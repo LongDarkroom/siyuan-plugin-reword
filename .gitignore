@@ -1,0 +1,11 @@
+node_modules/
+dist/
+logs/
+qa-reports/
+*.log
+.DS_Store
+.idea/
+.vscode/
+*.zip
+.workbuddy/
+package-lock.json

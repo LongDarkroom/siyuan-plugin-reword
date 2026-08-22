@@ -1,0 +1,288 @@
+/* AI Sidebar Styles */
+.ai-sidebar {
+  font-family: var(--b3-font-family);
+}
+
+/* 确保代码块样式正确显示 */
+.ai-message__content {
+  pre {
+    white-space: pre-wrap;
+    word-wrap: break-word;
+  }
+
+  code {
+    font-family: var(--b3-font-family-code);
+  }
+}
+
+/* Question Card 样式 */
+.agent-chat__question-card {
+  margin: 12px 0;
+  padding: 16px;
+  background: var(--b3-theme-surface);
+  border: 1px solid var(--b3-border-color);
+  border-radius: 8px;
+}
+
+.agent-chat__question-item {
+  margin-bottom: 16px;
+
+  &:last-child {
+    margin-bottom: 0;
+  }
+}
+
+.agent-chat__question-title {
+  font-weight: 600;
+  margin-bottom: 6px;
+  color: var(--b3-theme-on-background);
+}
+
+.agent-chat__question-description {
+  font-size: 12px;
+  color: var(--b3-theme-on-surface);
+  margin-bottom: 8px;
+}
+
+.agent-chat__question-options {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.agent-chat__question-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background-color 0.15s ease;
+
+  &:hover {
+    background: var(--b3-theme-background-light);
+  }
+
+  input[type="radio"],
+  input[type="checkbox"] {
+    flex-shrink: 0;
+    cursor: pointer;
+  }
+}
+
+.agent-chat__question-option-label {
+  color: var(--b3-theme-on-background);
+}
+
+.agent-chat__question-option-desc {
+  font-size: 12px;
+  color: var(--b3-theme-on-surface);
+  margin-left: auto;
+}
+
+.agent-chat__question-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 16px;
+}
+
+/* 滚动条样式 */
+.ai-sidebar__messages {
+  &::-webkit-scrollbar {
+    width: 8px;
+  }
+
+  &::-webkit-scrollbar-track {
+    background: var(--b3-theme-background);
+  }
+
+  &::-webkit-scrollbar-thumb {
+    background: var(--b3-theme-on-surface-light);
+    border-radius: 4px;
+
+    &:hover {
+      background: var(--b3-theme-on-surface);
+    }
+  }
+}
+
+/* 模式选择器样式 */
+.ai-sidebar__mode-selector {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-bottom: 8px;
+}
+
+.ai-sidebar__mode-select {
+  flex-shrink: 0;
+}
+
+.ai-sidebar__auto-approve-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--b3-theme-on-surface);
+  cursor: pointer;
+  margin-left: 8px;
+  white-space: nowrap;
+
+  input[type="checkbox"] {
+    cursor: pointer;
+  }
+
+  span {
+    user-select: none;
+  }
+}
+
+/* 差异查看对话框按钮组样式 */
+.ai-sidebar__diff-actions {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 12px;
+  padding: 8px;
+  background: var(--b3-theme-surface);
+  border-radius: 4px;
+
+  button {
+    flex: 1;
+    padding: 6px 12px;
+    font-size: 12px;
+    white-space: nowrap;
+  }
+}
+
+/* 适配移动端 */
+@media (max-width: 768px) {
+  .ai-sidebar {
+    font-size: 14px;
+  }
+
+  .ai-sidebar__mode-selector {
+    flex-wrap: wrap;
+  }
+}
+
+.ai-sidebar .b3-typography .katex-display {
+  display: flex;
+  justify-content: center;
+}
+
+.ai-sidebar pre {
+  position: relative;
+  margin: 8px 0;
+  padding: 0 !important;
+  border-radius: 6px;
+  background: var(--b3-theme-surface);
+  border: 1px solid var(--b3-border-color);
+  box-shadow: var(--b3-tooltips-shadow);
+  max-height: 600px;
+  display: flex;
+  flex-direction: column;
+}
+
+.ai-sidebar img{
+  width:50%;
+  max-width: 300px;
+}
+.ai-sidebar {
+    .vditor-task {
+            list-style: none !important;
+            word-break: break-word;
+            position: relative;
+            line-height: 1;
+        }
+
+    .vditor-task input {
+        left: -1.4em;
+        position: absolute;
+        top: 0.15em;
+        width: 0.8em;
+        height: 0.8em;
+    }
+}
+
+/* 网页小程序打开方式下拉菜单 */
+.webapp-view__open-menu-container {
+  position: relative;
+}
+
+.webapp-view__open-menu {
+  position: absolute;
+  top: 100%;
+  right: 0;
+  margin-top: 4px;
+  background: var(--b3-theme-background);
+  border: 1px solid var(--b3-border-color);
+  border-radius: 4px;
+  box-shadow: var(--b3-dialog-shadow);
+  z-index: 1000;
+  min-width: 150px;
+  overflow: hidden;
+  display: none;
+  flex-direction: column;
+
+  .b3-menu__item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 12px;
+    width: 100%;
+    border: none;
+    background: none;
+    text-align: left;
+    cursor: pointer;
+    color: var(--b3-theme-on-background);
+    font-size: 14px;
+    transition: background-color 0.2s;
+
+    &:hover {
+      background: var(--b3-list-hover);
+    }
+  }
+
+  .b3-menu__icon {
+    width: 16px;
+    height: 16px;
+    flex-shrink: 0;
+  }
+
+  .b3-menu__label {
+    flex: 1;
+    white-space: nowrap;
+  }
+}
+
+/* 重置 Copilot 输入框内 Protyle 编辑器的高度与边距，解决默认高度过高的问题 */
+.ai-sidebar__editor-wrapper {
+  min-height: 75px !important;
+  max-height: 180px !important;
+  overflow-y: auto !important;
+}
+
+.ai-sidebar__editor-wrapper .protyle {
+  background: transparent !important;
+  border: none !important;
+}
+
+.ai-sidebar__editor-wrapper .protyle-content {
+  background: transparent !important;
+}
+
+.ai-sidebar__editor-wrapper .protyle-wysiwyg {
+  outline: none !important;
+  width: 100% !important;
+  padding: 6px 80px 6px 8px !important;
+  box-sizing: border-box !important;
+  font-size: 14px !important;
+  line-height: 1.5 !important;
+  min-height: 75px !important;
+  max-height: 180px !important;
+  overflow-y: auto !important;
+}
+
+.ai-sidebar__editor-wrapper .protyle-wysiwyg [contenteditable="true"] {
+  outline: none !important;
+}

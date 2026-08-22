@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <title>REword · 词性框折叠功能测试</title>
+  <!-- 加载真实插件样式（build 后生成的 index.css），验证真实的 .hiword-vb-pos-collapsed 折叠效果 -->
+  <link rel="stylesheet" href="../index.css" />
+  <style>
+    body { font-family: -apple-system, "PingFang SC", sans-serif; padding: 24px; background: #f5f6f8; color: #222; }
+    h1 { font-size: 18px; }
+    .case { background: #fff; border: 1px solid #e3e6ea; border-radius: 8px; padding: 12px 16px; margin: 16px 0; }
+    .case h2 { font-size: 14px; margin: 0 0 8px; }
+    .result { font-weight: 600; }
+    .pass { color: #1a8a3c; }
+    .fail { color: #d23b3b; }
+    pre { background: #f0f2f5; padding: 8px; border-radius: 6px; white-space: pre-wrap; font-size: 12px; }
+    .summary { padding: 10px 14px; border-radius: 8px; font-size: 15px; font-weight: 700; }
+  </style>
+</head>
+<body>
+  <h1>REword · 词性框点击折叠测试</h1>
+  <p>本页加载真实 <code>index.css</code>，模拟「单词详情页」按词性分组结构，验证点击词性框能正确收起/展开下方释义。</p>
+
+  <!-- 模拟单词详情页：两种词性分组（默认展开） -->
+  <div class="hiword-vb-detail" id="fixture">
+    <div class="hiword-detail-section" data-section="sense">
+      <div class="hiword-detail-sec-body">
+        <div class="hiword-vb-detail-posgroups">
+          <div class="hiword-vb-pos-block" data-pos-idx="0">
+            <div class="hiword-vb-pos-row">
+              <button type="button" class="hiword-vb-pos-chip hiword-vb-pos-toggle hiword-vb-pos-open" data-action="toggle-pos" title="点击展开 / 收起该词性">
+                <span class="hiword-vb-pos-arrow">▸</span>n. <small>名词</small>
+              </button>
+            </div>
+            <div class="hiword-vb-pos-body">
+              <div class="hiword-dict-sense-item"><span class="hiword-dict-sense-num">1.</span><div class="hiword-dict-sense-body"><div class="hiword-dict-sense-main"><span class="hiword-dict-sense-zh">顺从的；听话的</span></div></div></div>
+              <div class="hiword-dict-sense-item"><span class="hiword-dict-sense-num">2.</span><div class="hiword-dict-sense-body"><div class="hiword-dict-sense-main"><span class="hiword-dict-sense-zh">易于驯服的</span></div></div></div>
+            </div>
+          </div>
+          <div class="hiword-vb-pos-block" data-pos-idx="1">
+            <div class="hiword-vb-pos-row">
+              <button type="button" class="hiword-vb-pos-chip hiword-vb-pos-toggle hiword-vb-pos-open" data-action="toggle-pos" title="点击展开 / 收起该词性">
+                <span class="hiword-vb-pos-arrow">▸</span>adj. <small>形容词</small>
+              </button>
+            </div>
+            <div class="hiword-vb-pos-body">
+              <div class="hiword-dict-sense-item"><span class="hiword-dict-sense-num">1.</span><div class="hiword-dict-sense-body"><div class="hiword-dict-sense-main"><span class="hiword-dict-sense-zh">温顺的</span></div></div></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="out"></div>
+
+  <script>
+    // 与 handleDockClick 的 toggle-pos 分支同源的逻辑（来自 src/dict/pos-toggle.ts）
+    function togglePosCollapsed(block) {
+      const collapsed = block.classList.toggle("hiword-vb-pos-collapsed");
+      const chip = block.querySelector(".hiword-vb-pos-toggle");
+      if (chip) chip.classList.toggle("hiword-vb-pos-open", !collapsed);
+      return collapsed;
+    }
+    // 事件委托：模拟侧边栏点击处理器
+    document.getElementById("fixture").addEventListener("click", (e) => {
+      const target = e.target.closest("[data-action]") || e.target;
+      if (target.dataset.action === "toggle-pos") {
+        const block = target.closest(".hiword-vb-pos-block");
+        if (block) togglePosCollapsed(block);
+      }
+    });
+
+    // 断言工具
+    const results = [];
+    function record(name, pass, detail) {
+      results.push({ name, pass, detail });
+      const div = document.createElement("div");
+      div.className = "case";
+      div.innerHTML =
+        "<h2>" + name + "</h2>" +
+        '<div class="result ' + (pass ? "pass" : "fail") + '">' + (pass ? "✅ PASS" : "❌ FAIL") + "</div>" +
+        "<pre>" + detail + "</pre>";
+      document.getElementById("out").appendChild(div);
+    }
+    function bodyHidden(block) {
+      const body = block.querySelector(".hiword-vb-pos-body");
+      const cs = getComputedStyle(body);
+      return cs.maxHeight === "0px" || cs.opacity === "0";
+    }
+
+    // 用例 1: 默认展开态
+    const b0 = document.querySelector('.hiword-vb-pos-block[data-pos-idx="0"]');
+    record("初始默认展开", !bodyHidden(b0) && !b0.classList.contains("hiword-vb-pos-collapsed"),
+      "首组词性框默认应展开，body 可见且不含 collapsed 类");
+
+    // 用例 2: 点击名词框 → 收起
+    b0.querySelector(".hiword-vb-pos-toggle").click();
+    record("点击词性框后收起", b0.classList.contains("hiword-vb-pos-collapsed") && bodyHidden(b0) && !b0.querySelector(".hiword-vb-pos-toggle").classList.contains("hiword-vb-pos-open"),
+      "点击后 block 含 collapsed 类、body 被 CSS 折叠（max-height:0 / opacity:0）、open 高亮移除");
+
+    // 用例 3: 再次点击 → 展开
+    b0.querySelector(".hiword-vb-pos-toggle").click();
+    record("再次点击后展开", !b0.classList.contains("hiword-vb-pos-collapsed") && !bodyHidden(b0) && b0.querySelector(".hiword-vb-pos-toggle").classList.contains("hiword-vb-pos-open"),
+      "再次点击恢复展开态，body 重新可见，open 高亮恢复");
+
+    // 用例 4: 互不影响 —— 收起名词框不影响形容词框
+    b0.querySelector(".hiword-vb-pos-toggle").click(); // 收起名词
+    const b1 = document.querySelector('.hiword-vb-pos-block[data-pos-idx="1"]');
+    record("各组独立折叠（互不干扰）", bodyHidden(b0) && !bodyHidden(b1),
+      "收起名词框后，形容词框仍保持展开，证明各组状态独立");
+
+    // 汇总
+    const allPass = results.every((r) => r.pass);
+    const summary = document.createElement("div");
+    summary.className = "summary";
+    summary.style.background = allPass ? "#e6f6ec" : "#fdeaea";
+    summary.style.color = allPass ? "#1a8a3c" : "#d23b3b";
+    summary.textContent = (allPass ? "🎉 全部通过：" : "⚠️ 存在失败：") + results.filter(r=>r.pass).length + " / " + results.length + " 项";
+    document.body.insertBefore(summary, document.getElementById("out"));
+  </script>
+</body>
+</html>
