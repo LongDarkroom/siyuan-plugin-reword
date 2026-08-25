@@ -12,6 +12,7 @@
 import { writable } from "svelte/store";
 
 export type ReaderTheme =
+  | "auto"    // 跟随思源主题（2026-08-25 新增）
   | "light"
   | "almond"
   | "autumn"
@@ -142,7 +143,7 @@ export interface ReaderSettings {
 export const READER_DEFAULT_SETTINGS: ReaderSettings = {
   fontSize: 17,
   lineHeight: 1.7,
-  theme: "light",
+  theme: "auto", // 默认跟随思源主题（2026-08-25）
   lineWidth: "normal",
   flow: "paginated",
   turnStyle: "default",
@@ -226,6 +227,7 @@ export const PROGRESS_STYLE_PRESETS: Record<ReaderProgressStyle, { label: string
 
 /** 8 款预设主题 + 自定义（参考 sireader 色板） */
 export const THEME_PRESETS: Record<ReaderTheme, { label: string; bg: string; fg: string; fg2: string }> = {
+  auto: { label: "跟随思源", bg: "#ffffff", fg: "#222222", fg2: "#888888" }, // 运行时由 resolveAutoTheme 覆盖
   light: { label: "默认", bg: "#ffffff", fg: "#222222", fg2: "#888888" },
   almond: { label: "杏仁黄", bg: "#f5ecdc", fg: "#4a3f2f", fg2: "#8f8370" },
   autumn: { label: "秋叶褐", bg: "#f4e8d8", fg: "#5a4632", fg2: "#97856e" },

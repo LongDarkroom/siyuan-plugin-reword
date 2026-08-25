@@ -17,26 +17,6 @@ import type { FontStore } from "./reader-fonts";
 
 export const READER_TAB_TYPE = "reader";
 
-/**
- * 标记阅读 Tab 为「已修改」状态。
- * 思源笔记「在当前页签中打开」设置会回收当前激活且未修改的页签；自定义阅读 Tab 没有 protyle
- * 帮它自动置 dirty，于是被当成干净页签回收。手动在 tab 根元素（<li class="item">）上打
- * data-dirty="true"，使其表现为「已修改」，从而逃过该回收逻辑。标签栏标题也会显示红点。
- */
-function markReaderTabDirty(tab: any): void {
-  if (!tab) return;
-  try {
-    const el = tab.element;
-    if (el) {
-      el.setAttribute("data-dirty", "true");
-      const text = el.querySelector?.(".item__text");
-      text?.setAttribute?.("data-dirty", "true");
-    }
-  } catch {
-    /* ignore */
-  }
-}
-
 interface TabRecord {
   tab: any; // Tab
   comp: any; // Svelte 组件
@@ -111,6 +91,15 @@ export class ReaderTabController {
                 self.plugin?.insertReaderSelectionToCurrentDoc?.({ markdown }) ?? undefined,
               onTranslate: (t: string) => self.plugin?.translateText?.(t) ?? undefined,
               getLabel: self.getLabel,
+              // 批注/高亮保存后固定阅读 Tab：官方 tab.pin() 防数量超限回收顶掉
+              onProtectTab: () => {
+                try {
+                  const t = self.openTabs.get(bookId)?.tab;
+                  t?.pin?.();
+                } catch {
+                  /* ignore */
+                }
+              },
             },
           });
         } catch (e) {
@@ -127,9 +116,6 @@ export class ReaderTabController {
         } catch {
           /* ignore */
         }
-        // 2026-08-24 修复（问题4）：标记阅读 Tab 为「已修改」，避免被思源
-        // 「在当前页签中打开 → 替换未修改页签」逻辑回收（详见 markReaderTabDirty）。
-        markReaderTabDirty(custom.tab);
       },
       destroy: function (this: any) {
         const custom = this;
@@ -187,7 +173,6 @@ export class ReaderTabController {
             const opened = this.openTabs.get(bookId)?.tab;
             if (opened) {
               opened.parent?.switchTab?.(opened.headElement);
-              markReaderTabDirty(opened); // 二次兜底：init 时序早于 element 完全挂载时补标记
             }
           } catch {
             /* ignore */
@@ -203,7 +188,6 @@ export class ReaderTabController {
         } catch {
           /* ignore */
         }
-        markReaderTabDirty(tab); // 标记当前页签为「已修改」，避免被思源回收逻辑替换
       }
     } catch (e) {
       console.warn("[REword] 打开阅读 Tab 失败:", e);

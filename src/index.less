@@ -6985,12 +6985,15 @@ body.hiword-resizing {
 
 /* ============ 确认弹窗（whale-confirm：删除二次确认） ============ */
 .whale-confirm {
-  width: 360px;
+  width: 340px;
   max-width: 88vw;
+  height: auto;
+  min-height: unset;
   padding: 0;
+  overflow: hidden;
 }
 .whale-confirm .whale-dlg-head {
-  padding: 14px 16px 10px;
+  padding: 12px 16px 8px;
   border-bottom: 1px solid var(--b3-theme-divider);
 }
 .hiword-ann-prompt-input {
@@ -7010,9 +7013,9 @@ body.hiword-resizing {
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--b3-theme-primary) 12%, transparent);
 }
 .whale-confirm-body {
-  margin: 14px 16px;
+  margin: 12px 16px;
   font-size: 13.5px;
-  line-height: 1.7;
+  line-height: 1.6;
   color: var(--b3-theme-on-background);
   word-break: break-word;
 }
@@ -7087,7 +7090,7 @@ body.hiword-resizing {
   margin-top: 2px;
 }
 .whale-confirm .whale-dlg-foot {
-  padding: 10px 16px 14px;
+  padding: 8px 16px 12px;
   border-top: 1px solid var(--b3-theme-divider);
   background: var(--b3-theme-background);
   border-radius: 0 0 16px 16px;

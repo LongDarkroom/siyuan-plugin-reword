@@ -65,12 +65,26 @@ export interface ReaderStyleOutput {
 }
 
 /** 把设置转换为 buildReaderStyles 用的派生参数 */
+/** 判断颜色是否为深色（用于「跟随思源」深色模式下的代码块/链接配色） */
+function isColorDark(hex: string): boolean {
+  const c = (hex || "").replace("#", "").trim();
+  if (c.length < 6) return false;
+  const r = parseInt(c.slice(0, 2), 16) || 0;
+  const g = parseInt(c.slice(2, 4), 16) || 0;
+  const b = parseInt(c.slice(4, 6), 16) || 0;
+  // 相对亮度（Rec. 601 luma），< 0.5 视为深色
+  const luminance = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
+  return luminance < 0.5;
+}
+
 export function deriveStyleOutput(
   settings: ReaderStyleInput,
   preset: { bg: string; fg: string; fg2: string },
   lineWidthPreset: { padding: string }
 ): ReaderStyleOutput {
-  const isDark = settings.theme === "dark" || settings.theme === "night" || settings.theme === "gold";
+  // 显式深色主题 OR 解析后的背景为深色（覆盖「跟随思源」+ 思源深色 → bg=#000000 的情况）
+  const explicitDark = settings.theme === "dark" || settings.theme === "night" || settings.theme === "gold";
+  const isDark = explicitDark || isColorDark(preset.bg);
   return {
     bg: settings.theme === "custom" && settings.customBg ? settings.customBg : preset.bg,
     fg: settings.theme === "custom" && settings.customFg ? settings.customFg : preset.fg,
