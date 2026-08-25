@@ -94,7 +94,7 @@ export interface AiHost {
   /** 把句子加入批注（落批注数据层并打标记） */
   annotateSentence(sentence: string, blockId?: string, note?: string, color?: string, style?: string, tags?: string[]): Promise<void>;
   /**
-   * 打开鲸鱼风格批注弹窗（截图 1：头部 5 线型 Aa + 富文本编辑区 +
+   * 打开微阅风格批注弹窗（截图 1：头部 5 线型 Aa + 富文本编辑区 +
    * 底部 3 功能按钮/保存）。供 AI 面板「插入批注」使用，与工具栏入口统一。
    */
   openAnnotationDialog(opts: {
@@ -289,42 +289,6 @@ export class AiPanel {
           </div>
           <!-- 对话消息区（动态填充） -->
           <div class="hiword-ai-messages" id="hiword-ai-messages"></div>
-
-          <!-- 左下角浮动工具栏（上传/搜索/模板/预设）2026-08-21 美化：加文字标签 -->
-          <div class="hiword-ai-toolbar" id="hiword-ai-toolbar">
-            <button class="hiword-ai-tool-btn" id="hiword-ai-upload" title="上传文件">
-              <svg class="hiword-ai-tool-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-                <path d="M12 16V4"/>
-                <path d="M7 9l5-5 5 5"/>
-                <path d="M4 17v2a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-2"/>
-              </svg>
-              <span class="hiword-ai-tool-label">上传</span>
-            </button>
-            <button class="hiword-ai-tool-btn" id="hiword-ai-docsearch" title="搜索文档 / 添加上下文">
-              <svg class="hiword-ai-tool-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-                <circle cx="11" cy="11" r="7"/>
-                <path d="M21 21l-4.3-4.3"/>
-              </svg>
-              <span class="hiword-ai-tool-label">搜索</span>
-            </button>
-            <button class="hiword-ai-tool-btn" id="hiword-ai-templates" title="提示词模板">
-              <svg class="hiword-ai-tool-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-                <rect x="4" y="3" width="16" height="18" rx="2"/>
-                <path d="M8 8h8"/>
-                <path d="M8 12h8"/>
-                <path d="M8 16h5"/>
-              </svg>
-              <span class="hiword-ai-tool-label">模板</span>
-            </button>
-            <button class="hiword-ai-tool-btn" id="hiword-ai-presets" title="预设">
-              <svg class="hiword-ai-tool-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-                <circle cx="12" cy="12" r="3.2"/>
-                <path d="M12 2.5v3M12 18.5v3M2.5 12h3M18.5 12h3M4.9 4.9l2.1 2.1M16.9 16.9l2.1 2.1M19.1 4.9l-2.1 2.1M7.1 16.9l-2.1 2.1"/>
-              </svg>
-              <span class="hiword-ai-tool-label">预设</span>
-            </button>
-            <div class="hiword-ai-status" id="hiword-ai-status"></div>
-          </div>
         </div>
 
         <!-- 批注查询侧滑面板（默认隐藏） -->
@@ -364,13 +328,49 @@ export class AiPanel {
           </div>
         </div>
 
-        <!-- 拖拽拉伸手柄：向上拖动可放大输入区 -->
-        <div class="hiword-ai-resizer" id="hiword-ai-resizer" title="向上拖动可放大输入区">
+        <!-- 2026-08-22 改：resizer 升级为 chevron 按钮(可点击+可拖拽) -->
+        <div class="hiword-ai-resizer" id="hiword-ai-resizer" title="点击收起输入区 / 拖动调整高度">
+          <button class="hiword-ai-resizer-toggle" id="hiword-ai-resizer-toggle" aria-label="收起输入区" type="button">▾</button>
           <span class="hiword-ai-resizer-grip"></span>
         </div>
 
-        <!-- 底部输入区 -->
+        <!-- 底部输入区（2026-08-22 改：工具栏上移到 footer 顶部,与输入框贴紧,消除中间大块空白） -->
         <div class="hiword-ai-footer" id="hiword-ai-footer">
+          <div class="hiword-ai-toolbar" id="hiword-ai-toolbar">
+            <button class="hiword-ai-tool-btn" id="hiword-ai-upload" title="上传文件">
+              <svg class="hiword-ai-tool-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M12 16V4"/>
+                <path d="M7 9l5-5 5 5"/>
+                <path d="M4 17v2a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-2"/>
+              </svg>
+              <span class="hiword-ai-tool-label">上传</span>
+            </button>
+            <button class="hiword-ai-tool-btn" id="hiword-ai-docsearch" title="搜索文档 / 添加上下文">
+              <svg class="hiword-ai-tool-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                <circle cx="11" cy="11" r="7"/>
+                <path d="M21 21l-4.3-4.3"/>
+              </svg>
+              <span class="hiword-ai-tool-label">搜索</span>
+            </button>
+            <button class="hiword-ai-tool-btn" id="hiword-ai-templates" title="提示词模板">
+              <svg class="hiword-ai-tool-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                <rect x="4" y="3" width="16" height="18" rx="2"/>
+                <path d="M8 8h8"/>
+                <path d="M8 12h8"/>
+                <path d="M8 16h5"/>
+              </svg>
+              <span class="hiword-ai-tool-label">模板</span>
+            </button>
+            <button class="hiword-ai-tool-btn" id="hiword-ai-presets" title="预设">
+              <svg class="hiword-ai-tool-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                <circle cx="12" cy="12" r="3.2"/>
+                <path d="M12 2.5v3M12 18.5v3M2.5 12h3M18.5 12h3M4.9 4.9l2.1 2.1M16.9 16.9l2.1 2.1M19.1 4.9l-2.1 2.1M7.1 16.9l-2.1 2.1"/>
+              </svg>
+              <span class="hiword-ai-tool-label">预设</span>
+            </button>
+            <span class="hiword-ai-toolbar-spacer"></span>
+            <div class="hiword-ai-status" id="hiword-ai-status"></div>
+          </div>
           <div class="hiword-ai-input-row">
             <div class="hiword-ai-protyle" id="hiword-ai-protyle" spellcheck="false"></div>
             <div class="hiword-ai-send-wrap">
@@ -2398,11 +2398,34 @@ export class AiPanel {
 
 
 
-    /* ========== 输入区向上拖拽拉伸 ========== */
+    /* ========== 输入区向上拖拽拉伸 + 2026-08-22 新增：chevron 点击收展 ========== */
     const resizer = contentEl.querySelector("#hiword-ai-resizer") as HTMLElement;
+    const toggleBtn = contentEl.querySelector("#hiword-ai-resizer-toggle") as HTMLElement | null;
     const panelEl = contentEl.querySelector(".hiword-ai-panel") as HTMLElement;
     const MIN_FOOTER_H = 120;
     const FOOTER_H_KEY = "reword-ai-footer-height";
+    const COLLAPSE_KEY = "reword-ai-footer-collapsed";  // 2026-08-22 新增
+
+    // 2026-08-22 改：纯函数 applyCollapsedState（吃 localStorage）,便于单测
+    const applyCollapsedState = (panel: HTMLElement | null, footer: HTMLElement | null, btn: HTMLElement | null, collapsed: boolean, lastH: number) => {
+      if (!panel || !footer || !btn) return;
+      if (collapsed) {
+        panel.classList.add("hiword-ai-panel--collapsed");
+        footer.style.height = "0px";
+        footer.style.minHeight = "0";
+        footer.style.overflow = "hidden";
+        btn.setAttribute("aria-label", "展开输入区");
+        btn.textContent = "▴";
+      } else {
+        panel.classList.remove("hiword-ai-panel--collapsed");
+        if (lastH >= MIN_FOOTER_H) footer.style.height = `${Math.round(lastH)}px`;
+        footer.style.minHeight = "";
+        footer.style.overflow = "";
+        btn.setAttribute("aria-label", "收起输入区");
+        btn.textContent = "▾";
+      }
+      try { localStorage.setItem(COLLAPSE_KEY, String(collapsed)); } catch { /* ignore */ }
+    };
 
     /** 应用高度并持久化 */
     const applyFooterHeight = (h: number) => {
@@ -2413,6 +2436,13 @@ export class AiPanel {
     if (savedH >= MIN_FOOTER_H && panelEl) {
       const maxH = Math.max(MIN_FOOTER_H, Math.round(panelEl.clientHeight * 0.6));
       applyFooterHeight(Math.min(savedH, maxH));
+    }
+
+    // 2026-08-22 新增：初始化收起态
+    let isCollapsed = false;
+    try { isCollapsed = localStorage.getItem(COLLAPSE_KEY) === "true"; } catch { /* ignore */ }
+    if (isCollapsed && footerEl && panelEl && toggleBtn) {
+      applyCollapsedState(panelEl, footerEl, toggleBtn, true, savedH);
     }
 
     let dragging = false;
@@ -2452,9 +2482,11 @@ export class AiPanel {
         rafId = 0;
       }
       doResize();
-      // 收尾高度持久化
-      const finalH = footerEl ? footerEl.offsetHeight : 0;
-      if (finalH > 0) localStorage.setItem(FOOTER_H_KEY, String(finalH));
+      // 2026-08-22 改：仅在展开态才写 height（避免收起时把 0 写回 localStorage）
+      if (!isCollapsed) {
+        const finalH = footerEl ? footerEl.offsetHeight : 0;
+        if (finalH > 0) localStorage.setItem(FOOTER_H_KEY, String(finalH));
+      }
     };
 
     resizer?.addEventListener("pointerdown", (ev: PointerEvent) => {
@@ -2468,6 +2500,25 @@ export class AiPanel {
       document.body.style.userSelect = "none";
       document.body.style.cursor = "row-resize";
       resizer.classList.add("hiword-ai-resizer--active");
+    });
+
+    // 2026-08-22 新增：chevron 点击收展
+    toggleBtn?.addEventListener("click", (e) => {
+      e.stopPropagation();  // 不触发 resizer 的 pointerdown
+      if (!footerEl || !panelEl || !toggleBtn) return;
+      if (!isCollapsed) {
+        // 收起前记下当前高度
+        const h = footerEl.offsetHeight;
+        if (h >= MIN_FOOTER_H) {
+          try { localStorage.setItem(FOOTER_H_KEY, String(h)); } catch { /* ignore */ }
+        }
+        applyCollapsedState(panelEl, footerEl, toggleBtn, true, h);
+        isCollapsed = true;
+      } else {
+        const lastH = Number(localStorage.getItem(FOOTER_H_KEY) || "0") || MIN_FOOTER_H;
+        applyCollapsedState(panelEl, footerEl, toggleBtn, false, lastH);
+        isCollapsed = false;
+      }
     });
 
     /* ========== AI 消息选字 → 复制 / 识别英文加入词库 ========== */

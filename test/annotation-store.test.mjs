@@ -55,3 +55,32 @@ test("cleanIal：无 IAL 数据时返回 0 且不产生脏写入（version 不�
   assert.equal(cleaned, 0);
   assert.equal(store.get("d").version, 3, "version 不应变化");
 });
+
+test("upsert：带 id 的二次 upsert 就地更新样式/颜色，不新增记录（编辑态改样式/颜色）", async () => {
+  const store = new AnnotationStore();
+  store.load({
+    annotations: [
+      mkItem({ id: "e", style: "highlight", color: "#facc15", note: "保留笔记", group: "我的分组" }),
+    ],
+  });
+  const updated = await store.upsert({ id: "e", style: "wavy", color: "#06b6d4", note: "保留笔记", group: "我的分组" });
+  assert.equal(updated.id, "e", "仍是同一条");
+  assert.equal(store.getAll().length, 1, "记录数不变（非新建）");
+  const e = store.get("e");
+  assert.equal(e.style, "wavy", "样式已改");
+  assert.equal(e.color, "#06b6d4", "颜色已改");
+  assert.equal(e.note, "保留笔记", "笔记未被清空");
+  assert.equal(e.group, "我的分组", "分组未被清空");
+});
+
+test("upsert：编辑时未传 note/group 应回退原值（防御性，避免误清空）", async () => {
+  const store = new AnnotationStore();
+  store.load({
+    annotations: [mkItem({ id: "f", style: "solid", color: "#22c55e", note: "原笔记", group: "G" })],
+  });
+  await store.upsert({ id: "f", style: "highlight", color: "#ec4899" });
+  const f = store.get("f");
+  assert.equal(f.note, "原笔记", "note 回退原值");
+  assert.equal(f.group, "G", "group 回退原值");
+  assert.equal(f.style, "highlight");
+});

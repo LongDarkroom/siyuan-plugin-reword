@@ -1,5 +1,5 @@
 /**
- * 鲸鱼风格 —— 侧边栏批注汇总面板渲染器
+ * 微阅风格 —— 侧边栏批注汇总面板渲染器
  * ------------------------------------------------------------------
  * 基于截图「3 侧边栏批注汇总」区域重构。
  *
@@ -12,6 +12,8 @@
  */
 
 import type { AnnotationItem, AnnotationCategory, AnnotationStyle } from "./annotation-store.ts";
+// 2026-08-25 B-P0：按来源（bookId 是否存在）拆分「文档批注」与「阅读批注」两个分区
+import { isReading } from "./annotation-store.ts";
 import { sanitizeHtml, compactSentence, stripIal, ensureBlockSeparators, expandInlineTableRows } from "./annotation-render.ts";
 import { getLute, configureKramdownLute, htmlToMd } from "./lute.ts";
 
@@ -23,7 +25,7 @@ export type WhaleActiveLabel = typeof WHALE_CATEGORY_ALL | string; // "all" | la
 
 /** 样式图标映射 */
 const STYLE_ICONS: Record<string, string> = {
-  solid: "━", wavy: "﹏", dashed: "┄", double: "═", dotted: "┉",
+  highlight: "▮", solid: "━", wavy: "﹏",
 };
 
 // ============ 工具函数 ============
@@ -52,6 +54,29 @@ function timeAgo(iso?: string): string {
   const day = Math.floor(hr / 24);
   if (day < 30) return `${day}天前`;
   return shortDate(iso);
+}
+
+/**
+ * 判断一条批注是否「纯高亮、无批注内容」。
+ * 与 renderWhaleNoteItem 的 isEmptyNote 判定保持一致：
+ *   - note 为空；或 note 仅等于选中文本（纯标注场景自动回填了选中词）。
+ * 用于 B-P1 把「阅读批注」再拆为「高亮（无批注内容）」与「批注（带内容）」两个子区。
+ */
+export function isEmptyNoteContent(a: AnnotationItem): boolean {
+  const noteText = stripIal((a.note || "").trim());
+  const sel = (a.selectedText || "").trim();
+  return noteText === "" || noteText === sel;
+}
+
+/**
+ * 第二级对象态判定（场景感知路由核）：把一条标注归类为
+ * 「纯高亮（无批注内容）」或「批注（带内容）」。
+ * 供阅读器 onShowAnnotation 与文档内联浮层共用，确保两端判定口径一致、不漂移。
+ */
+export type AnnotationKind = "pure" | "annotation";
+export function classifyAnnotation(a: AnnotationItem | null | undefined): AnnotationKind | null {
+  if (!a) return null;
+  return isEmptyNoteContent(a) ? "pure" : "annotation";
 }
 
 // 注：whale-renderer.renderMd 已删除（D7 死代码，无调用方）。
@@ -169,7 +194,7 @@ export function applyMarkColors(html: string): string {
 // ============ 主渲染函数 ============
 
 /**
- * 渲染鲸鱼风格批注侧边栏面板。
+ * 渲染微阅风格批注侧边栏面板。
  *
  * @param items 全部批注列表
  * @param activeLabel 当前标签筛选（"all" = 全部，或 labelId）
@@ -239,6 +264,15 @@ export function renderWhalePanel(
     return sortTimeDir === "asc" ? cmp : -cmp;
   });
 
+  // 2026-08-25 B-P0：按来源拆分为「文档批注」与「阅读批注」两个分区
+  // - 文档批注：!bookId（思源编辑器正文块批注）
+  // - 阅读批注：bookId 存在（阅读器书籍批注，含 cfi 定位锚点）
+  const docItems = filtered.filter(a => !isReading(a));
+  const readingItems = filtered.filter(a => isReading(a));
+  // 2026-08-25 B-P1：阅读批注再拆为「高亮（无批注内容）」与「批注（带内容）」
+  const readingHighlights = readingItems.filter(a => isEmptyNoteContent(a));
+  const readingNotes = readingItems.filter(a => !isEmptyNoteContent(a));
+
   // 当前选中样式/文档的提示文本（按钮副标）
   const docFilterLabel = sortDoc
     ? docInfos.find(d => d.id === sortDoc)?.name || "未知文档"
@@ -281,7 +315,7 @@ export function renderWhalePanel(
     <div class="whale-panel">
       <!-- 头部：标题 + 统计 + 分组切换（2026-08-17：时间/文档，默认时间） -->
       <div class="whale-panel-head">
-        <span class="whale-panel-title">批注汇总</span>
+        <span class="whale-panel-title">微阅批注汇总</span>
         <span class="whale-panel-count ${hasFilter ? "whale-panel-count--active" : ""}" title="${hasFilter ? "有筛选条件生效" : ""}">${filtered.length}/${items.length}</span>
         <span class="whale-panel-head-group" title="列表分组方式">
           <button type="button" class="whale-group-btn ${groupMode === "time" ? "active" : ""}" data-group-action="time">时间</button>
@@ -361,15 +395,45 @@ export function renderWhalePanel(
         </div>
       ` : ""}
 
-      <!-- 列表容器（2026-08-17：笔记化列表，按 groupMode 分组） -->
+      <!-- 列表容器：分为「文档批注」与「阅读批注」两个常驻分区，各自独立滚动（2026-08-25 B-P0） -->
       <div class="whale-panel-list" id="whale-panel-list">
-        ${filtered.length === 0 ? `
+        ${docItems.length === 0 && readingItems.length === 0 ? `
           <div class="whale-empty">
             <div class="whale-empty-icon">🐋</div>
             <p>还没有批注</p>
             <p class="whale-empty-hint">选中正文文字，点击编辑器工具栏的「批注」按钮，或按 <b>Alt+⌘/Ctrl+C</b></p>
           </div>
-        ` : renderWhaleNoteList(filtered, groupMode, labelMap, labelNameMap, docInfos)}
+        ` : `
+          <section class="whale-section" data-section="doc">
+            <div class="whale-section-head" data-toggle="section"><span class="whale-section-toggle">▾</span>文档批注<span class="whale-section-count">${docItems.length}</span></div>
+            <div class="whale-section-body">
+              ${docItems.length === 0
+                ? `<div class="whale-section-empty">暂无文档批注</div>`
+                : renderWhaleNoteList(docItems, groupMode, labelMap, labelNameMap, docInfos)}
+            </div>
+          </section>
+          <section class="whale-section" data-section="reading">
+            <div class="whale-section-head" data-toggle="section"><span class="whale-section-toggle">▾</span>阅读批注<span class="whale-section-count">${readingItems.length}</span></div>
+            <div class="whale-section-body">
+              ${readingItems.length === 0 ? `
+                <div class="whale-section-empty">暂无阅读批注</div>
+              ` : `
+                <div class="whale-subsection">
+                  <div class="whale-subsection-head">高亮（无批注内容）<span class="whale-subsection-count">${readingHighlights.length}</span></div>
+                  ${readingHighlights.length === 0
+                    ? `<div class="whale-section-empty">暂无纯高亮</div>`
+                    : renderWhaleNoteList(readingHighlights, groupMode, labelMap, labelNameMap, docInfos)}
+                </div>
+                <div class="whale-subsection">
+                  <div class="whale-subsection-head">批注（带内容）<span class="whale-subsection-count">${readingNotes.length}</span></div>
+                  ${readingNotes.length === 0
+                    ? `<div class="whale-section-empty">暂无带内容批注</div>`
+                    : renderWhaleNoteList(readingNotes, groupMode, labelMap, labelNameMap, docInfos)}
+                </div>
+              `}
+            </div>
+          </section>
+        `}
       </div>
 
       <!-- 底部工具栏 -->
@@ -460,7 +524,7 @@ function renderWhaleNoteItem(
   const sentenceText = (a.sentence || "").trim();
   const sourceText = stripIal(sel || sentenceText);
   const noteText = stripIal((a.note || "").trim());
-  const isEmptyNote = noteText === "" || noteText === sel;
+  const isEmptyNote = isEmptyNoteContent(a);
 
   const originMark = a.origin === "ai"
     ? `<span class="whale-notes-origin whale-notes-origin--ai">AI</span>`
@@ -504,6 +568,7 @@ function renderWhaleNoteItem(
 
   return `
     <div class="whale-notes-item" data-id="${escAttr(a.id)}" data-block="${escAttr(a.blockId)}" data-doc="${escAttr(a.docId)}"
+         data-book="${escAttr(a.bookId || "")}" data-cfi="${escAttr(a.cfi || "")}"
          style="--ann-color:${escAttr(annColor)}" data-ann-style="${escAttr(annStyle)}">
       <span class="whale-notes-accent" title="标注样式" style="color:${escAttr(annColor)}">${styleGlyph}</span>
       <div class="whale-notes-main">
@@ -529,20 +594,18 @@ function renderWhaleNoteItem(
  */
 export function renderStylePreview(): string {
   const sampleText = "重要的文本内容示例";
-  const colors = ["#9ca3af", "#facc15", "#22c55e", "#06b6d4", "#ec4899", "#f97316", "#8b5cf6"];
+  const colors = ["#facc15", "#22c55e", "#06b6d4", "#ec4899", "#8b5cf6"];
   const styles = [
-    { key: "solid", css: "solid", label: "单实线" },
+    { key: "highlight", css: "highlight", label: "高亮" },
+    { key: "solid", css: "solid", label: "直线段" },
     { key: "wavy", css: "wavy", label: "波浪线" },
-    { key: "dashed", css: "dashed", label: "虚线" },
-    { key: "double", css: "double", label: "双实线" },
-    { key: "dotted", css: "dotted", label: "点线" },
   ];
 
   const rows = styles.map(s => `
     <div class="whale-preview-row">
       <span class="whale-preview-label">${s.label}</span>
       <span class="whale-preview-text"
-            style="text-decoration: underline; text-decoration-style: ${s.css}; text-decoration-color: #06b6d4; text-decoration-thickness: 2px;">
+            style="${s.key === "highlight" ? `background: #06b6d4; color:#fff` : `text-decoration: underline; text-decoration-style: ${s.css}; text-decoration-color: #06b6d4; text-decoration-thickness: 2px;`}">
         ${sampleText}
       </span>
     </div>
@@ -573,17 +636,14 @@ export function renderStylePreview(): string {
  */
 export function renderStyleMatrixPicker(selectedColor?: string, selectedStyle?: string): string {
   const colors = [
-    { name: "灰", value: "#9ca3af" }, { name: "黄", value: "#facc15" },
-    { name: "绿", value: "#22c55e" }, { name: "青", value: "#06b6d4" },
-    { name: "粉", value: "#ec4899" }, { name: "橙", value: "#f97316" },
+    { name: "黄", value: "#facc15" }, { name: "绿", value: "#22c55e" },
+    { name: "青", value: "#06b6d4" }, { name: "粉", value: "#ec4899" },
     { name: "紫", value: "#8b5cf6" },
   ];
   const lineStyles = [
-    { key: "solid", icon: "━", label: "实线" },
+    { key: "highlight", icon: "▮", label: "高亮" },
+    { key: "solid", icon: "━", label: "直线" },
     { key: "wavy", icon: "﹏", label: "波浪" },
-    { key: "dashed", icon: "┄", label: "虚线" },
-    { key: "double", icon: "═", label: "双线" },
-    { key: "dotted", icon: "┉", label: "点线" },
   ];
 
   return `
@@ -592,7 +652,7 @@ export function renderStyleMatrixPicker(selectedColor?: string, selectedStyle?: 
         <span class="whale-matrix-icon">🎨</span>
         <span>正文下划线自定义</span>
       </div>
-      <div class="whale-matrix-subtitle">${colors.length} 种颜色 × ${lineStyles.length} 种线型 = ${colors.length * lineStyles.length} 种组合自由搭配</div>
+      <div class="whale-matrix-subtitle">${colors.length} 种颜色 × ${lineStyles.length} 种样式 = ${colors.length * lineStyles.length} 种组合自由搭配</div>
       <div class="whale-matrix-colors">
         ${colors.map(c => `
           <button class="whale-matrix-color-dot ${(c.value === selectedColor) ? 'active' : ''}"
@@ -603,7 +663,7 @@ export function renderStyleMatrixPicker(selectedColor?: string, selectedStyle?: 
         ${lineStyles.map(ls => `
           <button class="whale-matrix-line-btn ${(ls.key === selectedStyle) ? 'active' : ''}"
                   data-style="${ls.key}" title="${ls.label}">
-            <span class="whale-matrix-line-icon" style="text-decoration: underline; text-decoration-style: ${ls.key};">${ls.icon}</span>
+            <span class="whale-matrix-line-icon" style="${ls.key === "highlight" ? `background:${selectedColor || "#06b6d4"};color:#fff` : `text-decoration: underline; text-decoration-style: ${ls.key};`}">${ls.icon}</span>
           </button>
         `).join("")}
       </div>

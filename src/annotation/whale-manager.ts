@@ -1,7 +1,7 @@
 /**
- * 鲸鱼快速批注 —— 核心交互管理器
+ * 微阅快速批注 —— 核心交互管理器
  * ------------------------------------------------------------------
- * 基于截图「鲸鱼快速批注」重构的批注交互层。
+ * 基于截图「微阅快速批注」重构的批注交互层。
  *
  * 三种快捷创建方式：
  *  1. 快捷键 Alt+Ctrl+C（Mac: Alt+Cmd+C）：选中文字一键批注
@@ -15,7 +15,8 @@
  * 本模块不依赖 SiYuan SDK 细节，通过 IWhaleHost 接口桥接插件能力。
  */
 
-import type { AnnotationItem, AnnotationStyle, AnnotationCategory, WHALE_COLORS, ANNOTATION_STYLES } from "./annotation-store.ts";
+import type { AnnotationItem, AnnotationStyle, AnnotationCategory, ANNOTATION_STYLES } from "./annotation-store.ts";
+import { WHALE_COLORS } from "./annotation-store.ts";
 import { requestEditSession, releaseEditSession } from "./edit-session.ts";
 import { mountAnnEditor, DEFAULT_ANN_TOOLBAR, hasBlockTable, type AnnEditor } from "./ann-editor.ts";
 import { confirmDelete } from "./whale-confirm.ts";
@@ -25,24 +26,14 @@ import { getLogger } from "../core/logger.ts";
 // ============ 类型导出（避免循环依赖）============
 export type { AnnotationItem, AnnotationStyle, AnnotationCategory };
 
-/** 鲸鱼颜色（从 annotation-store 导出的便捷引用） */
-export const WHALE_COLOR_LIST = [
-  { name: "石板灰", value: "#9ca3af" },
-  { name: "明黄",   value: "#facc15" },
-  { name: "翠绿",   value: "#22c55e" },
-  { name: "青蓝",   value: "#06b6d4" },
-  { name: "玫粉",   value: "#ec4899" },
-  { name: "橙色",   value: "#f97316" },
-  { name: "紫罗兰", value: "#8b5cf6" },
-] as const;
+/** 微阅批注颜色（复用 annotation-store 的 WHALE_COLORS，保持单一来源） */
+export const WHALE_COLOR_LIST = WHALE_COLORS;
 
-/** 鲸鱼线型定义 */
+/** 微阅批注样式定义（2026-08-24 精简为 3 种：高亮 / 直线段 / 波浪线） */
 export const WHALE_LINE_STYLES: Record<AnnotationStyle, { label: string; css: string; icon: string; preview: string; hint?: string }> = {
-  solid:  { label: "实线", css: "solid",  icon: "━", preview: "text-decoration: underline", hint: "一般笔记" },
-  wavy:   { label: "波浪", css: "wavy",  icon: "﹏", preview: "text-decoration-style: wavy", hint: "生词 / 不认识" },
-  dashed: { label: "虚线", css: "dashed", icon: "┄", preview: "text-decoration-style: dashed", hint: "似懂非懂" },
-  double: { label: "双线", css: "double", icon: "═", preview: "text-decoration-style: double", hint: "已掌握 / 重点" },
-  dotted: { label: "点线", css: "dotted", icon: "┉", preview: "text-decoration-style: dotted", hint: "待复习 / 提醒" },
+  highlight: { label: "高亮", css: "highlight", icon: "▮", preview: "background-color", hint: "背景标记" },
+  solid:  { label: "直线段", css: "solid",  icon: "━", preview: "text-decoration: underline", hint: "一般笔记" },
+  wavy:   { label: "波浪线", css: "wavy",  icon: "﹏", preview: "text-decoration-style: wavy", hint: "生词 / 不认识" },
 };
 
 /** 宿主接口（由 index.ts 实现） */
@@ -82,14 +73,15 @@ export interface IWhaleHost {
   cycleLabelColor(id: string): Promise<string>;
   /** 打开标签管理弹窗（2026-08-15 新增） */
   manageLabels(): void;
-  /** 获取 AI 设置（2026-08-22 新增,鲸鱼 AI 助手用） */
+  /** 获取 AI 设置（2026-08-22 新增,微阅 AI 助手用） */
   getAiSettings(): { apiKey: string; baseUrl: string; model: string; enabled: boolean; [k: string]: any };
   /** 打开 AI 设置弹窗（2026-08-22 新增,无 API Key 时引导用户去设置） */
   openAiSettings(): void;
   /**
-   * 打开批注 AI 助手小窗（2026-08-22 新增）。
+   * 打开批注 AI 助手小窗（2026-08-22 新增;2026-08-22 改:parentDialog + 填回逻辑下放）。
    * 由 index.ts 注入(动态 import,避免 whale-manager 直接依赖 ai 模块)
-   *   - onFillBack 在用户点"填回批注"时由 host 内部关闭 AI 弹窗并用 prefillNote 重开批注弹窗
+   *   - parentDialog 原批注弹窗(AI 弹窗贴它旁边,原弹窗保持打开)
+   *   - onFillBack 由调用方实现"AI 回复 → 编辑器"的填回策略
    */
   openAnnoAiDialog(opts: {
     selectedText: string;
@@ -97,6 +89,7 @@ export interface IWhaleHost {
     blockId: string;
     docId: string;
     existingNote?: string;
+    parentDialog?: HTMLElement;
     onFillBack: (reply: string) => void;
   }): void;
 }
@@ -125,11 +118,19 @@ export interface WhaleAnnotationDialogOptions {
  */
 export function buildWhaleDialogHtml(
   opts: WhaleAnnotationDialogOptions,
-  esc: (s: string) => string
+  esc: (s: string) => string,
+  /**
+   * "框架样式"手风琴是否默认展开。
+   *  - undefined / true → 渲染时带 `open` 属性（默认展开）
+   *  - false → 渲染时**不带** `open` 属性（默认收起）
+   * 2026-08-22 新增：解决"收起后重开又被默认展开"的记忆模式 bug。
+   * 调用方应基于 `localStorage["hiword-whale-accordion-open"]` 计算后传入。
+   */
+  isAccordionOpen: boolean = true,
 ): string {
   const isEdit = !!opts.existing;
-  const defaultColor = opts.existing?.color || WHALE_COLOR_LIST[3].value;
-  const defaultStyle = opts.existing?.style || "solid";
+  const defaultColor = opts.existing?.color || WHALE_COLOR_LIST[2].value;
+  const defaultStyle = opts.existing?.style || "highlight";
   // 2026-08-18 打磨：新建默认 both（高亮+下划线同时生效），视觉更显眼、一次标注即见样式
   const defaultScope = opts.existing?.scope || "both";
   const defaultLineColor = opts.existing?.lineColor || defaultColor;
@@ -147,7 +148,7 @@ export function buildWhaleDialogHtml(
       <div class="whale-dlg whale-dlg--popup">
         <!-- 顶部：标题 + 删除（编辑态）/关闭（拖拽区） -->
         <div class="whale-dlg-head" data-drag-handle>
-          <span class="whale-dlg-title">批注</span>
+          <span class="whale-dlg-title">微阅批注</span>
           <div class="whale-dlg-head-right">
             ${isEdit ? `<button class="whale-dlg-trash" id="whale-dlg-delete" title="删除批注">
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"/><path d="M10 11v6M14 11v6"/></svg>
@@ -168,8 +169,8 @@ export function buildWhaleDialogHtml(
           <div class="whale-dlg-editor" id="whale-dlg-editor"></div>
         </div>
 
-        <!-- 框架样式（2026-08-17：合并原「快捷样式/自定义样式」手风琴；2026-08-18 打磨：默认展开，降低首次上色心智成本） -->
-        <details class="whale-dlg-accordion" id="whale-accordion-styles" open>
+        <!-- 框架样式（2026-08-17：合并原「快捷样式/自定义样式」手风琴；2026-08-18 打磨：默认展开，降低首次上色心智成本；2026-08-22 改：open 由参数 isAccordionOpen 控制，记忆模式生效） -->
+        <details class="whale-dlg-accordion" id="whale-accordion-styles"${isAccordionOpen ? " open" : ""}>
           <summary class="whale-dlg-more-summary">框架样式</summary>
           <div class="whale-dlg-custom">
             <div class="whale-dlg-custom-row">
@@ -193,7 +194,7 @@ export function buildWhaleDialogHtml(
                 ${Object.entries(WHALE_LINE_STYLES).map(([key, val]) => `
                   <button class="whale-dlg-style-aa ${key === defaultStyle ? "active" : ""}"
                           data-style="${key}" title="${val.label} · ${val.hint || ""}">
-                    <span style="text-decoration-line:underline;text-decoration-style:${val.css};text-decoration-color:${defaultLineColor};text-decoration-thickness:${key === "double" ? "1.5px" : "2px"};color:${defaultLineColor}">Aa</span>
+                    <span style="${key === "highlight" ? `background:${defaultLineColor};color:#fff` : `text-decoration-line:underline;text-decoration-style:${val.css};text-decoration-color:${defaultLineColor};text-decoration-thickness:2px;color:${defaultLineColor}`}">Aa</span>
                   </button>
                 `).join("")}
               </div>
@@ -219,6 +220,9 @@ export function buildWhaleDialogHtml(
           <button class="whale-dlg-btn whale-dlg-btn--primary" id="whale-dlg-ok">${isEdit ? "保存修改" : "保存"}</button>
         </div>
 
+        <!-- 2026-08-22 新增：底部 resize 手柄（拖动调整弹窗高度） -->
+        <div class="whale-dlg-resize-handle" id="whale-dlg-resize-handle" title="拖动调整高度"></div>
+
         <input type="hidden" id="whale-dlg-id" value="${opts.existing?.id || ""}" />
         <input type="hidden" id="whale-dlg-block" value="${opts.blockId}" />
         <input type="hidden" id="whale-dlg-doc" value="${opts.docId}" />
@@ -230,7 +234,7 @@ export function buildWhaleDialogHtml(
 }
 
 /**
- * 鲸鱼批注管理器
+ * 微阅批注管理器
  * ---------------
  * 管理浮动工具栏、快捷键绑定、弹窗编辑器、样式选择器。
  */
@@ -262,7 +266,7 @@ export class WhaleAnnotationManager {
     this.bindGlobalShortcut();
     this.bindSelectionChange();
     this.bindDragAnnotation();
-    getLogger().info("[REword-Whale] 鲸鱼批注管理器已初始化");
+    getLogger().info("[REword-MicroRead] 微阅批注管理器已初始化");
   }
 
   // ==================== 1. 快捷键创建 ====================
@@ -403,7 +407,7 @@ export class WhaleAnnotationManager {
       <div class="whale-style-menu-header">颜色</div>
       <div class="whale-style-colors">
         ${WHALE_COLOR_LIST.map((c, i) =>
-          `<button class="whale-style-color-dot ${i === 3 ? 'active' : ''}" data-color="${c.value}" style="background:${c.value}" title="${c.name}"></button>`
+          `<button class="whale-style-color-dot ${i === 2 ? 'active' : ''}" data-color="${c.value}" style="background:${c.value}" title="${c.name}"></button>`
         ).join("")}
       </div>
     `;
@@ -464,7 +468,7 @@ export class WhaleAnnotationManager {
     }
   }
 
-  // ==================== 4. 弹窗编辑器（鲸鱼风格） ====================
+  // ==================== 4. 弹窗编辑器（微阅风格） ====================
 
   /**
    * 从当前选区发起批注（入口方法）
@@ -486,7 +490,7 @@ export class WhaleAnnotationManager {
   }
 
   /**
-   * 显示鲸鱼风格批注弹窗（截图 1 对齐版）
+   * 显示微阅风格批注弹窗（截图 1 对齐版）
    * 布局：
    *  - 头部：标题「批注」+ 5 个 Aa 线型按钮（当前选中紫色边框）+ 红色垃圾桶
    *  - 编辑区：contenteditable 富文本（支持列表 / 加粗等）
@@ -503,12 +507,20 @@ export class WhaleAnnotationManager {
     }
     // 批注编辑器打开标志改由 requestEditSession 统一维护（D6/D8），此处不再直接赋值
 
+    // 2026-08-22 改：前移 localStorage 读取，"框架样式"手风琴状态作为模板参数传入，
+    // 模板首次渲染即正确状态，无视觉闪烁，杜绝"收起后重开被默认展开"的 race bug。
+    const ACCORDION_KEY = "hiword-whale-accordion-open";
+    const isAccordionOpen = (() => {
+      try { return localStorage.getItem(ACCORDION_KEY) !== "false"; }
+      catch { return true; }
+    })();
+
     const dlg = document.createElement("div");
     // 2026-08-15 改造：外层用 whale-dlg-popup（fixed 定位紧凑窗口，仿查词悬浮弹窗）。
     // 旧 .whale-dlg-overlay（全屏遮罩中央弹窗）已废弃，仅 .whale-dlg-label-mgmt-overlay 等保留。
     dlg.className = "whale-dlg-popup";
     dlg.id = "whale-annotation-dialog";
-    dlg.innerHTML = buildWhaleDialogHtml(opts, (s) => this.escapeHtml(s));
+    dlg.innerHTML = buildWhaleDialogHtml(opts, (s) => this.escapeHtml(s), isAccordionOpen);
 
     document.body.appendChild(dlg);
     this.activeDialog = dlg;
@@ -531,8 +543,8 @@ export class WhaleAnnotationManager {
     // 状态（2026-08-15：defaultXxx 从 buildWhaleDialogHtml 内部计算移到这里复用，
     // 避免模板和状态两端重复，且 HTML 渲染与事件绑定共用同一份默认值）
     const isEdit = !!opts.existing;
-    const defaultColor = opts.existing?.color || WHALE_COLOR_LIST[3].value;
-    const defaultStyle = opts.existing?.style || "solid";
+    const defaultColor = opts.existing?.color || WHALE_COLOR_LIST[2].value;
+    const defaultStyle = opts.existing?.style || "highlight";
     // 2026-08-18 打磨：与 buildWhaleDialogHtml 对齐，新建默认 both
     const defaultScope = opts.existing?.scope || "both";
     const defaultLineColor = opts.existing?.lineColor || defaultColor;
@@ -571,13 +583,13 @@ export class WhaleAnnotationManager {
           span.style.color = selectedLineColor;
           span.style.textDecorationColor = selectedLineColor;
           span.style.textDecorationStyle =
-            st === "dotted" ? "dotted" : st === "wavy" ? "wavy" : st === "dashed" ? "dashed" : st === "double" ? "double" : "solid";
+            st === "wavy" ? "wavy" : "solid";
         }
       });
     };
     dlg.querySelectorAll("#whale-dlg-style-btns .whale-dlg-style-aa").forEach((btn) => {
       btn.addEventListener("click", () => {
-        selectedStyle = (btn as HTMLElement).dataset.style as AnnotationStyle || "solid";
+        selectedStyle = (btn as HTMLElement).dataset.style as AnnotationStyle || "highlight";
         refreshAaStyles();
       });
     });
@@ -632,6 +644,58 @@ export class WhaleAnnotationManager {
       });
     };
     renderLabelChips();
+
+    // ====== 2026-08-22 改：框架样式手风记忆模式（2026-08-22 bug 修复）======
+    // 旧实现"先 render 再 removeAttribute"导致视觉闪烁 + 偶尔 race。
+    // 新实现：localStorage 在 buildHtml 之前就读好，作为模板参数传入，
+    // 模板首次渲染即正确状态；这里只保留 toggle 监听，每次切换时写回。
+    const accordion = dlg.querySelector("#whale-accordion-styles") as HTMLDetailsElement | null;
+    accordion?.addEventListener("toggle", () => {
+      try {
+        localStorage.setItem(ACCORDION_KEY, accordion.open ? "true" : "false");
+      } catch {
+        /* 隐私模式等 localStorage 不可用时静默忽略 */
+      }
+    });
+
+    // ====== 2026-08-22 新增：底部 resize 手柄（拖动调整编辑区高度）======
+    const resizeHandle = dlg.querySelector("#whale-dlg-resize-handle") as HTMLElement | null;
+    const innerDlg = dlg.querySelector(".whale-dlg") as HTMLElement | null;
+    if (resizeHandle && innerDlg) {
+      let resizing = false;
+      let startY = 0;
+      let startHeight = 0;
+      const startResize = (e: MouseEvent) => {
+        e.preventDefault();
+        resizing = true;
+        startY = e.clientY;
+        startHeight = innerDlg!.offsetHeight;
+        resizeHandle!.classList.add("active");
+        document.body.classList.add("hiword-resizing");
+      };
+      const onMove = (e: MouseEvent) => {
+        if (!resizing) return;
+        const dy = e.clientY - startY;
+        const newH = Math.max(200, startHeight + dy); // 最小 200px
+        innerDlg!.style.height = `${newH}px`;
+        innerDlg!.style.maxHeight = "none";
+        innerDlg!.style.overflowY = "auto";
+      };
+      const onUp = () => {
+        if (!resizing) return;
+        resizing = false;
+        resizeHandle!.classList.remove("active");
+        document.body.classList.remove("hiword-resizing");
+      };
+      resizeHandle.addEventListener("mousedown", startResize);
+      document.addEventListener("mousemove", onMove);
+      document.addEventListener("mouseup", onUp);
+      (dlg as any).__resizeClean = () => {
+        resizeHandle.removeEventListener("mousedown", startResize);
+        document.removeEventListener("mousemove", onMove);
+        document.removeEventListener("mouseup", onUp);
+      };
+    }
 
     // ====== 关闭 / 删除 ======
     dlg.querySelector("#whale-dlg-close")?.addEventListener("click", () => this.closeDialog());
@@ -708,24 +772,17 @@ export class WhaleAnnotationManager {
       await doSave(""); // note 空 = 纯颜色标注
     });
 
-    // ====== AI 助手（2026-08-22 新增）======
-    // 读当前编辑器内容（Protyle→Kramdown, fallback innerText）
+    // ====== AI 助手（2026-08-22 新增；2026-08-22 改：原批注弹窗保留,不就关）======
+    // 设计要点：
+    //  - 点击 AI 按钮 → 不关闭批注弹窗(用户可继续观察/编辑)
+    //  - AI 弹窗出现在批注弹窗旁边(anno-ai-dialog 内部用 parentDialog 定位)
+    //  - AI 弹窗"填回批注" → 就地写编辑器(AnnEditor.write),原批注弹窗保持打开
+    //  - 关闭 AI 弹窗(×/ESC/复制/取消)→ 原批注弹窗保持打开
     const readCurrentNote = () => this.readAnnEditorContent(dlg);
     dlg.querySelector("#whale-dlg-ai")?.addEventListener("click", () => {
       const currentNote = readCurrentNote();
-      // 复用完整弹窗配置(保留 blockId/docId/sentence/selectedText)
-      // 先关批注弹窗（不释放 edit session,让 AI 弹窗期间不阻塞其他打开）,
-      // 由 host.onFillBack 重新打开批注弹窗,带 prefillNote
-      const captured = {
-        selectedText: opts.selectedText,
-        sentence: opts.sentence,
-        blockId: opts.blockId,
-        docId: opts.docId,
-        existing: opts.existing,
-        // 不带 prefillNote,重开时由 host 注入
-      };
-      // 先关弹窗,再开 AI
-      this.closeDialog();
+      // 闭包捕获 activeDialog(若用户在 AI 弹窗期间手动关了批注弹窗,后续 setNoteContent 安全降级)
+      const capturedDialog = this.activeDialog;
       try {
         this.host.openAnnoAiDialog({
           selectedText: opts.selectedText,
@@ -733,14 +790,19 @@ export class WhaleAnnotationManager {
           blockId: opts.blockId,
           docId: opts.docId,
           existingNote: currentNote,
+          // 2026-08-22 改：原批注弹窗保持打开,传给 AI 弹窗用于定位
+          parentDialog: dlg,
           onFillBack: (reply: string) => {
-            // 关闭 AI 弹窗后,用 prefillNote 重开批注弹窗
-            // 注意:此处不直接调用 showWhaleDialog,因为 host 还要做"关闭 AI 弹窗"动作,
-            // 统一由 host.onFillBack 内部处理(避免循环依赖与时序错位)
-            try {
-              this.showWhaleDialog({ ...captured, prefillNote: reply });
-            } catch (e: any) {
-              this.host.showMessage(`重开批注弹窗失败: ${e?.message || e}`, "error");
+            // 2026-08-22 改：就地写编辑器,不再关闭/重开批注弹窗
+            if (!capturedDialog || !document.body.contains(capturedDialog)) {
+              this.host.showMessage("批注弹窗已关闭,无法填回", "error");
+              return;
+            }
+            const ok = this.setNoteContent(reply);
+            if (ok) {
+              this.host.showMessage("AI 回复已填入批注", "success");
+            } else {
+              this.host.showMessage("填回批注失败：编辑器未就绪", "error");
             }
           },
         });
@@ -828,10 +890,31 @@ export class WhaleAnnotationManager {
   }
 
   /**
-   * 2026-08-15 新增：批注弹窗浮动定位。
-   *  - 优先定位到当前选区附近（下方偏右），让用户直观看到批注与原文位置对应；
-   *  - 空间不足时改到选区上方；
-   *  - 完全无选区时居中偏上（兜底）。
+   * 2026-08-22 新增：就地写入批注编辑器（AI 助手「填回批注」用）。
+   * 不重建 Protyle,只调 AnnEditor.write() 替换内容；
+   * 弹窗保持打开,用户可在 AI 回复基础上继续手改。
+   * @returns 是否写入成功
+   */
+  setNoteContent(note: string): boolean {
+    if (!this.activeDialog) return false;
+    if (this.annEditor) {
+      this.annEditor.write(note);
+      return true;
+    }
+    // 回退 contenteditable 模式（旧实现兼容）
+    const el = this.activeDialog.querySelector("#whale-dlg-editor") as HTMLElement | null;
+    if (!el) return false;
+    el.innerHTML = this.escapeHtml(note);
+    return true;
+  }
+
+  /**
+   * 2026-08-22 改：批注弹窗浮动定位。避让选区本身，依次尝试 4 个方位：
+   *   右 → 下 → 上 → 左 → 居中
+   * 设计要点：
+   *  - 弹窗不再压在选区上（之前 `left = anchorRect.right - width + 10` 会盖住选区）
+   *  - 优先右侧（用户视觉上"原选区 + 弹窗"从左到右）
+   *  - 都不够时居中偏上兜底
    * 不依赖外部 anchor 参数，直接读 window.getSelection() 的 Range。
    */
   private positionWhalePopup(popup: HTMLElement): void {
@@ -840,24 +923,63 @@ export class WhaleAnnotationManager {
     if (sel && sel.rangeCount > 0 && !sel.isCollapsed) {
       const range = sel.getRangeAt(0);
       const rects = range.getClientRects();
-      // 选区可能跨多个矩形，取最后一个（用户视觉上的"选区末端"）
       anchorRect = rects.length > 0 ? rects[rects.length - 1] : range.getBoundingClientRect();
     }
     const width = Math.min(440, window.innerWidth - 20);
+    const dlgHeight = 360; // 估算高度（实际渲染后会自适应）
+    const margin = 12; // 与选区的间距
     popup.style.width = `${width}px`;
 
     if (anchorRect) {
-      let left = anchorRect.right - width + 10;
-      let top = anchorRect.bottom + 8;
-      if (left < 10) left = 10;
-      if (left + width > window.innerWidth - 10) left = window.innerWidth - width - 10;
-      // 视口底部空间不够时改到选区上方
-      const dlgHeight = 360; // 估算高度（实际渲染后会自适应）
-      if (top + dlgHeight > window.innerHeight - 10) {
-        top = Math.max(10, anchorRect.top - dlgHeight - 8);
+      // 四个方向的可视空间
+      const spaceRight = window.innerWidth - anchorRect.right - margin;
+      const spaceLeft = anchorRect.left - margin;
+      const spaceBottom = window.innerHeight - anchorRect.bottom - margin;
+      const spaceTop = anchorRect.top - margin;
+
+      let left = 0;
+      let top = 0;
+      let placed = false;
+
+      // 1) 优先右侧
+      if (spaceRight >= width) {
+        left = anchorRect.right + margin;
+        top = Math.max(margin, anchorRect.top);
+        placed = true;
       }
-      popup.style.left = `${left}px`;
-      popup.style.top = `${top}px`;
+      // 2) 选区下方
+      else if (spaceBottom >= dlgHeight) {
+        left = anchorRect.left;
+        top = anchorRect.bottom + margin;
+        placed = true;
+      }
+      // 3) 选区上方
+      else if (spaceTop >= dlgHeight) {
+        left = anchorRect.left;
+        top = anchorRect.top - dlgHeight - margin;
+        placed = true;
+      }
+      // 4) 选区左侧
+      else if (spaceLeft >= width) {
+        left = anchorRect.left - width - margin;
+        top = Math.max(margin, anchorRect.top);
+        placed = true;
+      }
+
+      if (placed) {
+        // 边界保护（防止极端窄屏溢出）
+        left = Math.max(margin, Math.min(left, window.innerWidth - width - margin));
+        top = Math.max(margin, Math.min(top, window.innerHeight - dlgHeight - margin));
+        popup.style.left = `${left}px`;
+        popup.style.top = `${top}px`;
+        // 清除之前可能残留的 transform（之前无选区兜底设了 translateX(-50%)）
+        popup.style.transform = "none";
+      } else {
+        // 都不够 → 居中偏上
+        popup.style.left = "50%";
+        popup.style.transform = "translateX(-50%)";
+        popup.style.top = "80px";
+      }
     } else {
       // 无选区：居中偏上
       popup.style.left = "50%";

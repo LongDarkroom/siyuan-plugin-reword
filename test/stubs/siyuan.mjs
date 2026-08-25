@@ -32,3 +32,8 @@ export function getActiveEditor() {
 export const Constants = {};
 export const platformUtils = {};
 export const IWebSocketData = {};
+
+// 2026-08-23 扩展：src/reader/reader-fonts.ts 等需要 siyuan 桩
+export const putFile = async () => false;
+export const getFileBlob = async () => null;
+export const removeFile = async () => undefined;

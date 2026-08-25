@@ -21,39 +21,87 @@ export type AnnotationOrigin = "manual" | "ai";
 export type AnnotationScope = "word" | "sentence" | "both";
 
 /**
- * 下划线样式 —— 鲸鱼风格 5 种线型 × 7 色 = 35 组合
- *  solid   = 一般笔记 / 默认（单实线）
- *  wavy    = 生词 / 不认识（波浪线，醒目）
- *  dashed  = 似懂非懂 / 模糊（虚线，提示需确认）
- *  double  = 已掌握 / 重点（双实线，强调）
- *  dotted  = 待复习 / 提醒（点线，轻量提示）
+ * 标注样式 —— 精简为 3 种（2026-08-24 重构，对标 Readest / 微信读书）
+ *  highlight = 背景高亮
+ *  solid   = 直线段（单实线下划线）
+ *  wavy    = 波浪线（生词 / 不认识，醒目）
+ * 旧样式 dashed / double / dotted 在 load 时降级（见 normalizeAnnotationStyle）。
  */
-export type AnnotationStyle = "solid" | "wavy" | "dashed" | "double" | "dotted";
+export type AnnotationStyle = "highlight" | "solid" | "wavy";
 
-/** 内置下划线样式定义（5 种线型） */
+/** 批注性质（2026-08-24 新增，对标 Readest）：
+ *  highlight = 纯高亮（工具栏「高亮」按钮，无批注内容，note 为空）
+ *  annotate  = 带批注内容（工具栏「批注」按钮，note 非空） */
+export type AnnotationType = "highlight" | "annotate";
+
+/** 工具栏 / 编辑器展示的 3 种样式，顺序即 UI 顺序（高亮 → 直线段 → 波浪线） */
+export const ANNOTATION_PANEL_STYLES: AnnotationStyle[] = ["highlight", "solid", "wavy"];
+
+/** 内置样式定义（3 种） */
 export const ANNOTATION_STYLES: Record<AnnotationStyle, { label: string; css: string; hint: string; icon: string }> = {
-  solid:  { label: "单实线", css: "solid", hint: "一般笔记", icon: "━" },
+  highlight: { label: "高亮", css: "highlight", hint: "背景标记", icon: "▮" },
+  solid:  { label: "直线段", css: "solid", hint: "一般笔记 / 重点", icon: "━" },
   wavy:   { label: "波浪线", css: "wavy", hint: "生词 / 不认识", icon: "﹏" },
-  dashed: { label: "虚线",   css: "dashed", hint: "似懂非懂", icon: "┄" },
-  double: { label: "双实线", css: "double", hint: "已掌握 / 重点", icon: "═" },
-  dotted: { label: "点线",   css: "dotted", hint: "待复习 / 提醒", icon: "┉" },
 };
 
-/** 鲸鱼风格 7 色调色板 */
+/** 微阅风格 5 色调色板（2026-08-24 精简：移除石板灰与橙色） */
 export const WHALE_COLORS = [
-  { name: "石板灰", value: "#9ca3af", hex: "#9ca3af" },  // 0: 灰
-  { name: "明黄",   value: "#facc15", hex: "#facc15" },  // 1: 黄
-  { name: "翠绿",   value: "#22c55e", hex: "#22c55e" },  // 2: 绿
-  { name: "青蓝",   value: "#06b6d4", hex: "#06b6d4" },  // 3: 青
-  { name: "玫粉",   value: "#ec4899", hex: "#ec4899" },  // 4: 粉
-  { name: "橙色",   value: "#f97316", hex: "#f97316" },  // 5: 橙
-  { name: "紫罗兰", value: "#8b5cf6", hex: "#8b5cf6" },  // 6: 紫
+  { name: "明黄",   value: "#facc15", hex: "#facc15" },  // 0: 黄
+  { name: "翠绿",   value: "#22c55e", hex: "#22c55e" },  // 1: 绿
+  { name: "青蓝",   value: "#06b6d4", hex: "#06b6d4" },  // 2: 青（默认）
+  { name: "玫粉",   value: "#ec4899", hex: "#ec4899" },  // 3: 粉
+  { name: "紫罗兰", value: "#8b5cf6", hex: "#8b5cf6" },  // 4: 紫
 ] as const;
 
+/** 默认样式与颜色（阅读器 / 微阅统一） */
+export const DEFAULT_ANNOTATION_STYLE: AnnotationStyle = "highlight";
+export const DEFAULT_ANNOTATION_COLOR: string = WHALE_COLORS[2].value; // 青蓝
+
 /**
- * 6 套预设快捷样式 —— 英语学习场景映射（规范方案三）
- * 解决「样式滥用导致界面杂乱」：日常批注只从这 6 套里选，
- * 颜色 + 线型被绑定为一个语义组合，避免 7×5=35 种任意混搭。
+ * 旧样式降级映射（2026-08-24）：删除的线型落到语义最接近的新样式。
+ *  dashed / double → solid（直线段）；dotted → wavy（波浪线）。
+ */
+const LEGACY_STYLE_FALLBACK: Record<string, AnnotationStyle> = {
+  dashed: "solid",
+  double: "solid",
+  dotted: "wavy",
+};
+
+/** 把任意字符串规整为合法 AnnotationStyle（非法 / 旧值走降级） */
+export function normalizeAnnotationStyle(style?: string): AnnotationStyle {
+  if (style === "highlight" || style === "solid" || style === "wavy") return style;
+  if (style && LEGACY_STYLE_FALLBACK[style]) return LEGACY_STYLE_FALLBACK[style];
+  return DEFAULT_ANNOTATION_STYLE;
+}
+
+/** 把任意颜色规整为 5 色调色板内的值（旧色 / 非法值回退默认青蓝） */
+export function normalizeAnnotationColor(color?: string): string {
+  if (color && WHALE_COLORS.some((c) => c.value === color)) return color;
+  return DEFAULT_ANNOTATION_COLOR;
+}
+
+/** 是否为「阅读批注」（书籍场景，由 bookId 区分文档编辑区批注）。文档批注 bookId 留空。 */
+export function isReading(a: AnnotationItem): boolean {
+  return !!a.bookId;
+}
+
+/**
+ * 是否为「纯高亮」（无批注内容）。
+ * 与 renderWhaleNoteItem 旧逻辑（note===selectedText 也算纯标注）不同，这里用统一口径：
+ * 仅当 note 为空（或纯空白）视为纯高亮，避免歧义。旧数据（无 type）可按 note 推断展示。
+ */
+export function isPureHighlight(a: AnnotationItem): boolean {
+  return !(a.note && a.note.trim());
+}
+
+/** 推断批注性质（无显式 type 时按 note 兜底）：有内容 → annotate，否则 highlight。 */
+export function inferType(a: AnnotationItem): AnnotationType {
+  return isPureHighlight(a) ? "highlight" : "annotate";
+}
+
+/**
+ * 3 套预设快捷样式 —— 英语学习场景映射（2026-08-24 精简）
+ * 颜色 + 样式绑定为语义组合，避免任意混搭。
  */
 export interface WhalePreset {
   key: string;
@@ -75,7 +123,7 @@ export interface WhalePreset {
   group: "highlight" | "line" | "label";
 }
 
-/** 6 套预设（按视觉强度降序，弹窗 / 面板共用） */
+/** 3 套预设（弹窗 / 面板共用） */
 export const WHALE_PRESETS: WhalePreset[] = [
   {
     key: "new-word", name: "生词突击",
@@ -84,34 +132,16 @@ export const WHALE_PRESETS: WhalePreset[] = [
     group: "highlight",
   },
   {
-    key: "fuzzy", name: "模糊待定",
-    color: "#22c55e", style: "dotted", colorName: "翠绿", styleName: "点线",
-    scene: "见过但不确定意思，下次阅读时优先确认", intensity: "中强", icon: "┉",
-    group: "highlight",
-  },
-  {
-    key: "syntax", name: "句法核心",
-    color: "#f97316", style: "double", colorName: "橙色", styleName: "双实",
-    scene: "从句/倒装/虚拟语气等语法结构，写作可仿", intensity: "中等", icon: "═",
-    group: "line",
-  },
-  {
     key: "trap", name: "易错预警",
-    color: "#ec4899", style: "dashed", colorName: "玫粉", styleName: "虚线",
-    scene: "形近词/时态混淆/介词搭配错误", intensity: "中强", icon: "┄",
+    color: "#ec4899", style: "solid", colorName: "玫粉", styleName: "直线",
+    scene: "形近词/时态混淆/介词搭配错误", intensity: "中强", icon: "━",
     group: "line",
   },
   {
     key: "culture", name: "文化注释",
-    color: "#06b6d4", style: "solid", colorName: "青蓝", styleName: "实线",
+    color: "#06b6d4", style: "solid", colorName: "青蓝", styleName: "直线",
     scene: "背景知识/作者意图/文化典故", intensity: "温和", icon: "━",
     group: "label",
-  },
-  {
-    key: "logic", name: "逻辑脉络",
-    color: "#8b5cf6", style: "double", colorName: "紫罗兰", styleName: "双实",
-    scene: "段落论点/论证关系/文章结构", intensity: "中等", icon: "═",
-    group: "line",
   },
 ];
 
@@ -145,6 +175,16 @@ export interface AnnotationItem {
   id: string;            // 唯一 ID
   blockId: string;       // 所属块 ID（思源 data-node-id）
   docId: string;         // 所属文档根 ID（root_id），便于跳转与聚合
+  /**
+   * 书籍批注归属（阅读器 / Phase 2 新增）。思源块批注不填；
+   * 书籍场景下由桥接层把 blockId 派生为 `book:<bookId>`、docId 设为 bookId，
+   * 并用 bookId + cfi 在 foliate 坐标系内精确定位。
+   */
+  bookId?: string;
+  /** foliate CFI 锚点（书籍场景精确定位；思源块批注不填） */
+  cfi?: string;
+  /** 批注性质：highlight=纯高亮无批注内容；annotate=带批注内容（工具栏「批注」按钮生成） */
+  type?: AnnotationType;
   sentence: string;      // 批注锚定的上下文句子（只读展示，不改正文）
   selectedText: string;  // 用户实际选中的精确文本（用于行内高亮定位）
   start?: number;        // 选中文本在块 textContent 中的起始偏移（2026-08-17：用于稳定定位）
@@ -167,6 +207,15 @@ export interface AnnotationItem {
   createdAt: string;     // 创建时间（ISO）
   updatedAt: string;     // 更新时间（ISO）
   ai?: AnnotationAiMeta; // 仅 origin==="ai" 或曾用 AI 时存在
+  /**
+   * 软删除时间戳（2026-08-24 重构：对标 Readest）。
+   *   - 未删除：undefined
+   *   - 已删除：ISO 时间字符串
+   * 读取路径（getByBook/getAll/getByBlock/exists/hasBlock）一律过滤 deletedAt，
+   * 渲染层（onCreateOverlay 重绘时再过滤一次）保证翻页后已删高亮不再出现。
+   * 撤销删除即清掉该字段（restore），数据不丢、零正文污染。
+   */
+  deletedAt?: string;
 }
 
 /** 持久化结构 */
@@ -178,6 +227,12 @@ export interface AnnotationStoreData {
 export interface AnnotationInput {
   blockId: string;
   docId: string;
+  /** 书籍批注归属（阅读器 / Phase 2 新增）；思源块批注不填 */
+  bookId?: string;
+  /** foliate CFI 锚点（书籍场景精确定位；思源块批注不填） */
+  cfi?: string;
+  /** 批注性质：highlight=纯高亮无批注内容；annotate=带批注内容 */
+  type?: AnnotationType;
   sentence: string;
   selectedText: string;  // 用户实际选中的精确文本
   start?: number;        // 选中文本在块 textContent 中的起始偏移（2026-08-17）
@@ -230,6 +285,11 @@ function nowIso(): string {
   return new Date().toISOString();
 }
 
+/** 软删除过滤：deletedAt 已置位的视为已删除，读取路径一律排除 */
+function isActive(it: AnnotationItem): boolean {
+  return !it.deletedAt;
+}
+
 function genId(): string {
   const c: any = (globalThis as any).crypto;
   if (c && typeof c.randomUUID === "function") return c.randomUUID();
@@ -264,17 +324,35 @@ export class AnnotationStore {
     this.items.clear();
     this.byKey.clear();
     const list = Array.isArray(raw?.annotations) ? raw.annotations : [];
+    let migrated = 0;
     for (const it of list) {
       if (it && typeof it.id === "string" && typeof it.blockId === "string") {
         const item = it as AnnotationItem;
+        // 2026-08-25 修复：阅读器批注因历史 bug 导致 blockId 以「book:」开头
+        // 但 bookId 字段缺失（undefined），导致 isReading() 返回 false、
+        // 批注被错误归类到「文档批注」而非「阅读批注」。
+        // 此处从 blockId 前缀反推补全 bookId，一次性修复已有脏数据。
+        if (!item.bookId && item.blockId.startsWith("book:")) {
+          item.bookId = item.blockId.slice(5); // 去掉 "book:" 前缀
+          migrated++;
+          getLogger().info(`[REword-Store] 迁移补全 bookId: ann=${item.id.slice(0,8)} bookId=${item.bookId}`);
+        }
         const normalized: AnnotationItem = {
           ...item,
+          style: normalizeAnnotationStyle(item.style),
+          color: normalizeAnnotationColor(item.color),
+          lineColor: normalizeAnnotationColor(item.lineColor ?? item.color),
           noteFormat: item.noteFormat ?? detectNoteFormat(item.note),
           version: item.version ?? 0,
         };
         this.items.set(normalized.id, normalized);
         this.byKey.set(annotationKey(normalized.blockId, normalized.sentence || "", normalized.selectedText || ""), normalized.id);
       }
+    }
+    if (migrated > 0) {
+      getLogger().info(`[REword-Store] load 时自动迁移 ${migrated} 条阅读批注的 bookId`);
+      // 触发一次落盘以持久化修复结果（异步，不阻塞 load）
+      this.emit().catch(() => {});
     }
   }
 
@@ -346,16 +424,24 @@ export class AnnotationStore {
 
   /** 全部批注（按 createdAt 倒序，供面板展示） */
   getAll(): AnnotationItem[] {
-    return [...this.items.values()].sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+    return [...this.items.values()]
+      .filter(isActive)
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
   }
 
   get(id: string): AnnotationItem | undefined {
-    return this.items.get(id);
+    const it = this.items.get(id);
+    return it && isActive(it) ? it : undefined;
   }
 
   /** 某块下的全部批注（供块级标记 #23） */
   getByBlock(blockId: string): AnnotationItem[] {
-    return [...this.items.values()].filter((a) => a.blockId === blockId);
+    return [...this.items.values()].filter((a) => a.blockId === blockId && isActive(a));
+  }
+
+  /** 某本书下的全部批注（阅读器 / Phase 2：按 bookId 聚合高亮与批注） */
+  getByBook(bookId: string): AnnotationItem[] {
+    return [...this.items.values()].filter((a) => a.bookId === bookId && isActive(a));
   }
 
   /** 是否已对某块的某句子 + 选中文本做过批注 */
@@ -370,7 +456,7 @@ export class AnnotationStore {
 
   /** 全部被批注的块 ID 集合（供 #23 一次性打标） */
   annotatedBlockIds(): string[] {
-    return [...new Set([...this.items.values()].map((a) => a.blockId))];
+    return [...new Set([...this.items.values()].filter(isActive).map((a) => a.blockId))];
   }
 
   /**
@@ -393,7 +479,7 @@ export class AnnotationStore {
       if (input.expectedUpdatedAt !== undefined && prev.updatedAt !== input.expectedUpdatedAt) {
         throw new ConflictError(prev.id);
       }
-      const note = normalizeNoteToKramdown(cleanNote);
+      const note = input.note !== undefined ? normalizeNoteToKramdown(cleanNote) : prev.note;
       const updated: AnnotationItem = {
         ...prev,
         blockId: input.blockId || prev.blockId,
@@ -416,6 +502,9 @@ export class AnnotationStore {
         ai: input.ai ? { ...prev.ai, ...input.ai } : prev.ai,
         updatedAt: ts,
       };
+      // 2026-08-24 修复：更新 = 重新激活。此前 ...prev 展开会保留 deletedAt，
+      // 导致"软删记录被重新标注 → 画出来了但数据不可见（被过滤）→ 又删不掉"。
+      delete updated.deletedAt;
       this.items.set(updated.id, updated);
       this.reindexKeys();
       await this.emit();
@@ -430,7 +519,7 @@ export class AnnotationStore {
       if (input.expectedUpdatedAt !== undefined && prev.updatedAt !== input.expectedUpdatedAt) {
         throw new ConflictError(prev.id);
       }
-      const note = normalizeNoteToKramdown(cleanNote);
+      const note = input.note !== undefined ? normalizeNoteToKramdown(cleanNote) : prev.note;
       const updated: AnnotationItem = {
         ...prev,
         note,
@@ -449,6 +538,8 @@ export class AnnotationStore {
         ai: input.ai ? { ...prev.ai, ...input.ai } : prev.ai,
         updatedAt: ts,
       };
+      // 2026-08-24 修复：更新 = 重新激活（清除软删标记），同上。
+      delete updated.deletedAt;
       this.items.set(updated.id, updated);
       await this.emit();
       return updated;
@@ -460,6 +551,9 @@ export class AnnotationStore {
       id: input.id || genId(),
       blockId: input.blockId,
       docId: input.docId,
+      bookId: input.bookId,
+      cfi: input.cfi,
+      type: input.type,
       sentence: cleanSentence,
       selectedText: cleanSelected,
       start: input.start,
@@ -468,10 +562,10 @@ export class AnnotationStore {
       noteFormat: "kramdown",
       version: 1,
       origin: input.origin || "manual",
-      color: input.color || WHALE_COLORS[3].value, // 默认青色
+      color: normalizeAnnotationColor(input.color) || DEFAULT_ANNOTATION_COLOR, // 默认青色
       style: input.style,
       scope: input.scope ?? "word", // 默认单词模式（背景高亮）
-      lineColor: input.lineColor || input.color || WHALE_COLORS[3].value,
+      lineColor: normalizeAnnotationColor(input.lineColor || input.color) || DEFAULT_ANNOTATION_COLOR,
       tags: input.tags || [],
       labels: input.labels || [],
       category: input.category,
@@ -485,8 +579,40 @@ export class AnnotationStore {
     return created;
   }
 
-  /** 删除批注，返回是否真的删除成功 */
+  /**
+   * 删除批注（2026-08-24 重构：对标 Readest 软删除）。
+   * 不再从内存 Map 物理删除，而是置 deletedAt 时间戳并落盘。
+   * 所有读取路径（getByBook/getByBlock/getAll/exists/hasBlock）已过滤 deletedAt，
+   * 渲染层在 onCreateOverlay 重绘时再过滤一次，保证翻页后高亮不再出现。
+   * 撤销删除用 restore(id) 清掉该字段即可恢复，数据不丢、零正文污染。
+   * 返回是否真的置位成功（id 不存在返回 false）。
+   */
   async remove(id: string): Promise<boolean> {
+    const it = this.items.get(id);
+    if (!it) return false;
+    if (it.deletedAt) return true; // 已删，幂等
+    it.deletedAt = nowIso();
+    it.updatedAt = it.deletedAt;
+    await this.emit();
+    return true;
+  }
+
+  /**
+   * 撤销软删除：清掉 deletedAt 字段，恢复该批注为活跃状态。
+   * 与 Readest 的「撤销删除」语义一致。返回是否真的恢复成功。
+   */
+  async restore(id: string): Promise<boolean> {
+    const it = this.items.get(id);
+    if (!it) return false;
+    if (!it.deletedAt) return true; // 本就活跃，幂等
+    delete it.deletedAt;
+    it.updatedAt = nowIso();
+    await this.emit();
+    return true;
+  }
+
+  /** 物理删除（仅用于清理/迁移场景，正常删除流程不要用） */
+  async hardRemove(id: string): Promise<boolean> {
     const it = this.items.get(id);
     if (!it) return false;
     this.items.delete(id);

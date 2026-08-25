@@ -146,3 +146,46 @@ test("IWhaleHost 接口:含 getAiSettings / openAiSettings / openAnnoAiDialog(20
   assert.match(src, /openAiSettings\(\): void;/, "IWhaleHost 应有 openAiSettings");
   assert.match(src, /openAnnoAiDialog\(opts: \{/, "IWhaleHost 应有 openAnnoAiDialog");
 });
+
+// ============ 2026-08-22 改:原批注弹窗保留 + setNoteContent 公共方法 ============
+
+test("2026-08-22 改:IWhaleHost.openAnnoAiDialog 接受 parentDialog(原批注弹窗元素)", async () => {
+  const fs = await import("node:fs/promises");
+  const src = await fs.readFile("src/annotation/whale-manager.ts", "utf8");
+  // 父批注弹窗元素:AI 弹窗贴它旁边
+  assert.match(src, /parentDialog\?: HTMLElement;/, "openAnnoAiDialog opts 应有 parentDialog?: HTMLElement");
+});
+
+test("2026-08-22 改:WhaleAnnotationManager 有 setNoteContent 公共方法(AI 填回时用)", async () => {
+  const fs = await import("node:fs/promises");
+  const src = await fs.readFile("src/annotation/whale-manager.ts", "utf8");
+  assert.match(src, /setNoteContent\(note: string\): boolean/, "WhaleAnnotationManager 应有 setNoteContent 公共方法");
+  // 实现:优先 AnnEditor.write,回退 contenteditable
+  assert.match(src, /this\.annEditor\.write\(note\)/, "setNoteContent 应优先调 AnnEditor.write");
+});
+
+test("2026-08-22 改:AI 按钮 handler 不调 closeDialog(原批注弹窗保持打开)", async () => {
+  const fs = await import("node:fs/promises");
+  const src = await fs.readFile("src/annotation/whale-manager.ts", "utf8");
+  // 找到 AI 按钮的 handler 块,确认不含 closeDialog
+  const aiHandlerMatch = src.match(/whale-dlg-ai.*?addEventListener\("click",[\s\S]*?\}\);/);
+  assert.ok(aiHandlerMatch, "应能找到 AI 按钮 handler");
+  // handler 内不应有 closeDialog(改前在的)
+  assert.doesNotMatch(aiHandlerMatch[0], /this\.closeDialog\(\)/, "AI 按钮 handler 不应再调 closeDialog");
+});
+
+test("2026-08-22 改:positionWhalePopup 用右→下→上→左避让策略", async () => {
+  const fs = await import("node:fs/promises");
+  const src = await fs.readFile("src/annotation/whale-manager.ts", "utf8");
+  // 提取 positionWhalePopup 函数体
+  const fnMatch = src.match(/private positionWhalePopup[\s\S]*?^  \}/m);
+  assert.ok(fnMatch, "应能找到 positionWhalePopup 函数");
+  // 避让策略四向候选 + placed 标志
+  assert.match(fnMatch[0], /spaceRight[\s\S]*?width/, "应有 spaceRight 检查");
+  assert.match(fnMatch[0], /spaceBottom[\s\S]*?dlgHeight/, "应有 spaceBottom 检查");
+  assert.match(fnMatch[0], /spaceTop[\s\S]*?dlgHeight/, "应有 spaceTop 检查");
+  assert.match(fnMatch[0], /spaceLeft[\s\S]*?width/, "应有 spaceLeft 检查");
+  // 验证不再用"覆盖选区"逻辑(旧: anchorRect.right - width + 10)
+  assert.doesNotMatch(fnMatch[0], /anchorRect\.right\s*-\s*width\s*\+\s*10/,
+    "不应再用 anchorRect.right - width + 10 覆盖选区的旧逻辑");
+});

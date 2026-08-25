@@ -40,7 +40,7 @@ export function applyInlineMarks(
     sentence: string;
     id: string;
     color?: string;
-    style?: string; // "solid" | "wavy" | "dashed" | "double"
+    style?: string; // "highlight" | "solid" | "wavy"
     scope?: string; // "word" | "sentence" | "both"
     lineColor?: string; // 下划线独立色（2026-08-15 新增）
     labels?: string[];

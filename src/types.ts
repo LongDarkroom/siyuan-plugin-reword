@@ -14,6 +14,35 @@ export type WordStatus = typeof WordStatus[keyof typeof WordStatus];
 /** 掌握程度最大值（5 星） */
 export const MASTERY_MAX = 5;
 
+/**
+ * 单词学习状态(2026-08-22 新增:词库驱动高亮体系)
+ * 与 WordStatus(复习队列状态)独立:WordStatus 管复习队列进出,
+ * LearningStatus 管"我对这个单词的掌握度"——直接驱动文档单词高亮颜色。
+ * - learning(黄):未掌握/刚加入/不稳定
+ * - mastered(绿):已掌握(5 星或显式标记)
+ * - review(紫):需复习(最近复习失败或显式标记)
+ */
+export const LearningStatus = {
+  Learning: "learning",
+  Mastered: "mastered",
+  Review: "review",
+} as const;
+export type LearningStatus = typeof LearningStatus[keyof typeof LearningStatus];
+
+/** 学习状态对应的高亮色(复用 WHALE_COLORS 同色值,保持视觉统一) */
+export const LEARNING_STATUS_COLORS: Record<LearningStatus, string> = {
+  [LearningStatus.Learning]: "#facc15",  // 黄色
+  [LearningStatus.Mastered]: "#22c55e",  // 绿色
+  [LearningStatus.Review]:    "#8b5cf6",  // 紫色
+};
+
+/** 学习状态显示文案(中文) */
+export const LEARNING_STATUS_LABELS: Record<LearningStatus, string> = {
+  [LearningStatus.Learning]: "未掌握",
+  [LearningStatus.Mastered]: "已掌握",
+  [LearningStatus.Review]:    "需复习",
+};
+
 /** 词库中一个单词的记录 */
 export interface WordRecord {
   id: string;          // 唯一 ID
@@ -23,6 +52,9 @@ export interface WordRecord {
   meaning: string;     // 释义
   mastery: number;     // 掌握程度 0~5（实心星数量）
   status: WordStatus;  // 状态
+  /** 2026-08-22 新增:学习状态(词库驱动文档高亮用,默认 'learning')。
+   *  与 status(复习队列)正交:status=Archived 的单词也可能有 learningStatus=mastered。 */
+  learningStatus?: LearningStatus;
   labels?: string[];   // 分类标签 id 数组（2026-08-14 新增，与批注 labels 共享命名空间）
   example?: string;    // 例句（AI 精读时同步的上下文原句，可选）
   created: string;     // 纳入时间（ISO）

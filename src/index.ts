@@ -5,9 +5,12 @@ import {
   fetchSyncPost,
   getFrontend,
 } from "siyuan";
+import { DockManager, SLOT_LABELS, type DockableFeature, type DockSlot } from "./dock/dock-manager.ts";
 import * as path from "path";
 import * as fs from "node:fs";
 import { VocabStore, ALL_BOOK_ID } from "./vocab/vocab-store.ts";
+import { LearningStatus, type LearningStatus as LearningStatusT } from "./types.ts";
+import { getVocabHighlighter, configureVocabHighlightDeps } from "./vocab/vocab-highlight.ts";
 import { MASTERY_MAX } from "./types.ts";
 import { getDueQueue, nextReviewState, isDue } from "./review/scheduler.ts";
 import { calibrateFromHistory, applyCalibration } from "./review/calibrate.ts";
@@ -16,6 +19,8 @@ import { getReviewConfig, setReviewConfig, resetReviewConfig } from "./review/co
 import type { ReviewConfig, DeepPartial } from "./review/config.ts";
 import type { WordRecord, VocabSort, VocabBook } from "./types.ts";
 import { WordStatus } from "./types.ts";
+// 2026-08-23:Console 过滤(降级 iframe sandbox 警告 + ResizeObserver loop,详见 console-filter.ts)
+import { installConsoleFilter } from "./core/console-filter.ts";
 import * as dictEngine from "./dict/dict-engine.ts";
 import * as dictRenderer from "./dict/dict-renderer.ts";
 import { maybeFillPhonetic } from "./dict/online-phonetic.ts";
@@ -26,7 +31,8 @@ import { normalizePos, parseReviewMeaning } from "./utils/meaning-parser.ts";
 // 许可证模块（2026-08-22 已封存：UI 与门禁隐藏，仅保留状态加载；模块/脚本/测试文件不动，恢复时取消注释即可）
 import { initLicense, getStatus } from "./license/license.ts";
 import { togglePosCollapsed } from "./dict/pos-toggle.ts";
-import { AnnotationStore, WHALE_COLORS } from "./annotation/annotation-store.ts";
+import { AnnotationStore, WHALE_COLORS, DEFAULT_ANNOTATION_COLOR, DEFAULT_ANNOTATION_STYLE, type AnnotationStyle } from "./annotation/annotation-store.ts";
+import { setAnnotationStore } from "./annotation/store-singleton.ts";
 import { LabelStore } from "./annotation/label-store.ts";
 import { markAnnotatedBlocks, clearBlockMarks } from "./annotation/block-mark.ts";
 import { clearInlineMarks, applyInlineMarks } from "./annotation/inline-mark.ts";
@@ -49,12 +55,12 @@ import { buildAnnotationsMarkdown, buildVocabCsv, downloadTextFile } from "./exp
 import type { AnnotationItem } from "./annotation/annotation-store.ts";
 import { queryAnnotations as queryAnns } from "./annotation/annotation-query.ts";
 import type { AnnotationQueryResult } from "./annotation/annotation-query.ts";
-// 鲸鱼快速批注
+// 微阅快速批注
 import { WhaleAnnotationManager, type IWhaleHost } from "./annotation/whale-manager.ts";
 import { mountAnnEditor, DEFAULT_ANN_TOOLBAR, hasBlockTable, type AnnEditor } from "./annotation/ann-editor.ts";
 import { WHALE_COLOR_LIST, WHALE_LINE_STYLES } from "./annotation/whale-manager.ts";
 import { confirmDelete } from "./annotation/whale-confirm.ts";
-import { renderWhalePanel, renderLabelManagementDialog, renderAnnotationHTML, type WhaleGroupMode } from "./annotation/whale-renderer.ts";
+import { renderWhalePanel, renderLabelManagementDialog, renderAnnotationHTML, classifyAnnotation, type WhaleGroupMode } from "./annotation/whale-renderer.ts";
 import { stripIal } from "./annotation/annotation-render.ts";
 import {
   configurePreviewRegistry, setupPreviews, mountPreview, destroyPreview,
@@ -81,6 +87,12 @@ import "./index.less";
 import { PersistentStore } from "./core/persist.ts";
 import { getLogger } from "./core/logger.ts";
 import { openLogViewer, exportLogsCommand } from "./core/log-viewer.ts";
+// ===== 阅读器（Phase 1：书架 + EPUB/MOBI/TXT/MD 阅读；内核 foliate-js）=====
+// foliate customElement 注册保护（必须在 reader 其他模块之前）—— 防止热重载重复 define 抛错阻断 plugin onload
+import "./reader/foliate-shim.ts";
+import { ReaderDockController, READER_FEATURE_ID } from "./reader/reader-dock.ts";
+// 2026-08-24：dock 批注面板删除后广播 → 各 ReaderView 全量 reconcile 清除当前页残留高亮
+import { notifyAnnotationsChanged } from "./reader/annotation-visual.ts";
 
 // ===== Copilot 聊天（照抄自独立 copilot 插件，作为 REword 内第二个 dock）=====
 import { CopilotPanel } from "./copilot/copilot/copilot-panel.ts";
@@ -110,11 +122,20 @@ const PLUGIN_NAME = "hiword-vocab";
 
 /**
  * 2026-08-17：内联 SVG 版图标。
- * addTopBar/addDock 直接传 svg tag 字符串可绕开思源 "Icon must be svg id or svg tag" 的 id 查找校验，
- * 从根本上消除图标报错。
+ * addTopBar/addDock 传 symbol id 字符串，思源内部用 <use xlink:href="#id"> 渲染，
+ * 可绕开 "Icon must be svg id or svg tag" 的 id 查找校验，同时保证多个 Dock 图标可区分。
  */
 const INLINE_ICON_REWORD = `<svg viewBox="0 0 1024 1024"><g fill="none" stroke="currentColor" stroke-width="64" stroke-linecap="round" stroke-linejoin="round"><path d="M512 220c-90-46-200-58-372-46v600c172-12 282 0 372 46 90-46 200-58 372-46V174c-172-12-282 0-372 46z"/><path d="M512 220v600"/></g></svg>`;
 // [已移除] INLINE_ICON_COPILOT 图标常量不再使用（Copilot 对话入口已禁用）
+
+// 2026-08-22：Dock 管理器各功能独立图标（symbol id，addDock 传 id 字符串）
+const ICON_REWORD = "iconREword";
+const ICON_VOCAB = "iconREwordVocab";
+const ICON_DICT = "iconREwordDict";
+const ICON_ANN = "iconREwordAnn";
+const ICON_AI = "iconREwordAI";
+const ICON_REVIEW = "iconREwordReview";
+const ICON_READER = "iconREwordReader";
 
 /** 词典元信息 */
 interface DictMeta {
@@ -181,11 +202,20 @@ export default class RewordPlugin extends Plugin {
   // 字段在 onload() 中初始化，避免构造函数问题
   private vocabStore!: VocabStore;
   private vocabSort: VocabSort = "time"; // 词库排序方式：time/mastery/custom
+  // 2026-08-23 注释:vocabStatusBarExpandedWords 字段在下方,初值从 localStorage 恢复(load 阶段)
   private vocabViewMaster = false; // 是否查看「单词总库」聚合视图（只读）
   private topBarIconId!: string;
   private isReady!: boolean;
   private dockElement!: HTMLElement | null;
   private dockModel!: any;
+  /** 2026-08-22 Dock 管理器：统一注册 / 布局 / 持久化 */
+  private dockManager!: DockManager;
+  /** 独立 Dock 的 element 映射（featureId -> 该 Dock 的根元素） */
+  private standaloneElements = new Map<string, HTMLElement>();
+  /** 独立 Dock 的 model 映射（featureId -> addDock 返回的 model，用于 showDock 聚焦） */
+  private standaloneModels = new Map<string, any>();
+  /** 阅读器（书架 + 阅读面板）控制器 */
+  private readerDock!: ReaderDockController;
   /** 复习面板当前状态筛选：all/active/archived/ignored */
   private reviewStatusFilter: "all" | "active" | "archived" | "ignored" = "active";
   private dictReady!: boolean;
@@ -244,7 +274,7 @@ export default class RewordPlugin extends Plugin {
   private copilotPanel?: CopilotPanel;       // Copilot 面板控制器（入口已禁用，仅保留实例）
   private lastDeepReadBlockId?: string;  // 最近一次精读来源块（句子批注落点）
   private lastDeepReadDocId?: string;    // 最近一次精读来源文档
-  private whaleManager?: WhaleAnnotationManager; // 鲸鱼快速批注管理器
+  private whaleManager?: WhaleAnnotationManager; // 微阅快速批注管理器
   /** v4：行内标记施加期间置 true，供 observer 短路避免自身修改递归 */
   private suppressMarkRefresh = false;
   /** v4：失焦后补施加行内标记的防抖 timer */
@@ -270,11 +300,19 @@ export default class RewordPlugin extends Plugin {
   private promptTemplateStore!: PromptTemplateStore;
   /** 词库标签横切筛选（2026-08-14 新增：all=全部） */
   private vocabLabelFilter = "all";
+  // 2026-08-23 新增 / 2026-08-23 改：词库面板状态条(未掌握/已掌握/需复习/清除)按单词独立收起态。
+  // - 默认每个单词的状态条都收起(用户主动展开想看的那些)
+  // - 用户点 chevron 单独展开/收起该单词,不影响其他单词
+  // - 持久化到 localStorage:reword-vocab-status-expanded (JSON 数组)
+  // 根因:之前用全局 boolean 时,点一个全展开,与用户意图"独立控制"不符
+  private vocabStatusBarExpandedWords: Set<string> = new Set();
   /** 批注面板标签筛选（2026-08-15 改造：基于 labelStore 自定义标签，"all"=全部） */
   private currentLabel: string = "all";
   /** 2026-08-15 新增：批注/词库面板标签筛选区收起状态（持久化 localStorage） */
   private whaleTagsCollapsed = false;
   private vocabTagsCollapsed = false;
+  /** 词库驱动文档高亮总开关(词库面板控制);默认开 */
+  private vocabAutoHighlight = true;
   /** 批注面板排序模式（2026-08-15 新增）：time=时间排序 / doc=按文档筛选 / style=按样式筛选 */
   private whaleSortMode: "time" | "doc" | "style" = "time";
   /** 时间排序方向：desc 默认（从新到旧）/ asc（从旧到新） */
@@ -318,6 +356,10 @@ export default class RewordPlugin extends Plugin {
       getLogger().error("[REword] 日志系统初始化失败（不影响主功能）:", { error: e });
     }
 
+    // 2026-08-23:安装 console + window.onerror 过滤(降级 iframe sandbox 警告 + ResizeObserver loop
+    // 异常,让真实错误可见)。在 logger 初始化后立即调用,幂等。
+    try { installConsoleFilter(); } catch { /* 过滤安装失败不阻断主流程 */ }
+
     // ========== 0. 注册自定义图标（必须在 addTopBar/addDock 之前）==========
     // 关键修复（2026-08-17）：原先把 5 个 <symbol> 拼成一条字符串传给 addIcons，
     // 其中 copilotIcon 带 xmlns="http://www.w3.org/2000/svg" 导致整串解析失败、
@@ -326,10 +368,22 @@ export default class RewordPlugin extends Plugin {
     // 改为：每个 symbol 单独 addIcons，互不牵连；并去掉 copilotIcon 的 xmlns，
     // 与其它 symbol 保持一致的纯 viewBox 写法。
     const rewordIconSymbols = [
+      // 主图标 / 组合栏（容器，承载全部功能）：打开的书
       `<symbol id="iconREword" viewBox="0 0 1024 1024"><g fill="none" stroke="currentColor" stroke-width="64" stroke-linecap="round" stroke-linejoin="round"><path d="M512 220c-90-46-200-58-372-46v600c172-12 282 0 372 46 90-46 200-58 372-46V174c-172-12-282 0-372 46z"/><path d="M512 220v600"/></g></symbol>`,
-      `<symbol id="iconREwordDict" viewBox="0 0 1024 1024"><g fill="none" stroke="currentColor" stroke-width="64" stroke-linecap="round" stroke-linejoin="round"><path d="M512 220c-90-46-200-58-372-46v600c172-12 282 0 372 46 90-46 200-58 372-46V174c-172-12-282 0-372 46z"/><path d="M512 220v600"/><circle cx="708" cy="724" r="82"/><path d="M766 782l74 74"/></g></symbol>`,
+      // 词库：单词卡（圆角卡片 + 三行文字线）—— 与书本 / 放大镜明显区分
+      `<symbol id="iconREwordVocab" viewBox="0 0 1024 1024"><g fill="none" stroke="currentColor" stroke-width="56" stroke-linecap="round" stroke-linejoin="round"><rect x="256" y="224" width="512" height="576" rx="56"/><path d="M352 352h320"/><path d="M352 480h320"/><path d="M352 608h208"/></g></symbol>`,
+      // 查词典：放大镜（圆圈 + 手柄）—— 语义明确「查询」
+      `<symbol id="iconREwordDict" viewBox="0 0 1024 1024"><g fill="none" stroke="currentColor" stroke-width="64" stroke-linecap="round" stroke-linejoin="round"><circle cx="448" cy="448" r="240"/><path d="M624 624L840 840"/></g></symbol>`,
+      // 新增词条：加号圆（保留）
       `<symbol id="iconREwordAdd" viewBox="0 0 1024 1024"><g fill="none" stroke="currentColor" stroke-width="64" stroke-linecap="round" stroke-linejoin="round"><circle cx="512" cy="512" r="392"/><path d="M512 312v400M312 512h400"/></g></symbol>`,
-      `<symbol id="iconREwordAnn" viewBox="0 0 1024 1024"><g fill="none" stroke="currentColor" stroke-width="56" stroke-linecap="round" stroke-linejoin="round"><path d="M704 224l96 96-368 368-152 40 40-152z"/><path d="M648 280l96 96"/><path d="M600 328L288 640"/></g></symbol>`,
+      // 微阅批注：居中短尾对话气泡（方正外形 + 两行文字）—— 修复侧边栏小尺寸下尾巴被裁切/挤压变形
+      `<symbol id="iconREwordAnn" viewBox="0 0 1024 1024"><g fill="none" stroke="currentColor" stroke-width="64" stroke-linecap="round" stroke-linejoin="round"><rect x="224" y="224" width="576" height="448" rx="64"/><path d="M384 672l-80 128v-128H224a64 64 0 01-64-64V288a64 64 0 0164-64h576a64 64 0 0164 64v320a64 64 0 01-64 64H384z"/><path d="M352 416h320"/><path d="M352 544h224"/></g></symbol>`,
+      // AI 精读：四角星（sparkle，通用 AI 符号）+ 小点缀 —— 替代原机器人头，避免渲染异常且辨识度高
+      `<symbol id="iconREwordAI" viewBox="0 0 1024 1024"><g fill="none" stroke="currentColor" stroke-width="56" stroke-linecap="round" stroke-linejoin="round"><path d="M512 192c24 160 96 232 256 256-160 24-232 96-256 256-24-160-96-232-256-256 160-24 232-96 256-256z"/><circle cx="768" cy="768" r="40"/></g></symbol>`,
+      // 复习：循环箭头（保留）
+      `<symbol id="iconREwordReview" viewBox="0 0 1024 1024"><g fill="none" stroke="currentColor" stroke-width="64" stroke-linecap="round" stroke-linejoin="round"><path d="M320 320a256 256 0 01562 56"/><path d="M882 376v-96h-96"/><path d="M704 704a256 256 0 01-562-56"/><path d="M142 648v96h96"/></g></symbol>`,
+      // 阅读器：展开的书页 + 书签尾（区别于主图标「合拢的书」）
+      `<symbol id="iconREwordReader" viewBox="0 0 1024 1024"><g fill="none" stroke="currentColor" stroke-width="56" stroke-linecap="round" stroke-linejoin="round"><path d="M192 256c128-64 256-80 384-48v560c-128-32-256-16-384 48z"/><path d="M832 256c-128-64-256-80-384-48v560c128-32 256-16 384 48z"/><path d="M512 208v560"/></g></symbol>`,
       `<symbol id="copilotIcon" viewBox="0 0 24 24" fill="none"><path d="M12 3a7 7 0 00-4 12.7V18a1 1 0 001 1h6a1 1 0 001-1v-2.3A7 7 0 0012 3z" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/><path d="M9 21h6M10 18v3M14 18v3" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></symbol>`,
     ];
     let iconsOk = 0;
@@ -354,7 +408,7 @@ export default class RewordPlugin extends Plugin {
     // 图标万一仍未注册（如 addIcons 在该版本异常），回退内置图标避免 onload 中断。
     try {
       this.topBarIconId = this.addTopBar({
-        icon: INLINE_ICON_REWORD,
+        icon: ICON_REWORD,
         title: "RE word",
         position: "right",
         callback: () => {
@@ -413,6 +467,7 @@ export default class RewordPlugin extends Plugin {
       );
       this.vocabStore = new VocabStore(() => this.saveVocab());
       this.annotationStore = new AnnotationStore(() => this.saveAnnotations());
+      setAnnotationStore(this.annotationStore); // Phase 2：暴露单例供阅读面板访问
       this.vocabLabelStore = new LabelStore(() => this.persistVocabLabels.update(this.vocabLabelStore.toJSON()));
       this.annotationLabelStore = new LabelStore(() => this.persistAnnotationLabels.update(this.annotationLabelStore.toJSON()));
       this.aiPresetStore = new AiPresetStore(() => this.persistAiPresets.update(this.aiPresetStore.export()));
@@ -490,9 +545,37 @@ export default class RewordPlugin extends Plugin {
     try { this.initHoverLookup(); } catch (e) { getLogger().error("悬停取词初始化失败", { operation: "初始化-悬停取词", error: e }); }
 
     // ========== 2. 注册 UI（全部容错，单步失败不影响其他）==========
-    try { this.initDockPanel(); } catch (e) { getLogger().error("侧边栏注册失败", { operation: "初始化-侧边栏", error: e }); }
+    // 2.0 初始化 Dock 管理器（多 Dock 布局：组合栏 + 可提取独立 Dock）
+    try {
+      this.dockManager = new DockManager(this);
+      const dockFeatures: DockableFeature[] = [
+        { id: "vocab", title: "词库", icon: ICON_VOCAB, defaultSlot: "combined" },
+        { id: "dict", title: "查词典", icon: ICON_DICT, defaultSlot: "combined" },
+        { id: "annotations", title: "微阅批注", icon: ICON_ANN, defaultSlot: "combined" },
+        { id: "ai", title: "AI 精读", icon: ICON_AI, defaultSlot: "combined" },
+        { id: "review", title: "复习", icon: ICON_REVIEW, defaultSlot: "combined" },
+        { id: READER_FEATURE_ID, title: "阅读器", icon: ICON_READER, defaultSlot: "combined" },
+      ];
+      for (const f of dockFeatures) this.dockManager.registerFeature(f);
+      // 一次性迁移：将面板布局重置为「全部收入组合栏」的干净状态（消除旧布局残留的独立 Dock 杂乱）
+      try { await this.migrateDockLayoutOnce(); } catch (e) { getLogger().warn("[REword] 面板布局迁移失败", { error: e }); }
+      await this.dockManager.load();
+    } catch (e) {
+      getLogger().error("[REword] Dock 管理器初始化失败（回退单 Dock）", { operation: "初始化-Dock管理器", error: e });
+      this.dockManager = new DockManager(this);
+    }
+    // 2026-08-22：一次性清理旧 Dock 缓存（修复旧图标/位置被 localStorage「local-plugin-docks」覆盖导致不生效）
+    try { await this.clearStaleDockCache(); } catch (e) { getLogger().warn("[REword] 清理 Dock 缓存失败", { error: e }); }
+    try { this.initDockPanels(); } catch (e) { getLogger().error("侧边栏注册失败", { operation: "初始化-侧边栏", error: e }); }
     // Copilot 聊天 dock（照抄 copilot 插件，作为第二个 dock 引入）
     try { await this.initCopilot(); } catch (e) { getLogger().error("Copilot 初始化失败", { operation: "初始化-Copilot", error: e }); }
+    // 阅读器（书架索引加载；面板随 dock 渲染按需初始化）
+    try {
+      this.readerDock = new ReaderDockController(this);
+      await this.readerDock.init();
+    } catch (e) {
+      getLogger().warn("[REword] 阅读器初始化失败（阅读器面板将不可用）", { error: e });
+    }
     try { await this.initDictionary(); } catch (e) { getLogger().error("词典引擎初始化失败", { operation: "初始化-词典", error: e }); }
     // 词典就绪后按当前激活 Tab 刷新（避免覆盖非词库 Tab 的内容）
     if (this.dictReady) {
@@ -560,9 +643,14 @@ export default class RewordPlugin extends Plugin {
     // 4.0 先加载持久化的复习校准配置，再注入 AWL/词频数据（让难度计算能用到），随后初始化词库并回填难度
     try { this.loadReviewConfig(); } catch (e) { getLogger().warn("[REword] 复习配置加载失败（用默认）:", { error: e }); }
     try { initReviewData(); } catch (e) { getLogger().warn("[REword] 复习数据注入失败:", { error: e }); }
-    this.initVocabStore().catch((err) => {
+    // 2026-08-23:从 fire-and-forget 改为 await + try/catch,确保 vocabStore.load() 完成后
+    // 才进入后续步骤(避免初始化竞态窗口内空数据被 persist 写盘覆盖磁盘)。
+    // 注意:vocabStore 内部也有 loaded 守卫(双保险),即便此 await 未起作用也不会丢数据。
+    try {
+      await this.initVocabStore();
+    } catch (err) {
       getLogger().error("词库初始化失败（收词功能暂不可用，查词仍可用）", { operation: "初始化-词库", error: err });
-    });
+    }
 
     // ========== 4.01 初始化分类标签库（2026-08-15 拆分：词库标签 / 批注标签 各自独立）==========
     this.initLabelStores().catch((err) => {
@@ -598,6 +686,24 @@ export default class RewordPlugin extends Plugin {
     }, 320);
     this.disposables.addTimer(initTimer);
 
+    // 2026-08-22 词库驱动文档高亮：注入 store 依赖并启动观察器
+    // 注意：必须在 vocabStore 已赋值之后（onload 段尾 4.2.1）
+    configureVocabHighlightDeps({
+      getAllWords: () => this.vocabStore.getAllWords(),
+      onLearningStatusChange: (cb) => this.vocabStore.onLearningStatusChange(cb),
+    });
+    const vocabInitTimer = setTimeout(() => {
+      const wysiwyg = document.querySelector(".protyle-wysiwyg") as HTMLElement | null;
+      if (wysiwyg) {
+        const hl = getVocabHighlighter();
+        hl.start(wysiwyg);
+        // 按开关状态启用/暂停高亮(关闭时不扫、不显示)
+        hl.setEnabled(this.vocabAutoHighlight);
+        hl.refreshAll();
+      }
+    }, 480);
+    this.disposables.addTimer(vocabInitTimer);
+
     // 正文内联批注点击浮层（查看/编辑/定位/删除）
     this.bindInlineAnnotationClick();
 
@@ -606,6 +712,11 @@ export default class RewordPlugin extends Plugin {
     this.disposables.addEventListener(document, "compositionend", () => {
       this.isComposing = false;
       this.scheduleInlineMarksAfterFocusLoss();
+    });
+
+    // 阅读器标注变更→侧边栏刷新：监听阅读器派发的事件，自动重新渲染批注面板
+    this.disposables.addEventListener(window, "reword:annotation-store-changed", () => {
+      if (this.dockElement) this.renderAnnotationsPanel(this.dockElement);
     });
   }
 
@@ -813,19 +924,35 @@ export default class RewordPlugin extends Plugin {
       getLogger().warn("[REword] 旧批注迁移失败:", { error: e });
     }
 
-    // ========== 4.2.1 初始化鲸鱼快速批注管理器 ==========
+    // ========== 4.2.1 初始化微阅快速批注管理器 ==========
     try {
       this.whaleManager = new WhaleAnnotationManager(this.createWhaleHost());
       this.whaleManager.init();
-      getLogger().info("[REword] 鲸鱼快速批注管理器已初始化");
+      getLogger().info("[REword] 微阅快速批注管理器已初始化");
     } catch (e) {
-      getLogger().warn("[REword] 鲸鱼批注管理器初始化失败:", { error: e });
+      getLogger().warn("[REword] 微阅批注管理器初始化失败:", { error: e });
     }
 
     // 加载 UI 持久化状态（2026-08-15 新增：批注/词库标签筛选区收起状态 + 排序维度）
     try {
       this.whaleTagsCollapsed = localStorage.getItem("hiword-whale-tags-collapsed") === "true";
       this.vocabTagsCollapsed = localStorage.getItem("hiword-vocab-tags-collapsed") === "true";
+      this.vocabAutoHighlight = localStorage.getItem("hiword-vocab-autohighlight") !== "false";
+      // 2026-08-23 新增 / 2026-08-23 改:词库面板状态条按单词独立展开态
+      // (旧 key "reword-vocab-status-collapsed" 弃用,新 key "reword-vocab-status-expanded" 存 JSON 数组)
+      try {
+        const raw = localStorage.getItem("reword-vocab-status-expanded");
+        if (raw) {
+          const arr = JSON.parse(raw);
+          if (Array.isArray(arr)) {
+            this.vocabStatusBarExpandedWords = new Set(arr.filter((w) => typeof w === "string"));
+          }
+        }
+        // 兼容旧 key:如果用户有旧的 collapsed=true 设置,迁移为全部展开(避免数据丢失)
+        // 注:旧版语义"全局折叠",新版默认折叠,所以这里不迁移,直接忽略
+      } catch {
+        /* 损坏的 JSON,忽略,走默认(全收起) */
+      }
       const mode = localStorage.getItem("hiword-annotation-sort-mode");
       if (mode === "time" || mode === "doc" || mode === "style") this.whaleSortMode = mode;
       const dir = localStorage.getItem("hiword-annotation-sort-time-dir");
@@ -834,7 +961,15 @@ export default class RewordPlugin extends Plugin {
       this.whaleSortDoc = doc || null;
       const styles = localStorage.getItem("hiword-annotation-sort-styles");
       if (styles) {
-        try { this.whaleSortStyles = JSON.parse(styles); } catch { /* noop */ }
+        try {
+          // 2026-08-24 迁移：旧线型（dashed/double→solid, dotted→wavy）在过滤 key 中降级，避免已存筛选失效
+          const raw: string[] = JSON.parse(styles);
+          this.whaleSortStyles = raw.map((k) => {
+            const [c, s] = k.split("|");
+            const ns = s === "dotted" ? "wavy" : s === "dashed" || s === "double" ? "solid" : s;
+            return `${c}|${ns}`;
+          });
+        } catch { /* noop */ }
       }
       const gm = localStorage.getItem("hiword-annotation-group-mode");
       if (gm === "time" || gm === "doc") this.whaleGroupMode = gm;
@@ -888,16 +1023,13 @@ export default class RewordPlugin extends Plugin {
 
   /** 聚焦 dock 的「AI 精读」Tab（供命令 / 快捷入口） */
   private showAiPanel() {
-    if (!this.dockElement) {
+    this.focusFeatureDock("ai");
+    const el = this.getFeatureElement("ai");
+    if (!el) {
       showMessage("请先打开 RE word 侧边栏", 2000, "info");
       return;
     }
-    // 切换激活 Tab 样式
-    this.dockElement.querySelectorAll(".hiword-dock-tab").forEach((t: Element) => {
-      const el = t as HTMLElement;
-      el.classList.toggle("active", el.dataset.tab === "ai");
-    });
-    this.renderAiPanel(this.dockElement);
+    this.renderFeatureInto("ai", el);
   }
 
   // ===================== Copilot 聊天（照抄 copilot 插件）=====================
@@ -1022,6 +1154,75 @@ export default class RewordPlugin extends Plugin {
     }
     await this.saveCopilotConversations();
     return { ok: res.ok, content: res.content, error: res.error, aborted: res.aborted };
+  }
+
+  /** 阅读器划词翻译：复用 Copilot AI 链路，返回中英双语 markdown */
+  public async translateText(text: string): Promise<string> {
+    if (!text?.trim()) return "";
+    try {
+      const res = await this.copilotSendToAI(
+        `请将下面内容翻译为中文，并保留「原文 / 译文」双语对照格式：\n\n${text}`,
+        { onToken: () => {} }
+      );
+      return res?.ok ? res.content || "" : "";
+    } catch (e) {
+      getLogger().error("[REword] 翻译失败:", { error: e });
+      return "";
+    }
+  }
+
+  /** 阅读器划词朗读（公开包装 TTS 引擎，自动适配中英文 voice） */
+  public speakText(text: string) {
+    this.speak(text);
+  }
+
+  /** 阅读器划词发送到设置笔记本（默认 REword/阅读摘录，可在 localStorage 配置） */
+  public async sendReaderSelection(opts: { markdown: string; title: string }): Promise<string> {
+    try {
+      let notebookId = (typeof localStorage !== "undefined" && localStorage.getItem("hiword-reader-send-notebook")) || "";
+      if (!notebookId) {
+        const nbs = await this.listNotebooks();
+        notebookId = nbs[0]?.id || "";
+      }
+      if (!notebookId) return "";
+      const path = (typeof localStorage !== "undefined" && localStorage.getItem("hiword-reader-send-path")) || "/REword/阅读摘录";
+      return await this.saveToNote({ markdown: opts.markdown, notebookId, path, title: opts.title, openAfterSave: false });
+    } catch (e) {
+      getLogger().error("[REword] 发送摘录失败:", { error: e });
+      return "";
+    }
+  }
+
+  /**
+   * 阅读器划词插入到当前打开的思源文档（2026-08-24 新增）
+   * 思源不提供"当前文档"API，从 localStorage 读最近打开的 docId；
+   * 找不到时降级到 saveToNote（写入默认笔记本）。
+   */
+  public async insertReaderSelectionToCurrentDoc(opts: { markdown: string }): Promise<string> {
+    try {
+      // 思源在 localStorage 存最近打开的 docId（key 形如 /workspace/xxx/yyy.sy 等）
+      // 取最近一个 .sy 结尾的 id 作为目标
+      let currentDocId = "";
+      if (typeof localStorage !== "undefined") {
+        for (let i = 0; i < localStorage.length; i++) {
+          const k = localStorage.key(i);
+          if (k && /\/[0-9]{14}-[a-z0-9]{7}$/.test(k)) {
+            currentDocId = k;
+            break;
+          }
+        }
+      }
+      if (!currentDocId) {
+        getLogger().warn("[REword] 找不到当前文档 ID，降级到 saveToNote");
+        return await this.sendReaderSelection({ markdown: opts.markdown, title: "阅读摘录" });
+      }
+      const { appendBlock } = await import("./siyuan/api");
+      const ops = await appendBlock("markdown", opts.markdown, currentDocId);
+      return ops && ops[0] ? ops[0].doOperations?.[0]?.id || currentDocId : currentDocId;
+    } catch (e) {
+      getLogger().error("[REword] 插入当前文档失败:", { error: e });
+      return "";
+    }
   }
 
   /* ===================== Copilot 持久化 ===================== */
@@ -1491,7 +1692,7 @@ export default class RewordPlugin extends Plugin {
   }
 
   /**
-   * 创建鲸鱼批注管理器的宿主适配器（IWhaleHost 实现）
+   * 创建微阅批注管理器的宿主适配器（IWhaleHost 实现）
    * 将插件能力桥接为标准接口，解耦 whale-manager 与 index.ts 细节。
    */
   private createWhaleHost(): IWhaleHost {
@@ -1534,10 +1735,10 @@ export default class RewordPlugin extends Plugin {
           end,
           note: params.note,
           origin: "manual",
-          color: params.color || WHALE_COLORS[3].value, // 默认青色
-          style: params.style || "solid",
+          color: params.color || DEFAULT_ANNOTATION_COLOR, // 默认青色
+          style: params.style || DEFAULT_ANNOTATION_STYLE,
           scope: params.scope || "word",
-          lineColor: params.lineColor || params.color || WHALE_COLORS[3].value,
+          lineColor: params.lineColor || params.color || DEFAULT_ANNOTATION_COLOR,
           labels: params.labels || [],
           tags: params.tags || [],
           category: params.category,
@@ -1548,10 +1749,13 @@ export default class RewordPlugin extends Plugin {
         return result;
       },
       async removeAnnotation(id: string) {
+        const ann = self.annotationStore.get(id); // remove 前取（remove 后 get 已过滤软删）
         const ok = await self.annotationStore.remove(id);
         if (ok) {
           self.refreshAnnotationMarkers();
           self.renderDockIfTab("annotations");
+          // 2026-08-24：广播 → 打开中的阅读面板立即清除该高亮
+          if (ann?.bookId) notifyAnnotationsChanged(ann.bookId);
         }
         return ok;
       },
@@ -1570,7 +1774,7 @@ export default class RewordPlugin extends Plugin {
       removeLabel: async (id: string) => self.annotationLabelStore.remove(id),
       cycleLabelColor: async (id: string) => self.annotationLabelStore.cycleColor(id),
       manageLabels: () => self.openLabelManagementDialog("annotation"),
-      // 2026-08-22 新增：鲸鱼批注 AI 助手桥接
+      // 2026-08-22 新增：微阅批注 AI 助手桥接
       getAiSettings: () => self.aiSettings,
       openAiSettings: () => self.openAiSettings(),
       // 动态 import 避免 ai 模块反向依赖 index.ts
@@ -1582,6 +1786,8 @@ export default class RewordPlugin extends Plugin {
             blockId: aopts.blockId,
             docId: aopts.docId,
             existingNote: aopts.existingNote,
+            // 2026-08-22 改:透传 parentDialog(原批注弹窗),AI 弹窗贴它旁边
+            parentDialog: aopts.parentDialog,
             onFillBack: aopts.onFillBack,
             getAiSettings: () => self.aiSettings,
             openAiSettings: () => self.openAiSettings(),
@@ -1653,7 +1859,7 @@ export default class RewordPlugin extends Plugin {
     return count;
   }
 
-  /** 打开鲸鱼风格批注弹窗（AI 面板「插入批注」与工具栏入口统一） */
+  /** 打开微阅风格批注弹窗（AI 面板「插入批注」与工具栏入口统一） */
   openAnnotationDialog(opts: {
     blockId?: string;
     docId?: string;
@@ -2035,123 +2241,501 @@ export default class RewordPlugin extends Plugin {
   }
 
   /**
-   * 初始化右侧边栏 Dock 面板
+   * 初始化侧边栏 Dock（Plan A：组合栏为主，独立 Dock 按需）。
+   *  - 组合栏（主功能侧边栏）：始终注册，承载「收入组合栏」的全部功能 Tab；
+   *  - 独立 Dock：仅为「停靠到左/右/下栏」的功能注册，按 slot 落在对应角落；
+   *  - combined / hidden 功能【不注册】独立 Dock —— 从根上杜绝「所有图标都跑出来」的杂乱。
+   * 布局由 this.dockManager 决定，持久化于 hiword-dock-layout.json。
    */
-  private initDockPanel() {
-    // 2026-08-17：图标改用内联 SVG + 包 try/catch 双重保险，杜绝 "Icon must be svg id or svg tag" 报错
-    let dockResult: any;
+  private initDockPanels() {
+    // ===== 组合 Dock（始终注册，承载 combined 功能的 Tab；保证 this.dockElement 有效）=====
     try {
-      dockResult = this.addDock({
+      const combinedIds = this.dockManager.getCombinedFeatureIds();
+      const dockResult: any = this.addDock({
         config: {
           position: "RightBottom" as const,
           size: { width: 320, height: 0 },
-          icon: INLINE_ICON_REWORD,
+          icon: ICON_REWORD,
           title: "RE word",
         },
-      data: {},
-      type: "hiword-sidebar",
-      init: (dock?: any) => {
-        // 箭头函数：this 指向插件实例；dock 才是 dock 实例
-        this.dockElement = dock.element;
-        dock.element.innerHTML = `
-          <div class="hiword-dock-panel">
-            <div class="hiword-dock-header">
-              <div class="hiword-dock-tabs">
-                <button class="hiword-dock-tab active" data-tab="vocab">词库</button>
-                <button class="hiword-dock-tab" data-tab="dict">查词典</button>
-                <button class="hiword-dock-tab" data-tab="annotations">批注</button>
-                <button class="hiword-dock-tab" data-tab="ai">AI 精读</button>
-                <button class="hiword-dock-tab" data-tab="review">复习</button>
-              </div>
-              <div class="hiword-dock-header-actions">
-                <button class="hiword-dock-settings-btn" id="hiword-settings-btn" title="全局设置">⚙️</button>
-                <button class="hiword-dock-settings-btn" id="hiword-reload-btn" data-action="reload-plugin" title="重载插件：应用最新代码，无需重启思源">🔄</button>
-              </div>
-            </div>
-            <div class="hiword-dock-content" id="hiword-dock-content">
-              <!-- 内容由 JS 动态填充 -->
-            </div>
-          </div>
-        `;
-
-        // 绑定 Tab 切换
-        dock.element.querySelector(".hiword-dock-tabs")?.addEventListener("click", (e: Event) => {
-          const target = e.target as HTMLElement;
-          if (target.classList.contains("hiword-dock-tab")) {
-            destroyAllPreviews();   // 切 Tab 会覆写 #hiword-dock-content，先销毁只读预览防 detached 崩溃
-            dock.element.querySelectorAll(".hiword-dock-tab").forEach((t: HTMLElement) => t.classList.remove("active"));
-            target.classList.add("active");
-            const tab = target.dataset.tab;
-            if (tab === "vocab") {
-              this.renderVocabPanel(dock.element);
-            } else if (tab === "dict") {
-              this.renderDictPanel(dock.element);
-            } else if (tab === "annotations") {
-              this.renderAnnotationsPanel(dock.element);
-              this._annotationsDirty = false;
-            } else if (tab === "ai") {
-              this.renderAiPanel(dock.element);
-            } else if (tab === "review") {
-              this.renderReviewPanel(dock.element);
-            }
-          }
-        });
-
-        // 全局设置按钮
-        dock.element.querySelector("#hiword-settings-btn")?.addEventListener("click", () => {
-          this.openUnifiedSettings();
-        });
-
-        // 默认显示词库 Tab
-        this.renderVocabPanel(dock.element);
-
-        // 应用已保存的字体大小（必须在 dockElement 设置后调用）
-        this.applyFontSize();
-
-        // 绑定内容区事件委托
-        dock.element.querySelector("#hiword-dock-content")?.addEventListener("click", (e: Event) => {
-          this.handleDockClick(e, dock.element);
-        });
-      },
-      update: () => {
-        this.refreshActivePanel();
-      },
-      destroy: () => {
-        // 2026-08-18：dock 关闭前销毁全部只读预览实例，避免 detached Protyle 悬垂（C 模块对称）
-        destroyAllPreviews();
-        this.dockElement = null;
-      },
+        data: {},
+        type: "hiword-sidebar",
+        init: (dock?: any) => {
+          this.dockElement = dock.element;
+          this.renderCombinedDockShell(dock.element, combinedIds);
+        },
+        update: () => { this.refreshActivePanel(); },
+        destroy: () => { destroyAllPreviews(); this.dockElement = null; },
       });
+      this.dockModel = (dockResult as any)?.model;
     } catch (e) {
-      // 2026-08-17：理论上内联 SVG 不会触发图标校验失败，此分支为极端情况兜底
-      getLogger().error("[REword] REword dock 注册失败（回退内置图标）:", { error: e });
-      try {
-        dockResult = this.addDock({
-          config: {
-            position: "RightBottom" as const,
-            size: { width: 320, height: 0 },
-            icon: "iconFile",
-            title: "RE word",
-          },
-          data: {},
-          type: "hiword-sidebar",
-          init: (dock?: any) => {
-            this.dockElement = dock.element;
-            dock.element.innerHTML = `<div class="hiword-dock-panel"></div>`;
-            this.renderVocabPanel(dock.element);
-            this.applyFontSize();
-          },
-          update: () => { this.refreshActivePanel(); },
-          destroy: () => { this.dockElement = null; },
-        });
-      } catch (e2) {
-        getLogger().error("[REword] REword dock 回退注册仍失败:", { error: e2 });
-        return;
-      }
+      getLogger().error("[REword] 组合 Dock 注册失败:", { operation: "初始化-侧边栏", error: e });
     }
 
-    // 保存引用以便后续更新
-    this.dockModel = (dockResult as any)?.model;
+    // ===== 独立 Dock（仅注册非 combined/非 hidden 的功能；按 slot 停靠到对应侧栏）=====
+    for (const { feature, slot } of this.dockManager.getStandaloneFeatures()) {
+      try {
+        this.registerStandaloneDock(feature, slot);
+      } catch (e) {
+        getLogger().error(`[REword] 独立 Dock 注册失败 (${feature.id}):`, { operation: "初始化-侧边栏", error: e });
+      }
+    }
+    // 兜底修正已渲染的独立/组合 dock 图标（缓存乱码双保险）
+    requestAnimationFrame(() => this.fixStandaloneDockIcons());
+  }
+
+  /** 注册一个功能的独立 Dock（幂等：已注册则跳过）。用于初始化与「拖出到角落」运行时扩展 */
+  private registerStandaloneDock(f: DockableFeature, slot: DockSlot): void {
+    if (this.standaloneElements.has(f.id)) return;
+    if (slot === "combined" || slot === "hidden") return;
+    const dockResult: any = this.addDock({
+      config: {
+        position: slot as any,
+        size: { width: 320, height: 0 },
+        icon: f.icon,
+        title: f.title,
+        show: true,
+      },
+      data: {},
+      type: "hiword-standalone-" + f.id,
+      init: (dock?: any) => {
+        this.standaloneElements.set(f.id, dock.element);
+        dock.element.innerHTML = `<div class="hiword-dock-panel"><div class="hiword-dock-content" id="hiword-dock-content"></div></div>`;
+        this.exposeDockContentDelegation(dock.element);
+        this.renderFeatureInto(f.id, dock.element);
+        this.applyFontSize();
+      },
+      update: () => {
+        const el = this.standaloneElements.get(f.id);
+        if (el) this.renderFeatureInto(f.id, el);
+      },
+      destroy: () => { destroyAllPreviews(); this.standaloneElements.delete(f.id); this.standaloneModels.delete(f.id); },
+    });
+    this.standaloneModels.set(f.id, (dockResult as any)?.model);
+  }
+
+  /** 渲染组合栏外壳（Tab 栏 + 内容区 + 头部按钮），combined 功能作为 Tab 呈现 */
+  private renderCombinedDockShell(dockElement: HTMLElement, combinedIds: string[]) {
+    const tabsHtml = combinedIds.length
+      ? combinedIds.map((id, i) => `<button class="hiword-dock-tab${i === 0 ? " active" : ""}" data-tab="${id}">${this.featureTitle(id)}</button>`).join("")
+      : `<div class="hiword-dock-empty">所有功能已移至独立侧边栏</div>`;
+    dockElement.innerHTML = `
+      <div class="hiword-dock-panel">
+        <div class="hiword-dock-header">
+          <div class="hiword-dock-tabs">${tabsHtml}</div>
+          <div class="hiword-dock-header-actions">
+            <button class="hiword-dock-settings-btn" id="hiword-settings-btn" title="全局设置">⚙️</button>
+            <button class="hiword-dock-settings-btn" id="hiword-dock-layout-btn" title="面板布局管理（可拖拽功能到角落 / 组合栏）">📐</button>
+            <button class="hiword-dock-settings-btn" id="hiword-reload-btn" data-action="reload-plugin" title="重载插件">🔄</button>
+          </div>
+        </div>
+        <div class="hiword-dock-content" id="hiword-dock-content"></div>
+      </div>`;
+
+    dockElement.querySelector(".hiword-dock-tabs")?.addEventListener("click", (e: Event) => {
+      const target = e.target as HTMLElement;
+      if (target.classList.contains("hiword-dock-tab")) {
+        destroyAllPreviews();
+        dockElement.querySelectorAll(".hiword-dock-tab").forEach((t: Element) => t.classList.remove("active"));
+        target.classList.add("active");
+        this.renderFeatureInto(target.dataset.tab!, dockElement);
+      }
+    });
+
+    dockElement.querySelector("#hiword-settings-btn")?.addEventListener("click", () => this.openUnifiedSettings());
+    dockElement.querySelector("#hiword-dock-layout-btn")?.addEventListener("click", () => this.openDockManagerPanel());
+
+    if (combinedIds.length > 0) this.renderFeatureInto(combinedIds[0], dockElement);
+    this.exposeDockContentDelegation(dockElement);
+    this.applyFontSize();
+  }
+
+  /** 重新渲染组合栏 Tab（功能在组合栏 / 独立栏之间移动后调用） */
+  private refreshCombinedDock(): void {
+    if (!this.dockElement) return;
+    const combinedIds = this.dockManager.getCombinedFeatureIds();
+    const activeTab = this.dockElement.querySelector(".hiword-dock-tab.active") as HTMLElement | null;
+    const activeId = activeTab?.dataset.tab ?? undefined;
+    this.renderCombinedDockShell(this.dockElement, combinedIds);
+    // 恢复此前激活的 Tab（若该功能仍在组合栏内），避免拖动功能时组合栏内容乱跳
+    if (activeId && combinedIds.includes(activeId)) {
+      const dockEl = this.dockElement;
+      const tab = dockEl.querySelector(`.hiword-dock-tab[data-tab="${activeId}"]`) as HTMLElement | null;
+      if (tab) {
+        dockEl.querySelectorAll(".hiword-dock-tab").forEach((t: Element) => t.classList.remove("active"));
+        tab.classList.add("active");
+        this.renderFeatureInto(activeId, dockEl);
+      }
+    }
+  }
+
+  /** 给某个 Dock 根元素绑定 #hiword-dock-content 的点击委托（词库/批注等交互） */
+  private exposeDockContentDelegation(dockElement: HTMLElement) {
+    dockElement.querySelector("#hiword-dock-content")?.addEventListener("click", (e: Event) => {
+      this.handleDockClick(e, dockElement);
+    });
+  }
+
+  /** 取功能显示名 */
+  private featureTitle(id: string): string {
+    return this.dockManager.getFeatures().find((f) => f.id === id)?.title ?? id;
+  }
+
+  /** 将指定功能渲染进给定 Dock 元素（各功能共用 #hiword-dock-content 结构） */
+  private renderFeatureInto(id: string, dockElement: HTMLElement) {
+    let contentEl = dockElement.querySelector("#hiword-dock-content") as HTMLElement | null;
+    if (!contentEl) {
+      dockElement.innerHTML = `<div class="hiword-dock-panel"><div class="hiword-dock-content" id="hiword-dock-content"></div></div>`;
+      contentEl = dockElement.querySelector("#hiword-dock-content");
+    }
+    if (id === "vocab") this.renderVocabPanel(dockElement);
+    else if (id === "dict") this.renderDictPanel(dockElement);
+    else if (id === "annotations") this.renderAnnotationsPanel(dockElement);
+    else if (id === "ai") this.renderAiPanel(dockElement);
+    else if (id === "review") this.renderReviewPanel(dockElement);
+    else if (id === READER_FEATURE_ID) {
+      try {
+        this.readerDock?.render(dockElement);
+      } catch (e) {
+        getLogger().warn("[REword] 渲染阅读器面板失败", { error: e });
+      }
+    }
+  }
+
+  /**
+   * 每次加载都清空【本插件】在「local-plugin-docks」中的缓存。
+   *
+   * 为什么必须每次清空（而非一次性）：
+   * 思源在插件初始化（In）时会用该缓存【整体覆盖】每个 dock 的 config（含 icon / title /
+   * position）。旧版本残留的过期 icon id 会让 genButton 渲染的 <use xlink:href="#旧id"> 指向
+   * 不存在的 symbol，导致侧边栏独立 dock 图标渲染成乱码（> / #）。
+   * 本函数在 onload 中、且早于思源的 In 渲染执行，因此清空后 In 必然采用本插件当前的 config
+   * （正确图标），从根上消除乱码。
+   * 插件自身的停靠位置由 hiword-dock-layout.json + moveFeatureToSlot 管理，与思源原生缓存无关，
+   * 清空本插件缓存不影响布局持久化。
+   */
+  private async clearStaleDockCache(): Promise<void> {
+    try {
+      const root = (window as any).siyuan?.storage?.["local-plugin-docks"];
+      if (root && typeof root === "object" && root[this.name] && typeof root[this.name] === "object") {
+        for (const k of Object.keys(root[this.name])) delete root[this.name][k];
+      }
+      getLogger().info("[REword] 已清空本插件 Dock 缓存（local-plugin-docks），确保图标/位置采用当前配置");
+    } catch (e) {
+      getLogger().warn("[REword] 清理 Dock 缓存失败", { error: e });
+    }
+  }
+
+  /** 修正已渲染 dock 图标的兜底：强制把 <use> 指向本功能正确的 symbol id。
+   *  思源会用 local-plugin-docks 缓存整体覆盖 config.icon，若缓存残留旧 id 会渲染乱码；
+   *  本函数直接修正 DOM，与 clearStaleDockCache 双保险，且覆盖「插件热重载不重跑 In」的场景。 */
+  private fixStandaloneDockIcons(): void {
+    const apply = (type: string, iconId: string) => {
+      const use = document.querySelector(`.dock__item[data-type="${type}"] svg use`) as SVGUseElement | null;
+      if (use) {
+        const href = "#" + iconId;
+        use.setAttribute("xlink:href", href);
+        use.setAttribute("href", href);
+      }
+    };
+    const prefix = this.name;
+    for (const { feature } of this.dockManager.getStandaloneFeatures()) {
+      apply(prefix + "hiword-standalone-" + feature.id, feature.icon);
+    }
+    apply(prefix + "hiword-sidebar", ICON_REWORD);
+  }
+
+  /**
+   * 一次性面板布局迁移（v2）：将布局重置为「全部收入组合栏」的干净状态。
+   * 解决此前「所有功能独立图标都跑出来、侧边栏杂乱」的问题——组合栏是功能的默认归宿，
+   * 只有用户主动拖出到角落时才生成独立 Dock。旧布局（hiword-dock-layout.json）可能残留
+   * standalone 配置导致杂乱，重置一次即可让新的默认值（全部 combined）生效。
+   */
+  private async migrateDockLayoutOnce(): Promise<void> {
+    const marker = "hiword-dock-layout-migrated-v2";
+    let done = false;
+    try { done = !!(await this.loadData(marker)); } catch { /* ignore */ }
+    if (done) return;
+    try {
+      await this.saveData("hiword-dock-layout.json", {});
+      getLogger().info("[REword] 已重置面板布局为组合栏默认（全部功能收入组合栏）");
+    } catch (e) {
+      getLogger().warn("[REword] 面板布局迁移失败", { error: e });
+    }
+    try { await this.saveData(marker, true); } catch { /* ignore */ }
+  }
+
+  /** 根据 data-type 找到承载该 dock 的思源 Dock 实例（left/right/bottom） */
+  private findDockByType(type: string): any {
+    const layout = (window as any).siyuan?.layout;
+    if (!layout) return null;
+    for (const d of [layout.leftDock, layout.rightDock, layout.bottomDock]) {
+      if (d && d.data && d.data[type]) return d;
+    }
+    return null;
+  }
+
+  /** 仅控制独立 dock 栏图标的显隐（不触碰面板内容，避免误开/误关） */
+  private setStandaloneDockVisible(id: string, visible: boolean): void {
+    const type = this.name + "hiword-standalone-" + id;
+    const item = document.querySelector(`.dock__item[data-type="${type}"]`) as HTMLElement | null;
+    if (!item) return;
+    if (visible) {
+      item.classList.remove("fn__none");
+      item.style.display = "";
+    } else {
+      item.classList.add("fn__none");
+      item.style.display = "none";
+    }
+  }
+
+  /** 强制关闭某功能的独立 dock 面板 */
+  private closeStandaloneDockPanel(id: string): void {
+    const type = this.name + "hiword-standalone-" + id;
+    const dock = this.findDockByType(type);
+    if (!dock) return;
+    try {
+      // 思源 toggleModel(ge, xe, Ze, at, ot)：关闭逻辑位于 `if (pt.active || at)` 内，
+      // 仅传 (type,false,true) 时 at=false，面板未处于 active 则整段跳过 → 关不掉（死面板）。
+      // 第 4 参 at=true 强制进入关闭分支，无论面板当前是否 active。
+      dock.toggleModel?.(type, false, true, true);
+    } catch (e) {
+      getLogger().warn(`[REword] 关闭独立 Dock 面板失败 (${id})`, { error: e });
+    }
+  }
+
+  /** 解析 slot 对应的思源 Dock 实例与分栏 index（0=上/左分组，1=下/右分组） */
+  private resolveTargetDock(slot: DockSlot): { dock: any; index: number } {
+    const layout = (window as any).siyuan?.layout;
+    switch (slot) {
+      case "LeftTop": return { dock: layout.leftDock, index: 0 };
+      case "LeftBottom": return { dock: layout.leftDock, index: 1 };
+      case "RightTop": return { dock: layout.rightDock, index: 0 };
+      case "RightBottom": return { dock: layout.rightDock, index: 1 };
+      // 底部栏「底部」落区：与 registerStandaloneDock 用 position:"Bottom"（经思源 genButton 得 index 0）保持一致，
+      // 统一落在底部左侧，避免「首次拖放=左下、再次拖放=右下」的左右跳变。
+      case "Bottom": return { dock: layout.bottomDock, index: 0 };
+      default: return { dock: layout.rightDock, index: 1 };
+    }
+  }
+
+  /**
+   * 运行时即时移动某功能 dock 到目标位置（无需重载思源）。
+   * - combined / hidden：隐藏独立 dock（若存在），并刷新组合栏 Tab 将其收纳为组合栏入口；
+   * - Left/Right/Bottom：确保独立 dock 已注册（combined → 角落时按需创建），再用思源原生
+   *   Dock.add() 跨栏迁移图标与面板（自动持久化）。
+   * 返回 "moved" 表示即时生效；"reload-needed" 表示无法运行时完成。
+   */
+  private moveFeatureToSlot(id: string, slot: DockSlot): "moved" | "reload-needed" {
+    const f = this.dockManager.getFeatures().find((x) => x.id === id);
+    if (!f) return "reload-needed";
+    if (slot === "combined" || slot === "hidden") {
+      // 收入组合栏 / 隐藏：先关闭可能仍打开的独立面板，再隐藏图标，最后把功能作为 Tab 收纳进组合栏
+      this.closeStandaloneDockPanel(id);
+      this.setStandaloneDockVisible(id, false);
+      this.refreshCombinedDock();
+      return "moved";
+    }
+    // 独立停靠：确保独立 Dock 已注册（combined → 角落时按需创建），再跨栏迁移
+    const alreadyRegistered = this.standaloneElements.has(id);
+    try {
+      this.registerStandaloneDock(f, slot);
+    } catch (e) {
+      getLogger().warn(`[REword] 注册独立 Dock 失败 (${id} -> ${slot})`, { error: e });
+      return "reload-needed";
+    }
+    this.setStandaloneDockVisible(id, true);
+    // 移动后立即兜底修正图标（覆盖思源 local-plugin-docks 缓存污染的 icon）
+    requestAnimationFrame(() => this.fixStandaloneDockIcons());
+    if (alreadyRegistered) {
+      const type = this.name + "hiword-standalone-" + id;
+      const item = document.querySelector(`.dock__item[data-type="${type}"]`) as HTMLElement | null;
+      const { dock: targetDock, index } = this.resolveTargetDock(slot);
+      if (item && targetDock) {
+        try {
+          targetDock.add(index, item);
+        } catch (e) {
+          getLogger().warn(`[REword] 移动 Dock 失败 (${id} -> ${slot})`, { error: e });
+        }
+      }
+    }
+    // 若原在组合栏，刷新移除其 Tab
+    this.refreshCombinedDock();
+    return "moved";
+  }
+
+  /** 布局完全就绪后，隐藏「组合栏/隐藏」功能的独立 dock 图标（避免与组合栏总览重复显示） */
+  public onLayoutReady() {
+    try {
+      for (const f of this.dockManager.getFeatures()) {
+        const slot = this.dockManager.getSlot(f.id);
+        if (slot === "combined" || slot === "hidden") {
+          // 关闭残留的独立面板（避免「有面板没图标」的死面板），再隐藏图标
+          this.closeStandaloneDockPanel(f.id);
+          this.setStandaloneDockVisible(f.id, false);
+        }
+      }
+      // 布局就绪后再兜底修正一次独立 Dock 图标（缓存污染兜底）
+      requestAnimationFrame(() => this.fixStandaloneDockIcons());
+    } catch (e) {
+      getLogger().warn("[REword] onLayoutReady 隐藏组合栏独立 Dock 失败", { error: e });
+    }
+  }
+
+  /** 聚焦某功能的承载 Dock（组合栏切 Tab / 独立 Dock 调 showDock） */
+  private focusFeatureDock(id: string) {
+    const slot = this.dockManager.getSlot(id);
+    if (slot !== "combined" && slot !== "hidden") {
+      this.standaloneModels.get(id)?.showDock?.();
+    } else {
+      this.dockModel?.showDock?.();
+      const tab = this.dockElement?.querySelector(`.hiword-dock-tab[data-tab="${id}"]`) as HTMLElement | null;
+      tab?.click();
+    }
+  }
+
+  /** 取某功能当前承载它的 Dock 根元素（独立 Dock 优先，否则组合栏） */
+  private getFeatureElement(id: string): HTMLElement | null {
+    const slot = this.dockManager.getSlot(id);
+    if (slot !== "combined" && slot !== "hidden") {
+      return this.standaloneElements.get(id) ?? this.dockElement;
+    }
+    return this.dockElement;
+  }
+
+  /** 刷新某功能（在其承载 Dock 中重绘；组合栏仅在对应 Tab 激活时才重绘，避免覆盖其它 Tab） */
+  private refreshFeature(id: string) {
+    const slot = this.dockManager.getSlot(id);
+    if (slot !== "combined" && slot !== "hidden") {
+      const el = this.standaloneElements.get(id);
+      if (el) this.renderFeatureInto(id, el);
+      return;
+    }
+    if (this.dockElement) {
+      const activeTab = this.dockElement.querySelector(".hiword-dock-tab.active") as HTMLElement | null;
+      if (!activeTab || activeTab.dataset.tab === id) {
+        this.renderFeatureInto(id, this.dockElement);
+      }
+    }
+  }
+
+  /**
+   * 面板布局管理（Phase 2 + Phase 3）：
+   *  - 每个功能用下拉框选择停靠位置，改动即时生效（无需重载）；
+   *  - 也可直接拖动功能行到屏幕对应角落（主侧边栏 / 左上 / 左下 / 右上 / 右下 / 底部）即时停靠。
+   */
+  private openDockManagerPanel() {
+    const features = this.dockManager.getFeatures();
+    const rows = features.map((f) => {
+      const cur = this.dockManager.getSlot(f.id);
+      const opts = SLOT_LABELS
+        .map((s) => `<option value="${s.value}"${s.value === cur ? " selected" : ""}>${s.label}</option>`)
+        .join("");
+      return `<div class="hiword-dm-row" draggable="true" data-feature="${f.id}">
+        <span class="hiword-dm-drag" title="拖动到屏幕角落以停靠">⠿</span>
+        <span class="hiword-dm-name"><span class="hiword-dm-icon" data-feature="${f.id}"></span>${f.title}</span>
+        <select class="hiword-dm-select b3-select" data-feature="${f.id}">${opts}</select>
+      </div>`;
+    }).join("");
+    const dialog = new Dialog({
+      title: "面板布局管理",
+      content: `<div class="hiword-dm">
+        <div class="hiword-dm-tip">选择停靠位置<strong>即时生效</strong>，无需重载；也可直接<strong>拖动功能行到屏幕对应角落</strong>（主侧边栏 / 左上 / 左下 / 右上 / 右下 / 底部）。同侧多个面板在思源中为堆叠互斥，需同时查看请分到不同侧。</div>
+        ${rows}
+        <div class="hiword-dm-actions">
+          <button class="b3-button b3-button--outline hiword-dm-close" id="hiword-dm-close">关闭</button>
+        </div>
+      </div>`,
+      width: "460px",
+    });
+    const content = dialog.element.querySelector(".hiword-dm") as HTMLElement;
+
+    // 为每个功能名渲染对应图标（管理器内也能区分）
+    content?.querySelectorAll<HTMLElement>(".hiword-dm-icon").forEach((ico) => {
+      const fid = ico.dataset.feature!;
+      const f = features.find((x) => x.id === fid);
+      if (f) ico.innerHTML = `<svg class="hiword-dm-inline-icon"><use xlink:href="#${f.icon}"></use></svg>`;
+    });
+
+    // 下拉框：即时移动
+    content?.querySelectorAll(".hiword-dm-select").forEach((sel) => {
+      sel.addEventListener("change", async (e: Event) => {
+        const target = e.target as HTMLSelectElement;
+        const fid = target.dataset.feature!;
+        const slot = target.value as DockSlot;
+        await this.dockManager.setSlot(fid, slot);
+        const res = this.moveFeatureToSlot(fid, slot);
+        showMessage(res === "moved" ? "布局已即时应用" : "需重载思源生效", 1800, "info" as any);
+      });
+    });
+
+    // 拖拽停靠：功能行可拖到屏幕角落
+    content?.addEventListener("dragstart", (e: DragEvent) => {
+      const row = (e.target as HTMLElement).closest(".hiword-dm-row") as HTMLElement | null;
+      if (!row) return;
+      (e.dataTransfer as any)?.setData("text/plain", row.dataset.feature || "");
+      if (e.dataTransfer) e.dataTransfer.effectAllowed = "move";
+      this.showDockDropZones();
+    });
+    content?.addEventListener("dragend", () => this.hideDockDropZones());
+
+    content?.querySelector("#hiword-dm-close")?.addEventListener("click", () => dialog.destroy());
+  }
+
+  /** 显示拖拽落区 overlay（全屏六角） */
+  private showDockDropZones() {
+    let overlay = document.getElementById("hiword-dock-zones") as HTMLElement | null;
+    if (!overlay) {
+      overlay = document.createElement("div");
+      overlay.id = "hiword-dock-zones";
+      overlay.className = "hiword-dock-zones";
+      overlay.innerHTML = `
+        <div class="hiword-dz hiword-dz-combined" data-slot="combined"><span>主侧边栏</span><em>组合栏总览</em></div>
+        <div class="hiword-dz hiword-dz-lt" data-slot="LeftTop"><span>左上</span></div>
+        <div class="hiword-dz hiword-dz-lb" data-slot="LeftBottom"><span>左下</span></div>
+        <div class="hiword-dz hiword-dz-rt" data-slot="RightTop"><span>右上</span></div>
+        <div class="hiword-dz hiword-dz-rb" data-slot="RightBottom"><span>右下</span></div>
+        <div class="hiword-dz hiword-dz-bottom" data-slot="Bottom"><span>底部</span></div>`;
+      document.body.appendChild(overlay);
+      overlay.querySelectorAll<HTMLElement>(".hiword-dz").forEach((zone) => {
+        zone.addEventListener("dragover", (e: DragEvent) => {
+          e.preventDefault();
+          if (e.dataTransfer) e.dataTransfer.dropEffect = "move";
+          zone.classList.add("hiword-dz--over");
+        });
+        zone.addEventListener("dragleave", () => zone.classList.remove("hiword-dz--over"));
+        zone.addEventListener("drop", async (e: DragEvent) => {
+          e.preventDefault();
+          zone.classList.remove("hiword-dz--over");
+          const fid = (e.dataTransfer as any)?.getData("text/plain") || "";
+          const slot = zone.dataset.slot as DockSlot;
+          this.hideDockDropZones();
+          if (fid && slot) {
+            await this.dockManager.setSlot(fid, slot);
+            const res = this.moveFeatureToSlot(fid, slot);
+            const sel = document.querySelector(`.hiword-dm-select[data-feature="${fid}"]`) as HTMLSelectElement | null;
+            if (sel) sel.value = slot;
+            showMessage(
+              res === "moved"
+                ? `${this.featureTitle(fid)} 已停靠到${this.slotLabel(slot)}`
+                : "需重载思源生效",
+              2000, "info" as any);
+          }
+        });
+      });
+    }
+    requestAnimationFrame(() => overlay!.classList.add("hiword-dz-show"));
+  }
+
+  /** 隐藏拖拽落区 overlay */
+  private hideDockDropZones() {
+    const overlay = document.getElementById("hiword-dock-zones");
+    if (overlay) overlay.classList.remove("hiword-dz-show");
+  }
+
+  /** slot 的中文标签 */
+  private slotLabel(slot: DockSlot): string {
+    return SLOT_LABELS.find((s) => s.value === slot)?.label ?? slot;
   }
 
   /**
@@ -2170,22 +2754,32 @@ export default class RewordPlugin extends Plugin {
    * 检测当前选中的 Tab 按钮，只重绘对应面板，避免词库内容覆盖查词典/AI 等界面
    */
   private refreshActivePanel() {
-    if (!this.dockElement) return;
-    destroyAllPreviews();   // 各 Tab 共用 #hiword-dock-content，刷新前先销毁只读预览防 detached 崩溃
-    const activeTab = this.dockElement.querySelector(".hiword-dock-tab.active") as HTMLElement;
-    const tab = activeTab?.dataset.tab;
-    if (tab === "vocab") {
-      this.renderVocabPanel(this.dockElement);
-    } else if (tab === "dict") {
-      this.renderDictPanel(this.dockElement);
-    } else if (tab === "annotations") {
-      this.renderAnnotationsPanel(this.dockElement);
-    } else if (tab === "ai") {
-      // AI 面板由 AiPanel 实例自行管理 render()，此处仅触发重绘
-      const aiPanel = (this as any).aiPanelInstance;
-      if (aiPanel?.render) aiPanel.render();
-    } else if (tab === "review") {
-      this.renderReviewPanel(this.dockElement!);
+    // 组合栏：刷新当前激活 Tab
+    if (this.dockElement) {
+      destroyAllPreviews();   // 各 Tab 共用 #hiword-dock-content，刷新前先销毁只读预览防 detached 崩溃
+      const activeTab = this.dockElement.querySelector(".hiword-dock-tab.active") as HTMLElement | null;
+      const tab = activeTab?.dataset.tab;
+      if (tab === "vocab") {
+        this.renderVocabPanel(this.dockElement);
+      } else if (tab === "dict") {
+        this.renderDictPanel(this.dockElement);
+      } else if (tab === "annotations") {
+        this.renderAnnotationsPanel(this.dockElement);
+      } else if (tab === "ai") {
+        this.renderAiPanel(this.dockElement);
+      } else if (tab === "review") {
+        this.renderReviewPanel(this.dockElement);
+      } else if (tab === READER_FEATURE_ID) {
+        try {
+          this.readerDock?.render(this.dockElement);
+        } catch (e) {
+          getLogger().warn("[REword] 刷新阅读器面板失败", { error: e });
+        }
+      }
+    }
+    // 独立 Dock（2026-08-22）：逐个重绘
+    for (const [id, el] of this.standaloneElements) {
+      this.renderFeatureInto(id, el);
     }
   }
 
@@ -2232,6 +2826,14 @@ export default class RewordPlugin extends Plugin {
           .join("")}
         ${currentBookIsAll ? "" : `<span class="hiword-vb-addtheme" id="hiword-vb-add-theme" title="新建主题">＋</span>`}
       </div>
+      <!-- 2026-08-23 新增：文档内自动高亮词库单词开关 -->
+      <div class="hiword-vb-autohighlight-row">
+        <label class="hiword-vb-switch">
+          <input type="checkbox" id="hiword-vb-autohighlight" ${this.vocabAutoHighlight ? "checked" : ""} />
+          <span class="hiword-vb-switch-graph"></span>
+        </label>
+        <span class="hiword-vb-autohighlight-label">文档内自动高亮词库单词</span>
+      </div>
       <!-- 2026-08-14 新增：标签横切筛选（不限词本/主题） -->
       ${this.renderVocabLabelFilterRow()}
       <div class="hiword-vb-toolbar">
@@ -2268,6 +2870,11 @@ export default class RewordPlugin extends Plugin {
         return;
       }
       this.renderVocabPanel(dockElement);
+    });
+    // 文档内自动高亮开关(2026-08-23)
+    contentEl.querySelector("#hiword-vb-autohighlight")?.addEventListener("change", (e) => {
+      const on = (e.target as HTMLInputElement).checked;
+      this.setVocabAutoHighlight(on);
     });
     // 新建单词本（2026-08-14 改：window.prompt 在思源 Electron 中常被禁用，改用自定义弹窗）
     contentEl.querySelector("#hiword-vb-add-book")?.addEventListener("click", async () => {
@@ -2407,6 +3014,71 @@ export default class RewordPlugin extends Plugin {
           t.textContent = `+${hidden} 展开`;
           t.setAttribute("title", `展开全部标签`);
         }
+      } else if (action === "vocab-status-set" && word) {
+        // 2026-08-22 新增 / 2026-08-23 改:词库面板"未掌握/已掌握/需复习/清除"切换
+        // 2026-08-23 性能改:**不**调用 renderVocabPanel(否则会重建所有 chip + 触发 highlighter 全扫)
+        // 改为只更新该单词行内的 4 颗 chip 的 active 状态(局部 DOM 更新,微秒级)
+        e.stopPropagation();
+        const raw = t.dataset.status ?? "";
+        const nextStatus: LearningStatusT | "" = raw as any;
+        if (nextStatus === "" || Object.values(LearningStatus).includes(nextStatus as any)) {
+          const arg: LearningStatusT | null = nextStatus === "" ? null : (nextStatus as LearningStatusT);
+          this.vocabStore.setLearningStatus(word, arg).then(() => {
+            // 局部刷新:只更新目标行的 chip active 状态
+            const safe = (window as any).CSS?.escape ? (window as any).CSS.escape(word) : word.replace(/"/g, '\\"');
+            const row = contentEl.querySelector(
+              `.hiword-vb-row[data-word="${safe}"]`
+            ) as HTMLElement | null;
+            if (row) {
+              row.querySelectorAll(".hiword-vb-status-chip").forEach((chip) => {
+                const cs = (chip as HTMLElement).dataset.status ?? "";
+                // arg === null 表示清除态,与 data-status="" 匹配
+                const isActive =
+                  (cs === "" && arg === null) ||
+                  (cs !== "" && cs === arg);
+                chip.classList.toggle("active", !!isActive);
+              });
+            }
+            // highlighter 会通过 store emit 自动重扫,无需手动触发
+          });
+        }
+      } else if (action === "vocab-status-collapse") {
+        // 2026-08-23 改:状态条**按单词独立**收起/展开(全局默认收起)
+        // 2026-08-23 性能改:**不**重渲染整个面板(避免卡顿),只切该单词的 class + chevron
+        // 根因(早期 bug):之前用全局 boolean 时,点一个全展开 — 与用户意图"独立控制"不符
+        // 修复:用 Set<string> 记录已展开的单词,只切该单词的 DOM,其他单词完全不受影响
+        e.stopPropagation();
+        const word = t.dataset.word || "";
+        if (!word) return;
+        const willExpand = !this.vocabStatusBarExpandedWords.has(word);
+        if (willExpand) {
+          this.vocabStatusBarExpandedWords.add(word);
+        } else {
+          this.vocabStatusBarExpandedWords.delete(word);
+        }
+        // 持久化
+        try {
+          localStorage.setItem(
+            "reword-vocab-status-expanded",
+            JSON.stringify(Array.from(this.vocabStatusBarExpandedWords))
+          );
+        } catch { /* ignore */ }
+        // 局部刷新:只切该单词那根 bar 的 class 与 chevron
+        const safe = (window as any).CSS?.escape ? (window as any).CSS.escape(word) : word.replace(/"/g, '\\"');
+        const bar = contentEl.querySelector(
+          `.hiword-vb-status-bar[data-status-bar-word="${safe}"]`
+        ) as HTMLElement | null;
+        if (bar) {
+          bar.classList.toggle("hiword-vb-status-bar--collapsed", !willExpand);
+          const btn = bar.querySelector(".hiword-vb-status-collapse") as HTMLElement | null;
+          if (btn) {
+            const text = willExpand ? "▴" : "▾";
+            const t = willExpand ? "收起状态条" : "展开状态条";
+            btn.textContent = text;
+            btn.setAttribute("title", t);
+            btn.setAttribute("aria-label", t);
+          }
+        }
       }
     });
 
@@ -2447,6 +3119,85 @@ export default class RewordPlugin extends Plugin {
 
     // 应用字体大小设置（每次渲染后重新应用，确保 class 不丢失）
     this.applyFontSize();
+  }
+
+  /**
+   * 2026-08-22 新增 / 2026-08-23 扩：词库面板单词行下"未掌握/已掌握/需复习/清除"4 选 1 状态切换条 + 收起按钮。
+   * 由 renderVocabWordRows 内联调用生成 HTML（不暴露到外部）。
+   *  - 默认 active = learning（保持旧行为兼容）
+   *  - 第 4 颗 ✕ = "清除样式"，点击 setLearningStatus(word, undefined) → 文档内不再高亮
+   *  - 2026-08-23 改:右侧 ▾ 按钮切换**该单词的**展开/收起态(全局默认收起)
+   *    - 展开集合 this.vocabStatusBarExpandedWords 持久化到 localStorage
+   *    - 不在集合内 → 默认收起(只显示 chevron ▾)
+   *    - 在集合内 → 展开(显示 4 颗 chip + chevron ▴)
+   *  - 点击 chip 调 setLearningStatus → store emit → highlighter 自动重扫
+   */
+  private renderVocabStatusBar(w: { word: string; learningStatus?: string }): string {
+    const cur = w.learningStatus as LearningStatusT | undefined; // undefined = 清除态
+    // 2026-08-23 改:4 项 = 3 颜色 + 1 清除;status 为空字符串时,语义上视为 undefined
+    const items: Array<{ status: LearningStatusT | ""; label: string; title: string }> = [
+      { status: LearningStatus.Learning, label: "未掌握", title: "未掌握(黄色高亮)" },
+      { status: LearningStatus.Mastered, label: "已掌握", title: "已掌握(绿色高亮)" },
+      { status: LearningStatus.Review,    label: "需复习", title: "需复习(紫色高亮)" },
+      { status: "" /* sentinel = 清除 */,     label: "✕",      title: "清除样式(文档内不再高亮)" },
+    ];
+    const word = this.escapeAttr(w.word);
+    const chips = items.map((it) => {
+      // 清除态:cur === undefined 且 status === ""
+      const isActive = (it.status === "" && !cur) || (it.status !== "" && cur === it.status);
+      // data-status 用空串表示"清除"
+      const dataStatus = it.status;
+      return `<button type="button"
+              class="hiword-vb-status-chip${isActive ? " active" : ""}${it.status === "" ? " hiword-vb-status-chip--clear" : ""}"
+              data-action="vocab-status-set"
+              data-word="${word}"
+              data-status="${dataStatus}"
+              title="${it.title}">${it.label}</button>`;
+    }).join("");
+    // 2026-08-23 改:按单词独立判断 collapsed(不在 expanded 集合 = 收起)
+    const isExpanded = this.vocabStatusBarExpandedWords.has(w.word);
+    const collapsed = !isExpanded;
+    const chevron = collapsed ? "▾" : "▴";
+    const chevronTitle = collapsed ? "展开状态条" : "收起状态条";
+    // collapsed class 控制 4 颗 chip 隐藏 / chevron 单独显示
+    return `<div class="hiword-vb-status-bar${collapsed ? " hiword-vb-status-bar--collapsed" : ""}" data-status-bar-word="${word}">
+      ${chips}
+      <button type="button"
+              class="hiword-vb-status-collapse"
+              data-action="vocab-status-collapse"
+              data-word="${word}"
+              title="${chevronTitle}"
+              aria-label="${chevronTitle}">${chevron}</button>
+    </div>`;
+  }
+
+  /**
+   * 2026-08-22 新增：把词库面板定位到指定 word,找不到时 showMessage 提示。
+   * 先清空可能把目标过滤掉的 label 筛选。
+   */
+  private scrollVocabPanelToWord(word: string): void {
+    // 1) 清空当前标签筛选(可能把目标过滤掉了)
+    if (this.vocabLabelFilter && this.vocabLabelFilter !== "all") {
+      this.vocabLabelFilter = "all";
+      if (this.dockElement) this.renderVocabPanel(this.dockElement);
+    }
+    // 2) 找目标行
+    const safe = (window as any).CSS?.escape ? (window as any).CSS.escape(word) : word.replace(/"/g, '\\"');
+    const row = this.dockElement?.querySelector(
+      `.hiword-vb-row[data-word="${safe}"]`
+    ) as HTMLElement | null;
+    if (!row) {
+      showMessage(`「${word}」不在当前词本/主题中`, 2000, "info");
+      return;
+    }
+    // 3) 滚动 + 闪烁
+    row.scrollIntoView({ behavior: "smooth", block: "center" });
+    row.classList.remove("whale-card--flash", "hiword-vb-row--flash");
+    void row.offsetWidth;  // 强制 reflow 重新触发动画
+    row.classList.add("whale-card--flash", "hiword-vb-row--flash");
+    setTimeout(() => {
+      row.classList.remove("whale-card--flash", "hiword-vb-row--flash");
+    }, 2200);
   }
 
   /** 渲染单词行（一列一个：拖拽柄 + 单词 + 词性 + 意思 + 朗读 + 掌握度星 + 操作） */
@@ -2500,6 +3251,8 @@ export default class RewordPlugin extends Plugin {
 
         // 2026-08-14 新增：词卡标签行（可折叠 + 编辑入口）
         const tagsHtml = this.renderVocabRowTags(w);
+        // 2026-08-22 新增：学习状态切换条（未掌握/已掌握/需复习）
+        const statusBarHtml = this.renderVocabStatusBar(w);
 
         return `
         <div class="hiword-vb-row" draggable="${this.vocabSort === "custom"}" data-id="${w.id}" data-word="${this.escapeAttr(w.word)}">
@@ -2507,6 +3260,7 @@ export default class RewordPlugin extends Plugin {
           <div class="hiword-vb-main">
             ${mainHtml}
             ${tagsHtml}
+            ${statusBarHtml}
           </div>
           <div class="hiword-vb-right">
             ${starsHtml}
@@ -2765,9 +3519,19 @@ export default class RewordPlugin extends Plugin {
     </div>`;
   }
 
+  /** 2026-08-23 新增:词库驱动文档高亮总开关(词库面板控制) */
+  private setVocabAutoHighlight(on: boolean): void {
+    this.vocabAutoHighlight = on;
+    try {
+      localStorage.setItem("hiword-vocab-autohighlight", String(on));
+    } catch {}
+    const hl = getVocabHighlighter();
+    hl.setEnabled(on);
+  }
+
   /** 按当前标签筛选过滤单词（all=全部；no-label=无标签） */
   private applyVocabLabelFilter(words: WordRecord[]): WordRecord[] {
-    if (this.vocabLabelFilter === "all" || !this.vocabLabelFilter) return words;
+    if (this.vocabLabelFilter === "all" || this.vocabLabelFilter === "__all__" || !this.vocabLabelFilter) return words;
     if (this.vocabLabelFilter === "__no_label__") {
       return words.filter((w) => !(w.labels && w.labels.length > 0));
     }
@@ -3701,11 +4465,12 @@ export default class RewordPlugin extends Plugin {
 
   /** 应用字体大小到侧边栏面板（通过 CSS class 切换） */
   private applyFontSize() {
-    if (!this.dockElement) return;
-    const panel = this.dockElement.querySelector(".hiword-dock-panel") as HTMLElement;
-    if (!panel) return;
-    panel.classList.remove("hiword-font-small", "hiword-font-medium", "hiword-font-large", "hiword-font-xlarge");
-    panel.classList.add("hiword-font-" + this.fontSize);
+    // 2026-08-22：多 Dock 下需覆盖组合栏 + 所有独立 Dock 的面板
+    const panels = document.querySelectorAll(".hiword-dock-panel") as NodeListOf<HTMLElement>;
+    panels.forEach((panel) => {
+      panel.classList.remove("hiword-font-small", "hiword-font-medium", "hiword-font-large", "hiword-font-xlarge");
+      panel.classList.add("hiword-font-" + this.fontSize);
+    });
   }
 
   /**
@@ -4066,11 +4831,11 @@ export default class RewordPlugin extends Plugin {
 
     const pop = document.createElement("div");
     pop.className = "hiword-quick-mark-pop";
-    const colors = WHALE_COLOR_LIST.slice(0, 6); // 灰/黄/绿/青/粉/橙
+    const colors = WHALE_COLOR_LIST; // 5 色：黄/绿/青/粉/紫
     const lines: Array<[string, string, string]> = [
-      ["solid", "实线", "━"],
+      ["highlight", "高亮", "▮"],
+      ["solid", "直线段", "━"],
       ["wavy", "波浪", "﹏"],
-      ["dashed", "虚线", "┄"],
     ];
     pop.innerHTML = `
       <div class="hiword-quick-mark-head">🎨 快速标记（不写文字）</div>
@@ -4078,7 +4843,7 @@ export default class RewordPlugin extends Plugin {
         ${colors.map((c) => `<button type="button" class="hiword-quick-mark-swatch" data-color="${c.value}" title="背景高亮 · ${c.name}" style="background:${c.value}"></button>`).join("")}
       </div>
       <div class="hiword-quick-mark-row" data-kind="line">
-        ${lines.map(([k, label, icon]) => `<button type="button" class="hiword-quick-mark-line" data-style="${k}" title="下划线 · ${label}" style="text-decoration:underline;text-decoration-style:${k}">Aa</button>`).join("")}
+        ${lines.map(([k, label, icon]) => `<button type="button" class="hiword-quick-mark-line" data-style="${k}" title="${label}" ${k === "highlight" ? `style="background:#06b6d4;color:#fff"` : `style="text-decoration:underline;text-decoration-style:${k === "wavy" ? "wavy" : "solid"}"`}>Aa</button>`).join("")}
       </div>
     `;
     document.body.appendChild(pop);
@@ -4107,8 +4872,8 @@ export default class RewordPlugin extends Plugin {
           selectedText: selection,
           note: "", // 纯标注：无文字
           origin: "manual",
-          color: color || WHALE_COLOR_LIST[3].value, // 默认青
-          style: (style as any) || "solid",
+          color: color || WHALE_COLOR_LIST[2].value, // 默认青蓝
+          style: (style as any) || "highlight",
           scope: style ? "sentence" : "word",
         });
         this.applyAnnotationBlockMarks();
@@ -4518,6 +5283,23 @@ export default class RewordPlugin extends Plugin {
     this.disposables.addEventListener(document, "keyup", onKeyUp);
     this.disposables.addEventListener(window, "blur", onBlur);
     this.disposables.addEventListener(document, "mousemove", onMove);
+
+    // 2026-08-22 词库高亮：点击已高亮单词直接跳转词库面板(不弹浮窗,不依赖 Alt 键)
+    // 用 capture 阶段,确保比 Alt+hover 浮窗逻辑更早触发
+    const onVocabMarkClick = (e: MouseEvent) => {
+      if (this._vocabPickOpen) return; // 词库分类浮窗打开时,避免冲突
+      const t = e.target as HTMLElement;
+      if (!t) return;
+      const markEl = t.closest(".hiword-vocab-mark") as HTMLElement | null;
+      if (!markEl) return;
+      const word = markEl.dataset.vocabWord;
+      if (!word) return;
+      e.preventDefault();
+      e.stopPropagation();
+      this.focusFeatureDock("vocab");
+      this.scrollVocabPanelToWord(word);
+    };
+    this.disposables.addEventListener(document, "click", onVocabMarkClick, true);
   }
 
   /** 取光标下单词（基于 caretRangeFromPoint/caretPositionFromPoint，含边界容差与元素兜底）。无英文单词则返回 null。 */
@@ -4855,28 +5637,25 @@ export default class RewordPlugin extends Plugin {
   }
 
   /**
-   * 在侧边栏中查询单词
+   * 在侧边栏中查询单词（2026-08-22：兼容组合栏 / 独立 Dock 两种停靠方式）
    */
   private lookupWordInDock(word: string) {
-    // 打开/切换到侧边栏的词典 Tab
-    // 通过模拟点击侧边栏图标来确保面板可见
-    // 然后执行查询
-    if (this.dockElement) {
-      const tabBtn = this.dockElement.querySelector('[data-tab="dict"]') as HTMLElement;
-      if (tabBtn && !tabBtn.classList.contains("active")) {
-        tabBtn.click();
-      }
-      setTimeout(() => {
-        const input = this.dockElement?.querySelector("#hiword-dict-input") as HTMLInputElement;
-        if (input) {
-          input.value = word.trim();
-          this.doDictLookup(word.trim(), this.dockElement!);
-        }
-      }, 150);
-    } else {
+    this.focusFeatureDock("dict");
+    const el = this.getFeatureElement("dict");
+    if (!el) {
       // 侧边栏未打开时，用对话框显示
       this.showDictDialog(word);
+      return;
     }
+    setTimeout(() => {
+      const input = el.querySelector("#hiword-dict-input") as HTMLInputElement | null;
+      if (input) {
+        input.value = word.trim();
+        this.doDictLookup(word.trim(), el);
+      } else {
+        this.showDictDialog(word);
+      }
+    }, 150);
   }
 
   /**
@@ -5488,28 +6267,19 @@ export default class RewordPlugin extends Plugin {
     }
     const word = selection;
 
-    // 尽量让右侧 Dock 可见：点击对应的 Dock 标签
-    const tabEl = document.querySelector('[data-type="hiword-sidebar"]') as HTMLElement | null;
-    if (tabEl && !tabEl.classList.contains("active")) {
-      tabEl.click();
-    }
-
     const fillAndLookup = () => {
-      if (!this.dockElement) {
+      this.focusFeatureDock("dict");
+      const el = this.getFeatureElement("dict");
+      if (!el) {
         // Dock 尚未初始化，降级为对话框
         this.showDictDialog(word);
         return;
       }
-      // 切换到「查词典」Tab
-      const dictTab = this.dockElement.querySelector('[data-tab="dict"]') as HTMLElement;
-      if (dictTab && !dictTab.classList.contains("active")) {
-        dictTab.click();
-      }
       setTimeout(() => {
-        const input = this.dockElement?.querySelector("#hiword-dict-input") as HTMLInputElement;
+        const input = el.querySelector("#hiword-dict-input") as HTMLInputElement | null;
         if (input) {
           input.value = word;
-          this.doDictLookup(word, this.dockElement!);
+          this.doDictLookup(word, el);
           input.focus();
         } else {
           this.showDictDialog(word);
@@ -6199,6 +6969,14 @@ export default class RewordPlugin extends Plugin {
       this.renderUnifiedDictPanel(dlg, dialog);
       showMessage("已刷新", 2000, "info");
     });
+  }
+
+  /**
+   * 思源管理菜单「RE word → 设置」入口。
+   * 覆盖 Plugin.openSetting，确保在阅读器 Tab、普通文档 Tab 等任意场景下都能打开统一设置面板。
+   */
+  public openSetting() {
+    this.openUnifiedSettings();
   }
 
   /**
@@ -7315,6 +8093,8 @@ export default class RewordPlugin extends Plugin {
     }
     this.aiPanel?.destroy();
     this.copilotPanel?.destroy();
+    // 阅读器：销毁挂载组件（触发 foliate-view close 释放 blob URL）
+    try { this.readerDock?.dispose(); } catch { /* ignore */ }
     // 彻底断开预览实例池与 IntersectionObserver（2026-08-18）
     disposePreviewRegistry();
     // 关闭可能残留的浮层
@@ -8390,7 +9170,7 @@ export default class RewordPlugin extends Plugin {
   }
 
   /**
-   * 从当前选区发起「添加批注」：定位块与文档，打开鲸鱼风格批注弹窗。
+   * 从当前选区发起「添加批注」：定位块与文档，打开微阅风格批注弹窗。
    * 若同一块同一句子已存在批注则进入编辑态（预填 note）。
    * v2：改用 whaleManager.showWhaleDialog（截图 1 风格：头部 5 线型 Aa +
    *     富文本编辑区 + 底部 3 功能按钮/保存）。
@@ -8687,7 +9467,7 @@ export default class RewordPlugin extends Plugin {
   }
 
   /**
-   * 渲染 dock「批注」Tab 面板（#21）—— 鲸鱼风格 v4。
+   * 渲染 dock「批注」Tab 面板（#21）—— 微阅风格 v4。
    * 使用 renderWhalePanel 替代旧版 renderAnnotationsList。
    */
   private renderAnnotationsPanel(dockElement: HTMLElement) {
@@ -8706,7 +9486,7 @@ export default class RewordPlugin extends Plugin {
     // 2026-08-15 新增：聚合 docInfos（按 docId 分组，含文档名/计数）
     const docInfos = this.getAnnotationDocInfos(items);
 
-    // 使用鲸鱼渲染器（含 sort 维度参数：mode / timeDir / doc / styles）
+    // 使用微阅渲染器（含 sort 维度参数：mode / timeDir / doc / styles）
     this.applyWhalePanelHTML(contentEl, renderWhalePanel(
       items,
       this.currentLabel,
@@ -8748,7 +9528,7 @@ export default class RewordPlugin extends Plugin {
     })).sort((a, b) => b.count - a.count);
   }
 
-  /** 绑定鲸鱼面板搜索框 */
+  /** 绑定微阅面板搜索框 */
   private bindWhaleSearch(contentEl: HTMLElement, allItems: AnnotationItem[], dockElement?: HTMLElement): void {
     const input = contentEl.querySelector("#whale-search-input") as HTMLInputElement;
     const clearBtn = contentEl.querySelector("#whale-search-clear") as HTMLElement;
@@ -8777,7 +9557,7 @@ export default class RewordPlugin extends Plugin {
     });
   }
 
-  /** 绑定鲸鱼面板分类 tabs */
+  /** 绑定微阅面板分类 tabs */
   private bindWhaleTabs(contentEl: HTMLElement, allItems: AnnotationItem[], dockElement?: HTMLElement): void {
     const searchInput = (contentEl.querySelector("#whale-search-input") as HTMLInputElement)?.value || "";
     contentEl.querySelectorAll("#whale-panel-tabs .whale-tab").forEach((tab) => {
@@ -8959,12 +9739,12 @@ export default class RewordPlugin extends Plugin {
     pop.className = "hiword-style-filter-pop";
     const presets = [
       { color: "#facc15", style: "wavy", label: "生词" },
-      { color: "#22c55e", style: "dotted", label: "模糊" },
-      { color: "#f97316", style: "double", label: "句法" },
-      { color: "#ec4899", style: "dashed", label: "易错" },
+      { color: "#22c55e", style: "solid", label: "模糊" },
       { color: "#06b6d4", style: "solid", label: "文化" },
-      { color: "#8b5cf6", style: "double", label: "逻辑" },
-      { color: "#9ca3af", style: "solid", label: "中性" },
+      { color: "#ec4899", style: "solid", label: "易错" },
+      { color: "#8b5cf6", style: "wavy", label: "逻辑" },
+      { color: "#facc15", style: "highlight", label: "重点" },
+      { color: "#06b6d4", style: "highlight", label: "金句" },
     ];
     pop.innerHTML = `
       <div class="hiword-style-filter-head">🎨 勾选样式（${this.whaleSortStyles.length} / ${presets.length}）</div>
@@ -8973,7 +9753,7 @@ export default class RewordPlugin extends Plugin {
           const key = `${p.color}|${p.style}`;
           const active = this.whaleSortStyles.includes(key);
           return `<button type="button" class="hiword-style-filter-cell ${active ? "active" : ""}" data-style-key="${key}" title="${p.label}">
-            <span class="hiword-style-filter-preview" style="text-decoration:underline;text-decoration-style:${p.style};text-decoration-color:${p.color};color:${p.color}">Aa</span>
+            <span class="hiword-style-filter-preview" style="${p.style === "highlight" ? `background:${p.color};color:#fff` : `text-decoration:underline;text-decoration-style:${p.style === "wavy" ? "wavy" : "solid"};text-decoration-color:${p.color};color:${p.color}`}">Aa</span>
             <span class="hiword-style-filter-label">${p.label}</span>
           </button>`;
         }).join("")}
@@ -9047,13 +9827,28 @@ export default class RewordPlugin extends Plugin {
     setTimeout(() => document.addEventListener("mousedown", onDocDown, true), 0);
   }
 
-  /** 绑定鲸鱼卡片操作按钮 */
+  /** 绑定微阅卡片操作按钮 */
   private bindWhaleCardActions(contentEl: HTMLElement): void {
+    // 2026-08-25：分区头部点击收起/展开
+    contentEl.querySelectorAll(".whale-section-head[data-toggle='section']").forEach((head) => {
+      head.addEventListener("click", () => {
+        const section = head.closest(".whale-section") as HTMLElement;
+        if (section) section.classList.toggle("collapsed");
+      });
+    });
+
     // 定位 → 编辑区平滑滚动到标注文字（居中显示）；2026-08-17：原文引用条整条也可点击；
     // 2026-08-17 新增：笔记化面板的「原文：xxx」元信息行同样可点击定位
     const jumpHandler = (btn: Element) => {
       const card = btn.closest(".whale-card, .whale-notes-item") as HTMLElement;
       if (!card) return;
+      // C 跳转定位：阅读批注（带 data-book + data-cfi）→ 打开/聚焦阅读 Tab 并跳转到对应位置弹气泡
+      const bookId = card.dataset.book;
+      const cfi = card.dataset.cfi;
+      if (bookId && cfi) {
+        void this.jumpToReading(bookId, cfi);
+        return;
+      }
       const annId = card.dataset.id;
       if (annId) this.scrollEditorToAnnotation(annId);
     };
@@ -9379,12 +10174,15 @@ export default class RewordPlugin extends Plugin {
     });
   }
 
-  /** 删除一条批注（#22）：更新数据层 + 刷新面板 + 刷新正文块标记 */
+  /** 删除一条批注（#22）：更新数据层 + 刷新面板 + 刷新正文块标记 + 广播阅读器视觉同步 */
   private async deleteAnnotation(id: string, dockElement: HTMLElement) {
+    const ann = this.annotationStore.get(id); // remove 前取（remove 后 get 已过滤软删）
     if (await this.annotationStore.remove(id)) {
       showMessage("批注已删除", 2000, "success" as any);
       this.renderAnnotationsPanel(dockElement);
       this.refreshAnnotationMarkers();
+      // 2026-08-24：广播 → 打开中的阅读面板立即清除该高亮（不依赖翻页重绘）
+      if (ann?.bookId) notifyAnnotationsChanged(ann.bookId);
     }
   }
 
@@ -9401,6 +10199,17 @@ export default class RewordPlugin extends Plugin {
       this.ensureAnnotationObserver();
       const t = setTimeout(() => this.applyAnnotationBlockMarks(), 280);
       this.disposables.addTimer(t);
+      // 2026-08-22 词库高亮:切文档时重启 highlighter(绑到新 protyle DOM)+ 立即全扫
+      const t2 = setTimeout(() => {
+        const wysiwyg = document.querySelector(".protyle-wysiwyg") as HTMLElement | null;
+        if (wysiwyg) {
+          const hl = getVocabHighlighter();
+          hl.start(wysiwyg);
+          hl.setEnabled(this.vocabAutoHighlight);
+          hl.refreshAll();
+        }
+      }, 360);
+      this.disposables.addTimer(t2);
     }
   };
 
@@ -9545,7 +10354,10 @@ export default class RewordPlugin extends Plugin {
     }
     const ann = this.annotationStore.get(annId);
     if (ann) {
-      this.showInlineAnnotationPopover(span, ann);
+      // 第二级对象态判定：纯高亮（无批注内容）走「改样式/色 + 删除」浮层，
+      // 批注（带内容）走「查看卡片」。两端共用 classifyAnnotation，口径一致。
+      const kind = classifyAnnotation(ann);
+      this.showInlineAnnotationPopover(span, ann, kind);
       // 同步联动：打开侧边栏批注面板并精确定位+高亮对应条目
       // （用户阅读时点批注词 → 一键看到这条在所有批注中的位置）
       this.focusAnnotationCardInDock(annId);
@@ -9564,28 +10376,17 @@ export default class RewordPlugin extends Plugin {
    */
   private focusAnnotationCardInDock(annId: string): void {
     if (!annId) return;
-    // 1) 展开侧边栏（如果折叠）
-    try {
-      this.dockModel?.showDock?.();
-    } catch {
-      /* noop */
-    }
-    // 2) 切换到批注 Tab（如果当前不是）
-    const dockEl = this.dockElement;
+    // 1) 展开承载批注的 Dock（如果折叠）
+    this.focusFeatureDock("annotations");
+    // 2) 取批注承载的 Dock 元素（组合栏 / 独立 Dock）
+    const dockEl = this.getFeatureElement("annotations");
     if (!dockEl) return;
-    const tabs = dockEl.querySelectorAll(".hiword-dock-tab");
-    let switched = false;
-    tabs.forEach((t: Element) => {
-      const tab = t as HTMLElement;
-      if (tab.dataset.tab === "annotations") {
-        if (!tab.classList.contains("active")) {
-          tab.click(); // 复用现有 tab 切换逻辑（会触发 renderAnnotationsPanel）
-          switched = true;
-        }
-      }
-    });
-    // 若 tab click 后面板已渲染则直接定位；否则先自己渲染一次
-    if (!switched) {
+    // 若批注仍在组合栏且当前非激活，切到批注 Tab
+    const annTab = dockEl.querySelector('.hiword-dock-tab[data-tab="annotations"]') as HTMLElement | null;
+    if (annTab && !annTab.classList.contains("active")) {
+      annTab.click(); // 复用现有 tab 切换逻辑（会触发 renderAnnotationsPanel）
+    } else if (!annTab) {
+      // 独立 Dock：确保已渲染
       this.renderAnnotationsPanel(dockEl);
     }
     // 3) 滚动 + 高亮目标条目（卡片或笔记化条目）
@@ -9608,6 +10409,16 @@ export default class RewordPlugin extends Plugin {
    * 编辑区平滑滚动到内联标注文字位置（侧边栏卡片"定位"按钮使用）。
    * 找到 .hiword-ann-inline[data-ann-id] span → scrollIntoView 居中 → 闪烁高亮。
    */
+  /** 解析批注标签 id → {name, color}（供阅读器查看气泡展示标签名/色） */
+  resolveAnnotationLabel(id: string): { name: string; color: string } | null {
+    try {
+      const l = this.annotationLabelStore?.get(id);
+      return l ? { name: l.name, color: l.color } : null;
+    } catch {
+      return null;
+    }
+  }
+
   private scrollEditorToAnnotation(annId: string): void {
     if (!annId) return;
     // 延迟一帧确保 DOM 已渲染（侧边栏操作后编辑器可能需要重绘）
@@ -9631,6 +10442,16 @@ export default class RewordPlugin extends Plugin {
     });
   }
 
+  /** C 跳转定位：侧边栏阅读批注 → 打开/聚焦阅读 Tab 并跳转到对应 cfi 弹查看气泡 */
+  private async jumpToReading(bookId: string, cfi: string): Promise<void> {
+    try {
+      await this.readerDock?.tabController?.focusAnnotation(bookId, cfi);
+    } catch (e) {
+      getLogger().warn("[REword] 跳转到阅读批注失败", { data: { bookId, cfi }, error: e });
+      showMessage("跳转到阅读批注失败", 2000, "error" as any);
+    }
+  }
+
   private closeInlineAnnotationPopover(): void {
     if (this.popNotePreview) {
       try { this.popNotePreview.destroy(); } catch { /* ignore */ }
@@ -9645,9 +10466,16 @@ export default class RewordPlugin extends Plugin {
       .forEach((el) => el.classList.remove("hiword-ann-inline--active"));
   }
 
-  /** 弹出内联批注浮层 */
-  private showInlineAnnotationPopover(span: HTMLElement, ann: AnnotationItem): void {
+  /** 弹出内联批注浮层
+   * @param kind 第二级对象态：pure=纯高亮（无批注内容），annotation=带批注内容。
+   *   纯高亮 → 提供「改样式/色 + 升级批注 + 删除」；批注 → 只读查看卡（编辑/面板/复制/删除）。 */
+  private showInlineAnnotationPopover(
+    span: HTMLElement,
+    ann: AnnotationItem,
+    kind?: "pure" | "annotation" | null
+  ): void {
     this.closeInlineAnnotationPopover();
+    const isPure = kind === "pure";
 
     const styleIcon: Record<string, string> = {
       solid: "━", wavy: "﹏", dashed: "┄", double: "═", dotted: "┉",
@@ -9675,6 +10503,27 @@ export default class RewordPlugin extends Plugin {
       })
       .join("");
 
+    // ── 纯高亮专用：3 样式 + 5 色快捷行（即时改样式/色，等同阅读器编辑工具栏）──
+    const STYLE_LIST: Array<{ key: AnnotationStyle; icon: string; label: string }> = [
+      { key: "highlight", icon: "▮", label: "高亮" },
+      { key: "solid", icon: "━", label: "直线段" },
+      { key: "wavy", icon: "﹏", label: "波浪线" },
+    ];
+    const curStyle = (ann.style as AnnotationStyle) || "highlight";
+    const curColor = ann.color || "#06b6d4";
+    const styleRowHtml = isPure
+      ? `<div class="hiword-ann-pop-stylerow" data-role="style-row">${STYLE_LIST.map(
+          (s) =>
+            `<button class="hiword-ann-pop-style-btn${s.key === curStyle ? " active" : ""}" data-style="${s.key}" title="${s.label}">${s.icon}</button>`
+        ).join("")}</div>`
+      : "";
+    const colorRowHtml = isPure
+      ? `<div class="hiword-ann-pop-stylerow hiword-ann-color-picker" data-role="color-row">${WHALE_COLORS.map(
+          (c) =>
+            `<button class="hiword-ann-color-swatch${c.value === curColor ? " active" : ""}" data-color="${c.value}" style="background:${c.value}; color:${c.value}" title="${c.name}"></button>`
+        ).join("")}</div>`
+      : "";
+
     const pop = document.createElement("div");
     pop.className = "hiword-ann-popover";
     pop.innerHTML = `
@@ -9685,17 +10534,26 @@ export default class RewordPlugin extends Plugin {
         <button class="hiword-ann-pop-close" title="关闭">✕</button>
       </div>
       ${sourceText ? `<div class="hiword-ann-pop-sentence" data-act="locate-editor" title="点击定位到原文">${esc(sourceText)}</div>` : ""}
-      <div class="hiword-ann-pop-note b3-typography">${
-        ann.note
-          ? `<div class="hiword-ann-pop-protyle"></div><div class="hiword-ann-pop-fallback">${noteFallback}</div>`
-          : (sourceText ? "" : '<span class="hiword-ann-pop-empty">纯标注 · 无文字内容</span>')
-      }</div>
-      ${tagChips ? `<div class="hiword-ann-pop-tags">${tagChips}</div>` : ""}
+      ${
+        isPure
+          ? `${sourceText ? `<div class="hiword-ann-pop-sentence" data-act="locate-editor" title="点击定位到原文">${esc(sourceText)}</div>` : ""}
+             <div class="hiword-ann-pop-note hiword-ann-pop-pure-hint">纯标注 · 无文字内容，可改样式/色或升级为批注</div>${styleRowHtml}${colorRowHtml}`
+          : `<div class="hiword-ann-pop-note b3-typography">${
+              ann.note
+                ? `<div class="hiword-ann-pop-protyle"></div><div class="hiword-ann-pop-fallback">${noteFallback}</div>`
+                : (sourceText ? "" : '<span class="hiword-ann-pop-empty">纯标注 · 无文字内容</span>')
+            }</div>${tagChips ? `<div class="hiword-ann-pop-tags">${tagChips}</div>` : ""}`
+      }
       <div class="hiword-ann-pop-actions">
-        <button class="hiword-ann-pop-btn" data-act="edit">编辑</button>
-        <button class="hiword-ann-pop-btn" data-act="locate" title="在侧边栏批注面板中查看">面板</button>
-        <button class="hiword-ann-pop-btn" data-act="copy" title="复制原文">复制</button>
-        <button class="hiword-ann-pop-btn hiword-ann-pop-btn--danger" data-act="delete">删除</button>
+        ${
+          isPure
+            ? `<button class="hiword-ann-pop-btn" data-act="upgrade" title="添加批注内容，升级为批注">批注</button>
+               <button class="hiword-ann-pop-btn hiword-ann-pop-btn--danger" data-act="delete">删除</button>`
+            : `<button class="hiword-ann-pop-btn" data-act="edit">编辑</button>
+               <button class="hiword-ann-pop-btn" data-act="locate" title="在侧边栏批注面板中查看">面板</button>
+               <button class="hiword-ann-pop-btn" data-act="copy" title="复制原文">复制</button>
+               <button class="hiword-ann-pop-btn hiword-ann-pop-btn--danger" data-act="delete">删除</button>`
+        }
       </div>
     `;
     document.body.appendChild(pop);
@@ -9750,6 +10608,57 @@ export default class RewordPlugin extends Plugin {
     pop.addEventListener("mousedown", (ev) => ev.stopPropagation());
 
     // 操作
+    // ── 纯高亮分支：快捷改样式/色 + 升级为批注 + 删除 ──
+    if (isPure) {
+      const applyStyle = async (style: AnnotationStyle) => {
+        const scope = style === "highlight" ? "word" : "sentence";
+        await this.annotationStore.upsert({ ...ann, id: ann.id, style, scope, type: "highlight" });
+        this.applyAnnotationBlockMarks();
+        pop.querySelectorAll<HTMLElement>("[data-style]").forEach((b) =>
+          b.classList.toggle("active", b.dataset.style === style)
+        );
+      };
+      const applyColor = async (color: string) => {
+        await this.annotationStore.upsert({ ...ann, id: ann.id, color });
+        this.applyAnnotationBlockMarks();
+        pop.querySelectorAll<HTMLElement>(".hiword-ann-color-swatch").forEach((b) =>
+          b.classList.toggle("active", b.dataset.color === color)
+        );
+      };
+      pop.querySelector('[data-role="style-row"]')?.addEventListener("click", (e) => {
+        const btn = (e.target as HTMLElement).closest<HTMLElement>("[data-style]");
+        if (btn?.dataset.style) void applyStyle(btn.dataset.style as AnnotationStyle);
+      });
+      pop.querySelector('[data-role="color-row"]')?.addEventListener("click", (e) => {
+        const btn = (e.target as HTMLElement).closest<HTMLElement>("[data-color]");
+        if (btn?.dataset.color) void applyColor(btn.dataset.color);
+      });
+      pop.querySelector('[data-act="upgrade"]')?.addEventListener("click", () => {
+        this.closeInlineAnnotationPopover();
+        this.whaleManager?.showWhaleDialog({
+          selectedText: ann.selectedText, sentence: ann.sentence,
+          blockId: ann.blockId, docId: ann.docId, existing: ann,
+        });
+      });
+      pop.querySelector('[data-act="locate-editor"]')?.addEventListener("click", () => {
+        this.closeInlineAnnotationPopover();
+        this.scrollEditorToAnnotation(ann.id);
+      });
+      pop.querySelector('[data-act="delete"]')?.addEventListener("click", async () => {
+        const ok = await confirmDelete("确定删除这条标注？");
+        if (!ok) return;
+        this.closeInlineAnnotationPopover();
+        try {
+          await this.deleteAnnotation(ann.id, this.dockElement ?? document.body);
+        } catch (e: any) {
+          getLogger().error("[REword] 浮层删除批注异常", { data: { id: ann.id }, error: e });
+          showMessage(`删除失败：${e?.message || e}`, 3000, "error");
+        }
+      });
+      return;
+    }
+
+    // ── 批注分支（带内容）：编辑 / 面板 / 复制 / 删除 ──
     pop.querySelector('[data-act="edit"]')?.addEventListener("click", () => {
       this.closeInlineAnnotationPopover();
       this.whaleManager?.showWhaleDialog({

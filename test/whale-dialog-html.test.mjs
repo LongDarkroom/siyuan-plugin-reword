@@ -149,3 +149,28 @@ test("弹窗 HTML：无预设分组 chips（2026-08-17 合并到框架样式）"
   assert.doesNotMatch(html, /whale-dlg-preset-chip/, "不应有预设 chips");
   assert.doesNotMatch(html, /data-preset-group=/, "不应有分组");
 });
+
+// 2026-08-22 新增：测试 isAccordionOpen 参数(修 Bug: 框架样式记忆模式失效)
+test("弹窗 HTML：isAccordionOpen=true(默认)时,框架样式 details 含 open 属性", () => {
+  const html = buildWhaleDialogHtml({
+    selectedText: "x", sentence: "x", blockId: "b1", docId: "d1",
+  }, esc, true);
+  assert.match(html, /id="whale-accordion-styles"\s+open/, "默认应带 open 属性");
+});
+
+test("弹窗 HTML：isAccordionOpen=false 时,框架样式 details 不含 open 属性(记忆模式生效)", () => {
+  const html = buildWhaleDialogHtml({
+    selectedText: "x", sentence: "x", blockId: "b1", docId: "d1",
+  }, esc, false);
+  assert.doesNotMatch(html, /id="whale-accordion-styles"[^>]*\bopen\b/, "收起时应不带 open 属性");
+  // 但 details 元素本身仍存在
+  assert.match(html, /id="whale-accordion-styles"/, "details 元素本身应存在");
+});
+
+// 2026-08-22 新增：测试品牌改名 - dialog title 应为"微阅批注"
+test("弹窗 HTML：dialog 标题已从「批注」改为「微阅批注」(2026-08-22 品牌改名)", () => {
+  const html = buildWhaleDialogHtml({
+    selectedText: "x", sentence: "x", blockId: "b1", docId: "d1",
+  }, esc);
+  assert.match(html, /class="whale-dlg-title">微阅批注</, "标题应为「微阅批注」");
+});

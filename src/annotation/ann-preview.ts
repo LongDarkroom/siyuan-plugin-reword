@@ -58,10 +58,11 @@ export function configurePreviewRegistry(o: PreviewRegistryOptions): void {
  */
 export function setupPreviews(container: HTMLElement): void {
   sweepDetached();
-  const root = container.querySelector("#whale-panel-list") as HTMLElement | null;
+  // 2026-08-25 B-P0：面板列表现含多个独立滚动分区（.whale-section-body），
+  // 不再有单一滚动根。改用视口为 root，IntersectionObserver 会自动感知任意嵌套滚动容器的滚动。
   io?.disconnect();
   io = new IntersectionObserver(onIntersect, {
-    root: root ?? null,                       // root 为 null 时退化为视口，仍可用
+    root: null,
     rootMargin: opts?.rootMargin ?? "320px 0px",
     threshold: 0,
   });

@@ -22,15 +22,17 @@ export interface PersistentStoreOptions {
 }
 
 export class PersistentStore {
+  private readonly save: (data: unknown) => Promise<void>;
   private timer: ReturnType<typeof setTimeout> | null = null;
   private pending: unknown = null;
   private inFlight = false;
   private opts: Required<PersistentStoreOptions>;
 
   constructor(
-    private readonly save: (data: unknown) => Promise<void>,
+    save: (data: unknown) => Promise<void>,
     options: PersistentStoreOptions = {}
   ) {
+    this.save = save;
     this.opts = {
       delay: options.delay ?? 400,
       retries: options.retries ?? 3,

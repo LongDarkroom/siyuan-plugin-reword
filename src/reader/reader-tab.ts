@@ -1,0 +1,257 @@
+/**
+ * 阅读器 - 独立 Tab 控制器
+ * ---------------------------------------------------------------
+ * 把「阅读」从 Dock 面板升级为思源原生 Tab（像打开文档一样）：
+ * - onload 时注册自定义 Tab 类型（plugin.addTab），书架点书 → openTab 打开独立 Tab
+ * - 多开：每本书一个 Tab，可同时开多本
+ * - 去重：同一本书已开 → 聚焦已有 Tab，不重复开
+ * - 生命周期：Tab 关闭 → destroy → 销毁 Svelte 组件（触发 view.close + 进度/时长落盘）
+ */
+
+// @ts-ignore - Svelte 组件
+import ReaderView from "./ReaderView.svelte";
+import { openTab } from "siyuan";
+import type { BookshelfStore } from "./bookshelf-store";
+import type { ReaderSettingsStore } from "./reader-settings";
+import type { FontStore } from "./reader-fonts";
+
+export const READER_TAB_TYPE = "reader";
+
+/**
+ * 标记阅读 Tab 为「已修改」状态。
+ * 思源笔记「在当前页签中打开」设置会回收当前激活且未修改的页签；自定义阅读 Tab 没有 protyle
+ * 帮它自动置 dirty，于是被当成干净页签回收。手动在 tab 根元素（<li class="item">）上打
+ * data-dirty="true"，使其表现为「已修改」，从而逃过该回收逻辑。标签栏标题也会显示红点。
+ */
+function markReaderTabDirty(tab: any): void {
+  if (!tab) return;
+  try {
+    const el = tab.element;
+    if (el) {
+      el.setAttribute("data-dirty", "true");
+      const text = el.querySelector?.(".item__text");
+      text?.setAttribute?.("data-dirty", "true");
+    }
+  } catch {
+    /* ignore */
+  }
+}
+
+interface TabRecord {
+  tab: any; // Tab
+  comp: any; // Svelte 组件
+}
+
+export class ReaderTabController {
+  private openTabs = new Map<string, TabRecord>(); // bookId -> { tab, comp }
+  private opening = new Set<string>(); // bookId -> 正在打开中（防重入竞态导致重复 openTab）
+  private registered = false;
+
+  constructor(
+    private plugin: any,
+    private stores: {
+      store: BookshelfStore;
+      settingsStore: ReaderSettingsStore;
+      fontStore: FontStore;
+    },
+    private getLabel?: (id: string) => { name: string; color: string } | null
+  ) {}
+
+  /** 注册自定义 Tab 类型（必须在 onload 同步阶段调用） */
+  register(): void {
+    if (this.registered) return;
+    this.registered = true;
+    const self = this;
+    this.plugin.addTab({
+      type: READER_TAB_TYPE,
+      init: function (this: any) {
+        const custom = this;
+        const bookId = custom.data?.bookId;
+        if (!bookId) return;
+        // 2026-08-24 修复（方案 B）：custom.element 用 flex 撑满，
+        // holder 改为相对 flex 子项，不再使用 absolute inset:0。
+        // 避免 holder 成为覆盖整个 Tab 的命中层，从而拦截思源顶栏"管理"菜单。
+        custom.element.style.display = "flex";
+        custom.element.style.flexDirection = "column";
+        custom.element.style.minHeight = "0";
+        custom.element.style.position = "relative";
+        custom.element.style.overflow = "hidden";
+        const holder = document.createElement("div");
+        holder.style.cssText =
+          "position:relative;flex:1;min-height:0;display:flex;flex-direction:column;overflow:hidden;";
+        custom.element.append(holder);
+        let comp: any = null;
+        try {
+          comp = new ReaderView({
+            target: holder,
+            props: {
+              bookId,
+              store: self.stores.store,
+              settingsStore: self.stores.settingsStore,
+              fontStore: self.stores.fontStore,
+              onCloseTab: () => {
+                try {
+                  custom.tab?.close?.();
+                } catch {
+                  /* ignore */
+                }
+              },
+              onTitleChange: (t: string) => {
+                try {
+                  custom.tab?.updateTitle?.(t);
+                } catch {
+                  /* ignore */
+                }
+              },
+              // 阅读器划词工具栏委托插件能力：朗读 / 发送笔记本 / 翻译
+              onSpeak: (t: string) => { try { self.plugin?.speakText?.(t); } catch { /* ignore */ } },
+              onSendToNote: (opts: { markdown: string; title: string }) =>
+                self.plugin?.sendReaderSelection?.(opts) ?? undefined,
+              onInsertToCurrentDoc: (markdown: string) =>
+                self.plugin?.insertReaderSelectionToCurrentDoc?.({ markdown }) ?? undefined,
+              onTranslate: (t: string) => self.plugin?.translateText?.(t) ?? undefined,
+              getLabel: self.getLabel,
+            },
+          });
+        } catch (e) {
+          console.warn("[REword] 阅读 Tab 挂载失败:", e);
+          return;
+        }
+        self.openTabs.set(bookId, { tab: custom.tab, comp });
+        // 2026-08-24 修复（问题3）：立即给阅读 Tab 一个稳定标题，避免被思源当成
+        // "无名空白 Tab" 参与「在当前页签中打开 → 替换未修改页签」的回收逻辑。
+        // 书名异步加载完成后 ReaderView 会经 onTitleChange 再次更新为 "书名 · 章节"。
+        // 自定义 Tab 本身不参与文档页签的替换判定，但明确命名可彻底排除误判。
+        try {
+          custom.tab?.updateTitle?.(custom.data?.title || "阅读");
+        } catch {
+          /* ignore */
+        }
+        // 2026-08-24 修复（问题4）：标记阅读 Tab 为「已修改」，避免被思源
+        // 「在当前页签中打开 → 替换未修改页签」逻辑回收（详见 markReaderTabDirty）。
+        markReaderTabDirty(custom.tab);
+      },
+      destroy: function (this: any) {
+        const custom = this;
+        const bookId = custom.data?.bookId;
+        if (!bookId) return;
+        const rec = self.openTabs.get(bookId);
+        if (rec) {
+          try {
+            rec.comp?.$destroy?.();
+          } catch {
+            /* ignore */
+          }
+          self.openTabs.delete(bookId);
+        }
+      },
+    });
+  }
+
+  /** 打开一本书的阅读 Tab；已打开则聚焦（不重复开），未打开则新建并激活 */
+  async openBookTab(bookId: string, title?: string): Promise<void> {
+    const existing = this.openTabs.get(bookId);
+    if (existing?.tab) {
+      try {
+        existing.tab.parent?.switchTab?.(existing.tab.headElement);
+      } catch {
+        /* ignore */
+      }
+      return;
+    }
+    // 2026-08-24 修复（问题3）：防重入。书架连点/并发调用时，init 尚未把 tab 写回
+    // openTabs，第二次调用会再 openTab 一次，造成重复 custom Tab，思源可能把先开的
+    // 无名 Tab 当作「未修改」回收。用 opening 锁挡住并发的重复打开。
+    if (this.opening.has(bookId)) return;
+    this.opening.add(bookId);
+    console.log("[REword] openBookTab 调 openTab", { bookId });
+    try {
+      // 思源 openTab 路由：custom.id 必须精确等于 addTab 注册的工厂 key
+      // 实测 = plugin.name + tab.type 直接拼接（无分隔符）：
+      // "siyuan-plugin-reword" + "reader" = "siyuan-plugin-rewordreader"
+      const tab = await openTab({
+        app: (window as any).siyuan?.ws?.app,
+        custom: {
+          id: `${this.plugin.name}${READER_TAB_TYPE}`,
+          type: READER_TAB_TYPE,
+          icon: "iconBook",
+          title: title || "阅读",
+          data: { bookId, title },
+        } as any,
+        keepCursor: false,
+        openNewTab: true,
+        afterOpen: () => {
+          // 打开后显式切换到新书页签，确保界面自动跳转定位到阅读窗口
+          // addTab 的 init 已把 tab 记录到 openTabs，因此从 map 中取最可靠
+          try {
+            const opened = this.openTabs.get(bookId)?.tab;
+            if (opened) {
+              opened.parent?.switchTab?.(opened.headElement);
+              markReaderTabDirty(opened); // 二次兜底：init 时序早于 element 完全挂载时补标记
+            }
+          } catch {
+            /* ignore */
+          }
+        },
+      });
+      console.log("[REword] openBookTab openTab 返回", { tabExists: !!tab, tabType: (tab as any)?.type });
+      if (tab) {
+        this.openTabs.set(bookId, { tab, comp: this.openTabs.get(bookId)?.comp ?? null });
+        // 兜底：若 afterOpen 因时序未触发，立即再切一次
+        try {
+          tab.parent?.switchTab?.(tab.headElement);
+        } catch {
+          /* ignore */
+        }
+        markReaderTabDirty(tab); // 标记当前页签为「已修改」，避免被思源回收逻辑替换
+      }
+    } catch (e) {
+      console.warn("[REword] 打开阅读 Tab 失败:", e);
+    } finally {
+      // 无论成功失败都释放锁，避免异常时永久卡住该书无法再开
+      this.opening.delete(bookId);
+    }
+  }
+
+  /** 插件卸载：关闭所有阅读 Tab */
+  dispose(): void {
+    for (const rec of this.openTabs.values()) {
+      try {
+        rec.tab?.close?.();
+      } catch {
+        /* ignore */
+      }
+    }
+    this.openTabs.clear();
+  }
+
+  /**
+   * C 跳转定位：打开（或聚焦）书的阅读 Tab，并让 ReaderView 跳转到指定 cfi 弹查看气泡。
+   * 由 index.ts 侧边栏阅读批注「原文」点击触发。
+   */
+  async focusAnnotation(bookId: string, cfi: string): Promise<void> {
+    if (!bookId || !cfi) return;
+    try {
+      await this.openBookTab(bookId);
+    } catch (e) {
+      console.warn("[REword] focusAnnotation 打开阅读 Tab 失败:", e);
+    }
+    // openBookTab 后 comp（ReaderView 实例）同步写入 openTabs（init 内 new ReaderView 后立即 set）。
+    // 对未开过的书，openTab 异步挂载可能略有延迟，这里短暂轮询等待 comp.focusAnnotation 可用。
+    let comp: any = null;
+    for (let i = 0; i < 12; i++) {
+      comp = this.openTabs.get(bookId)?.comp;
+      if (comp?.focusAnnotation) break;
+      await new Promise((r) => setTimeout(r, 120));
+    }
+    if (comp?.focusAnnotation) {
+      try {
+        await comp.focusAnnotation(cfi);
+      } catch (e) {
+        console.warn("[REword] focusAnnotation 调用 ReaderView 失败:", e);
+      }
+    } else {
+      console.warn("[REword] focusAnnotation 未找到 ReaderView 实例，无法跳转", { bookId });
+    }
+  }
+}

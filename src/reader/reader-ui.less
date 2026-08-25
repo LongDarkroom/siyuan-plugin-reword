@@ -1,0 +1,185 @@
+/* RE word 阅读器 - UI 设计令牌与动效基线
+   --------------------------------------------------------------------
+   本文件是 reader 内部所有 UI 组件的样式基线，与 ReaderView.svelte 的
+   <style> 块内的具体组件样式形成层级：
+     - reader-ui.less（基础变量/动效/通用按钮/抽屉）  ← 本文件
+     - ReaderView.svelte <style>（具体组件）
+
+   设计原则：
+     - 颜色：全部用 --b3-* / --hw-* 设计令牌，不硬编码
+     - 动效：200ms ease-out 一致，禁用 prefers-reduced-motion
+     - 响应式：媒体查询按 4 断点（wide / normal / narrow / tiny）
+     - 主题：自动跟随思源暗色（依赖 --b3-* 变量，无白闪）
+   -------------------------------------------------------------------- */
+
+/* 通用动效：抽屉 200ms / 浮窗 150ms / 模态 250ms */
+.reader-ui-transition {
+  transition-property: background, color, border-color, opacity, transform;
+  transition-duration: 200ms;
+  transition-timing-function: ease-out;
+}
+
+.reader-ui-transition--fast { transition-duration: 150ms; }
+.reader-ui-transition--slow { transition-duration: 250ms; }
+
+/* 抽屉滑入（从右） */
+@keyframes reader-slide-in-right {
+  from { transform: translateX(100%); opacity: 0; }
+  to   { transform: translateX(0);     opacity: 1; }
+}
+.reader-ui-drawer--right {
+  animation: reader-slide-in-right 200ms ease-out;
+}
+
+/* 抽屉滑入（从左） */
+@keyframes reader-slide-in-left {
+  from { transform: translateX(-100%); opacity: 0; }
+  to   { transform: translateX(0);      opacity: 1; }
+}
+.reader-ui-drawer--left {
+  animation: reader-slide-in-left 200ms ease-out;
+}
+
+/* 浮窗淡入 */
+@keyframes reader-fade-in {
+  from { opacity: 0; transform: scale(0.96); }
+  to   { opacity: 1; transform: scale(1); }
+}
+.reader-ui-popover {
+  animation: reader-fade-in 150ms ease-out;
+}
+
+/* 通用按钮基线（被 ReaderView / BookshelfView / ReaderSettings 等复用） */
+.reader-ui-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 28px;
+  height: 28px;
+  padding: 0 8px;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--b3-theme-on-surface);
+  font-size: 13px;
+  cursor: pointer;
+  user-select: none;
+  transition: background 200ms ease-out, color 200ms ease-out, border-color 200ms ease-out;
+}
+.reader-ui-btn:hover {
+  background: var(--b3-list-hover, rgba(0, 0, 0, 0.04));
+}
+.reader-ui-btn--active {
+  color: var(--b3-theme-primary, #0f6bff);
+  border-color: var(--b3-theme-primary, #0f6bff);
+}
+.reader-ui-btn--disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* 抽屉基线 */
+.reader-ui-drawer {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 320px;
+  background: var(--b3-theme-surface, #fff);
+  border-right: 1px solid var(--b3-border-color);
+  z-index: 100;
+  display: flex;
+  flex-direction: column;
+}
+.reader-ui-drawer--right {
+  right: 0;
+  border-right: none;
+  border-left: 1px solid var(--b3-border-color);
+  animation-name: reader-slide-in-right;
+}
+.reader-ui-drawer--left {
+  left: 0;
+  animation-name: reader-slide-in-left;
+}
+.reader-ui-drawer__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--b3-border-color);
+  font-weight: 500;
+}
+.reader-ui-drawer__body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 8px 0;
+}
+.reader-ui-drawer__backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.3);
+  z-index: 99;
+  animation: reader-fade-in 150ms ease-out;
+}
+
+/* 进度条基线（被 ReaderView 进度条 + ReaderBookmark 等复用） */
+.reader-ui-progress {
+  position: relative;
+  width: 100%;
+  height: 4px;
+  background: var(--b3-border-color, #e0e0e0);
+  border-radius: 2px;
+  overflow: hidden;
+  cursor: pointer;
+  transition: height 200ms ease-out;
+}
+.reader-ui-progress:hover { height: 8px; }
+.reader-ui-progress__fill {
+  height: 100%;
+  background: var(--b3-theme-primary, #0f6bff);
+  border-radius: 2px;
+  transition: width 150ms ease-out;
+}
+.reader-ui-progress__thumb {
+  position: absolute;
+  top: 50%;
+  width: 12px;
+  height: 12px;
+  background: var(--b3-theme-primary, #0f6bff);
+  border: 2px solid var(--b3-theme-surface, #fff);
+  border-radius: 50%;
+  transform: translate(-50%, -50%);
+  opacity: 0;
+  transition: opacity 200ms ease-out;
+}
+.reader-ui-progress:hover .reader-ui-progress__thumb { opacity: 1; }
+
+/* 4 断点响应式（wide / normal / narrow / tiny） */
+/* 默认（tiny 起）隐藏 */
+.reader-ui-hide-narrow,
+.reader-ui-hide-tiny { display: none; }
+
+/* narrow (>= 480) */
+@media (min-width: 480px) {
+  .reader-ui-hide-tiny { display: initial; }
+}
+/* normal (>= 800) */
+@media (min-width: 800px) {
+  .reader-ui-hide-narrow { display: initial; }
+  .reader-ui-hide-tiny { display: initial; }
+}
+
+/* 暗色模式自动跟随（思源变量已自动处理，无需 media query） */
+
+/* 尊重 prefers-reduced-motion */
+@media (prefers-reduced-motion: reduce) {
+  .reader-ui-transition,
+  .reader-ui-drawer--right,
+  .reader-ui-drawer--left,
+  .reader-ui-popover,
+  .reader-ui-progress,
+  .reader-ui-progress__fill,
+  .reader-ui-progress__thumb {
+    animation: none !important;
+    transition: none !important;
+  }
+}

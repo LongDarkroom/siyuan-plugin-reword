@@ -1,8 +1,11 @@
-import { WordStatus, MASTERY_MAX } from "../types.ts";
-import type { WordRecord, VocabTheme, VocabBook, VocabStoreData, VocabSort, ReviewGrade, ReviewEvent } from "../types.ts";
+import { WordStatus, MASTERY_MAX, LearningStatus } from "../types.ts";
+import type { WordRecord, VocabTheme, VocabBook, VocabStoreData, VocabSort, ReviewGrade, ReviewEvent, LearningStatus as LearningStatusType } from "../types.ts";
 import { sqlQuery, getBlockAttrs } from "../siyuan/index.ts";
 import { getLogger } from "../core/logger.ts";
 import { computeDifficulty } from "../review/difficulty.ts";
+
+/** 2026-08-22 新增:学习状态变更监听者(由 vocab-highlight 模块订阅) */
+export type LearningStatusListener = (word: string, status: LearningStatusType) => void;
 
 const DEFAULT_BOOK = "我的单词本";
 const DEFAULT_THEME = "未分类";
@@ -37,11 +40,25 @@ export class VocabStore {
   private data: VocabStoreData = { books: [], activeBookId: "", activeThemeId: "" };
   private onChange?: () => void | Promise<void>;
   /**
+   * 2026-08-23 新增:load 完成守卫。
+   * 修复词库丢失根因:onload 期间 `new VocabStore()` 后 data 是空(含 1 个空 book),
+   * 若此时 persist() 被触发(同步/异步早期副作用)会把空数据覆盖磁盘旧数据。
+   * 守卫:load() 同步设置 this.loaded = true;persist() 在 !loaded 时直接 noop。
+   * 注意:__forcePersistForMigration 是显式越权入口,仅用于运维修复场景。
+   */
+  private loaded = false;
+  /**
    * 反向索引：word(小写) → {book, theme, record}。
    * 强引用 record，便于 record 字段 in-place 更新后索引自动同步。
    * 注意：移除整本/整主题时必须 rebuild，否则会留下 dangling 引用。
    */
   private byWord = new Map<string, { book: VocabBook; theme: VocabTheme; record: WordRecord }>();
+  /**
+   * 2026-08-22 新增:学习状态变更监听者集合。
+   * 写路径(setLearningStatus / addWord)同步 emit,供 vocab-highlight 模块做即时刷新。
+   * 注意:不在 persist() 内部 emit——避免"批量更新时所有 listener 重复触发重扫"。
+   */
+  private learningStatusListeners = new Set<LearningStatusListener>();
 
   constructor(onChange?: () => void | Promise<void>) {
     this.onChange = onChange;
@@ -50,12 +67,17 @@ export class VocabStore {
   /**
    * 重建 byWord 索引（O(N)）。仅在批量结构变更（移除整本/整主题/反序列化）时调用。
    * 单词增删/移动走增量更新，不调本方法。
+   * 2026-08-22 改：顺便给旧数据补 learningStatus 字段（默认 'learning'），保证兼容性。
    */
   private rebuildByWordIndex(): void {
     this.byWord.clear();
     for (const book of this.data.books) {
       for (const theme of book.themes) {
         for (const record of theme.words) {
+          // 旧数据兼容：缺 learningStatus 字段视为未掌握
+          if (!record.learningStatus) {
+            record.learningStatus = LearningStatus.Learning;
+          }
           this.byWord.set(record.word, { book, theme, record });
         }
       }
@@ -87,6 +109,9 @@ export class VocabStore {
       // 尝试从旧版思源文档词库迁移
       this.migrateFromLegacyDoc().catch(() => {/* 迁移失败不影响启动 */});
     }
+    // 2026-08-23:无论 valid 与否,load 完成即标 loaded=true;
+    // 后续 persist() 才会真正写盘,避免初始化竞态窗口内空数据覆盖磁盘。
+    this.loaded = true;
   }
 
   /** 序列化 */
@@ -95,6 +120,11 @@ export class VocabStore {
   }
 
   private async persist(): Promise<void> {
+    // 2026-08-23:loaded 守卫 — load() 还没跑完时(初始化竞态窗口)直接 noop,
+    // 避免空 data 覆盖磁盘旧数据(根因修复)。
+    if (!this.loaded) {
+      return;
+    }
     if (this.onChange) {
       try {
         await this.onChange();
@@ -102,6 +132,21 @@ export class VocabStore {
         getLogger().warn("[REword] 词库持久化失败:", { error: e });
       }
     }
+  }
+
+  /**
+   * 2026-08-23 新增:强制持久化入口(运维修复用)。
+   * 场景:用户已因旧版本 bug 丢数据,需触发 migrate 重新从 `HiWord-Vocabulary` 文档恢复;
+   * 或运维手动覆盖磁盘。**不在常规 addWord/setActiveBook 路径调用**。
+   */
+  __forcePersistForMigration(): Promise<void> {
+    this.loaded = true;
+    return this.persist();
+  }
+
+  /** 2026-08-23 新增:测试 / 运维只读状态 */
+  __isLoaded(): boolean {
+    return this.loaded;
   }
 
   // ============ 默认与激活态 ============
@@ -271,6 +316,8 @@ export class VocabStore {
       meaning: meta?.meaning ?? "",
       mastery: 0,
       status: WordStatus.Active,
+      // 2026-08-22 词库驱动高亮：新词默认未掌握(黄色)
+      learningStatus: LearningStatus.Learning,
       labels: meta?.labels ?? [],
       example: meta?.example ?? "",
       created: now,
@@ -297,7 +344,65 @@ export class VocabStore {
     // 1.1 byWord 同步：新增词进索引，O(1)
     this.byWord.set(w, { book, theme, record });
     await this.persist();
+    // 2026-08-22 新增：emit learningStatusChange,触发高亮刷新
+    this.emitLearningStatusChange(w, record.learningStatus ?? LearningStatus.Learning);
     return { added: true, record };
+  }
+
+  /**
+   * 2026-08-22 新增：切换单词学习状态(词库面板"未掌握/已掌握/需复习"按钮调)。
+   *  - 单词不存在 → 静默忽略(返回 false),不抛错
+   *  - 2026-08-23 改：status 传 null/undefined/"" = 清除样式(不显示高亮),内部 delete 字段
+   *  - 写完持久化 + emit learningStatusChange(供 vocab-highlight 即时刷新高亮)
+   */
+  async setLearningStatus(
+    word: string,
+    status: LearningStatusType | null | undefined
+  ): Promise<boolean> {
+    const w = word.toLowerCase().trim();
+    const entry = this.byWord.get(w);
+    if (!entry) return false;
+    // 规范化:null / undefined / "" 都视为"清除"
+    const isClear = !status;
+    const nextStatus: LearningStatusType | undefined = isClear
+      ? undefined
+      : (status as LearningStatusType);
+    // 无变化则跳过
+    if (entry.record.learningStatus === nextStatus) return true;
+    if (isClear) {
+      // delete 而非赋空串,语义更清晰,且序列化更干净
+      delete entry.record.learningStatus;
+    } else {
+      entry.record.learningStatus = nextStatus;
+    }
+    entry.record.updated = new Date().toISOString();
+    await this.persist();
+    // emit 时把 undefined 传出去(让 listener 知道这是"清除"事件)
+    this.emitLearningStatusChange(w, (nextStatus as any) ?? ("cleared" as any));
+    return true;
+  }
+
+  /**
+   * 2026-08-22 新增：订阅学习状态变更。
+   * 返回取消订阅函数(由 vocab-highlight.start/stop 配对调用)。
+   * 不会因 listener 抛错影响其他 listener 或写入流程。
+   */
+  onLearningStatusChange(listener: LearningStatusListener): () => void {
+    this.learningStatusListeners.add(listener);
+    return () => {
+      this.learningStatusListeners.delete(listener);
+    };
+  }
+
+  /** 2026-08-22 新增：emit 学习状态变更 */
+  private emitLearningStatusChange(word: string, status: LearningStatusType): void {
+    for (const l of this.learningStatusListeners) {
+      try {
+        l(word, status);
+      } catch (e) {
+        getLogger().warn("[REword] learningStatus listener 抛错(已忽略)", { error: e });
+      }
+    }
   }
 
   /**

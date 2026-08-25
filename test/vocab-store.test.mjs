@@ -229,3 +229,137 @@ test("1.1 byWord 索引:与 data.books 数量一致性(防漂移)", async () => 
   assert.equal(all2.length, 2);
   assert.equal(s.__byWordIndexSizeForTest(), all2.length);
 });
+
+// ============================================================
+// 2026-08-22 新增:LearningStatus 字段 + setLearningStatus + onLearningStatusChange
+// ============================================================
+import { LearningStatus } from "../src/types.ts";
+
+test("learningStatus:新建单词默认 learningStatus='learning'", async () => {
+  const s = makeStore();
+  await s.addWord("hello", { meaning: "你好" });
+  const r = s.findRecord("hello");
+  assert.ok(r);
+  assert.equal(r.learningStatus, LearningStatus.Learning);
+});
+
+test("learningStatus:setLearningStatus 修改后 record 字段同步 + byWord 引用一致", async () => {
+  const s = makeStore();
+  await s.addWord("apple");
+  const before = s.findRecord("apple");
+  const ok = await s.setLearningStatus("apple", LearningStatus.Mastered);
+  assert.equal(ok, true);
+  const after = s.findRecord("apple");
+  assert.equal(after.learningStatus, LearningStatus.Mastered);
+  // byWord 是强引用,record 应当是同一对象(更新 in-place)
+  assert.strictEqual(before, after);
+});
+
+test("learningStatus:setLearningStatus 不存在的单词返回 false(静默忽略)", async () => {
+  const s = makeStore();
+  const ok = await s.setLearningStatus("nonexistent", LearningStatus.Mastered);
+  assert.equal(ok, false);
+  // 不应 throw
+});
+
+test("learningStatus:setLearningStatus 触发 onLearningStatusChange 监听者", async () => {
+  const s = makeStore();
+  await s.addWord("test");
+  const events = [];
+  const unsub = s.onLearningStatusChange((w, st) => events.push({ word: w, status: st }));
+  await s.setLearningStatus("test", LearningStatus.Review);
+  assert.equal(events.length, 1);
+  assert.equal(events[0].word, "test");
+  assert.equal(events[0].status, "review");
+  unsub();
+  // 取消订阅后再触发,不应再收到
+  await s.setLearningStatus("test", LearningStatus.Mastered);
+  assert.equal(events.length, 1, "取消订阅后不再接收");
+});
+
+test("learningStatus:setLearningStatus 状态相同时不 emit(避免无谓刷新)", async () => {
+  const s = makeStore();
+  await s.addWord("foo");
+  const events = [];
+  s.onLearningStatusChange((w, st) => events.push({ w, st }));
+  await s.setLearningStatus("foo", LearningStatus.Learning); // 已经是 learning
+  assert.equal(events.length, 0, "同状态不触发 emit");
+});
+
+test("learningStatus:addWord 新增单词后 emit('learning')", async () => {
+  const s = makeStore();
+  const events = [];
+  s.onLearningStatusChange((w, st) => events.push({ w, st }));
+  await s.addWord("fresh");
+  assert.ok(events.length >= 1);
+  assert.equal(events[events.length - 1].w, "fresh");
+  assert.equal(events[events.length - 1].st, LearningStatus.Learning);
+});
+
+test("learningStatus:旧数据(无 learningStatus 字段)load 时补为 'learning'", () => {
+  const s = new VocabStore();
+  // 模拟旧 JSON 数据,record 没有 learningStatus 字段
+  s.load({
+    books: [{
+      id: "b1", name: "B1", order: 0,
+      themes: [{ id: "t1", name: "未分类", order: 0, words: [
+        { id: "w1", word: "legacy", phonetic: "", pos: "", meaning: "", mastery: 0, status: "active", labels: [], example: "", created: "2025-01-01", updated: "2025-01-01", order: 0 }
+        // 注意:无 learningStatus 字段
+      ]}]
+    }],
+    activeBookId: "b1",
+    activeThemeId: "t1",
+    reviewEvents: [],
+  });
+  const r = s.findRecord("legacy");
+  assert.ok(r);
+  assert.equal(r.learningStatus, LearningStatus.Learning);
+});
+
+// ============================================================
+// 2026-08-23 新增:清除样式(✕)+ 收起态相关测试
+// ============================================================
+
+test("learningStatus:setLearningStatus(word, null) = 清除样式(字段被 delete)", async () => {
+  const s = makeStore();
+  await s.addWord("apple");
+  await s.setLearningStatus("apple", LearningStatus.Mastered);
+  const cleared = await s.setLearningStatus("apple", null);
+  assert.equal(cleared, true);
+  const r = s.findRecord("apple");
+  assert.ok(r);
+  assert.equal(r.learningStatus, undefined, "字段被 delete,不应残留值");
+});
+
+test("learningStatus:setLearningStatus(word, undefined) 也走清除路径", async () => {
+  const s = makeStore();
+  await s.addWord("banana");
+  await s.setLearningStatus("banana", LearningStatus.Review);
+  const cleared = await s.setLearningStatus("banana", undefined);
+  assert.equal(cleared, true);
+  assert.equal(s.findRecord("banana").learningStatus, undefined);
+});
+
+test("learningStatus:清除样式时 emit 一个 'cleared' 哨兵状态(让 highlighter 移除高亮)", async () => {
+  const s = makeStore();
+  await s.addWord("x");
+  await s.setLearningStatus("x", LearningStatus.Mastered);
+  const events = [];
+  s.onLearningStatusChange((w, st) => events.push({ w, st }));
+  await s.setLearningStatus("x", null);
+  assert.ok(events.length >= 1);
+  const last = events[events.length - 1];
+  assert.equal(last.w, "x");
+  // 哨兵字符串 'cleared' (高亮模块据此从索引移除)
+  assert.equal(last.st, "cleared");
+});
+
+test("learningStatus:对已清除的词再次清除,emit 不触发(无变化短路)", async () => {
+  const s = makeStore();
+  await s.addWord("y");
+  await s.setLearningStatus("y", null); // 第一次清除
+  const events = [];
+  s.onLearningStatusChange(() => events.push(1));
+  await s.setLearningStatus("y", null); // 再次清除(无变化)
+  assert.equal(events.length, 0, "已清除的词再清除不应 emit");
+});
