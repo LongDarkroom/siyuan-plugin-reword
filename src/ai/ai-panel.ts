@@ -72,6 +72,8 @@ export interface AiHost {
   getDeepReadSource(): AiDeepReadSource | null;
   /** 异步读取整块正文（kramdown），用于「读取当前块」且无选区时补全文本 */
   fetchBlockText(blockId: string): Promise<string | null>;
+  /** 读取块类型（如 p 段落 / l,i 列表 / h 标题 / c 代码 / quote 引用），用于拖入卡片图标区分；失败返回 null */
+  fetchBlockType(blockId: string): Promise<string | null>;
   /** 读取整篇文档正文（拼装 markdown，截断 12k）。用于页签/文档树拖入 */
   fetchDocText(docId: string): Promise<string | null>;
   /** 从拖拽事件中解析块 ID（可能返回 null 表示非块拖拽） */
@@ -201,6 +203,8 @@ export class AiPanel {
   private _busySince: number | null = null;
   /** 当前可中止的 AI 请求（用户点「停止」时 abort） */
   private aiAbort: AbortController | null = null;
+  /** 2026-08-27：发送按钮引用，供 sendText() 复用同一条发送链路（避免重复实现流式逻辑） */
+  private runBtnEl: HTMLButtonElement | null = null;
   /** 流式 thinking 实时显示容器（生成期间挂载在 loadingMsg 内，完成后移除） */
   private liveThinkingEl: HTMLElement | null = null;
   /** 流式 thinking 累积文本（用于最终替换为 <details> 面板） */
@@ -239,9 +243,9 @@ export class AiPanel {
     if (!contentEl) return;
     this.contentEl = contentEl;
 
-    const src = this.host.getDeepReadSource();
-    const prefill = src ? src.text : "";
-
+    // 2026-08-26 修复：不再在 render() 中自动把选区文本预填进输入框。
+    // 旧逻辑无论用户是否已输入，每次切回 AI 精读（重渲染）都会把「先前选中文本」灌入输入框，
+    // 覆盖已输入内容。预填改为仅在显式动作（⌥⌘A 命令 / 右键「发送到 AI」）经 prefillSelection() 触发。
     contentEl.innerHTML = `
       <div class="hiword-ai-panel">
         <!-- 顶部工具栏 -->
@@ -329,7 +333,7 @@ export class AiPanel {
         </div>
 
         <!-- 2026-08-22 改：resizer 升级为 chevron 按钮(可点击+可拖拽) -->
-        <div class="hiword-ai-resizer" id="hiword-ai-resizer" title="点击收起输入区 / 拖动调整高度">
+        <div class="hiword-ai-resizer" id="hiword-ai-resizer" data-tooltip="点击收起输入区 / 拖动调整高度">
           <button class="hiword-ai-resizer-toggle" id="hiword-ai-resizer-toggle" aria-label="收起输入区" type="button">▾</button>
           <span class="hiword-ai-resizer-grip"></span>
         </div>
@@ -337,7 +341,8 @@ export class AiPanel {
         <!-- 底部输入区（2026-08-22 改：工具栏上移到 footer 顶部,与输入框贴紧,消除中间大块空白） -->
         <div class="hiword-ai-footer" id="hiword-ai-footer">
           <div class="hiword-ai-toolbar" id="hiword-ai-toolbar">
-            <button class="hiword-ai-tool-btn" id="hiword-ai-upload" title="上传文件">
+            <!-- 左组：内容来源 -->
+            <button class="hiword-ai-tool-btn" id="hiword-ai-upload" title="上传文件（支持文本类）">
               <svg class="hiword-ai-tool-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
                 <path d="M12 16V4"/>
                 <path d="M7 9l5-5 5 5"/>
@@ -345,14 +350,16 @@ export class AiPanel {
               </svg>
               <span class="hiword-ai-tool-label">上传</span>
             </button>
-            <button class="hiword-ai-tool-btn" id="hiword-ai-docsearch" title="搜索文档 / 添加上下文">
+            <button class="hiword-ai-tool-btn" id="hiword-ai-docsearch" title="添加上下文 / 搜索文档">
               <svg class="hiword-ai-tool-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
                 <circle cx="11" cy="11" r="7"/>
                 <path d="M21 21l-4.3-4.3"/>
               </svg>
-              <span class="hiword-ai-tool-label">搜索</span>
+              <span class="hiword-ai-tool-label">添加上下文</span>
             </button>
-            <button class="hiword-ai-tool-btn" id="hiword-ai-templates" title="提示词模板">
+            <span class="hiword-ai-toolbar-divider"></span>
+            <!-- 右组：提示词 / 配置 -->
+            <button class="hiword-ai-tool-btn" id="hiword-ai-templates" title="提示词模板：插入到输入框，不改 AI 角色">
               <svg class="hiword-ai-tool-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
                 <rect x="4" y="3" width="16" height="18" rx="2"/>
                 <path d="M8 8h8"/>
@@ -361,12 +368,13 @@ export class AiPanel {
               </svg>
               <span class="hiword-ai-tool-label">模板</span>
             </button>
-            <button class="hiword-ai-tool-btn" id="hiword-ai-presets" title="预设">
+            <button class="hiword-ai-tool-btn" id="hiword-ai-presets" title="预设：切换 AI 角色/温度（点击管理）">
               <svg class="hiword-ai-tool-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
                 <circle cx="12" cy="12" r="3.2"/>
                 <path d="M12 2.5v3M12 18.5v3M2.5 12h3M18.5 12h3M4.9 4.9l2.1 2.1M16.9 16.9l2.1 2.1M19.1 4.9l-2.1 2.1M7.1 16.9l-2.1 2.1"/>
               </svg>
               <span class="hiword-ai-tool-label">预设</span>
+              <span class="hiword-ai-tool-sub" id="hiword-ai-preset-name"></span>
             </button>
             <span class="hiword-ai-toolbar-spacer"></span>
             <div class="hiword-ai-status" id="hiword-ai-status"></div>
@@ -405,7 +413,7 @@ export class AiPanel {
     this.bind(contentEl);
     this.mountProtyle(contentEl);
     // Protyle 延迟挂载：预填内容等挂载完成后再写入，避免被挂载重建的 DOM 冲掉
-    this.pendingPrefill = prefill || null;
+    this.pendingPrefill = null; // 2026-08-26：显式复位，预填仅在 prefillSelection() 显式触发
     // 应用 AI 消息字体大小设置（CSS 变量驱动，随设置实时生效）
     this.applyAiFontSize();
     // 自动恢复上次活跃会话（有消息的会话才恢复，避免空会话干扰新用户）
@@ -591,7 +599,18 @@ export class AiPanel {
         el.addEventListener("paste", (e: ClipboardEvent) => { void this.handlePaste(e); }, true);
         el.addEventListener("click", (e: Event) => {
           const target = (e.target as HTMLElement).closest('[data-type="block-ref"]') as HTMLElement | null;
-          if (target) { e.preventDefault(); e.stopPropagation(); target.classList.toggle("hiword-ref--expanded"); }
+          if (target) {
+            e.preventDefault();
+            e.stopPropagation();
+            const me = e as MouseEvent;
+            // 命中卡片右侧 × 区域（padding-right 18px 预留）→ 删除该引用卡
+            if (target.getBoundingClientRect().right - me.clientX <= 20) {
+              target.remove();
+              this.refreshInputEmptyState();
+              return;
+            }
+            target.classList.toggle("hiword-ref--expanded");
+          }
         }, true);
         // Protyle 挂载完成，写入延迟的预填内容
         if (this.pendingPrefill) { this.setInputMarkdown(this.pendingPrefill); this.pendingPrefill = null; }
@@ -637,7 +656,16 @@ export class AiPanel {
     inputEl.addEventListener("paste", (e: ClipboardEvent) => { void this.handlePaste(e); }, true);
     inputEl.addEventListener("click", (e: Event) => {
       const target = (e.target as HTMLElement).closest('[data-type="block-ref"]') as HTMLElement | null;
-      if (target) { e.stopPropagation(); target.classList.toggle("hiword-ref--expanded"); }
+      if (target) {
+        e.stopPropagation();
+        const me = e as MouseEvent;
+        if (target.getBoundingClientRect().right - me.clientX <= 20) {
+          target.remove();
+          this.refreshInputEmptyState();
+          return;
+        }
+        target.classList.toggle("hiword-ref--expanded");
+      }
     }, true);
     // 兜底模式同样写入延迟的预填内容
     if (this.pendingPrefill) { this.setInputMarkdown(this.pendingPrefill); this.pendingPrefill = null; }
@@ -660,10 +688,12 @@ export class AiPanel {
         /\.(txt|md|markdown|json|csv|log|xml|yml|yaml|html?|js|ts|tsx|jsx|css|py|go|rs|c|cpp|h|hpp|java|sh|sql|toml|ini|cfg)$/i.test(f.name)
       );
       if (textFiles.length === 0) {
+        const names = [...dt.files].map((f) => f.name).join("、");
         logger.warn("drop 包含不支持的文件类型（仅支持文本文件）", {
           operation: "拖块插入",
           data: { files: [...dt.files].map((f) => `${f.type} ${f.name}`) },
         });
+        showMessage(`仅支持文本文件（txt/md/代码/json 等），已忽略：${names}`, 4000, "error");
         return;
       }
       for (const file of textFiles) {
@@ -684,7 +714,7 @@ export class AiPanel {
       e.preventDefault();
       e.stopPropagation();
       try {
-        this.insertDocRef(docId);   // 同步插入占位卡（不预取 12k 文本）
+        await this.insertDocRef(docId);   // 异步：插入卡片 + 预取文档全文缓存
         logger.info("页签拖入占位成功", { operation: "页签拖入", data: { docId } });
       } catch (err) {
         logger.error("页签拖入失败", { operation: "页签拖入", error: err, data: { docId } });
@@ -808,6 +838,10 @@ export class AiPanel {
     // ★ 缓存内核 API 返回的完整 kramdown 正文到 refKramdownById，
     //   发送时 AI 路径直接从这里拿正文替换占位符，避免 Lute 二次解析 block-ref 节点导致的 anchor 截断
     if (kramdownBody) this.refKramdownById.set(blockId, kramdownBody);
+    // 块类型：用于卡片差异化图标/颜色（段落 ¶ / 列表 ☰ / 标题 H / 代码 </> / 引用 "）
+    // 误取/失败时不加修饰类，退化为默认段落样式，不影响功能
+    const blockType = (await this.host.fetchBlockType(blockId)) || "";
+    const typeClass = blockType ? ` hiword-ai-block-ref--${blockType}` : "";
     // anchor 用作输入框折叠卡片显示（取正文前 6 字预览）
     const anchor = kramdownBody;
     // 容错：API 失败/为空时用块 ID 短后缀作为锚文本（思源会渲染为带 ID 提示的块引用卡片）
@@ -818,7 +852,7 @@ export class AiPanel {
     const rawText = this.stripHtmlTags(anchor || fallbackAnchor).replace(/\n/g, " ").trim();
     const displayAnchor = rawText.slice(0, 6) + (rawText.length > 6 ? "…" : "");
     const safeAnchor = escapeHtml(displayAnchor || fallbackAnchor);
-    const card = `<span data-type="block-ref" data-id="${blockId}" data-subtype="s">${safeAnchor}</span>`;
+    const card = `<span data-type="block-ref" data-id="${blockId}" data-subtype="s" class="hiword-ai-block-ref${typeClass}" data-block-type="${escapeHtml(blockType)}">${safeAnchor}</span>`;
     logger.debug("插入块 " + blockId, { operation: "拖块插入", data: { blockId } });
 
     if (this.protyle) {
@@ -881,7 +915,7 @@ export class AiPanel {
    *     都能识别；发送时由 expandDocRefs 按「📄 文档 」锚前缀识别为文档引用，
    *     调 host.fetchDocText 实时拉取全文，复用既有逻辑，且文档被改也能拿到最新版。
    */
-  private insertDocRef(docId: string): void {
+  private async insertDocRef(docId: string): Promise<void> {
     const logger = getLogger();
     logger.info("页签/文档树拖入,插入文档引用卡片 docId=" + docId, { operation: "页签拖入" });
 
@@ -892,8 +926,36 @@ export class AiPanel {
     const safeId = docId.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
     const card =
       `<span data-type="block-ref" data-id="${safeId}" ` +
-      `data-subtype="s" class="hiword-ai-doc-ref" ` +
-      `title="发送时实时拉取文档全文">📄 文档 ${escapeHtml(shortId)}</span>`;
+      `data-subtype="s" class="hiword-ai-doc-ref" data-doc-status="loading" ` +
+      `title="正在载入文档全文…（发送时一并提交）">📄 文档 ${escapeHtml(shortId)}</span>`;
+
+    // 预取完成后更新卡片状态角标（loading → ready / failed）
+    const updateDocCardStatus = (status: "ready" | "failed") => {
+      const wysiwyg = this.protyle?.protyle?.wysiwyg?.element;
+      const cardEl =
+        (wysiwyg?.querySelector(`[data-type="block-ref"][data-id="${CSS.escape(docId)}"]`) as HTMLElement | null) ??
+        (this.inputEl?.querySelector(`[data-type="block-ref"][data-id="${CSS.escape(docId)}"]`) as HTMLElement | null);
+      if (cardEl) {
+        cardEl.setAttribute("data-doc-status", status);
+        cardEl.setAttribute("title", status === "ready" ? "文档全文已就绪，发送时一并提交" : "文档内容拉取失败，发送时将重试");
+      }
+    };
+
+    // ★ 预取文档全文并缓存（与 insertBlockRef 的 refKramdownById 对齐），
+    //   发送时 expandDocRefs 优先用缓存，避免发送时实时拉取失败导致 AI 收不到内容
+    this.host.fetchDocText(docId).then((text) => {
+      if (text) {
+        this.docTextCache.set(docId, text);
+        logger.info("文档预取成功", { operation: "页签拖入", data: { docId, len: text.length } });
+        updateDocCardStatus("ready");
+      } else {
+        logger.warn("文档预取为空，发送时将重试", { operation: "页签拖入", data: { docId } });
+        updateDocCardStatus("failed");
+      }
+    }).catch((e) => {
+      logger.warn("文档预取异常，发送时将重试", { operation: "页签拖入", data: { docId }, error: e });
+      updateDocCardStatus("failed");
+    });
 
     if (this.protyle) {
       const wysiwyg = this.protyle.protyle?.wysiwyg?.element;
@@ -916,16 +978,49 @@ export class AiPanel {
     if (blockId && wysiwyg.querySelector(`[data-type="block-ref"][data-id="${CSS.escape(blockId)}"]`)) {
       return;
     }
-    // 确保有可编辑段落作为锚点
+    // 确保有可编辑段落作为锚点（优先非占位段落）
     let paragraph = wysiwyg.querySelector<HTMLElement>("[data-node-id]:not([data-reword-placeholder]) > [contenteditable]");
     if (!paragraph) {
-      // 回退到任意 contenteditable 段落（含占位段落）
-      paragraph = wysiwyg.querySelector<HTMLElement>("[contenteditable='true']");
+      // 回退到任意非占位 contenteditable 段落
+      const allEditable = Array.from(wysiwyg.querySelectorAll<HTMLElement>("[contenteditable='true']"));
+      paragraph = allEditable.find((p) => {
+        const parent = p.closest<HTMLElement>("[data-node-id]");
+        return parent?.dataset?.rewordPlaceholder !== "1";
+      }) ?? null;
     }
     if (!paragraph) {
-      // 最终回退：创建新段落
+      // ★ 升级占位段为真段落：新会话时 wysiwyg 只有占位段，
+      // 与其创建新段落导致「空第一行 + 块引用第二行」的错乱布局，
+      // 不如直接把占位段升级——移除 placeholder 标记、写入内容、更新 node-id。
+      // 升级后 readInputValue 不再把它当占位清理，预设提示词也不会顶掉块引用。
+      const placeholder = wysiwyg.querySelector<HTMLElement>('[data-reword-placeholder="1"]');
+      if (placeholder) {
+        placeholder.removeAttribute('data-reword-placeholder');
+        placeholder.setAttribute('data-node-id', 'reword-p-' + Date.now());
+        const inner = placeholder.querySelector<HTMLElement>('[contenteditable="true"]');
+        if (inner) { inner.innerHTML = cardHtml; }
+        // ★ 追加空真段落供光标/后续输入（否则用预设提示词会出现「块引用→空行→文本」三行错乱）
+        const emptyId = 'reword-p-' + Date.now();
+        wysiwyg.insertAdjacentHTML('beforeend',
+          `<div data-node-id="${emptyId}" data-type="NodeParagraph"><div contenteditable="true"><br></div></div>`);
+        // 光标移到空段落，用户可直接继续输入
+        const newPara = wysiwyg.querySelector<HTMLElement>(`[data-node-id="${emptyId}"] > [contenteditable]`);
+        if (newPara) {
+          try {
+            const sel = window.getSelection();
+            const range = document.createRange();
+            range.selectNodeContents(newPara);
+            range.collapse(true);
+            sel?.removeAllRanges();
+            sel?.addRange(range);
+          } catch { /* selection 可能被锁定 */ }
+        }
+        return;
+      }
+      // 连占位段都没有（极端边界）：创建全新真段落
+      const newId = "reword-p-" + Date.now();
       wysiwyg.insertAdjacentHTML("beforeend",
-        `<div data-node-id="reword-p-${Date.now()}" data-type="NodeParagraph"><div contenteditable="true">${cardHtml}</div></div>`);
+        `<div data-node-id="${newId}" data-type="NodeParagraph"><div contenteditable="true">${cardHtml}</div></div>`);
       return;
     }
     // 在段落末尾追加卡片
@@ -1004,6 +1099,43 @@ export class AiPanel {
   private focusInput(): void {
     if (this.protyle) { this.protyle.focus(); return; }
     this.inputEl?.focus();
+  }
+
+  /**
+   * 显式把当前选区/块文本预填进输入框。
+   * 仅用于用户主动动作（⌥⌘A「AI 精读（当前块/选区）」命令、右键「发送到 AI 分析」），
+   * 不再在 render() 中自动触发——避免切走阅读 Tab 再切回 AI 精读时把「先前选中文本」灌入输入框、
+   * 覆盖用户已输入内容。
+   * - Protyle 已挂载：直接写入。
+   * - 尚未挂载（render 刚触发、rAF 待挂载）：暂存 pendingPrefill，挂载回调会消费。
+   */
+  public prefillSelection(): void {
+    const src = this.host.getDeepReadSource();
+    const text = src?.text || "";
+    if (!text) return; // 无选区/块文本：不打扰，保留用户已输入内容或空态
+    if (this.protyle || this.inputEl) {
+      this.setInputMarkdown(text);
+    } else {
+      this.pendingPrefill = text;
+    }
+  }
+
+  /**
+   * 2026-08-27：外部入口（阅读器「翻译」按钮）调用。
+   * 把文本预填进输入框并复用既有发送链路（runBtn 点击处理器内联实现，含流式生成）。
+   * 调用方负责先打开/聚焦面板（showAiPanel）。正在生成中则忽略本次请求，避免误 abort 丢失上一次结果。
+   */
+  public sendText(text: string): void {
+    if (!text || !text.trim()) return;
+    if (this.aiBusy) {
+      getLogger().warn("AiPanel.sendText 被忽略：AI 精读正在生成中");
+      return;
+    }
+    this.setInputMarkdown(text);
+    this.focusInput();
+    if (this.runBtnEl) {
+      this.runBtnEl.click();
+    }
   }
 
   /** 创建一个启用块引用语法的 Lute（Protyle 内置 lute 缺失时的兜底） */
@@ -1164,7 +1296,8 @@ export class AiPanel {
    * 必须保留思源原生语法，否则 block-ref 会被展成 @@REWORD_REF_id@@ 文本，失去交互与样式。
    */
   private getInputMarkdownForPrefill(): string {
-    return this.readInputValue({ replaceBlockRefs: false });
+    // trimEnd：去掉末尾空段落产生的多余换行，避免合并预设/模板时出现「块引用→空行→文本」的三行错乱
+    return this.readInputValue({ replaceBlockRefs: false }).trimEnd();
   }
 
   /** 读取输入框内容：Protyle 模式用全特性 Lute 把块 DOM 序列化为完整 Kramdown；回退用 htmlToMarkdown */
@@ -1186,9 +1319,26 @@ export class AiPanel {
       const existingLute = p.protyle.lute ?? undefined;
       const lute = this.fullKramdownLute(existingLute);
       try {
-        // 克隆并移除 REword 占位节点（lite Protyle wysiwyg 初始占位），避免被当作消息正文发送到 LLM
+        // 克隆并清理 REword 占位节点（lite Protyle wysiwyg 初始占位），避免被当作消息正文发送到 LLM
         const clone = wysiwyg.cloneNode(true) as HTMLElement;
-        clone.querySelectorAll('[data-reword-placeholder="1"]').forEach((n) => n.remove());
+        // ★ 安全网：移除占位段前，先将其中的块引用「救出」到新真段落。
+        //   场景：protyle.insert() 原生路径可能把块引用写入占位段（光标默认在占位段内），
+        //   若直接删占位段，块引用随之丢失 → 新会话拖块后用预设提示词会「顶掉」块引用。
+        clone.querySelectorAll('[data-reword-placeholder="1"]').forEach((placeholder) => {
+          const refs = placeholder.querySelectorAll('[data-type="block-ref"]');
+          if (refs.length > 0) {
+            // 将块引用迁移到新建的真段落中，再删除空占位段
+            const safePara = document.createElement('div');
+            safePara.setAttribute('data-node-id', 'reword-saved-' + Date.now());
+            safePara.setAttribute('data-type', 'NodeParagraph');
+            const inner = document.createElement('div');
+            inner.setAttribute('contenteditable', 'true');
+            refs.forEach((r) => inner.appendChild(r.cloneNode(true)));
+            safePara.appendChild(inner);
+            placeholder.parentNode?.insertBefore(safePara, placeholder.nextSibling);
+          }
+          placeholder.remove();
+        });
         // ★ Lute 为主：所有行内/块级格式（加粗/高亮/列表/代码块等）仍由 Lute 序列化。
         //   发送场景下块引用走「占位符旁路」：列表块 anchor 常含 {、数字. 等 kramdown 语法字符，
         //   Lute 序列化时会二次解析 anchor 文本导致截断（((id '27. 泄漏）。
@@ -1631,12 +1781,12 @@ export class AiPanel {
   }
 
   /**
-   * 2026-08-21 A 任务 v2：把 Markdown 中的文档占位符 ((docId '📄 文档 XXXXXX')) 展开为思源 SQL 实时拉取的文档正文。
-   * 镜像 expandBlockRefs 模式：
-   *   - 同一会话内已拉过同 docId → 走 docTextCache 复用
-   *   - 拉取失败/为空 → 占位替换为空（与 expandBlockRefs 一致降级）
+   * 把 Markdown 中的文档占位符 ((docId '📄 文档 XXXXXX')) 展开为文档正文。
+   * 策略（2026-08-26 修复）：
+   *   - 拖入时 insertDocRef 已预取全文到 docTextCache → 发送时缓存优先（零网络延迟）
+   *   - 缓存未命中时实时拉取（兼容历史会话/预取失败场景）
+   *   - 拉取失败 → 降级为明确提示文本（不再静默删掉导致 AI 看不到任何内容）
    *   - 全文超 MAX (12k) → 截断并在末尾追加"已截断"提示
-   *   - 多文档累加超 MAX → 降级为占位标题(不再叠加正文)
    */
   private async expandDocRefs(md: string): Promise<string> {
     const MAX_EXPAND = 12000;
@@ -1651,7 +1801,11 @@ export class AiPanel {
       if (!/^📄 文档 /.test(anchor)) continue;
       const docId = m[1];
       let text: string | undefined = this.docTextCache.get(docId);
-      if (text === undefined) {
+      if (text !== undefined) {
+        getLogger().info("[REword] expandDocRefs 缓存命中 docId=" + docId + " len=" + text.length);
+      } else {
+        // 缓存未命中：实时拉取（历史会话 / 预取失败时的兜底）
+        getLogger().info("[REword] expandDocRefs 缓存未命中，实时拉取 docId=" + docId);
         let fetched: string | null = null;
         try {
           fetched = await this.host.fetchDocText(docId);
@@ -1666,6 +1820,8 @@ export class AiPanel {
             if (oldest) this.docTextCache.delete(oldest);
           }
           text = fetched;
+        } else {
+          getLogger().warn("[REword] expandDocRefs 拉取结果为空 docId=" + docId + "（AI 将收到降级提示）");
         }
       }
       if (text) {
@@ -1679,8 +1835,14 @@ export class AiPanel {
           expandedLen += header.length + text.length;
         }
       } else {
-        // 拉取失败:占位替换为空（不发给 AI 噪声,但 UI 上仍可见折叠卡）
-        edits.push({ from: m.index, to: m.index + m[0].length, text: "" });
+        // ★ 降级：拉取失败时不再静默删除，而是给 AI 一个明确提示，
+        //   让 AI 知道用户引用了某个文档（即使内容不可用），避免 AI 说「看不到内容」
+        const shortId = docId.replace(/-/g, "").slice(-6);
+        edits.push({
+          from: m.index,
+          to: m.index + m[0].length,
+          text: `\n\n> ⚠️ 文档 ${shortId} 内容暂不可用（可能文档已被删除或权限不足），请用户重新拖入或粘贴正文。\n\n`,
+        });
       }
     }
     if (!edits.length) return md;
@@ -1722,6 +1884,8 @@ export class AiPanel {
     const readBtn = contentEl.querySelector("#hiword-ai-read") as HTMLButtonElement;
     const runBtn = contentEl.querySelector("#hiword-ai-run") as HTMLButtonElement;
     const sendBtn = contentEl.querySelector("#hiword-ai-send") as HTMLButtonElement;
+    // 2026-08-27：保存发送按钮引用，供外部（阅读器「翻译」）经 sendText() 复用同一条发送链路
+    this.runBtnEl = runBtn;
     const copyAllBtn = contentEl.querySelector("#hiword-ai-copyall") as HTMLButtonElement;
     const input = contentEl.querySelector("#hiword-ai-protyle") as HTMLElement;
     const statusEl = contentEl.querySelector("#hiword-ai-status") as HTMLElement;
@@ -1738,6 +1902,22 @@ export class AiPanel {
     const templatesBtn = contentEl.querySelector("#hiword-ai-templates") as HTMLButtonElement;
     const presetsBtn = contentEl.querySelector("#hiword-ai-presets") as HTMLButtonElement;
     const uploadBtn = contentEl.querySelector("#hiword-ai-upload") as HTMLButtonElement;
+    // 预设激活态同步到「预设」按钮：显示当前预设名 + 高亮（2026-08-26 改进）
+    const syncPresetButton = () => {
+      const nameEl = presetsBtn?.querySelector("#hiword-ai-preset-name") as HTMLElement | null;
+      const p = this.host.getActivePreset();
+      if (!presetsBtn) return;
+      if (p && p.name) {
+        presetsBtn.classList.add("hiword-ai-tool-btn--active");
+        presetsBtn.title = `当前预设：${p.name}（点击管理）`;
+        if (nameEl) { nameEl.textContent = p.name; nameEl.style.display = ""; }
+      } else {
+        presetsBtn.classList.remove("hiword-ai-tool-btn--active");
+        presetsBtn.title = "预设：切换 AI 角色/温度（点击管理）";
+        if (nameEl) { nameEl.textContent = ""; nameEl.style.display = "none"; }
+      }
+    };
+    syncPresetButton(); // 初始渲染即反映已持久化的激活预设
     const tokenRing = contentEl.querySelector("#hiword-ai-token-ring") as HTMLButtonElement;
     const tokenRingText = tokenRing?.querySelector(".hiword-ai-token-ring__text") as HTMLElement | null;
     const tokenRingProgress = tokenRing?.querySelector(".hiword-ai-token-ring__progress") as SVGCircleElement | null;
@@ -1931,6 +2111,14 @@ export class AiPanel {
         const file = fileInput.files?.[0];
         fileInput.remove();
         if (!file) return;
+
+        // 类型保护：accept 仅为提示，用户仍可选任意文件；非文本类读取会成乱码，故显式拦截
+        const textExtRe = /\.(txt|md|markdown|json|csv|log|xml|yml|yaml|html?|js|ts|tsx|jsx|css|py|go|rs|c|cpp|h|hpp|java|sh|sql|toml|ini|cfg)$/i;
+        if (!textExtRe.test(file.name) && !(file.type || "").startsWith("text/")) {
+          statusEl.textContent = `已忽略非文本文件「${file.name}」`;
+          showMessage(`仅支持文本文件（txt/md/代码/json 等），无法读取「${file.name}」`, 4000, "error");
+          return;
+        }
 
         // 尺寸保护：超过 2MB 提示
         if (file.size > 2 * 1024 * 1024) {
@@ -2285,6 +2473,7 @@ export class AiPanel {
           this.activePreset = p; // 保存即激活，本次精读生效
           statusEl.textContent = "预设已保存并激活";
           closeOverlay();
+          syncPresetButton();
         });
 
         panel.querySelector('[data-act="close-preset"]')?.addEventListener("click", async () => {
@@ -2292,6 +2481,7 @@ export class AiPanel {
           this.activePreset = undefined;
           statusEl.textContent = "已关闭预设，恢复自由对话";
           closeOverlay();
+          syncPresetButton();
         });
 
         panel.querySelector('[data-act="delete-preset"]')?.addEventListener("click", async (e) => {
@@ -2302,6 +2492,7 @@ export class AiPanel {
           }
           statusEl.textContent = "预设已删除";
           showPresetList();
+          syncPresetButton();
         });
 
         panel.querySelector('[data-act="preset-list"]')?.addEventListener("click", () => showPresetList());
@@ -2372,6 +2563,7 @@ export class AiPanel {
             statusEl.textContent = "预设已删除";
             listKw = "";
             showPresetList();
+            syncPresetButton();
           });
           item.querySelector('[data-act="open"]')?.addEventListener("click", () => {
             const p = this.host.listPresets().find((x) => x.id === id);
@@ -2379,6 +2571,7 @@ export class AiPanel {
               this.host.setActivePreset(id); // 选中即激活
               this.activePreset = p;
               showPresetPanel(p, false);
+              syncPresetButton();
             }
           });
         });

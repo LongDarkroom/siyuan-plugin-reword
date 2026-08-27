@@ -90,6 +90,11 @@ export class ReaderTabController {
               onInsertToCurrentDoc: (markdown: string) =>
                 self.plugin?.insertReaderSelectionToCurrentDoc?.({ markdown }) ?? undefined,
               onTranslate: (t: string) => self.plugin?.translateText?.(t) ?? undefined,
+              // 2026-08-27：翻译按钮发送到 AI 精读面板（自动打开）；悬浮取词「加入词库」委托 vocabStore
+              onTranslateToAi: (t: string) => self.plugin?.translateToAi?.(t),
+              onAddToVocab: (w: string) => self.plugin?.getVocabStore?.()?.addWord?.(w),
+              onRemoveFromVocab: (w: string) => self.plugin?.getVocabStore?.()?.removeWord?.(w),
+              isInVocab: (w: string) => !!self.plugin?.getVocabStore?.()?.hasWord?.(w),
               getLabel: self.getLabel,
               // 批注/高亮保存后固定阅读 Tab：官方 tab.pin() 防数量超限回收顶掉
               onProtectTab: () => {

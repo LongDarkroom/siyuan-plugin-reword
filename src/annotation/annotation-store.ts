@@ -13,6 +13,7 @@
 import { getLogger } from "../core/logger.ts";
 import { htmlToMd } from "./lute.ts";
 import { stripIal } from "./annotation-render.ts";
+import { getDefaultAnnotationColor } from "./annotation-config.ts";
 
 /** 批注来源 */
 export type AnnotationOrigin = "manual" | "ai";
@@ -87,11 +88,16 @@ export function isReading(a: AnnotationItem): boolean {
 
 /**
  * 是否为「纯高亮」（无批注内容）。
- * 与 renderWhaleNoteItem 旧逻辑（note===selectedText 也算纯标注）不同，这里用统一口径：
- * 仅当 note 为空（或纯空白）视为纯高亮，避免歧义。旧数据（无 type）可按 note 推断展示。
+ * 2026-08-26 统一口径：与 whale-renderer.ts 的 isEmptyNoteContent 对齐。
+ *   - note 为空（或纯空白）→ 纯高亮
+ *   - note 恰好等于选中文本（旧版自动回填 selectedText 的遗留数据）→ 也视为纯高亮
+ * 此前窄口径 `!(note && note.trim())` 会把 note=selectedText 的旧高亮误判为「批注」，
+ * 导致点击纯高亮却弹出批注预览卡（onShowAnnotation 走错分支）。
  */
 export function isPureHighlight(a: AnnotationItem): boolean {
-  return !(a.note && a.note.trim());
+  const noteText = (a.note || "").trim();
+  const sel = (a.selectedText || "").trim();
+  return !noteText || noteText === sel;
 }
 
 /** 推断批注性质（无显式 type 时按 note 兜底）：有内容 → annotate，否则 highlight。 */
@@ -337,6 +343,15 @@ export class AnnotationStore {
           migrated++;
           getLogger().info(`[REword-Store] 迁移补全 bookId: ann=${item.id.slice(0,8)} bookId=${item.bookId}`);
         }
+        // 2026-08-26 修复：旧版创建逻辑把 selectedText 自动回填进 note 字段，
+        // 导致 isPureHighlight 误判（note 非空 → 判为批注 → 点击纯高亮却弹批注卡）。
+        // 此处归一化：note 恰好等于选中文本 → 视为纯高亮，清空 note 以与新建纯高亮对齐。
+        const selText = (item.selectedText || "").trim();
+        if (selText && (item.note || "").trim() === selText) {
+          item.note = "";
+          migrated++;
+          getLogger().info(`[REword-Store] 迁移清空误回填 note: ann=${item.id.slice(0,8)}`);
+        }
         const normalized: AnnotationItem = {
           ...item,
           style: normalizeAnnotationStyle(item.style),
@@ -562,10 +577,10 @@ export class AnnotationStore {
       noteFormat: "kramdown",
       version: 1,
       origin: input.origin || "manual",
-      color: normalizeAnnotationColor(input.color) || DEFAULT_ANNOTATION_COLOR, // 默认青色
+      color: normalizeAnnotationColor(input.color) || getDefaultAnnotationColor(), // 默认=用户配置色
       style: input.style,
       scope: input.scope ?? "word", // 默认单词模式（背景高亮）
-      lineColor: normalizeAnnotationColor(input.lineColor || input.color) || DEFAULT_ANNOTATION_COLOR,
+      lineColor: normalizeAnnotationColor(input.lineColor || input.color) || getDefaultAnnotationColor(),
       tags: input.tags || [],
       labels: input.labels || [],
       category: input.category,

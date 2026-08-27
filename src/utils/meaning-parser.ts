@@ -113,6 +113,93 @@ export interface ParsedMeaning {
  * @param raw 原始 meaning（可能含音标/词性/编号/英文例句/中文释义）
  * @param fallbackPos 外部已解析出的词性（如 WordRecord.pos），当 raw 内未识别到词性时使用
  */
+/**
+ * 结构化单词表解析：把用户在思源笔记中整理的 `word pos 释义` 列表
+ * 解析为干净的单词条目（词性归一化、释义原样保留）。
+ *
+ * 支持格式：
+ *   1) word POS meaning   例: literature n 文学，文献，文学作品
+ *                          presently adv . 不久，目前（POS 后可带空格+点）
+ *   2) word — meaning     例: cock — 公鸡
+ *   3) word meaning       例: boss 老板（无词性，释义含中文）
+ *   4) 列表块前缀自动剥离（- / * / • / 数字. ）
+ *
+ * 仅当该行可识别为「单词 + 释义」结构时才产出 entry；无法识别的行进入 warnings，
+ * 由调用方（showVocabImportDialog / handleReviewDrop）结合 isWordListLike 决定是否走结构化导入。
+ */
+export interface ParsedWordListEntry {
+  word: string;
+  pos: string;
+  meaning: string;
+  raw: string;
+  lineNum: number;
+}
+
+const WORDLIST_POS_SET = new Set<string>([
+  ...KNOWN_POS_BASE, "a", "ad", "noun", "verb",
+]);
+
+function isWordListPos(s: string): boolean {
+  const p = s.replace(/\.$/, "").toLowerCase();
+  return WORDLIST_POS_SET.has(p);
+}
+
+export function parseWordList(text: string): { entries: ParsedWordListEntry[]; warnings: string[] } {
+  const lines = (text || "").split(/\r?\n/);
+  const entries: ParsedWordListEntry[] = [];
+  const warnings: string[] = [];
+  const WORD_RE = /^([A-Za-z\u4e00-\u9fa5][A-Za-z0-9\u4e00-\u9fa5'’.\-]*)\s+(\S+?)(?:\.\s*|\s+)(.+)$/;
+  const DASH_RE = /^([A-Za-z\u4e00-\u9fa5][A-Za-z0-9\u4e00-\u9fa5'’.\-]*)\s*[—\-–]\s*(.+)$/;
+  const SPACE_RE = /^([A-Za-z\u4e00-\u9fa5][A-Za-z0-9\u4e00-\u9fa5'’.\-]*)\s+(.+)$/;
+  lines.forEach((rawLine, idx) => {
+    const line = rawLine.replace(/^\s*(?:[-*•]\s*|\d+[.、)]\s*)/, "").trim();
+    if (!line) return;
+    // ① word POS meaning
+    const m = line.match(WORD_RE);
+    if (m) {
+      const word = m[1];
+      const maybePos = m[2];
+      const rest = m[3];
+      if (isWordListPos(maybePos)) {
+        const meaning = rest.trim();
+        if (meaning) {
+          entries.push({ word, pos: normalizePos(maybePos), meaning, raw: rawLine, lineNum: idx + 1 });
+          return;
+        }
+      }
+      // 词性未识别 → 当作「word meaning」（无词性），要求释义含中文以免把散文误判为单词
+      const meaning = (maybePos + " " + rest).trim();
+      if (hasChinese(meaning)) {
+        entries.push({ word, pos: "", meaning, raw: rawLine, lineNum: idx + 1 });
+      } else {
+        warnings.push(`第 ${idx + 1} 行无法识别为单词表条目：${rawLine}`);
+      }
+      return;
+    }
+    // ② word — meaning / word 释义（无词性）
+    const m2 = line.match(DASH_RE) || line.match(SPACE_RE);
+    if (m2) {
+      const meaning = m2[2].trim();
+      if (hasChinese(meaning)) {
+        entries.push({ word: m2[1], pos: "", meaning, raw: rawLine, lineNum: idx + 1 });
+      } else {
+        warnings.push(`第 ${idx + 1} 行无法识别为单词表条目：${rawLine}`);
+      }
+      return;
+    }
+    warnings.push(`第 ${idx + 1} 行无法识别为单词表条目：${rawLine}`);
+  });
+  return { entries, warnings };
+}
+
+/** 文本是否像「结构化单词表」：≥3 条可解析，或全部非空行均可解析 */
+export function isWordListLike(text: string): boolean {
+  const { entries } = parseWordList(text);
+  if (entries.length >= 3) return true;
+  const nonEmpty = (text || "").split(/\r?\n/).map((s) => s.trim()).filter(Boolean).length;
+  return nonEmpty > 0 && entries.length === nonEmpty;
+}
+
 export function parseReviewMeaning(raw: string, fallbackPos = ""): ParsedMeaning {
   const origin = (raw || "").replace(/\u0000/g, "");
   if (!origin.trim()) return { pos: normalizePos(fallbackPos), senses: [], raw: "" };

@@ -9,3 +9,10 @@ qa-reports/
 *.zip
 .workbuddy/
 package-lock.json
+
+# 测试书籍与封面（不进公共仓库，避免体积膨胀）
+books/*.epub
+books/covers/*.jpeg
+books/covers/*.jpg
+# 上架素材生成脚本（本地使用，不进库）
+scripts/gen_assets.py

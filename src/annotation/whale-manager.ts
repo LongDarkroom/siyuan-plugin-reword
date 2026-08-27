@@ -17,6 +17,7 @@
 
 import type { AnnotationItem, AnnotationStyle, AnnotationCategory, ANNOTATION_STYLES } from "./annotation-store.ts";
 import { WHALE_COLORS } from "./annotation-store.ts";
+import { getDefaultAnnotationColor, getDefaultAnnotationStyle } from "./annotation-config.ts";
 import { requestEditSession, releaseEditSession } from "./edit-session.ts";
 import { mountAnnEditor, DEFAULT_ANN_TOOLBAR, hasBlockTable, type AnnEditor } from "./ann-editor.ts";
 import { confirmDelete } from "./whale-confirm.ts";
@@ -129,8 +130,8 @@ export function buildWhaleDialogHtml(
   isAccordionOpen: boolean = true,
 ): string {
   const isEdit = !!opts.existing;
-  const defaultColor = opts.existing?.color || WHALE_COLOR_LIST[2].value;
-  const defaultStyle = opts.existing?.style || "highlight";
+  const defaultColor = opts.existing?.color || getDefaultAnnotationColor();
+  const defaultStyle = opts.existing?.style || getDefaultAnnotationStyle();
   // 2026-08-18 打磨：新建默认 both（高亮+下划线同时生效），视觉更显眼、一次标注即见样式
   const defaultScope = opts.existing?.scope || "both";
   const defaultLineColor = opts.existing?.lineColor || defaultColor;
@@ -543,8 +544,8 @@ export class WhaleAnnotationManager {
     // 状态（2026-08-15：defaultXxx 从 buildWhaleDialogHtml 内部计算移到这里复用，
     // 避免模板和状态两端重复，且 HTML 渲染与事件绑定共用同一份默认值）
     const isEdit = !!opts.existing;
-    const defaultColor = opts.existing?.color || WHALE_COLOR_LIST[2].value;
-    const defaultStyle = opts.existing?.style || "highlight";
+    const defaultColor = opts.existing?.color || getDefaultAnnotationColor();
+    const defaultStyle = opts.existing?.style || getDefaultAnnotationStyle();
     // 2026-08-18 打磨：与 buildWhaleDialogHtml 对齐，新建默认 both
     const defaultScope = opts.existing?.scope || "both";
     const defaultLineColor = opts.existing?.lineColor || defaultColor;

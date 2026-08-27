@@ -121,7 +121,7 @@ export function renderAnnoAiDialogHtml(
       <div class="hiword-anno-ai-reply" id="hiword-anno-ai-reply"></div>
 
       <!-- 中：chevron 手柄(可点击+可拖拽) -->
-      <div class="hiword-anno-ai-resizer" id="hiword-anno-ai-resizer" title="点击收起输入区 / 拖动调整高度">
+      <div class="hiword-anno-ai-resizer" id="hiword-anno-ai-resizer" data-tooltip="点击收起输入区 / 拖动调整高度">
         <button class="hiword-anno-ai-resizer-toggle" id="hiword-anno-ai-resizer-toggle" aria-label="收起输入区" type="button">▾</button>
       </div>
 

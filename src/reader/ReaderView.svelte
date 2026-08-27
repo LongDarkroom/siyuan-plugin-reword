@@ -51,6 +51,7 @@
     renderDictSuggestions,
     renderLoading,
   } from "../dict/dict-renderer";
+  import { togglePosCollapsed } from "../dict/pos-toggle";
   // Phase 2：划词高亮 + 批注（阅读器 / foliate 集成）
   // @ts-ignore - foliate-js 为纯 JS vendor（无类型声明）
   import { Overlayer } from "../reader/vendor/foliate-js/overlayer.js";
@@ -66,6 +67,7 @@
     type AnnotationStyle,
     type AnnotationType,
   } from "../annotation/annotation-store.ts";
+  import { getDefaultAnnotationColor, getDefaultAnnotationStyle } from "../annotation/annotation-config.ts";
   // 2026-08-24 根治：视觉层确定性同步（不信任 foliate 删除 API 的"静默失败"，
   // 改为按 key 遍历 overlay 强制移除 + 全量 reconcile）
   import {
@@ -85,7 +87,7 @@
   // 设计：Proxy 空函数，DEBUG_READER=false 时任意 dbg.xxx(...) 调用直接跳过，
   //      不触发任何字符串拼接或序列化（避免性能损耗）。
   // ============================================================
-  const DEBUG_READER = true;
+  const DEBUG_READER = false;  // 调试开关：true=开启控制台日志+HUD面板；false=静默（dbgHud 数据仍持续收集）
   const dbg = (() => {
     if (!DEBUG_READER) {
       const noop = () => {};
@@ -132,6 +134,14 @@
   export let onInsertToCurrentDoc: ((markdown: string) => Promise<string> | void) | undefined = undefined;
   /** 翻译选中文本（委托 plugin.translateText，返回双语结果） */
   export let onTranslate: ((text: string) => Promise<string> | void) | undefined = undefined;
+  /** 翻译选中文本并直接发送到 AI 精读面板（委托 plugin.translateToAi） */
+  export let onTranslateToAi: ((text: string) => void) | undefined = undefined;
+  /** 加入词库（委托 plugin vocabStore.addWord） */
+  export let onAddToVocab: ((word: string) => Promise<void> | void) | undefined = undefined;
+  /** 移出词库（委托 plugin vocabStore.removeWord） */
+  export let onRemoveFromVocab: ((word: string) => Promise<void> | void) | undefined = undefined;
+  /** 判断单词是否在词库（委托 plugin vocabStore.hasWord） */
+  export let isInVocab: ((word: string) => boolean) | undefined = undefined;
   /** 标签解析（委托插件 LabelStore）：用于阅读批注查看气泡展示标签名/色 */
   export let onProtectTab: (() => void) | undefined = undefined;
   export let getLabel: ((id: string) => { name: string; color: string } | null) | undefined = undefined;
@@ -153,6 +163,28 @@
   let readerViewEl: HTMLDivElement;  // 2026-08-23 新增：.reader-view 容器 ref（用于浮层 offset 与全局 mousedown 监听）
   let readerStageEl: HTMLDivElement;  // 2026-08-25 新增：.reader-stage 内容区 ref（浮层上下避让判定改用内容区坐标系，避免工具栏贴顶导航栏/越界）
   let view: any = null;
+  // ========== 2026-08-26 调试 HUD：高亮渲染链路诊断（foliate 原生管线） ==========
+  // 退回 foliate 原生：view.addAnnotation + draw-annotation 事件 + Overlayer 静态方法。
+  // 不再自建 SVG 层（rewordOverlays / rewordHighlights 已移除）。
+  const dbgHud = {
+    // v3 上游链路
+    setupCalled: false,    // setupAnnotationLayer 是否被调用
+    annStoreReady: false,  // setup 时 annStore 是否可用
+    bookIdAtSetup: "",     // setup 时 bookId 值
+    annotCountInStore: 0,  // 该书存储中的批注数量
+    totalInStore: -1,      // store 总批注数
+    storeBookIds: "",      // store 中所有 bookId 列表
+    bookIdMatch: false,    // 当前 bookId 是否在 store 中存在
+    // foliate 原生管线计数
+    createOverlayCalls: 0, // onCreateOverlay（create-overlay 事件）被调用次数
+    addAnnotationTries: 0, // addReaderAnnotation 调用次数
+    addAnnotationErrors: 0,// addReaderAnnotation 失败次数
+    drawnCount: 0,         // onDrawAnnotation 实际绘制次数
+    relocateCalls: 0,      // onRelocate 被调用次数
+    ovr_evtIndex: -1,      // create-overlay 事件的 detail.index
+    lastDraw: "",          // 最近一次绘制详情
+  };
+
   let meta: BookMeta | undefined;
   let title = "";
   let chapterLabel = "";
@@ -507,12 +539,21 @@
   function injectPageTurn(doc: Document, s?: ReaderSettings) {
     if (!view) return;
     const eff = s ?? settings;
+    // 2026-08-27：Option+悬浮取词（英文）注入（与翻页/快捷键同文档挂载，统一由 trackDocListener 登记移除）
+    setupHoverLookup(doc);
     // 可配置的点击分区翻页（默认关闭，防误触）
     if (eff.clickToTurn) {
       setupZoneClick(doc);
     }
     const onKeyDown = (e: KeyboardEvent) => {
       const k = e.key;
+      // 2026-08-27（revised）：⌘E / Ctrl+E 不再自研浮层，改为转发给父窗口，
+      // 让思源原生「最近打开文档」切换器接管（焦点在 iframe 正文时父文档收不到按键）。
+      if ((e.metaKey || e.ctrlKey) && k.toLowerCase() === "e") {
+        e.preventDefault();
+        forwardKeyToParent(e);
+        return;
+      }
       // F3 / Cmd+F：iframe 内按键不冒泡出主文档，需在 iframe 内自行响应
       if (k === "F3" || ((e.metaKey || e.ctrlKey) && k.toLowerCase() === "f")) {
         e.preventDefault();
@@ -580,6 +621,154 @@
       }
     };
     trackDocListener(doc, "touchend", onTouchEnd, { passive: true });
+  }
+
+  /* ================= Option+悬浮取词（英文，2026-08-27） ================= */
+  // 仅在 foliate 正文 iframe 内、按住 Option(altKey) 时，用 caretRangeFromPoint 取光标所在英文单词，
+  // 复用现有离线词典引擎 + 富词卡弹窗。松开 Option / 光标离开单词（未落在弹窗上）→ 收起。
+
+  /** 判断视口坐标是否落在当前词典弹窗内（让用户能把鼠标移进弹窗点 ★ / 候选词） */
+  function isOverDictPopup(x: number, y: number): boolean {
+    if (!dictPopupEl) return false;
+    const r = dictPopupEl.getBoundingClientRect();
+    return x >= r.left && x <= r.right && y >= r.top && y <= r.bottom;
+  }
+
+  function clearHoverHide() {
+    if (hoverHideTimer) { clearTimeout(hoverHideTimer); hoverHideTimer = null; }
+  }
+
+  /** 延迟收起悬浮弹窗（给光标移到弹窗留缓冲） */
+  function scheduleHoverHide(delay = 220) {
+    clearHoverHide();
+    hoverHideTimer = setTimeout(() => {
+      hoverHideTimer = null;
+      if (dictPopupSource === "hover") {
+        dictPopup = { ...dictPopup, visible: false };
+        dictPopupSource = null;
+        hoverWord = null;
+      }
+    }, delay);
+  }
+
+  /** 显示悬浮词典弹窗（英文单词） */
+  function showHoverDict(word: string, x: number, y: number) {
+    clearHoverHide();
+    hoverWord = word;
+    dictPopupSource = "hover";
+    dictPopup = { visible: true, x, y, html: renderLoading(), source: "hover" };
+    setTimeout(() => {
+      // 期间来源/单词已切换则丢弃旧结果
+      if (dictPopupSource !== "hover" || hoverWord !== word) return;
+      const entry = lookupSmart(word);
+      let html: string;
+      if (entry) {
+        html = renderDictCard(parseDictEntry(entry), { showStar: true, inVocab: isInVocab?.(word) ?? false });
+      } else {
+        const cands = searchCandidates(word, 3);
+        html = renderDictSuggestions(word, cands);
+      }
+      dictPopup = { ...dictPopup, html };
+    }, 30);
+  }
+
+  function setupHoverLookup(doc: Document) {
+    if (!view) return;
+    const WORD_RE = /^[A-Za-z][A-Za-z'’-]*$/;
+    const getWordAt = (cx: number, cy: number): { word: string; rect: DOMRect } | null => {
+      let range: Range | null = null;
+      try {
+        const anyDoc = doc as any;
+        if (typeof anyDoc.caretRangeFromPoint === "function") {
+          range = anyDoc.caretRangeFromPoint(cx, cy) as Range;
+        } else if (typeof anyDoc.caretPositionFromPoint === "function") {
+          const pos = anyDoc.caretPositionFromPoint(cx, cy) as any;
+          if (pos && pos.offsetNode) {
+            range = doc.createRange();
+            range.setStart(pos.offsetNode, pos.offset);
+            range.collapse(true);
+          }
+        }
+      } catch {
+        return null;
+      }
+      if (!range || range.startContainer.nodeType !== 3) return null;
+      const node = range.startContainer as Text;
+      const text = node.data;
+      let start = range.startOffset;
+      let end = range.startOffset;
+      while (start > 0 && /[A-Za-z'’-]/.test(text[start - 1])) start--;
+      while (end < text.length && /[A-Za-z'’-]/.test(text[end])) end++;
+      if (start >= end) return null;
+      const word = text.slice(start, end);
+      if (!WORD_RE.test(word)) return null;
+      const r = doc.createRange();
+      r.setStart(node, start);
+      r.setEnd(node, end);
+      const rect = r.getBoundingClientRect() as DOMRect;
+      if (!rect || (rect.width === 0 && rect.height === 0)) return null;
+      return { word, rect };
+    };
+
+    const onMove = (e: MouseEvent) => {
+      if (!e.altKey) {
+        // Option 释放：若光标没落在弹窗上，给一段宽限后收起（落在弹窗上则由 mouseenter 取消）
+        if (dictPopupSource === "hover" && !isOverDictPopup(e.clientX, e.clientY)) {
+          scheduleHoverHide();
+        }
+        return;
+      }
+      const found = getWordAt(e.clientX, e.clientY);
+      if (!found) {
+        if (dictPopupSource === "hover" && !isOverDictPopup(e.clientX, e.clientY)) {
+          scheduleHoverHide();
+        }
+        return;
+      }
+      // 同一单词且弹窗已显示：保持，取消待收起
+      if (found.word === hoverWord && dictPopup.visible) {
+        clearHoverHide();
+        return;
+      }
+      // 计算弹窗定位（词下方居中）
+      const frame = (doc.defaultView as any)?.frameElement as HTMLElement | null;
+      let vx = found.rect.left + found.rect.width / 2;
+      let vy = found.rect.bottom;
+      if (frame) {
+        const fr = frame.getBoundingClientRect();
+        vx += fr.left;
+        vy += fr.top;
+      }
+      const c = toContainerCoords(vx, vy + 4);
+      let cx = c.x;
+      let cy = c.y;
+      // 左右防溢出（弹窗宽约 360，transform translateX(-50%) 以 cx 为中点）
+      const stageW = readerStageEl?.clientWidth ?? readerViewEl?.clientWidth ?? 800;
+      const half = Math.min(180, Math.max(20, stageW / 2 - 8));
+      cx = Math.max(half, Math.min(stageW - half, cx));
+      // 底部空间不足则翻到词上方（估计弹窗高度 ~320）
+      const stageH = readerStageEl?.clientHeight ?? readerViewEl?.clientHeight ?? 600;
+      if (cy + 320 > stageH) {
+        let topVy = found.rect.top;
+        if (frame) topVy += frame.getBoundingClientRect().top;
+        const topC = toContainerCoords(found.rect.left + found.rect.width / 2, topVy - 8);
+        cy = topC.y - 320;
+        if (cy < 8) cy = 8;
+      }
+      showHoverDict(found.word, cx, cy);
+    };
+
+    trackDocListener(doc, "mousemove", onMove as EventListener);
+    // 松开 Option：宽限收起（光标已在弹窗上则保留，由弹窗 mouseenter 取消收起）
+    trackDocListener(doc, "keyup", ((e: KeyboardEvent) => {
+      if (e.key === "Alt" && dictPopupSource === "hover" && !isOverDictPopup(e.clientX, e.clientY)) {
+        scheduleHoverHide();
+      }
+    }) as EventListener);
+    // 光标离开正文文档（如移到弹窗或工具栏）：宽限收起
+    trackDocListener(doc, "mouseleave", (() => {
+      if (dictPopupSource === "hover") scheduleHoverHide();
+    }) as EventListener);
   }
 
   /* ================= 打开书籍 ================= */
@@ -770,7 +959,9 @@
     }, 1000);
   }
 
-  /** F3 / Cmd+F 快捷打开搜索（挂在组件容器上；多 Tab 时非激活 Tab 隐藏不响应） */
+  /** 组件键盘快捷键：F3/Cmd+F 搜索（挂在组件容器上；多 Tab 时非激活 Tab 隐藏不响应）。
+   *  ⌘E「最近打开文档」不再自研：焦点在父容器时由思源原生 handler 直接接管，
+   *  焦点在 foliate iframe 正文时由 iframe 内 keydown 转发给父窗口（见 forwardKeyToParent）。 */
   function onGlobalKey(e: KeyboardEvent) {
     // 非激活 Tab 容器 display:none → offsetParent 为 null，不响应
     if (container?.offsetParent === null) return;
@@ -788,6 +979,30 @@
       }, 30);
     }
   }
+
+  /* ================= ⌘E 转发给思源原生「最近打开文档」 =================
+   * 不自研浮层：焦点在 foliate iframe 正文时，keydown 不会冒泡到思源主窗口，
+   * 故在此把 ⌘E/Ctrl+E 原样转发给父窗口（思源主文档），由思源原生快捷键接管。
+   * 选中文档后思源自行为其新开 Tab，阅读 Tab 天然不被顶掉。 */
+
+  function forwardKeyToParent(e: KeyboardEvent) {
+    const pw = (window as any).parent;
+    if (!pw || pw === window) return;
+    const ne = new KeyboardEvent("keydown", {
+      key: e.key,
+      code: e.code,
+      location: e.location,
+      repeat: e.repeat,
+      metaKey: e.metaKey,
+      ctrlKey: e.ctrlKey,
+      altKey: e.altKey,
+      shiftKey: e.shiftKey,
+      bubbles: true,
+      cancelable: true,
+    } as KeyboardEventInit);
+    try { pw.document.dispatchEvent(ne); } catch { /* ignore */ }
+  }
+
 
   /* ================= 搜索 ================= */
 
@@ -1157,6 +1372,17 @@
   function onContainerMouseDown(_e: MouseEvent) {
     // 每次点击重置抑制标志（每个点击独立判断）
     suppressNextCreateToolbar = false;
+    // 2026-08-27：悬浮（hover）词典弹窗无遮罩，普通点击（如开始划选）应直接收起，避免遮挡。
+    //   必须同时检查 dictPopup.visible：scheduleHoverHide 有 220ms 延迟关闭，
+    //   在此窗口内 dictPopupSource 仍为 "hover" 但弹窗已不可见，
+    //   若不检查 visible 会误拦截工具栏/标注等正常点击（#toolbar-unresponsive）。
+    if (dictPopupSource === "hover" && dictPopup.visible) {
+      // 点弹窗内部（★/候选词）交给 onDictBodyClick 处理，不在此收起
+      const tg = _e.target as Element | null;
+      if (tg && tg.closest?.(".reader-dict-popup")) return;
+      closeDictPopup();
+      return;
+    }
     if (!showToc && !showSettings && !showSearch && !showFootnote && !selToolbar.visible && !noteEditor.visible) return;
     const t = _e.target as Element | null;
     if (!t) return;
@@ -1264,7 +1490,12 @@
   let selInfo: { index: number; cfi: string | null; range: Range | null } | null = null;
   // 当前选区矩形（已换算到主文档坐标），供批注编辑器/查看气泡定位使用
   let lastSelRect: SelRect | null = null;
-  let dictPopup: { visible: boolean; x: number; y: number; html: string } = { visible: false, x: 0, y: 0, html: "" };
+  let dictPopup: { visible: boolean; x: number; y: number; html: string; source?: "sel" | "hover" | null } = { visible: false, x: 0, y: 0, html: "", source: null };
+  // 2026-08-27：Option+悬浮取词（英文）相关状态
+  let dictPopupEl: HTMLElement | null = null;       // 弹窗 DOM 引用（用于命中检测）
+  let dictPopupSource: "sel" | "hover" | null = null; // 当前弹窗来源（sel=划词工具栏, hover=悬浮）
+  let hoverHideTimer: any = null;                   // 悬浮弹窗延迟收起计时器
+  let hoverWord: string | null = null;             // 当前悬浮命中的单词（去重用）
   let toastMsg = "";
   let toastTimer: any = null;
 
@@ -1279,8 +1510,8 @@
   // 章节 overlay 创建时只重加属于该章节的批注，根除翻页闪烁与性能悬崖。
   const annIndexCache = new Map<string, number>();
   // 上次选用的样式/颜色/分组（高亮/批注复用，贴近微信读书「一键高亮」体验）
-  let lastStyle: AnnotationStyle = "highlight";
-  let lastColor: string = WHALE_COLORS[2].value; // 默认青蓝
+  let lastStyle: AnnotationStyle = getDefaultAnnotationStyle();
+  let lastColor: string = getDefaultAnnotationColor(); // 默认=用户配置色
   let lastGroup: string = "未分组";
   // 2026-08-24 根治：当前编辑/待删除标注的独立缓存，不随 selToolbar 状态重置而丢失。
   // 修复「删除按钮点击时 selToolbar.editingId 已被选区检测(ws)/关闭逻辑重置为 undefined/null，
@@ -1294,7 +1525,7 @@
   // styleLabel/styleGlyph 预计算，以避开 Svelte4 模板表达式不支持的 ?./?? 运算符。
   let noteEditor: {
     visible: boolean; x: number; y: number;
-    mode: "create" | "view" | "edit";
+    mode: "create" | "view" | "edit" | "highlight";
     id: string | null; cfi: string; text: string;
     style: AnnotationStyle; color: string; note: string; group: string;
     time: string; // 格式化时间（view 态展示，updatedAt / createdAt）
@@ -1305,7 +1536,7 @@
   } = {
     visible: false, x: 0, y: 0, mode: "create",
     id: null, cfi: "", text: "",
-    style: "highlight", color: WHALE_COLORS[2].value, note: "", group: "未分组",
+    style: getDefaultAnnotationStyle(), color: getDefaultAnnotationColor(), note: "", group: "未分组",
     time: "", labels: [], styleLabel: "直线", styleGlyph: "━",
     placeAbove: false,
   };
@@ -1434,37 +1665,72 @@
     lastSelRect = rect; // 保存选区矩形，供批注编辑器定位使用
     const viewW = readerViewEl?.clientWidth ?? window.innerWidth;
     const midX = (rect.left + rect.right) / 2;
-    const gap = 8;
-    // 2026-08-25 修复：用「视口坐标」统一判定上下空间，避免 stage/view 双基准错位。
+    // gap：工具栏与选区之间的最小间距。下方模式时 CSS 小三角(::after) 从工具栏顶部往上延伸 7px 指向选区。
+    const gap = 12;
     // 导航栏/底栏取其在视口中的真实下沿/上沿，与 rect（视口坐标）同基准比较。
     const navBarEl = readerViewEl?.querySelector<HTMLElement>(".reader-toolbar");
     const bottomBarEl = readerViewEl?.querySelector<HTMLElement>(".reader-bottom-bar");
     const navBottom = navBarEl ? navBarEl.getBoundingClientRect().bottom : 40;
     const bottomTop = bottomBarEl ? bottomBarEl.getBoundingClientRect().top : (window.innerHeight - 36);
     // 预估有效高度：edit 态或样式条展开时含整条浮层（主栏+样式条+颜色条），否则仅主栏。
-    // 2026-08-25 修复：原写死 toolbarH=44 仅主栏，样式条展开后真实 ~116px 估不足 → 假阳性
-    // 选 above → 工具栏溢出压住选区文字。
     const stripShown = mode === "edit" || selToolbar.stripVisible;
     const effH = stripShown ? TOOLBAR_WITH_STRIP_H : TOOLBAR_BAR_ONLY_H;
+    // ★ 2026-08-26 优化：根据选区在视口中的垂直位置智能选择上下方向，
+    //   避免工具栏遮挡选区文字。此前固定偏好上方 → 选区在上半部时工具栏仍压住上方文字。
+    const readableCenter = (navBottom + bottomTop) / 2;
+    const selCenterY = (rect.top + rect.bottom) / 2;
+    const preferBelow = selCenterY < readableCenter; // 选区在上半部 → 优先放下方
     const roomAbove = (rect.top - gap - effH) >= navBottom;
     const roomBelow = (rect.bottom + gap + effH) <= bottomTop;
-    const above = roomAbove ? true : roomBelow ? false : true;
+    // 决策优先级：偏好方向有空间 → 用偏好；否则用另一个方向有空间 → 翻转；都没有 → 用偏好（让 fixToolbarPlacement 兜底强推）。
+    let above: boolean;
+    if (preferBelow && roomBelow) above = false;
+    else if (!preferBelow && roomAbove) above = true;
+    else if (roomAbove) above = true;
+    else if (roomBelow) above = false;
+    else above = !preferBelow; // 都没空间，反向尝试（fixToolbarPlacement 会做最终校正）
     // 计算锚点 Y（视口坐标），再转容器坐标
+    // CSS transform: 上方模式 translate(-50%, -100%) 让底部对齐锚点；
+    //   下方模式 .place-below 的 translate(-50%, 0) 让顶部对齐锚点。
     let top = above ? rect.top - gap : rect.bottom + gap;
     const c = toContainerCoords(midX, top);
     // 边界校正：上方模式且工具栏会压导航栏 → 强制翻到下方
-    if (above && c.y < navBottom && rect) {
+    // ★ 坐标系修正：c.y 是容器坐标，navBottom 是视口坐标，必须先转容器坐标再比。
+    //   原代码直接用 c.y < navBottom 比较（基准不一致）→ 可能误判/漏判导致翻面失败，工具栏压导航栏。
+    const navBottomC = navBottom - (readerViewEl?.getBoundingClientRect().top ?? 0);
+    if (above && c.y < navBottomC && rect) {
       const cBelow = toContainerCoords(midX, rect.bottom + gap);
       selToolbar = { visible: true, x: cBelow.x, y: cBelow.y, text, mode, editingId, placeAbove: false, stripVisible: selToolbar.stripVisible };
     } else {
       selToolbar = { visible: true, x: c.x, y: c.y, text, mode, editingId, placeAbove: above, stripVisible: selToolbar.stripVisible };
     }
     // 渲染后实测真实几何：用实测盒模型与选区矩形做重叠检测，彻底消除「压住文字」问题。
+    if (DEBUG_READER) {
+      console.log("[REword][pos] positionToolbarAbove", {
+        mode, editingId,
+        rect: { top: Math.round(rect.top), bottom: Math.round(rect.bottom), left: Math.round(rect.left), right: Math.round(rect.right) },
+        gap, effH, selCenterY: Math.round(selCenterY), readableCenter: Math.round(readableCenter),
+        preferBelow, roomAbove, roomBelow, above,
+        calcTop: Math.round(top),
+        navBottom: Math.round(navBottom), bottomTop: Math.round(bottomTop),
+        toContainer: { x: Math.round(c.x), y: Math.round(c.y) },
+        final: { x: Math.round(selToolbar.x), y: Math.round(selToolbar.y), placeAbove: selToolbar.placeAbove, stripVisible: selToolbar.stripVisible },
+      });
+    }
     void fixToolbarPlacement(rect, midX, gap, selToolbar.placeAbove);
   }
 
-  /** 首帧定位后实测工具栏真实几何并校正翻面（重叠检测基于视口坐标，与选区矩形同基准）
-   *  2026-08-25 优化：校正时也检查导航栏/底栏避让及与选区的重叠。 */
+  /**
+   * 2026-08-26 重写（v3 锚点坐标系版）：渲染后实测校正工具栏位置。
+   *
+   * ★ 核心修复：CSS transform 已处理 Y 偏移（上方 -100% 让底部对齐锚点，
+   *   下方 place-below 的 0% 让顶部对齐锚点），故所有校正路径
+   *   必须计算「锚点 Y」而非「绝对位置 Y」，否则与 CSS transform 叠加导致双重偏移。
+   *
+   * 锚点定义：
+   *   - 上方模式：锚点 = 工具栏底部应在的视口 Y（CSS -100% 后底部恰好在此）
+   *   - 下方模式：锚点 = 工具栏顶部应在的视口 Y（CSS 0% 后顶部恰好在此）
+   */
   async function fixToolbarPlacement(rect: SelRect, midX: number, gap: number, above: boolean) {
     try {
       await tick();
@@ -1474,31 +1740,66 @@
       const h = box.height;
       const w = box.width;
       if (h > 0) toolbarH = h;
+      if (DEBUG_READER) {
+        console.log("[REword][fix] 实测", {
+          above,
+          box: { t: Math.round(box.top), b: Math.round(box.bottom), h: Math.round(h), w: Math.round(w) },
+          rect: { t: Math.round(rect.top), b: Math.round(rect.bottom) },
+          spacing: above ? Math.round(rect.top - box.bottom) : Math.round(box.top - rect.bottom),
+        });
+      }
       const viewW = readerViewEl?.clientWidth ?? window.innerWidth;
       const navBarEl = readerViewEl?.querySelector<HTMLElement>(".reader-toolbar");
       const bottomBarEl = readerViewEl?.querySelector<HTMLElement>(".reader-bottom-bar");
       const navBottom = navBarEl ? navBarEl.getBoundingClientRect().bottom : 40;
       const bottomTop = bottomBarEl ? bottomBarEl.getBoundingClientRect().top : (window.innerHeight - 36);
-      // 水平夹紧：贴近左右边缘时不让工具栏一半溢出（readest 同款夹紧）
+      // 水平夹紧
       if (w > 0) {
         const half = w / 2 + 4;
         const clampedX = Math.min(Math.max(selToolbar.x, half), Math.max(half, viewW - half));
         if (clampedX !== selToolbar.x) selToolbar = { ...selToolbar, x: clampedX };
       }
-      // 重叠检测（视口坐标）：上方模式工具栏底部须高于选区上沿、且不压导航栏；
-      // 下方模式工具栏顶部须低于选区下沿、且不压底栏。任一不满足则翻面。
+      const MIN_GAP = 10;
+      let anchorY: number; // 视口坐标的锚点
+      let newAbove = above;
       if (above) {
-        if (box.bottom > rect.top - gap || box.top < navBottom) {
-          const c = toContainerCoords(midX, rect.bottom + gap);
-          selToolbar = { ...selToolbar, y: c.y, placeAbove: false };
+        const spacing = rect.top - box.bottom; // 正=有间距
+        if (spacing >= MIN_GAP && box.top >= navBottom) return; // 位置正确
+        const roomBelow = (bottomTop - rect.bottom) >= (h + MIN_GAP);
+        if (roomBelow && spacing < MIN_GAP) {
+          anchorY = rect.bottom + gap; newAbove = false; // 翻到下方
+        } else if (box.top < navBottom) {
+          anchorY = navBottom; newAbove = true; // 贴导航栏
+        } else {
+          anchorY = rect.top - MIN_GAP; newAbove = true; // 强推：底部=选区顶-MIN_GAP
         }
       } else {
-        if (box.top < rect.bottom + gap || box.bottom > bottomTop) {
-          const c = toContainerCoords(midX, rect.top - gap);
-          selToolbar = { ...selToolbar, y: c.y, placeAbove: true };
+        const spacing = box.top - rect.bottom;
+        if (spacing >= MIN_GAP && box.bottom <= bottomTop) return;
+        const roomAbove = (rect.top - navBottom) >= (h + MIN_GAP);
+        if (roomAbove && spacing < MIN_GAP) {
+          anchorY = rect.top - gap; newAbove = true; // 翻到上方
+        } else if (box.bottom > bottomTop) {
+          anchorY = bottomTop; newAbove = false; // 贴底栏
+        } else {
+          anchorY = rect.bottom + MIN_GAP; newAbove = false; // 强推：顶部=选区底+MIN_GAP
         }
       }
-    } catch { /* ignore */ }
+      const c = toContainerCoords(midX, anchorY);
+      selToolbar = { ...selToolbar, y: c.y, placeAbove: newAbove };
+      if (DEBUG_READER) {
+        void tick().then(() => {
+          const a = el?.getBoundingClientRect();
+          console.log("[REword][fix] 校正后", {
+            newAbove, anchorY: Math.round(anchorY), cy: Math.round(c.y),
+            actual: a ? { t: Math.round(a.top), b: Math.round(a.bottom) } : null,
+            gap: newAbove ? Math.round(rect.top - (a?.bottom ?? 0)) : Math.round((a?.top ?? 0) - rect.bottom),
+          });
+        });
+      }
+    } catch (e) {
+      console.warn("[REword][fix] 异常:", e);
+    }
   }
 
   /** 把 ISO 时间格式化为「YYYY-MM-DD HH:mm」便于查看气泡展示 */
@@ -1557,11 +1858,13 @@
     return { x: clampedX, y: c.y, placeAbove };
   }
 
-  /** 根据标注记录填充并弹「查看浮层」（view 态） */
-  function showViewerForRec(rec: { id: string; cfi: string; color: string }, rect?: SelRect | null) {
+  /** 根据标注记录填充并弹「简易预览卡」（preview 态）。
+   *  2026-08-26 用户设计：有笔记批注 → 先弹只读预览（时间+笔记+标签+复制/编辑/删除图标），
+   *  点「✏️ 笔记」才展开完整编辑器 (mode="edit")。 */
+  function showPreviewViewer(rec: { id: string; cfi: string; color: string }, rect?: SelRect | null) {
     if (!annStore) { try { annStore = getAnnotationStore(); } catch { annStore = null; } }
     const stored = annStore?.get(rec.id);
-    dbg.event("showViewerForRec", "▶ 批注查看卡路径", { id: rec?.id, cfi: rec?.cfi, classify: stored ? classifyAnnotation(stored) : "?" });
+    dbg.event("showPreviewViewer", "▶ 批注预览卡路径", { id: rec?.id, cfi: rec?.cfi, classify: stored ? classifyAnnotation(stored) : "?" });
     closeSelToolbar();
     const style = (stored?.style as AnnotationStyle) || "highlight";
     const color = stored?.color || rec.color;
@@ -1571,17 +1874,90 @@
     const group = stored?.group ?? "未分组";
     const time = fmtTime(stored?.updatedAt || stored?.createdAt);
     const labels = resolveLabels(stored?.labels);
-    // 统一用 positionPopupNear（锚定 + 四向避让 + 水平夹紧）。view 态预估高度 240。
+    // 统一用 positionPopupNear（锚定 + 四向避让 + 水平夹紧）。preview 态预估高度 160。
     const pos = rect
-      ? positionPopupNear(rect, 268, 240)
+      ? positionPopupNear(rect, 268, 160)
       : { x: (readerViewEl?.clientWidth ?? window.innerWidth) / 2, y: 80, placeAbove: false };
     const placeAbove = pos.placeAbove;
     const annStyle = ANNOTATION_STYLES[style] || { label: "直线", icon: "━" };
     noteEditor = {
-      visible: true, x: pos.x, y: pos.y, mode: "view",
+      visible: true, x: pos.x, y: pos.y, mode: "preview",
       id: rec.id, cfi: rec.cfi,
       text, note, style, color, group, time, labels,
       styleLabel: annStyle.label, styleGlyph: annStyle.icon,
+      placeAbove,
+    };
+  }
+
+  /** 根据标注记录填充并弹「查看浮层」（view 态，保留兼容 C 跳转兜底） */
+  function showViewerForRec(rec: { id: string; cfi: string; color: string }, rect?: SelRect | null) {
+    showPreviewViewer(rec, rect);
+  }
+
+  /**
+   * 纯高亮（标注）点击 → 复用 selToolbar 进入 edit 模式（不弹独立浮层）。
+   * 设计（2026-08-26 用户确认）：
+   *   - 工具栏主栏「高亮」按钮位置 → 替换为「🗑️ 删除」按钮
+   *   - 样式条自动展开（样式 + 颜色即时切换）
+   *   - 仅「点击已有标注」触发，选新文本不受影响（create 模式不变）
+   * 定位：上方空间够则放选区上方（底部贴 rect.top - gap），否则翻下方。
+   */
+  function openHighlightEditToolbar(rec: { id: string; cfi: string; color: string }, rect?: SelRect | null) {
+    if (!annStore) { try { annStore = getAnnotationStore(); } catch { annStore = null; } }
+    const stored = annStore?.get(rec.id);
+    const style = (stored?.style as AnnotationStyle) || "highlight";
+    const color = stored?.color || rec.color;
+    lastStyle = style; lastColor = color; // 同步偏好，供样式/颜色切换复用
+    const viewW = readerViewEl?.clientWidth ?? window.innerWidth;
+    const midX = rect ? (rect.left + rect.right) / 2 : viewW / 2;
+    const navBarEl = readerViewEl?.querySelector<HTMLElement>(".reader-toolbar");
+    const bottomBarEl = readerViewEl?.querySelector<HTMLElement>(".reader-bottom-bar");
+    const navBottom = navBarEl ? navBarEl.getBoundingClientRect().bottom : 40;
+    const bottomTop = bottomBarEl ? bottomBarEl.getBoundingClientRect().top : (window.innerHeight - 36);
+    // 2026-08-26 修复：不再减 effH！CSS transform: translateY(-100%) 已把工具栏向上偏移自身高度，
+    // JS 只需传「锚点 Y」（上方=选区顶-gap，下方=选区底+gap）。此前减 effH 导致双重偏移，
+    // 样式条被推到 .reader-floating-layer 的 inset:0 边界外而不可见。
+    const gap = 12;
+    const TOOLBAR_H_EST = TOOLBAR_WITH_STRIP_H; // 仅用于判断上下空间是否足够
+    const roomAbove = rect ? (rect.top - gap - TOOLBAR_H_EST) >= navBottom : true;
+    const above = rect ? (roomAbove ? true : (rect.bottom + gap + TOOLBAR_H_EST) <= bottomTop ? false : true) : true;
+    // 锚点 Y：上方模式→选区顶部上方 gap 处（CSS -100% 后工具栏底部恰好在此）
+    //        下方模式→选区底部下方 gap 处（CSS place-below 的 translate(0) 后工具栏顶部恰好在此）
+    const anchorY = above ? (rect ? rect.top - gap : 80) : (rect ? rect.bottom + gap : 80);
+    const c = toContainerCoords(midX, anchorY);
+    selToolbar = {
+      visible: true, x: c.x, y: c.y,
+      text: stored?.selectedText ?? "", mode: "edit",
+      editingId: rec.id, placeAbove: above,
+      stripVisible: true,   // 样式条展开
+      annId: rec.id, annCfi: rec.cfi, annStyle: style, annColor: color,
+    };
+    // 渲染后实测校正，确保不压选区
+    void fixToolbarPlacement(rect ?? { left: midX, top: anchorY, right: midX, bottom: (rect?.bottom ?? anchorY) } as SelRect, midX, gap, above);
+  }
+
+  /**
+   * 纯高亮（标注）样式面板：仅提供「样式切换 + 颜色切换 + 删除」，不含时间/笔记/复制/编辑，
+   * 与批注查看卡 (mode:"view") 完全隔离。用于 onShowAnnotation 判定 isPureHighlight 时的入口。
+   * 复用 positionPopupNear 定位；预估高度 120（两行 + 删除按钮，比 view 卡矮）。
+   * （2026-08-26 已废弃：纯标注改走 openHighlightEditToolbar，保留函数供 C 跳转兜底）
+   */
+  function showHighlightViewer(rec: { id: string; cfi: string; color: string }, rect?: SelRect | null) {    if (!annStore) { try { annStore = getAnnotationStore(); } catch { annStore = null; } }
+    const stored = annStore?.get(rec.id);
+    closeSelToolbar();
+    const style = (stored?.style as AnnotationStyle) || "highlight";
+    const color = stored?.color || rec.color;
+    lastStyle = style; lastColor = color; // 同步偏好，供「高亮」复用
+    const pos = rect
+      ? positionPopupNear(rect, 268, 120)
+      : { x: (readerViewEl?.clientWidth ?? window.innerWidth) / 2, y: 80, placeAbove: false };
+    const placeAbove = pos.placeAbove;
+    const annStyle = ANNOTATION_STYLES[style] || { label: "直线", icon: "━" };
+    noteEditor = {
+      visible: true, x: pos.x, y: pos.y, mode: "highlight",
+      id: rec.id, cfi: rec.cfi,
+      text: "", note: "", style, color, group: stored?.group ?? "未分组", time: "",
+      labels: [], styleLabel: annStyle.label, styleGlyph: annStyle.icon,
       placeAbove,
     };
   }
@@ -1773,19 +2149,26 @@
   }
 
   // 查词 → 弹窗渲染卡片（同源 renderDictCard）
-  function runDictLookup(word: string) {
-    dictPopup = { visible: true, x: selToolbar.x, y: selToolbar.y + toolbarH, html: renderLoading() };
-    // 注：selToolbar.x/y 已是容器相对坐标，dictPopup 直接复用 + 工具栏实测高度 偏移即可
+  // opts.x/opts.y 指定弹窗容器相对坐标；opts.source 标记来源（sel=划词工具栏, hover=Option 悬浮）
+  function runDictLookup(word: string, opts?: { x?: number; y?: number; source?: "sel" | "hover" }) {
+    const x = opts?.x ?? selToolbar.x;
+    const y = opts?.y ?? (selToolbar.y + toolbarH);
+    const source = opts?.source ?? "sel";
+    dictPopupSource = source;
+    dictPopup = { visible: true, x, y, html: renderLoading(), source };
     setTimeout(() => {
       const entry = lookupSmart(word);
       let html: string;
       if (entry) {
-        html = renderDictCard(parseDictEntry(entry), {});
+        html = renderDictCard(parseDictEntry(entry), { showStar: true, inVocab: isInVocab?.(word) ?? false });
       } else {
         const cands = searchCandidates(word, 3);
         html = renderDictSuggestions(word, cands);
       }
-      dictPopup = { ...dictPopup, html };
+      // 仅当来源未切换时更新（避免悬浮→划词切换时旧异步请求覆盖新弹窗）
+      if (dictPopupSource === source) {
+        dictPopup = { ...dictPopup, html };
+      }
     }, 30);
   }
 
@@ -1804,6 +2187,22 @@
     if (!annStore) {
       try { annStore = getAnnotationStore(); } catch { annStore = null; }
     }
+    // --- v3 诊断 ---
+    dbgHud.setupCalled = true;
+    dbgHud.annStoreReady = !!annStore;
+    dbgHud.bookIdAtSetup = bookId || "(empty)";
+    if (annStore && bookId) {
+      try { dbgHud.annotCountInStore = annStore.getByBook(bookId).length; } catch { dbgHud.annotCountInStore = -1; }
+      // v5 深度诊断：store 总数 + 所有 bookId + 是否包含当前 bookId
+      try {
+        const all = annStore.getAll();
+        dbgHud.totalInStore = all.length;
+        const bookIds = [...new Set(all.map((a: any) => a.bookId).filter(Boolean))];
+        dbgHud.storeBookIds = bookIds.join(", ") || "(none)";
+        dbgHud.bookIdMatch = bookIds.includes(bookId);
+      } catch(e: any) { dbgHud.totalInStore = -1; dbgHud.storeBookIds = e.message; }
+    }
+    // --- /v3 ---
     annByValue.clear();
     annIndexCache.clear();
     // 重绘该书已有批注（每节 overlay 创建时触发）
@@ -1819,32 +2218,20 @@
     // 而工具栏/批注卡坐标是创建时一次性写死的 → 视觉「脱钩」。监听 relocate（滚动/翻页即触发），
     // 统一收起所有瞬时浮层，符合「滚动=放弃临时浮层」心智模型，并消除错位。
     view.addEventListener("relocate", onRelocate);
-    // 2026-08-25 修复：热重载后 foliate 不会为已渲染的 overlay 重新触发 create-overlay，
-    // 导致批注数据在但高亮不显示。故 setup 后立即对当前书做一次全量重绘。
-    // 2026-08-25 可靠性：单次 rAF 可能早于 overlay 就绪（addReaderAnnotation → view.addAnnotation
-    // 静默失败）。改为双 rAF 兜底，并在 addReaderAnnotation 内部已做 try-catch+日志，失败可查。
-    if (annStore && bookId) {
-      const redrawAll = () => {
-        for (const it of annStore.getByBook(bookId)) {
-          if (it.cfi && it.color && !it.deletedAt) void addReaderAnnotation(it);
-        }
-      };
-      requestAnimationFrame(() => requestAnimationFrame(redrawAll));
-    }
-    // 2026-08-25：页签重新可见时强制重绘高亮。
-    // 根因：高亮仅由 foliate 的 create-overlay 事件绘制，而该事件只在 foliate 主动渲染
-    // 某节时触发一次；切走页签（display:none）再回来，foliate 复用/重渲后未必重新触发
-    // create-overlay，导致已绘制高亮凭空消失。故用 IntersectionObserver 监听内容区可见性：
-    // 从「不可见」回到「可见」时标记 annotationsDirty，借 foliate 的 relocate（内容就绪）信号
-    // 补绘，并加兜底定时器，确保高亮始终恢复。
+    // 2026-08-26 退回 foliate 原生管线：高亮由 foliate 的 create-overlay 事件 +
+    // view.addAnnotation 内部 overlayer 管理，无需我们自建 SVG 层，也无需初始全量自绘。
+    // 页签重新可见时：foliate 的 overlayer 随 iframe 持久存在；若 iframe 被销毁重建，
+    // foliate 会重新触发 create-overlay → onCreateOverlay 自动重绘。此处仅作安全兜底：
+    // 回到可见区时标记 annotationsDirty，借 relocate 信号用 foliate 原生管线补绘
+    // （addReaderAnnotation 内部幂等：foliate 的 addAnnotation 会先 remove 再 add）。
     if (typeof IntersectionObserver !== "undefined" && readerStageEl) {
       visibilityObserver = new IntersectionObserver((entries) => {
         for (const e of entries) {
           if (e.isIntersecting) {
             annotationsDirty = true;
-            // 兜底：若 foliate 未在重显时触发 relocate，延迟补绘一次（此时内容已重新布局就绪）
+            // 兜底：若 foliate 未在重显时触发 relocate，延迟补绘一次
             setTimeout(() => {
-              if (annotationsDirty) { redrawAnnotations(); annotationsDirty = false; }
+              if (annotationsDirty) { redrawBookAnnotations(); annotationsDirty = false; }
             }, 450);
           }
           // 离开可见区：保留 annotationsDirty，下次回到页签再补绘
@@ -1873,13 +2260,16 @@
    *  滚动后选区矩形已变，浮层仍停在旧坐标 → 视觉「脱钩」错位。收起比错位更可接受，
    *  也契合「滚动=放弃临时浮层」的心理模型。注：此事不含 TOC/设置/搜索等常驻面板。 */
   function onRelocate() {
+    dbgHud.relocateCalls++;
     if (selToolbar.visible) closeSelToolbar();
     if (noteEditor.visible) noteEditor = { ...noteEditor, visible: false, mode: "create", id: null, placeAbove: false };
     if (showFootnote) closeFootnote();
     if (dictPopup.visible) dictPopup = { ...dictPopup, visible: false };
-    // 2026-08-25：页签重新可见后 foliate 重新布局，借「内容就绪」信号补绘高亮，避免消失
+    // 2026-08-26 退回 foliate 原生：高亮归 foliate 的 overlayer 管理，随 iframe 持久存在，
+    // 重渲后 foliate 自动 redraw()。仅作安全兜底：若 annotationsDirty（由页签可见性置位），
+    // 用 foliate 原生管线幂等重绘该书批注。
     if (annotationsDirty) {
-      redrawAnnotations();
+      redrawBookAnnotations();
       if (annStore && bookId && view) annotationsDirty = false;
     }
   }
@@ -2039,6 +2429,7 @@
 
   /** 把单条批注绘制进 foliate（异步；用返回 index 回填 cfi→章节缓存） */
   async function addReaderAnnotation(it: any): Promise<void> {
+    dbgHud.addAnnotationTries++;
     if (!it.cfi || !it.color || !view) return;
     if (it.deletedAt) return; // 软删除项不重绘（最终一致保障：翻页后已删高亮彻底消失）
     const style = normalizeAnnotationStyle(it.style) as AnnotationStyle;
@@ -2049,112 +2440,109 @@
       // 避免三处 note 拷贝不一致（2026-08-24 重构）。
       annByValue.set(it.cfi, { id: it.id, cfi: it.cfi, color: it.color });
     } catch (err) {
+      dbgHud.addAnnotationErrors++;
       // 2026-08-25 可靠性：原空 catch 静默吞错，无法排查 CFI 无效/overlay 未就绪等问题。
       console.warn("[REword] addReaderAnnotation 失败（id=" + it?.id + ", cfi=" + it?.cfi + "）:", err);
     }
   }
 
-  /** 强制把存储中的批注重绘进当前 foliate 视图。
-   *  仅对「已有 overlay 的章节」立即绘制；其余章节待其 create-overlay 触发时由 onCreateOverlay 绘制。
-   *  用于「页签重新可见」等 foliate 不再主动触发 create-overlay 的场景，避免高亮凭空消失。
-   *  幂等：foliate addAnnotation 内部先 remove 再 add，重复调用不会叠加重复绘制。 */
-  function redrawAnnotations() {
+  /**
+   * 用 foliate 原生管线重绘该书所有批注（幂等）。
+   * 逐条调用 addReaderAnnotation → view.addAnnotation，foliate 内部会
+   *   resolveNavigation(cfi) → 找该分节 overlayer → emit draw-annotation → 我们 onDrawAnnotation 画。
+   * 不依赖自建 SVG 层。供 onCreateOverlay / 页签可见性兜底 / relocate 兜底复用。
+   */
+  function redrawBookAnnotations() {
     if (!annStore || !bookId || !view) return;
-    for (const it of annStore.getByBook(bookId)) {
-      if (it.cfi && it.color && !it.deletedAt) void addReaderAnnotation(it);
+    const annots = annStore.getByBook(bookId);
+    dbgHud.annotCountInStore = annots.length;
+    for (const it of annots) {
+      if (!it.cfi || it.deletedAt) continue;
+      void addReaderAnnotation(it);
     }
   }
 
   /**
-   * 章节 overlay 创建回调：只重绘「属于当前章节」的批注。
-   * - create-overlay 事件携带 detail.index（章节索引）。
-   * - cfi→章节索引走 annIndexCache 懒缓存：命中且匹配则直接绘制；
-   *   未命中则异步解析并缓存，若正是当前章节立即绘制，否则等该章节 overlay 创建时再绘制。
-   * 彻底去除「每次翻页都全量重加全书批注」的 O(N) 性能悬崖与翻页闪烁。
+   * 章节 overlay 创建回调（foliate 原生管线）。
+   * - create-overlay 事件携带 detail.index（章节索引），此时该分节的 Overlayer 已就绪，
+   *   调用 view.addAnnotation 必能命中 #getOverlayer → emit draw-annotation → 绘制。
+   * - 性能优化：annIndexCache 缓存 cfi→章节索引。若已缓存且 ≠ 当前章节则跳过
+   *   （等该章节 overlay 创建时再画）；未缓存或匹配当前章节则交给 addReaderAnnotation
+   *   （内部 resolveNavigation 解析并回填缓存，且幂等：重复 add 只重绘不重复）。
    */
   function onCreateOverlay(e?: any) {
+    dbgHud.createOverlayCalls++;
     if (!annStore || !bookId || !view) return;
     const idx = e?.detail?.index;
-    // 兜底：事件未携带章节索引（非预期）时回退为全量重加，避免丢失批注
-    if (idx === undefined) {
-      for (const it of annStore.getByBook(bookId)) {
-        if (it.cfi && it.color) void addReaderAnnotation(it);
-      }
-      return;
-    }
-    for (const it of annStore.getByBook(bookId)) {
-      if (!it.cfi || !it.color) continue;
+    dbgHud.ovr_evtIndex = (typeof idx === "number") ? idx : -1;
+
+    const annots = annStore.getByBook(bookId);
+    dbgHud.annotCountInStore = annots.length;
+
+    for (const it of annots) {
+      if (!it.cfi || it.deletedAt) continue;
+      // 章节索引缓存命中且不匹配当前章节 → 跳过（等该章节 overlay 创建时再画）
       const cached = annIndexCache.get(it.cfi);
-      if (cached !== undefined) {
-        if (cached === idx) void addReaderAnnotation(it);
-        continue;
-      }
-      // 首次：解析章节索引并缓存；命中当前章节则立即绘制
-      void (async () => {
-        try {
-          const nav: any = await view.resolveNavigation(it.cfi);
-          const i = nav?.index;
-          if (typeof i === "number") {
-            annIndexCache.set(it.cfi, i);
-            if (i === idx) void addReaderAnnotation(it);
-          }
-        } catch {
-          /* 解析失败：下次该章节 overlay 创建时再试 */
-        }
-      })();
+      if (typeof cached === "number" && typeof idx === "number" && cached !== idx) continue;
+      // 否则（未缓存或匹配当前章节）交给 foliate 原生 addAnnotation，
+      // 内部解析 CFI、缓存章节索引、emit draw-annotation。
+      void addReaderAnnotation(it);
     }
   }
 
+  // 2026-08-26 退回 foliate 原生：自建 SVG 高亮层（getOrCreateRewordOverlay /
+  // drawAnnotationDirect / resolveAndDrawAnnotation / rewordOverlays / rewordHighlights）
+  // 已全部移除，统一由 foliate 的 Overlayer + view.addAnnotation + draw-annotation 事件承担。
+
+  /**
+   * foliate 的 draw-annotation 事件处理器：由 view.addAnnotation 内部 emit，
+   * 携带 { draw, annotation, doc, range }。我们用 foliate 自带的 Overlayer 静态方法绘制，
+   * 支持 highlight（背景）/ solid（直线段=underline）/ wavy（波浪线=squiggly）三类。
+   */
   function onDrawAnnotation(e: any) {
     const detail = e?.detail;
     const draw = detail?.draw;
     const annotation = detail?.annotation;
-    // 2026-08-25 可靠性：缺 draw/annotation 直接告警返回，避免后续空引用静默失败。
-    if (typeof draw !== "function" || !annotation) {
-      console.warn("[REword] draw-annotation 事件缺少 draw 或 annotation，跳过绘制", detail);
-      return;
-    }
-    const { color, style, note } = annotation;
-    const kind = (style || "highlight") as AnnotationStyle;
-    const fn =
-      kind === "highlight" ? Overlayer.highlight :
-      kind === "wavy" ? Overlayer.squiggly :
-      Overlayer.underline; // solid → 直线段（下划线）
-    // 2026-08-25 可靠性：主绘制调用（高亮/线段）此前无错误保护，draw 内部抛异常会
-    // 让整条标注静默消失。现包 try-catch 并输出标注详情，便于排查 CFI/颜色/线型异常。
-    try {
-      draw(fn, { color, padding: 1 });
-    } catch (err) {
-      console.warn("[REword] 绘制高亮失败（style=" + kind + ", color=" + color + "）:", err, annotation);
-    }
-    // 有笔记的批注在高亮末尾绘制小圆点指示器，提示用户「此高亮有批注内容」
-    // try-catch 保护：指示器绘制失败绝不影响高亮本身（高亮是核心功能）
-    if (note && note.trim()) {
-      try { draw(drawNoteIndicator, { color: "#fff", padding: 0 }); } catch (err) {
-        console.warn("[REword] drawNoteIndicator 失败（不影响高亮）:", err);
+    const doc = detail?.doc;
+    const range = detail?.range;
+    if (!draw || !annotation || !range) return;
+
+    const color = annotation.color || "#f5d567";
+    const style = normalizeAnnotationStyle(annotation.style) as AnnotationStyle;
+    dbgHud.drawnCount++;
+    dbgHud.lastDraw = `draw style=${style} color=${color} cf=${String(annotation.value || "").slice(0, 20)}`;
+
+    if (style === "solid") {
+      // 直线段：foliate Overlayer.underline（一条横线下沿）
+      const wm = getWritingMode(doc, range);
+      draw(Overlayer.underline, { color, ...wm });
+    } else if (style === "wavy") {
+      // 波浪线：foliate Overlayer.squiggly
+      const wm = getWritingMode(doc, range);
+      draw(Overlayer.squiggly, { color, ...wm });
+    } else {
+      // 高亮背景：foliate Overlayer.highlight（圆角矩形 + 半透明）
+      // 防御：确保 iframe 文档的 --overlayer-highlight-opacity 非 0（否则高亮透明不可见）
+      if (doc?.documentElement) {
+        const cur = doc.defaultView?.getComputedStyle(doc.documentElement).getPropertyValue("--overlayer-highlight-opacity");
+        if (!cur || cur.trim() === "0" || cur.trim() === "0px") {
+          doc.documentElement.style.setProperty("--overlayer-highlight-opacity", "0.3");
+        }
       }
+      draw(Overlayer.highlight, { color });
     }
   }
 
-  /** 绘制批注指示器：在高亮最后一行右下角画一个小实心圆点 */
-  function drawNoteIndicator(rects: any[] | any, options: any) {
-    const g = document.createElementNS("http://www.w3.org/2000/svg", "g");
-    // 防御：Overlayer.draw 传 rects 数组；但若接口变更导致收到单对象也能兜底
-    const arr = Array.isArray(rects) ? rects : [rects];
-    if (!arr.length) return g;
-    const last = arr[arr.length - 1];
-    if (!last || typeof last.right !== "number") return g;
-    const r = 2.8; // 圆点半径
-    const cx = last.right + r + 1;
-    const cy = last.bottom - r - 1;
-    const circle = document.createElementNS("http://www.w3.org/2000/svg", "circle");
-    circle.setAttribute("cx", String(cx));
-    circle.setAttribute("cy", String(cy));
-    circle.setAttribute("r", String(r));
-    circle.setAttribute("fill", "#6b9eff"); // 思源蓝，与批注语义一致
-    circle.setAttribute("class", "xh-note-indicator");
-    g.appendChild(circle);
-    return g;
+  /** 取 Range 所在节点的 writing-mode（竖排时需传给 Overlayer 的线型绘制） */
+  function getWritingMode(doc: any, range: Range): { writingMode?: string } {
+    try {
+      const node = range.startContainer;
+      const el = node && node.nodeType === 1 ? node : node?.parentElement;
+      const wm = doc?.defaultView?.getComputedStyle(el)?.writingMode;
+      return wm ? { writingMode: wm } : {};
+    } catch {
+      return {};
+    }
   }
 
   function onShowAnnotation(e: any) {
@@ -2191,6 +2579,13 @@
         annByValue.set(value, rec);
       }
     }
+    // ★★ 关键诊断：rec 确定后立即记录路径与内容（用于排查 id=undefined 根因）
+    const recPath = (function() {
+      const fast = annByValue.get(value);
+      if (fast && fast === rec) return "FAST";
+      if (rec) return "SLOW(getByBook)";
+      return "GHOST";
+    })();
     if (!rec) {
       // 兜底：foliate 知道这是高亮但我们没找到活跃记录（数据已软删/损坏）。
       // 2026-08-24 死锁解除：弹 edit 工具栏 +「清除残留高亮」按钮，不再弹 toast（按钮自明）。
@@ -2208,6 +2603,28 @@
       activeAnnCfi = value;
       console.log("[REword] onShowAnnotation ghost 分支: ghostCfi=", value, ", editingId=", selToolbar.editingId);
       return;
+    }
+    // 2026-08-26 根因修复：annByValue 缓存可能存入 id=undefined 的脏记录（历史代码路径
+    // 用 noteEditor.id=null 写入，或旧版代码未校验 id）。此处做防御性补全：
+    // 若 rec.id 为空，用 CFI 在 store 中反查真实 id，修复缓存，然后继续正常流程。
+    if (!rec.id && annStore && bookId) {
+      console.warn("[REword] onShowAnnotation: rec.id 为空！尝试用 CFI 反查 store 补全...", { cfi: rec.cfi, value });
+      const byBook = annStore.getByBook(bookId);
+      const normCfi = (s: string) => String(s || "").replace(/^epubcfi\(/i, "").replace(/\)+$/, "");
+      const target = normCfi(rec.cfi || value);
+      const hit =
+        byBook.find((it: any) => normCfi(it.cfi) === target) ||
+        byBook.find((it: any) => {
+          const a = normCfi(it.cfi);
+          return a && (a.startsWith(target) || target.startsWith(a));
+        });
+      if (hit?.id) {
+        console.log("[REword] onShowAnnotation: id 补全成功", { oldId: rec.id, newId: hit.id, cfi: target });
+        rec = { id: hit.id, cfi: rec.cfi || hit.cfi, color: rec.color || hit.color };
+        annByValue.set(value, rec);  // 修复缓存，后续走快路径不再命中脏数据
+      } else {
+        console.warn("[REword] onShowAnnotation: id 补全失败！store 中也找不到该 CFI 的记录，降级为 ghost", { target, byBookCount: byBook.length });
+      }
     }
     const stored = annStore?.get(rec.id);
     const style = (stored?.style as AnnotationStyle) || "highlight";
@@ -2249,14 +2666,33 @@
         };
       }
     }
-    // 2026-08-25 修订：点击任何已批注/已高亮文本 → 统一弹出「简化查看卡」（view 态）。
-    // 无论是否有笔记，都走查看卡；样式修改仅能通过：
-    //   1) 查看卡内的样式行/颜色行（即时改，不进编辑态）
-    //   2) 点「编辑」→ 进入 noteEditor edit 态（改样式 + 改内容）
-    // 取消旧「标注→edit 工具栏（删除+样式条）」路径，减少误操作（之前便捷改样式易误用工具栏）。
+    // 2026-08-26 标注与批注隔离 v2：
+    //   - 纯高亮（无 note）→ 复用 selToolbar 进入 edit 模式（高亮按钮变删除 + 样式条展开）
+    //   - 有笔记批注 → 弹「简易预览卡」(mode:"preview")：只读 + 编辑入口
     suppressNextCreateToolbar = true;  // 抑制选区路径的创建工具栏
-    showViewerForRec(rec, rect);
-    console.log("[REword] onShowAnnotation 分支(统一查看卡): rec.id=", rec.id, ", rec.cfi=", rec.cfi, ", hasNote=", !!(stored && classifyAnnotation(stored) === "annotation"));
+    // ★ 诊断日志：排查"纯高亮仍弹预览卡"问题 — 打印判定依据的原始数据
+    const pure = stored ? isPureHighlight(stored) : false;
+    if (DEBUG_READER) {
+      console.log("[REword][onShowAnnotation] 判定依据:", {
+        hasStored: !!stored,
+        recId: rec?.id,
+        note: stored?.note,
+        noteType: typeof stored?.note,
+        noteLength: stored?.note?.length,
+        noteTrimmed: (stored?.note || "").trim(),
+        selectedText: stored?.selectedText,
+        selectedTextTrimmed: (stored?.selectedText || "").trim(),
+        isPureHighlight: pure,
+        classify: stored ? classifyAnnotation(stored) : "?",
+      });
+    }
+    if (stored && pure) {
+      openHighlightEditToolbar(rec, rect);
+      console.log("[REword] onShowAnnotation 分支(纯高亮→selToolbar edit): rec.id=", rec.id, ", rec.cfi=", rec.cfi);
+    } else {
+      showPreviewViewer(rec, rect);
+      console.log("[REword] onShowAnnotation 分支(批注→预览卡): rec.id=", rec.id, ", rec.cfi=", rec.cfi, ", hasNote=", !!(stored && classifyAnnotation(stored) === "annotation"), ", reason=", !stored ? "!stored" : "!pure");
+    }
   }
 
   /** 持久化一条书籍批注 + 在 foliate 中渲染高亮（直接接收 style/color/type） */
@@ -2282,17 +2718,12 @@
     };
     const created = annStore.upsert(input);
     annByValue.set(cfi, { id: created.id, cfi, color });
-    // 渲染高亮；addAnnotation 是 async——必须 await 才能真正捕获渲染失败。
-    // （2026-08-24 修复：此前同步 try-catch 捕获不到 async reject，回滚永不触发；
-    //  若渲染失败则回滚 store 写入并提示，避免"数据有但看不见"的不一致。）
+    // foliate 原生绘制：addAnnotation 内部 resolveNavigation + 找 overlayer + emit draw-annotation。
+    // 若当前章节 overlay 已就绪立即画出；否则等 create-overlay 事件补绘（数据已落库，不回滚）。
     try {
-      await view?.addAnnotation({ value: cfi, color, style, note });
+      await addReaderAnnotation({ ...input, id: created.id });
     } catch (err) {
-      console.warn("[REword] 高亮渲染失败，回滚批注:", err);
-      try { await annStore.hardRemove(created.id); } catch { /* ignore */ }
-      annByValue.delete(cfi);
-      toast("高亮渲染失败，请重试");
-      return;
+      console.warn("[REword] 绘制失败（批注数据已保存，高亮稍后由 create-overlay 补绘）:", err);
     }
     dispatchAnnotationChanged();
   }
@@ -2382,7 +2813,7 @@
   // 查看态「编辑」→ 同一张卡片就地切到编辑态（位置不跳变，不另开气泡）。
   // 数据已随 view 态载入 noteEditor（text/cfi/id/style/color/note），直接翻转 mode 即可。
   function onViewerEdit() {
-    if (noteEditor.mode !== "view") return;
+    if (noteEditor.mode !== "view" && noteEditor.mode !== "preview") return;
     noteEditor = { ...noteEditor, mode: "edit" };
     // 下一帧 textarea 就绪后聚焦输入框
     void tick().then(() => {
@@ -2399,6 +2830,16 @@
     try { navigator.clipboard?.writeText(text); } catch { /* ignore */ }
     closeNoteEditor();
     toast("已复制");
+  }
+
+  // 预览卡「导出」：将「原文 + 笔记」组合为 Markdown 复制到剪贴板（轻量导出，后续可接思源文档）
+  function onViewerExport() {
+    const text = (noteEditor.text || "").trim();
+    const note = (noteEditor.note || "").trim();
+    const md = [text ? `> ${text}` : "", note ? note : ""].filter(Boolean).join("\n\n");
+    if (!md) { toast("无内容可导出"); return; }
+    try { navigator.clipboard?.writeText(md); } catch { /* ignore */ }
+    toast("已导出批注到剪贴板");
   }
 
   /** 共享：软删除一条标注（视觉擦除 + 数据软删 + reconcile），供查看气泡与划词工具栏复用 */
@@ -2463,9 +2904,9 @@
         group,
         type: noteVal ? "annotate" : "highlight",
       });
-      // 重绘视觉：擦旧 → 画新（样式/颜色/笔记变化）
+      // 重绘视觉：擦旧 → 画新（样式/颜色/笔记变化），均走 foliate 原生管线
       await eraseAnnotationVisual(cfi);
-      try { await view?.addAnnotation({ value: cfi, color, style, note: noteVal }); } catch { /* ignore */ }
+      await addReaderAnnotation({ id, cfi, color, style, note: noteVal });
       annByValue.set(cfi, { id, cfi, color });
       noteEditor = { ...noteEditor, visible: false, mode: "create", id: null };
       closeSelToolbar();
@@ -2489,34 +2930,31 @@
 
   // 查看态：点色板颜色 → 即时改色（readest「颜色即分类」：不改笔记、不关卡片）
   async function applyViewerColor(color: string) {
-    if (noteEditor.mode !== "view" || !noteEditor.id) return;
+    // 2026-08-26 放宽守卫：view 态与 highlight 态共用此即时改色逻辑（highlight 面板复用，避免重复代码）
+    if (!noteEditor.id) return;
     lastColor = color;
     if (!annStore) { try { annStore = getAnnotationStore(); } catch { annStore = null; } }
     const cfi = noteEditor.cfi;
     if (annStore) annStore.upsert({ id: noteEditor.id, color });
     if (cfi) {
       await eraseAnnotationVisual(cfi);
-      try {
-        await view?.addAnnotation({ value: cfi, color, style: noteEditor.style, note: noteEditor.note });
-      } catch { /* ignore */ }
+      await addReaderAnnotation({ id: noteEditor.id, cfi, color, style: noteEditor.style, note: noteEditor.note || "" });
       annByValue.set(cfi, { id: noteEditor.id, cfi, color });
     }
     noteEditor = { ...noteEditor, color };
     dispatchAnnotationChanged(); // 通知侧边栏刷新
   }
 
-  // 查看态：点样式 → 即时改样式（与改色同理）
+  // 查看态/高亮态：点样式 → 即时改样式（与改色同理；highlight 面板复用）
   async function applyViewerStyle(style: AnnotationStyle) {
-    if (noteEditor.mode !== "view" || !noteEditor.id) return;
+    if (!noteEditor.id) return;
     lastStyle = style;
     if (!annStore) { try { annStore = getAnnotationStore(); } catch { annStore = null; } }
     const cfi = noteEditor.cfi;
     if (annStore) annStore.upsert({ id: noteEditor.id, style });
     if (cfi) {
       await eraseAnnotationVisual(cfi);
-      try {
-        await view?.addAnnotation({ value: cfi, color: noteEditor.color, style, note: noteEditor.note });
-      } catch { /* ignore */ }
+      await addReaderAnnotation({ id: noteEditor.id, cfi, color: noteEditor.color, style, note: noteEditor.note || "" });
       annByValue.set(cfi, { id: noteEditor.id, cfi, color: noteEditor.color });
     }
     noteEditor = { ...noteEditor, style };
@@ -2561,10 +2999,10 @@
     // 无需先 deleteAnnotation：单个 addAnnotation 调用即可完成替换（对标 readest / foliate 官方 view.js:427）。
     if (view) {
       try {
-        await view.addAnnotation({ value: cfi, color, style, note });
+        await addReaderAnnotation({ id: effId, cfi, color, style, note });
         if (effId) annByValue.set(cfi, { id: effId, cfi, color });
         toast(`样式已改为 ${ANNOTATION_STYLES[style]?.label || style}`);
-        dbg.step("applyEditStyle", "✅ 视觉更新成功（原子替换）", { cfi, style, effId });
+        dbg.step("applyEditStyle", "✅ 视觉更新成功（直接绘制）", { cfi, style, effId });
       } catch (e) {
         console.error("[REword] applyEditStyle 视觉更新失败:", e);
         toast("样式切换失败，请重试");
@@ -2610,10 +3048,10 @@
     // 视觉更新：单次 addAnnotation = foliate 原子替换（读 est/readest 一致做法）。
     if (view) {
       try {
-        await view.addAnnotation({ value: cfi, color, style, note });
+        await addReaderAnnotation({ id: effId, cfi, color, style, note });
         if (effId) annByValue.set(cfi, { id: effId, cfi, color });
         toast(`颜色已更改`);
-        dbg.step("applyEditColor", "✅ 视觉更新成功（原子替换）", { cfi, color, effId });
+        dbg.step("applyEditColor", "✅ 视觉更新成功（直接绘制）", { cfi, color, effId });
       } catch (e) {
         console.error("[REword] applyEditColor 视觉更新失败:", e);
         toast("颜色切换失败，请重试");
@@ -2640,13 +3078,11 @@
     const text = selToolbar.text?.trim();
     if (!text) return;
     closeSelToolbar();
-    if (onTranslate) {
-      const r = onTranslate(text);
-      if (r && typeof (r as Promise<string>).then === "function") {
-        (r as Promise<string>).then((md) => toast("翻译已生成")).catch(() => toast("翻译失败"));
-      }
+    // 2026-08-27：翻译按钮仅发送到 AI 精读面板（自动打开），不再弹内联双语卡片
+    if (onTranslateToAi) {
+      onTranslateToAi(text);
     } else {
-      toast("翻译未配置：请在设置中配置翻译引擎");
+      toast("翻译未配置：请先在 AI 设置中配置翻译引擎");
     }
   }
 
@@ -2752,23 +3188,20 @@
   // foliate 内部静默失败时误判成功会让兜底永远不跑；而 readest 的软删除 + 重绘过滤
   // 天然保证"最终一致"，无需验证。
 
-  // 2026-08-24 根治（替代"信任 foliate + 不验证"模型）：
-  // 擦除 = foliate 官方删除（await，尽力而为） + 按 key 遍历所有已渲染 overlay 强制移除。
-  // foliate 的 addAnnotation(ann, true) 是"静默失败"型（resolveNavigation 失败 /
-  // #getOverlayer 找不到 / key 不匹配都不抛错），PDF/fixed-layout 下 index=页码与 spine index
-  // 必然错位、每次删除都静默失败——所以必须用 eraseOverlayKey 验证并兜底，
-  // 返回值是"真实结果"（移除数 > 0 或确认已不存在），不再以"没抛错"当成功。
+  // 2026-08-26 退回 foliate 原生：删除即 foliate 的 deleteAnnotation（= addAnnotation(ann, true)），
+  // 内部 resolveNavigation(cfi) → 找该分节 overlayer → overlayer.remove(value)。
+  // 兜底：若 foliate 静默失败（fixed-layout 页码错位等），用 eraseOverlayKey 遍历所有
+  // 已渲染 overlay（foliate 原生 overlayer）按宽松 CFI 匹配强制移除，确保视觉消失。
   async function eraseAnnotationVisual(cfi: string): Promise<boolean> {
     if (!view || !cfi) return false;
     console.log("[REword] eraseAnnotationVisual 开始, cfi=", cfi);
-    // 1) foliate 官方删除（await 以捕获真正抛出的异常；静默失败由下面兜底）
+    // 1) foliate 原生删除
     try {
-      await view.addAnnotation({ value: cfi, color: "", style: "highlight", note: "" }, true);
-      console.log("[REword] foliate 官方删除调用完成(不表示成功)");
+      await view.deleteAnnotation({ value: cfi, color: "", style: "highlight", note: "" });
     } catch (e) {
-      console.log("[REword] foliate 官方删除抛错:", e);
+      console.warn("[REword] foliate deleteAnnotation 抛错:", e);
     }
-    // 2) 强制兜底 A：按 key 遍历所有已渲染 overlay 移除（宽松 CFI 匹配）
+    // 2) 兜底：按 key 遍历所有已渲染 overlay（foliate 原生）强制移除（宽松 CFI 匹配）
     const removed = eraseOverlayKey(view, cfi);
     const still = hasOverlayKey(view, cfi);
     console.log("[REword] eraseOverlayKey 移除数=", removed, ", 残留=", still);
@@ -2777,7 +3210,6 @@
       return true;
     }
     // 3) 核选项：清空全部 overlay SVG + 触发重绘（完全不依赖 CFI 匹配）
-    // 适用场景：CFI 格式差异导致步骤1-2 全部失败的极端情况
     console.log("[REword] 步骤2失败，启动核选项 nukeAndRedrawOverlays");
     const nuked = nukeAndRedrawOverlays(view);
     console.log("[REword] 核选项清除 overlay 数=", nuked);
@@ -2909,7 +3341,7 @@
   }
 
   /** 撤销刚删除的标注（清掉软删除时间戳，数据重新生效并重建高亮） */
-  function undoDelete() {
+  async function undoDelete() {
     if (!pendingDelete || !annStore) return;
     const r = pendingDelete;
     pendingDelete = null;
@@ -2917,9 +3349,9 @@
     try {
       // 1) 清软删除标记，恢复数据活跃
       annStore.restore(r.id);
-      // 2) 重建视觉高亮
+      // 2) 重建视觉高亮（foliate 原生：addAnnotation 解析 CFI 并重绘）
       if (r.cfi) {
-        view?.addAnnotation({ value: r.cfi, color: r.color, style: r.style, note: r.note });
+        await addReaderAnnotation({ id: r.id, cfi: r.cfi, color: r.color, style: r.style, note: r.note || "" });
         annByValue.set(r.cfi, { id: r.id, cfi: r.cfi, color: r.color });
       }
       toast("已撤销");
@@ -2932,15 +3364,99 @@
 
   // 卡片内「相似词候选」可点击二次查词
   function onDictBodyClick(e: MouseEvent) {
-    const t = (e.target as HTMLElement)?.closest?.("[data-action='lookup-candidate']") as HTMLElement | null;
-    if (t) {
-      const w = t.getAttribute("data-word") || "";
-      if (w) runDictLookup(w);
+    const rawTarget = e.target as HTMLElement;
+    // 用 closest 向上查找带 data-action 的祖先（点到按钮内部 span/文字时仍能命中）
+    const target = (rawTarget.closest("[data-action]") as HTMLElement) || rawTarget;
+    const action = target.dataset.action;
+    const word = target.dataset.text || target.dataset.word;
+
+    // ── 朗读 ──
+    if (action === "tts" && word) {
+      onSpeak?.(word);
+      return;
+    }
+
+    // ── 加入/移出词库 ★ ──
+    if (action === "vocab-star") {
+      const w = (target.getAttribute("data-word") || "").trim();
+      if (w) {
+        const on = target.classList.contains("star-on");
+        if (on) {
+          onRemoveFromVocab?.(w);
+          target.classList.remove("star-on");
+          target.textContent = "☆";
+          target.title = "加入词库";
+        } else {
+          onAddToVocab?.(w);
+          target.classList.add("star-on");
+          target.textContent = "★";
+          target.title = "移出词库";
+        }
+      }
+      return;
+    }
+
+    // ── 候选词再查 ──
+    if (action === "lookup-candidate" && word) {
+      runDictLookup(word, { x: dictPopup.x, y: dictPopup.y, source: (dictPopupSource as any) ?? "hover" });
+      return;
+    }
+
+    // ── 词性区块折叠/展开 ──
+    if (action === "toggle-pos") {
+      const block = target.closest(".hiword-vb-pos-block") as HTMLElement | null;
+      if (block) togglePosCollapsed(block);
+      return;
+    }
+
+    // ── 释义/词组 section 折叠/展开 ──
+    if (action === "toggle-section") {
+      const sec = target.closest(".hiword-detail-section") as HTMLElement | null;
+      if (sec) sec.classList.toggle("hiword-detail-sec-collapsed");
+      return;
+    }
+
+    // ──「查看全部 N 个义项」展开/收起 ──
+    if (action === "toggle-senses") {
+      const full = target.nextElementSibling as HTMLElement | null;
+      if (full && full.classList.contains("hiword-dict-senses-full")) {
+        const willShow = full.hidden;
+        full.hidden = !willShow;
+        target.classList.toggle("hiword-dict-senses-open", willShow);
+        const arrow = target.querySelector(".hiword-dict-senses-toggle-arrow");
+        if (arrow) arrow.textContent = willShow ? "▴" : "▾";
+        // 展开全量时隐藏初始 4 条，收起时恢复
+        const initial = target.parentElement?.querySelector(".hiword-dict-senses-initial") as HTMLElement | null;
+        if (initial) initial.hidden = willShow;
+      }
+      return;
+    }
+
+    // ── 义项内例句展开/收起 ──
+    if (action === "toggle-examples") {
+      const moreContainer = target.closest(".hiword-dict-sense-ex-more");
+      const rest = moreContainer?.querySelector(".hiword-dict-sense-ex-rest") as HTMLElement | null;
+      if (moreContainer && rest) {
+        const willShow = rest.hidden;
+        rest.hidden = !willShow;
+        const exCount = moreContainer.querySelectorAll(".hiword-dict-sense-ex-row").length;
+        target.innerHTML = `<span class="hiword-dict-sense-toggle-arrow">${willShow ? "▴" : "▾"}</span> ${willShow ? "收起例句" : `展开 ${Math.max(0, exCount - 1)} 条例句`}`;
+      }
+      return;
     }
   }
 
   function closeDictPopup() {
+    dictPopupSource = null;
     dictPopup = { ...dictPopup, visible: false };
+  }
+
+  // 2026-08-27：悬浮弹窗——光标进入/离开时的收起控制
+  function onDictPopupEnter() {
+    clearHoverHide();
+  }
+  function onDictPopupLeave() {
+    if (dictPopupSource === "hover") scheduleHoverHide();
   }
 
   // 订阅阅读设置：设置变更（含其它已开 Tab）即自动重刷样式，
@@ -2994,6 +3510,7 @@
     if (annotatePressTimer) clearTimeout(annotatePressTimer);
     if (toastTimer) clearTimeout(toastTimer);
     if (undoTimer) clearTimeout(undoTimer);
+    if (hoverHideTimer) clearTimeout(hoverHideTimer);
     if (sessionReadMs > 0) void store.addReadingTime(bookId, sessionReadMs);
     // 2026-08-23 修复：listener 绑在 readerViewEl（不是 document）
     if (readerViewEl) {
@@ -3454,6 +3971,18 @@
     {/if}
   </div>
 
+  <!-- 2026-08-26 调试 HUD：foliate 原生标注管线诊断（DEBUG_READER=true 时显示） -->
+  {#if DEBUG_READER}
+  <div class="reader-debug-hud">
+    <div class="reader-debug-hud-title">🔍 REword 高亮诊断（foliate 原生）</div>
+    <div class="reader-debug-hud-row"><b>setup:</b> {dbgHud.setupCalled} <b>annStore:</b> {dbgHud.annStoreReady} <b>bookId:</b> {dbgHud.bookIdAtSetup}</div>
+    <div class="reader-debug-hud-row"><b>storeAnnots:</b> {dbgHud.annotCountInStore} <b>totalInStore:</b> {dbgHud.totalInStore} <b>bookIdMatch:</b> {dbgHud.bookIdMatch}</div>
+    <div class="reader-debug-hud-row"><b>createOverlay:</b> {dbgHud.createOverlayCalls} <b>relocate:</b> {dbgHud.relocateCalls} <b>evtIdx:</b> {dbgHud.ovr_evtIndex}</div>
+    <div class="reader-debug-hud-row"><b>addAnnotation 调用:</b> {dbgHud.addAnnotationTries} <b>失败:</b> {dbgHud.addAnnotationErrors} <b>绘制:</b> {dbgHud.drawnCount}</div>
+    <div class="reader-debug-hud-row"><b>lastDraw:</b> {dbgHud.lastDraw}</div>
+  </div>
+  {/if}
+
   <!-- 底部控制栏：目录/翻页/进度条/搜索。独立在 .reader-stage 之外（2026-08-25 修复：
        此前误置于 stage 内，被 position:absolute 的 .reader-container 遮挡 + overflow:hidden 裁切导致不可见）。 -->
   <div class="reader-bottom-bar">
@@ -3531,13 +4060,14 @@
               <span class="reader-sel-ico">{@html SEL_ICONS.trash}</span><span class="reader-sel-txt">清除残留</span>
             </button>
           {:else}
-          <button class="reader-sel-item" title="复制" on:click={onSelCopy}>
-            <span class="reader-sel-ico">{@html SEL_ICONS.copy}</span><span class="reader-sel-txt">复制</span>
-          </button>
+          <!-- 2026-08-26 标注 edit 模式：删除按钮替代「高亮」位置（最前），其余功能保留 -->
           <button class="reader-sel-item reader-sel-item-danger" title="删除划线" on:click={onAnnDeleteById}>
             <span class="reader-sel-ico">{@html SEL_ICONS.trash}</span><span class="reader-sel-txt">删除</span>
           </button>
-          <button class="reader-sel-item" title="批注" on:click={onEditAnnotate}>
+          <button class="reader-sel-item" title="复制" on:click={onSelCopy}>
+            <span class="reader-sel-ico">{@html SEL_ICONS.copy}</span><span class="reader-sel-txt">复制</span>
+          </button>
+          <button class="reader-sel-item" title="批注：升级为带笔记标注" on:click={onEditAnnotate}>
             <span class="reader-sel-ico">{@html SEL_ICONS.annotate}</span><span class="reader-sel-txt">批注</span>
           </button>
           <button class="reader-sel-item" title="词典" on:click={onSelDict}>
@@ -3560,9 +4090,9 @@
           <button
             class="reader-sel-item reader-sel-item-accent"
             class:active={selToolbar.stripVisible}
-            title="高亮：展开样式条（高亮/直线/波浪 + 颜色）"
+            title="标注：展开样式条（高亮/直线/波浪 + 颜色）"
             on:click={toggleStyleStrip}>
-            <span class="reader-sel-ico">{@html SEL_ICONS.highlight}</span><span class="reader-sel-txt">高亮</span>
+            <span class="reader-sel-ico">{@html SEL_ICONS.highlight}</span><span class="reader-sel-txt">标注</span>
           </button>
           <button
             class="reader-sel-item reader-sel-item-accent"
@@ -3587,11 +4117,36 @@
     </div>
   {/if}
 
-  <!-- 统一批注浮层：create（新建）/ view（查看）/ edit（编辑）三态合一，均锚定选区下方 -->
+  <!-- 统一批注浮层：preview（只读预览）/ view（兼容）/ highlight（纯标注）/ create·edit（编辑） -->
   {#if noteEditor.visible}
     <div class="reader-note-editor" class:place-above={noteEditor.placeAbove} bind:this={noteEditorEl} style="left:{noteEditor.x}px;top:{noteEditor.y}px">
-      {#if noteEditor.mode === "view"}
-        <!-- 查看态：时间 + 原文 + 批注 + 标签 + 即时改色/样式 + 复制/编辑/删除 -->
+      {#if noteEditor.mode === "preview"}
+        <!-- 2026-08-26 简易预览卡：只读笔记 + 图标操作（复制/导出/删除）+ 编辑入口 -->
+        <div class="reader-preview-head">
+          <span class="reader-viewer-time" title={noteEditor.time}>{noteEditor.time || "未记录时间"}</span>
+          <span class="reader-preview-actions">
+            <button class="reader-icon-btn" title="复制" on:click={onViewerCopy}>{@html SEL_ICONS.copy}</button>
+            <button class="reader-icon-btn" title="导出" on:click={onViewerExport}>⬇️</button>
+            <button class="reader-icon-btn reader-icon-btn-danger" title="删除" on:click={onViewerDelete}>{@html SEL_ICONS.trash}</button>
+          </span>
+        </div>
+        {#if noteEditor.note}
+          <div class="reader-viewer-note reader-preview-note">{noteEditor.note}</div>
+        {:else}
+          <div class="reader-preview-empty">（无批注内容）</div>
+        {/if}
+        {#if noteEditor.labels.length}
+          <div class="reader-viewer-labels">
+            {#each noteEditor.labels as l}
+              <span class="reader-viewer-label" style="--lc:{l.color}">#{l.name}</span>
+            {/each}
+          </div>
+        {/if}
+        <div class="reader-preview-foot">
+          <button class="reader-viewer-btn reader-viewer-btn-primary" on:click={onViewerEdit}>✏️ 笔记</button>
+        </div>
+      {:else if noteEditor.mode === "view"}
+        <!-- 查看态（兼容保留）：时间 + 原文 + 批注 + 标签 + 即时改色/样式 + 复制/编辑/删除 -->
         <div class="reader-viewer-head">
           <span class="reader-viewer-time" title={noteEditor.time}>{noteEditor.time || "未记录时间"}</span>
           <span class="reader-viewer-style">
@@ -3625,6 +4180,29 @@
         <div class="reader-viewer-actions">
           <button class="reader-viewer-btn" on:click={onViewerCopy}>复制</button>
           <button class="reader-viewer-btn" on:click={onViewerEdit}>编辑</button>
+          <button class="reader-viewer-btn reader-viewer-btn-danger" on:click={onViewerDelete}>删除</button>
+        </div>
+      {:else if noteEditor.mode === "highlight"}
+        <!-- 纯标注（高亮）面板：与批注查看卡隔离。仅样式/颜色即时切换 + 删除，无时间/笔记/复制/编辑 -->
+        <div class="reader-viewer-head">
+          <span class="reader-viewer-time">标注</span>
+          <span class="reader-viewer-style">
+            <span class="reader-style-glyph style-{noteEditor.style}" style="--sc:{noteEditor.color}" title={noteEditor.styleLabel}>{noteEditor.styleGlyph}</span>
+          </span>
+        </div>
+        <div class="reader-style-row reader-viewer-style-row">
+          {#each ANNOTATION_PANEL_STYLES as s}
+            <button class="reader-style-btn" class:active={s === noteEditor.style} title={ANNOTATION_STYLES[s].label} on:click={() => applyViewerStyle(s)}>
+              <span class="reader-style-glyph style-{s}" style="--sc:{noteEditor.color}">{ANNOTATION_STYLES[s].icon}</span>
+            </button>
+          {/each}
+        </div>
+        <div class="reader-color-row">
+          {#each WHALE_COLORS as c}
+            <button class="reader-color-dot" class:active={c.value === noteEditor.color} style="background:{c.value}" title={c.name} on:click={() => applyViewerColor(c.value)}></button>
+          {/each}
+        </div>
+        <div class="reader-viewer-actions">
           <button class="reader-viewer-btn reader-viewer-btn-danger" on:click={onViewerDelete}>删除</button>
         </div>
       {:else}
@@ -3680,8 +4258,12 @@
 
   <!-- 即时词典弹窗（复用 .hiword-dict-* 全局样式） -->
   {#if dictPopup.visible}
-    <div class="reader-dict-backdrop" on:click={closeDictPopup} aria-hidden="true"></div>
-    <div class="reader-dict-popup" style="left:{dictPopup.x}px; top:{dictPopup.y}px">
+    <!-- 仅划词工具栏来源（sel）渲染遮罩：悬浮（hover）来源不能遮罩，否则会拦截 iframe 的 mousemove 取词 -->
+    {#if dictPopupSource === "sel"}
+      <div class="reader-dict-backdrop" on:click={closeDictPopup} aria-hidden="true"></div>
+    {/if}
+    <div class="reader-dict-popup" bind:this={dictPopupEl} style="left:{dictPopup.x}px; top:{dictPopup.y}px"
+         on:mouseenter={onDictPopupEnter} on:mouseleave={onDictPopupLeave}>
       <div class="reader-dict-head">
         <span>词典</span>
         <button class="reader-dict-close" on:click={closeDictPopup} title="关闭">✕</button>
@@ -3815,6 +4397,7 @@
     pointer-events: none;
     z-index: 2;
   }
+
   .reader-floating-layer > * {
     pointer-events: auto;
   }
@@ -4080,6 +4663,22 @@
   }
   .reader-viewer-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 11px; color: #9aa3ab; }
   .reader-viewer-time { opacity: 0.85; }
+
+  /* 2026-08-26 简易预览卡（preview 态）样式 */
+  .reader-preview-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 11px; color: #9aa3ab; }
+  .reader-preview-actions { display: flex; gap: 2px; }
+  .reader-icon-btn {
+    width: 24px; height: 24px; display: inline-flex; align-items: center; justify-content: center;
+    border: none; background: transparent; border-radius: 6px; cursor: pointer; font-size: 13px; color: #cdd5dd;
+    padding: 0;
+  }
+  .reader-icon-btn:hover { background: rgba(255, 255, 255, 0.12); }
+  .reader-icon-btn-danger:hover { background: rgba(255, 80, 80, 0.18); color: #ffb4b4; }
+  .reader-preview-note { max-height: 140px; overflow: auto; }
+  .reader-preview-empty { font-size: 12px; color: #7a838c; font-style: italic; padding: 4px 0; }
+  .reader-preview-foot { display: flex; justify-content: flex-end; margin-top: 4px; }
+  .reader-viewer-btn-primary { background: rgba(90, 160, 255, 0.18); border-color: rgba(90, 160, 255, 0.4); color: #aaccff; }
+  .reader-viewer-btn-primary:hover { background: rgba(90, 160, 255, 0.3); }
   .reader-viewer-excerpt {
     font-size: 13px;
     line-height: 1.5;
@@ -4961,4 +5560,37 @@
     color: var(--b3-theme-error, #e24b4a);
     font-size: 13px;
   }
+
+  /* 2026-08-26 调试 HUD：高亮渲染链路诊断 */
+  .reader-debug-hud {
+    position: fixed;
+    bottom: 60px;
+    right: 8px;
+    z-index: 2147483647;
+    background: rgba(0, 0, 0, 0.88);
+    color: #00ff88;
+    font-family: "SF Mono", Menlo, Consolas, monospace;
+    font-size: 11px;
+    line-height: 1.5;
+    padding: 8px 10px;
+    border-radius: 6px;
+    max-width: 380px;
+    word-break: break-all;
+    pointer-events: auto;
+    box-shadow: 0 2px 12px rgba(0,0,0,0.5);
+    user-select: text;
+  }
+  .reader-debug-hud-title {
+    color: #ffcc00;
+    font-weight: 700;
+    margin-bottom: 4px;
+    border-bottom: 1px solid rgba(255,255,255,0.15);
+    padding-bottom: 3px;
+  }
+  .reader-debug-hud-row {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .reader-debug-hud-row b { color: #66ccff; }
 </style>

@@ -126,7 +126,12 @@
 .hiword-phonetic {
   font-size: 12px;
   color: var(--b3-theme-on-surface-light);
-  font-family: monospace;
+  font-family: "Charis SIL", "Lucida Sans Unicode", "Segoe UI Symbol", sans-serif;
+  max-width: 200px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 0 0 auto;
 }
 
 .hiword-meaning {
@@ -142,6 +147,48 @@
   align-items: center;
   gap: 6px;
   flex-shrink: 0;
+}
+
+/* 对话框批量删除多选态（2026-08-27 从内嵌面板迁移） */
+.hiword-word-item--select {
+  padding-left: 8px;
+}
+.hiword-word-sel {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  margin-right: 4px;
+}
+.hiword-word-sel input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  cursor: pointer;
+  accent-color: var(--b3-theme-primary, var(--hw-accent));
+}
+.hiword-dialog-batchdel-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  margin-top: 8px;
+  border-top: 1px solid var(--b3-border-color, #e0e0e0);
+  background: var(--b3-theme-background, #fff);
+  border-radius: 0 0 8px 8px;
+  flex-shrink: 0;
+}
+.hiword-dialog-batchdel-count {
+  flex: 1 1 auto;
+  font-size: 12px;
+  color: var(--b3-theme-on-surface-light, #999);
+}
+.hiword-dialog-batchdel-ok {
+  background: var(--b3-theme-error, #e24b4a) !important;
+  border-color: var(--b3-theme-error, #e24b4a) !important;
+  color: #fff !important;
+}
+.hiword-dialog-batchdel-ok:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 /* ========== 掌握度标签 ========== */
@@ -1763,6 +1810,40 @@ body.hiword-dragging {
 /* 批量态：隐藏行内操作按钮与拖拽柄，避免误操作 */
 .hiword-vb-list--batch .hiword-vb-actions { display: none; }
 .hiword-vb-list--batch .hiword-vb-row { cursor: default; }
+/* 2026-08-27 批量删除态：显示勾选框、隐藏拖拽柄与行内操作，避免误操作 */
+.hiword-vb-list--batchdel .hiword-vb-actions { display: none; }
+.hiword-vb-list--batchdel .hiword-vb-row { cursor: default; }
+.hiword-vb-sel-wrap {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+}
+.hiword-vb-sel { width: 16px; height: 16px; cursor: pointer; accent-color: var(--b3-theme-primary, var(--hw-accent)); }
+/* 批量删除操作栏（贴列表底部） */
+.hiword-vb-batchdel-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  margin-top: 8px;
+  border-top: 1px solid var(--b3-border-color, #e0e0e0);
+  background: var(--b3-theme-background, #fff);
+  border-radius: 0 0 8px 8px;
+}
+.hiword-vb-batchdel-count {
+  flex: 1 1 auto;
+  font-size: 12px;
+  color: var(--b3-theme-on-surface-light, #999);
+}
+.hiword-vb-batchdel-ok {
+  background: var(--b3-theme-error, #e24b4a) !important;
+  border-color: var(--b3-theme-error, #e24b4a) !important;
+  color: #fff !important;
+}
+.hiword-vb-batchdel-ok:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
 /* 总库聚合视图：拖拽无实际意义，隐藏拖拽柄 */
 .hiword-vb-list--master .hiword-vb-drag { display: none; }
 /* 2026-08-15 新增：词库标签「管理」入口按钮 */
@@ -3905,6 +3986,188 @@ body.hiword-dragging {
   border-top: 1px solid var(--b3-theme-divider);
 }
 
+/* ---- 设置行（键值型） ---- */
+.hiword-up-row {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-bottom: 14px;
+  &:last-child { margin-bottom: 0; }
+}
+.hiword-up-row-k {
+  width: 116px;
+  flex-shrink: 0;
+  font-size: 13px;
+  color: var(--b3-theme-on-surface, #555);
+  font-weight: 500;
+}
+.hiword-up-row--block { flex-direction: column; align-items: stretch; }
+.hiword-up-row--block .hiword-up-row-k { width: auto; margin-bottom: 8px; }
+.hiword-up-row--actions { gap: 10px; flex-wrap: wrap; }
+.hiword-up-row--switch { }
+.hiword-up-row-sub {
+  display: block;
+  width: 100%;
+  font-size: 11.5px;
+  color: var(--b3-theme-on-surface-light, #999);
+  margin-top: 6px;
+  line-height: 1.45;
+}
+.hiword-up-slider-row {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.hiword-up-slider-row input[type="range"] {
+  flex: 1;
+  accent-color: var(--b3-theme-primary);
+  height: 5px;
+}
+.hiword-up-slider-val {
+  min-width: 56px;
+  text-align: right;
+  font-size: 12.5px;
+  color: var(--b3-theme-primary);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.hiword-up-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--b3-theme-on-surface, #444);
+  cursor: pointer;
+}
+.hiword-up-textarea {
+  width: 100%;
+  padding: 9px 12px;
+  border: 1px solid var(--b3-theme-divider);
+  border-radius: 8px;
+  background: var(--b3-theme-background);
+  color: var(--b3-theme-on-background, #333);
+  font-size: 13px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  outline: none;
+  box-sizing: border-box;
+  resize: vertical;
+  line-height: 1.5;
+  &:focus { border-color: var(--b3-theme-primary); box-shadow: 0 0 0 3px color-mix(in srgb, var(--b3-theme-primary) 15%, transparent); }
+}
+.hiword-up-group--note {
+  font-size: 12px;
+  color: var(--b3-theme-on-surface-light, #999);
+  line-height: 1.6;
+  background: color-mix(in srgb, var(--b3-theme-primary) 4%, var(--b3-theme-surface, #fff));
+}
+
+/* ---- 标注与批注设置 ---- */
+.hiword-ann-styles { display: flex; gap: 10px; flex-wrap: wrap; }
+.hiword-ann-style {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 9px 14px;
+  border: 1px solid var(--b3-theme-divider);
+  border-radius: 9px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  min-width: 92px;
+  &:hover { border-color: var(--b3-theme-primary); }
+  &.is-active { border-color: var(--b3-theme-primary); background: color-mix(in srgb, var(--b3-theme-primary) 8%, transparent); }
+  input { display: none; }
+}
+.hiword-ann-style-name { font-size: 13px; font-weight: 600; color: var(--b3-theme-on-surface, #333); }
+.hiword-ann-style-desc { font-size: 11px; color: var(--b3-theme-on-surface-light, #999); }
+
+.hiword-ann-colors { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.hiword-ann-swatch {
+  width: 26px; height: 26px;
+  border-radius: 7px;
+  background: var(--sw);
+  border: 2px solid transparent;
+  cursor: pointer;
+  box-shadow: 0 1px 3px rgba(0,0,0,.15);
+  transition: transform 0.12s ease, border-color 0.12s ease;
+  &:hover { transform: scale(1.08); }
+  &.is-active { border-color: var(--b3-theme-on-surface, #333); box-shadow: 0 0 0 2px color-mix(in srgb, var(--b3-theme-primary) 30%, transparent); }
+}
+.hiword-ann-custom {
+  width: 30px; height: 28px;
+  padding: 0;
+  border: 1px solid var(--b3-theme-divider);
+  border-radius: 7px;
+  background: var(--b3-theme-background);
+  cursor: pointer;
+}
+
+.hiword-ann-palette { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
+.hiword-ann-pitem {
+  display: flex; align-items: center; gap: 6px;
+  padding: 4px 6px 4px 4px;
+  border: 1px solid var(--b3-theme-divider);
+  border-radius: 8px;
+  background: var(--b3-theme-background);
+}
+.hiword-ann-pdot { width: 18px; height: 18px; border-radius: 5px; box-shadow: 0 1px 2px rgba(0,0,0,.15); }
+.hiword-ann-pdel {
+  border: none; background: none; cursor: pointer;
+  font-size: 15px; line-height: 1; color: var(--b3-theme-on-surface-light, #999);
+  padding: 0 2px;
+  &:hover { color: #e5484d; }
+}
+.hiword-ann-addrow { display: flex; align-items: center; gap: 10px; }
+
+/* ---- 快捷键设置 ---- */
+.hiword-sc-list { display: flex; flex-direction: column; gap: 2px; }
+.hiword-sc-row {
+  display: flex; align-items: center; gap: 12px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  transition: background 0.12s ease;
+  &:hover { background: var(--b3-theme-surface-lighter, #f5f6f7); }
+  &.is-conflict { background: color-mix(in srgb, #e5484d 8%, transparent); }
+}
+.hiword-sc-keys { width: 130px; flex-shrink: 0; }
+.hiword-sc-keys kbd {
+  display: inline-block;
+  padding: 3px 8px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11.5px;
+  background: var(--b3-theme-surface-lighter, #eee);
+  border: 1px solid var(--b3-theme-divider);
+  border-bottom-width: 2px;
+  border-radius: 5px;
+  color: var(--b3-theme-on-surface, #444);
+}
+.hiword-sc-label { flex: 1; font-size: 13px; color: var(--b3-theme-on-surface, #333); }
+.hiword-sc-badge {
+  font-size: 11px;
+  color: #e5484d;
+  background: color-mix(in srgb, #e5484d 12%, transparent);
+  padding: 2px 8px;
+  border-radius: 20px;
+  font-weight: 500;
+}
+
+/* ---- 关于 ---- */
+.hiword-about { display: flex; align-items: center; gap: 16px; }
+.hiword-about-logo {
+  font-size: 28px; font-weight: 800; letter-spacing: -1px;
+  color: var(--b3-theme-on-surface, #222);
+  span { color: var(--b3-theme-primary); }
+}
+.hiword-about-meta { display: flex; flex-direction: column; gap: 3px; }
+.hiword-about-ver { font-size: 14px; color: var(--b3-theme-on-surface, #333); }
+.hiword-about-desc { font-size: 12px; color: var(--b3-theme-on-surface-light, #999); }
+.hiword-changelog {
+  margin: 0; padding-left: 18px;
+  font-size: 12.5px; line-height: 1.9; color: var(--b3-theme-on-surface, #555);
+  li { margin-bottom: 2px; }
+  b { color: var(--b3-theme-primary); }
+}
+
 /* ========== 批注对话框（方案 C 录入入口 #20）========== */
 .hiword-ann-dialog {
   padding: 16px 20px 18px;
@@ -4675,6 +4938,82 @@ body.hiword-dragging {
   }
 }
 
+/* 块引用卡（段落/列表）：与文档卡用不同色系 + 左侧条区分 */
+.hiword-ai-block-ref {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  margin: 0 2px;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--b3-theme-on-surface, #888) 12%, transparent);
+  color: var(--b3-theme-on-surface, #555);
+  font-size: var(--hiword-ai-input-font-size, 13px);
+  font-weight: 500;
+  cursor: default;
+  user-select: none;
+  vertical-align: baseline;
+  white-space: nowrap;
+  border-left: 3px solid var(--b3-theme-on-surface, #888);
+}
+/* 块类型差异化图标（::before 不进入 DOM，故不影响序列化到 ((id 'anchor')) ） */
+.hiword-ai-block-ref::before {
+  content: "¶"; /* 默认：段落 */
+  opacity: 0.65;
+  font-weight: 700;
+  font-family: var(--b3-font-family-code, monospace);
+}
+.hiword-ai-block-ref--l::before,
+.hiword-ai-block-ref--i::before { content: "☰"; } /* 列表 */
+.hiword-ai-block-ref--h::before { content: "H"; font-style: italic; } /* 标题 */
+.hiword-ai-block-ref--c::before { content: "</>"; font-family: var(--b3-font-family-code, monospace); } /* 代码 */
+.hiword-ai-block-ref--quote::before { content: "\201C"; } /* 引用“ */
+/* 不同类型用左侧条颜色强化区分 */
+.hiword-ai-block-ref--l,
+.hiword-ai-block-ref--i { border-left-color: #2e9e6b; }
+.hiword-ai-block-ref--c { border-left-color: #c9861b; }
+.hiword-ai-block-ref--quote { border-left-color: #8a6fd1; }
+.hiword-ai-block-ref--h { border-left-color: #d05a8c; }
+/* 文档卡状态角标（2026-08-26 改进：让"全文待加载/已就绪"可见） */
+.hiword-ai-doc-ref[data-doc-status="loading"] {
+  border: 1px dashed var(--b3-theme-primary, #4f6ef7);
+  opacity: 0.85;
+}
+.hiword-ai-doc-ref[data-doc-status="ready"] {
+  border: 1px solid color-mix(in srgb, var(--b3-theme-primary, #4f6ef7) 40%, transparent);
+}
+.hiword-ai-doc-ref[data-doc-status="failed"] {
+  background: color-mix(in srgb, var(--b3-theme-error, #e24b4a) 14%, transparent);
+  color: var(--b3-theme-error, #e24b4a);
+  border: 1px solid color-mix(in srgb, var(--b3-theme-error, #e24b4a) 40%, transparent);
+}
+/* 块/文档引用卡：悬停显示可删除 ×（::after 不进 DOM，不影响序列化到 ((id)) ） */
+.hiword-ai-block-ref,
+.hiword-ai-doc-ref {
+  position: relative;
+  padding-right: 18px; /* 给 × 预留位置，避免悬停时出现布局抖动 */
+}
+.hiword-ai-block-ref::after,
+.hiword-ai-doc-ref::after {
+  content: "×";
+  position: absolute;
+  right: 4px;
+  top: 50%;
+  transform: translateY(-50%);
+  font-size: 13px;
+  line-height: 1;
+  font-weight: 700;
+  color: var(--b3-theme-error, #e24b4a);
+  opacity: 0;
+  cursor: pointer;
+  pointer-events: none; /* 点击穿透到卡片，由 JS 用坐标判定是否命中 × 区 */
+  transition: opacity 0.12s ease;
+}
+.hiword-ai-block-ref:hover::after,
+.hiword-ai-doc-ref:hover::after {
+  opacity: 0.9;
+}
+
 /* 加载动画：三点跳动 */
 .hiword-ai-msg-loading {
   display: inline-flex;
@@ -4754,6 +5093,31 @@ body.hiword-dragging {
   transition: background 0.15s ease;
   /* 确保拉伸手柄不随滚动移动 */
   contain: layout style;
+
+  /* 自定义 tooltip：替代原生 title（原生 tooltip 会溢出到下方输入区） */
+  &::after {
+    content: attr(data-tooltip);
+    position: absolute;
+    bottom: calc(100% + 6px);  /* 显示在 resizer 上方，不与输入区重叠 */
+    left: 50%;
+    transform: translateX(-50%);
+    padding: 4px 10px;
+    background: var(--b3-theme-on-background);
+    color: var(--b3-theme-background);
+    font-size: 11px;
+    font-weight: 500;
+    white-space: nowrap;
+    border-radius: 6px;
+    pointer-events: none;
+    opacity: 0;
+    transition: opacity 0.15s ease;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.18);
+    z-index: 10;
+  }
+  &:hover::after {
+    opacity: 1;
+  }
+
   /* 扩大命中区域，但视觉上仍是一条细线 */
   &::before {
     content: "";
@@ -5173,9 +5537,25 @@ body.hiword-dragging {
 
 /* 拖拽悬停态（块从文档树/编辑器拖入时的高亮反馈） */
 .hiword-ai-protyle--dragover {
-  background: color-mix(in srgb, var(--b3-theme-primary, var(--b3-theme-primary)) 10%, transparent);
+  background: color-mix(in srgb, var(--b3-theme-primary, #4f6ef7) 14%, transparent);
   border-radius: 8px;
-  box-shadow: inset 0 0 0 2px var(--b3-theme-primary, var(--b3-theme-primary));
+  box-shadow: inset 0 0 0 2px var(--b3-theme-primary, #4f6ef7);
+}
+/* 拖拽悬停时中央提示「松开以添加」 */
+.hiword-ai-protyle--dragover::after {
+  content: "松开以添加";
+  position: absolute;
+  left: 50%; bottom: 8px;
+  transform: translateX(-50%);
+  z-index: 5;
+  padding: 4px 12px;
+  border-radius: 999px;
+  background: var(--b3-theme-primary, #4f6ef7);
+  color: #fff;
+  font-size: 12px; line-height: 1;
+  pointer-events: none;
+  white-space: nowrap;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25);
 }
 
 .hiword-ai-dropped-block {
@@ -9871,6 +10251,7 @@ body.hiword-resizing {
   flex-shrink: 0;
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 2px;
   padding: 4px 6px;
   background: transparent;
@@ -9898,16 +10279,42 @@ body.hiword-resizing {
 /* 2026-08-22 改：工具栏按钮单图标,无文字标签(紧凑布局,与输入框贴紧) */
 .hiword-ai-tool-btn {
   flex-direction: row;
-  width: 28px;
+  width: auto;
   height: 28px;
-  padding: 0;
-  gap: 0;
+  padding: 0 6px;
+  gap: 4px;
   font-size: 14px;
+  white-space: nowrap;
 }
 .hiword-ai-tool-label {
-  /* 2026-08-22 改：紧凑模式,隐藏文字标签(只显示图标) */
-  display: none;
+  /* 始终显示文字标签（图标 + 文字），便于辨认四个功能键 */
+  display: inline;
+  font-size: 12px;
+  line-height: 1;
 }
+
+/* 2026-08-26 改进：工具栏分组分隔线（左:内容来源 / 右:提示词配置） */
+.hiword-ai-toolbar-divider {
+  width: 1px; height: 18px; margin: 0 4px;
+  background: var(--b3-theme-divider, #e0e0e0);
+  flex-shrink: 0;
+}
+/* 预设激活态高亮（图标型按钮也可见） */
+.hiword-ai-tool-btn--active {
+  background: color-mix(in srgb, var(--b3-theme-primary, #4f6ef7) 18%, transparent);
+  color: var(--b3-theme-primary, #4f6ef7);
+  width: auto; padding: 0 6px; gap: 2px;
+}
+.hiword-ai-tool-btn--active:hover {
+  background: color-mix(in srgb, var(--b3-theme-primary, #4f6ef7) 26%, transparent);
+}
+/* 预设名徽标：激活时显示在图标旁（标签默认隐藏，这里是唯一可见的预设名） */
+.hiword-ai-tool-sub {
+  display: none;
+  max-width: 72px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-size: 11px; line-height: 1; color: var(--b3-theme-primary, #4f6ef7);
+}
+.hiword-ai-tool-btn--active .hiword-ai-tool-sub { display: inline; }
 
 /* 通用弹窗浮层 */
 .hiword-ai-overlay {
@@ -11247,6 +11654,91 @@ body.hiword-resizing {
   background: var(--b3-theme-background-hover, #f0f0f0);
 }
 
+/* ===== 结构化单词表导入弹窗（2026-08-27 新增） ===== */
+.hiword-wl-dialog {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  padding: 12px 16px;
+  box-sizing: border-box;
+  font-size: 13px;
+}
+.hiword-wl-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--b3-border-color, #e0e0e0);
+}
+.hiword-wl-list {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  margin: 10px 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.hiword-wl-row {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: var(--b3-theme-background, #fff);
+  border: 1px solid var(--b3-border-color, #eee);
+}
+.hiword-wl-row:hover {
+  background: var(--b3-theme-background-hover, #f6f7fb);
+}
+.hiword-wl-row .hiword-wl-check {
+  flex: 0 0 auto;
+  margin-top: 2px;
+}
+.hiword-wl-word {
+  flex: 0 0 auto;
+  font-weight: 600;
+  color: var(--b3-theme-primary, var(--hw-accent));
+  min-width: 92px;
+}
+.hiword-wl-pos {
+  flex: 0 0 auto;
+  font-size: 11px;
+  color: var(--b3-theme-on-surface-light, #999);
+  min-width: 32px;
+}
+.hiword-wl-meaning {
+  flex: 1 1 auto;
+  color: var(--b3-theme-on-surface, #444);
+  word-break: break-word;
+}
+.hiword-wl-footer {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--b3-border-color, #e0e0e0);
+}
+.hiword-wl-count {
+  flex: 1 1 auto;
+  font-size: 12px;
+  color: var(--b3-theme-on-surface-light, #999);
+}
+.hiword-wl-cancel {
+  padding: 6px 14px;
+  border: 1px solid var(--b3-border-color, #d0d0d0);
+  border-radius: 6px;
+  background: var(--b3-theme-background, #fff);
+  color: var(--b3-theme-on-surface, #555);
+  cursor: pointer;
+  font-size: 13px;
+}
+.hiword-wl-cancel:hover {
+  background: var(--b3-theme-background-hover, #f0f0f0);
+}
+
 /* ===== 从单词库加入复习 对话框 ===== */
 .hiword-av-dialog { display: flex; flex-direction: column; height: 100%; }
 .hiword-av-bar {
@@ -11607,6 +12099,30 @@ body.hiword-resizing {
   border-bottom: 1px solid var(--b3-theme-divider, #e8e8e8);
   position: relative;
   user-select: none;
+
+  /* 自定义 tooltip：替代原生 title */
+  &::after {
+    content: attr(data-tooltip);
+    position: absolute;
+    bottom: calc(100% + 6px);
+    left: 50%;
+    transform: translateX(-50%);
+    padding: 4px 10px;
+    background: var(--b3-theme-on-background);
+    color: var(--b3-theme-background);
+    font-size: 11px;
+    font-weight: 500;
+    white-space: nowrap;
+    border-radius: 6px;
+    pointer-events: none;
+    opacity: 0;
+    transition: opacity 0.15s ease;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.18);
+    z-index: 10;
+  }
+  &:hover::after {
+    opacity: 1;
+  }
 }
 .hiword-anno-ai-resizer-toggle {
   background: none; border: 0; cursor: pointer;
@@ -11960,4 +12476,22 @@ body.hiword-resizing {
   height: 22px;
   font-size: 13px;
   color: var(--b3-theme-primary);
+}
+
+/* 词库列表分页器（2026-08-27 性能优化 P2） */
+.hiword-vb-pager {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 8px 0 2px;
+  font-size: 12px;
+  color: var(--b3-theme-on-surface, #888);
+}
+.hiword-vb-pager .hiword-vb-pager-info {
+  white-space: nowrap;
+}
+.hiword-vb-pager button[disabled] {
+  opacity: 0.45;
+  cursor: not-allowed;
 }

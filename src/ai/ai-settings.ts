@@ -32,6 +32,8 @@ export interface AiSettings {
   exportSavePath: string;    // 全局保存文档路径（sprig 语法）
   /** 记忆文档 */
   soulDocId: string;         // SOUL 文档 ID（用于记忆上下文）
+  /** 阅读器「翻译」按钮发送到 AI 精读时预置的提示词（如「请把下面这句话翻译一下」） */
+  translatePrompt: string;
 
   // 2026-08-21 精简：以下字段已删除(从 21 个 → 14 个,-33%)
   //  - chatApi: 强制 OpenAI 兼容,不再支持多格式
@@ -97,6 +99,10 @@ export const DEFAULT_AI_DEEPREAD_SYSTEM = `你是 REword 英语学习助手，�
  *   旧的"对话模式"提示词由 normalizeAiSettings 自动迁移到 promptTemplate 末尾。
  */
 
+/** 阅读器「翻译」按钮发送到 AI 精读时预置的默认提示词 */
+export const DEFAULT_TRANSLATE_PROMPT =
+  "请把下面这句话翻译成中文，要求准确、通顺、符合中文表达习惯；如有必要请附上重点词组或难词解释：";
+
 export const DEFAULT_AI_SETTINGS: AiSettings = {
   enabled: false,
   baseUrl: "https://api.openai.com/v1",
@@ -119,6 +125,8 @@ export const DEFAULT_AI_SETTINGS: AiSettings = {
   exportSavePath: "",
   // 记忆文档
   soulDocId: "",
+  // 2026-08-27 阅读器「翻译」预置提示词
+  translatePrompt: DEFAULT_TRANSLATE_PROMPT,
   // 2026-08-21 精简：双模式字段 defaultMode / chatPromptTemplate 已删除
 };
 
@@ -192,6 +200,10 @@ export function normalizeAiSettings(raw: any): AiSettings {
     exportSavePath: str(r.exportSavePath, ""),
     // 记忆文档
     soulDocId: str(r.soulDocId, ""),
+    // 2026-08-27 阅读器「翻译」预置提示词（缺省回退到默认，避免空串）
+    translatePrompt: (typeof r.translatePrompt === "string" && r.translatePrompt.trim())
+      ? r.translatePrompt
+      : DEFAULT_TRANSLATE_PROMPT,
     // 2026-08-21 精简：defaultMode / chatPromptTemplate 双模式字段已删除
     //   若 raw 中存在,normalize 会忽略(用户可自行编辑 promptTemplate)
   };
