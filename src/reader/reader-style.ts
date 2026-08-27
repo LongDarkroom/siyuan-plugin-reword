@@ -40,6 +40,8 @@ export interface ReaderStyleInput {
   customFontId?: string;
   /** 是否强制正文继承 body 字体栈（覆盖 epub 内联死字体）；默认 true（运行时总为 boolean） */
   overridePublisherFont?: boolean;
+  /** 统一正文字号：压平书籍 p/li 级写死字号（如 font-size: medium），默认 true（运行时总为 boolean） */
+  overrideBookFontSize?: boolean;
   /** 文本设置（2026-08-24 新增） */
   text?: { fontWeight: number; letterSpacing: number };
   /** 段落设置（2026-08-24 新增） */
@@ -142,6 +144,8 @@ export function buildReaderStyles(
   return [
     fontCss,
     paragraphStyles(o),
+    colorSchemeStyles(o),
+    fontSizeOverrideStyles(settings.fontSize, settings.overrideBookFontSize !== false),
     inlineOverrideStyles(),
     publisherFontOverrideStyles(settings.overridePublisherFont !== false),
     headingStyles(),
@@ -165,6 +169,34 @@ export function buildReaderStyles(
 /** color-scheme + 根字号 */
 export function colorSchemeStyles(o: ReaderStyleOutput): string {
   return `:root { color-scheme: ${o.colorScheme}; }`;
+}
+
+/**
+ * 字号覆盖段（2026-08-27 修复「字号设置无效」）
+ *
+ * 根因（用户书《Nate the Great on the Owl Express》实测）：
+ * - 书的 CSS 在段落 class 上写死绝对字号：p.k_nonindent_lh { font-size: medium }
+ * - CSS 关键字 medium 是「浏览器默认字号」（≈16px），**不随 html 根字号缩放**；
+ *   且 p.k_nonindent_lh 特异性 (0,1,1) 高于 html (0,0,1)。
+ * - 旧实现只输出 html { font-size: Xpx }，对这类书完全无效 → A+/A- 无反应。
+ *
+ * 修复策略（flatten=true 时）：
+ * 1. body { font-size: Xpx !important } —— !important 压过书籍非 important 声明（与特异性无关）
+ * 2. p/li/blockquote/div 等正文容器 font-size: inherit !important —— 压平书籍在
+ *    元素/class 上的写死字号，最终全部回到 body 的 Xpx
+ * 3. 标题 h1-h6 不在压平列表（headingStyles 已有 em 相对值，随 body 等比缩放）；
+ *    figcaption 不压平（figureStyles 的 0.85em 相对值保留）
+ *
+ * flatten=false 时仅输出 html 根字号（保留书籍原排版，行内 span 仍被 inlineOverrideStyles 压制）。
+ */
+export function fontSizeOverrideStyles(fontSize: number, flatten: boolean): string {
+  const base = `html { font-size: ${fontSize}px; }`;
+  if (!flatten) return base;
+  return `${base}
+body { font-size: ${fontSize}px !important; }
+p, li, blockquote, div, dd, dt, td, th {
+  font-size: inherit !important;
+}`.trim();
 }
 
 /** body 主题（背景 / 文字色 / 行高 / 行宽 padding）
@@ -377,6 +409,6 @@ export function layoutMarginStyles(input?: {
  */
 function _sanityCheckUnused(): void {
   // 占位，让 buildReaderStyles 引用所有子函数以避免 tree-shake 误删
-  const _x = [paragraphStyles, inlineOverrideStyles, headingStyles, quoteStyles, listStyles, figureStyles, bodyStyles, textStyles, paragraphLayoutStyles, layoutMarginStyles, linkStyles, codeStyles, colorSchemeStyles, wordWrapStyles];
+  const _x = [paragraphStyles, inlineOverrideStyles, headingStyles, quoteStyles, listStyles, figureStyles, bodyStyles, textStyles, paragraphLayoutStyles, layoutMarginStyles, linkStyles, codeStyles, colorSchemeStyles, wordWrapStyles, fontSizeOverrideStyles];
   void _x;
 }

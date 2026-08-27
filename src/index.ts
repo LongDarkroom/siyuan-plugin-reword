@@ -9213,6 +9213,59 @@ export default class RewordPlugin extends Plugin {
   }
 
   /**
+   * 导入智能筛选（2026-08-27）：
+   * - 中文词汇直接剔除（词库仅收英文单词）
+   * - 词形校验：仅允许英文字母（含 ' ’ - 连接符），数字/夹杂符号的识别噪声剔除
+   * - 严格词典校验：每个词必须在离线词典查得到释义（lookupSmart 命中且 definition 非空），
+   *   识别错误 / 词典未收录的词直接筛除，不写入词库；词典未就绪时跳过该项避免误杀
+   * - 大小写去重
+   * 返回有效列表与分类计数，供反馈提示。
+   */
+  private filterImportWords<T>(items: T[], getWord: (item: T) => string): {
+    valid: T[]; zhCount: number; noDictCount: number; dupCount: number;
+  } {
+    const valid: T[] = [];
+    let zhCount = 0;
+    let noDictCount = 0;
+    let dupCount = 0;
+    const seen = new Set<string>();
+    const dictReady = dictEngine.getStatus() === "ready";
+    for (const it of items) {
+      const w = (getWord(it) || "").trim();
+      if (!w) { noDictCount++; continue; }
+      // 含中文 → 非英文单词，直接筛除
+      if (/[\u4e00-\u9fff]/.test(w)) { zhCount++; continue; }
+      // 词形校验：字母开头、仅字母与常见连接符
+      if (!/^[A-Za-z][A-Za-z'’\-]*$/.test(w)) { noDictCount++; continue; }
+      const key = w.toLowerCase();
+      if (seen.has(key)) { dupCount++; continue; }
+      seen.add(key);
+      // 严格校验：词典必须查得到该词且释义非空，否则筛除
+      let hasDict = true;
+      if (dictReady) {
+        try {
+          const entry = dictEngine.lookupSmart(w);
+          hasDict = !!(entry && entry.definition && String(entry.definition).trim());
+        } catch {
+          hasDict = false;
+        }
+      }
+      if (!hasDict) { noDictCount++; continue; }
+      valid.push(it);
+    }
+    return { valid, zhCount, noDictCount, dupCount };
+  }
+
+  /** 筛选计数 → 反馈文案（无筛除返回空串） */
+  private importFilterNote(r: { zhCount: number; noDictCount: number; dupCount: number }): string {
+    const parts: string[] = [];
+    if (r.zhCount) parts.push(`${r.zhCount} 个中文词汇`);
+    if (r.noDictCount) parts.push(`${r.noDictCount} 个词典未收录`);
+    if (r.dupCount) parts.push(`${r.dupCount} 个重复`);
+    return parts.length ? `已自动筛除 ${parts.join("、")}` : "";
+  }
+
+  /**
    * AI 面板「加入到词库」入口：接收 AI 面板选中的文本，自动识别英文/中文单词，
    * 复用现有「提取单词到词库」对话框（与文档框选/拖放共享同一套交互与视觉）。
    * 调用方无需提供选区上下文，由本方法独立完成 tokenize → 弹窗 → 批量入库。
@@ -9256,6 +9309,24 @@ export default class RewordPlugin extends Plugin {
     if (!this.isReady) {
       showMessage("RE word 尚未就绪", 3000, "error");
       return;
+    }
+    // 2026-08-27 智能筛选：中文词不入库（仅保留有效英文单词）；词典查无释义的词剔除；去重
+    const zhAll = zhWords.length; // 中文词一律不计入候选
+    const fr = this.filterImportWords(enWords, (w) => w);
+    if (fr.valid.length === 0) {
+      const note = this.importFilterNote({ zhCount: zhAll + fr.zhCount, noDictCount: fr.noDictCount, dupCount: fr.dupCount });
+      showMessage(`没有可导入的有效单词${note ? `（${note}）` : ""}`, 3500, "info");
+      return;
+    }
+    enWords = fr.valid;
+    zhWords = [];
+    const filterTotal = zhAll + fr.zhCount + fr.noDictCount + fr.dupCount;
+    if (filterTotal > 0) {
+      showMessage(
+        `${this.importFilterNote({ zhCount: zhAll + fr.zhCount, noDictCount: fr.noDictCount, dupCount: fr.dupCount })}，保留有效单词 ${fr.valid.length} 个`,
+        3000,
+        "info"
+      );
     }
     const total = enWords.length + zhWords.length;
 
@@ -9554,6 +9625,17 @@ export default class RewordPlugin extends Plugin {
     if (!this.isReady) {
       showMessage("RE word 尚未就绪", 3000, "error");
       return;
+    }
+    // 2026-08-27 智能筛选：中文词 / 词典查无释义的词条直接剔除（不写入词库），并反馈筛选结果
+    const fr = this.filterImportWords(entries, (e) => e.word);
+    if (fr.valid.length === 0) {
+      const note = this.importFilterNote(fr);
+      showMessage(`没有可导入的有效单词${note ? `（${note}）` : ""}`, 3500, "info");
+      return;
+    }
+    entries = fr.valid;
+    if (fr.zhCount + fr.noDictCount + fr.dupCount > 0) {
+      showMessage(`${this.importFilterNote(fr)}，保留有效词条 ${fr.valid.length} 个`, 3000, "info");
     }
     const books = this.vocabStore.getBooks().filter((b) => b.id !== ALL_BOOK_ID);
     const activeBook = this.vocabStore.getActiveBook();

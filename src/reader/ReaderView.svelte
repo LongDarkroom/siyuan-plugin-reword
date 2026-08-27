@@ -138,6 +138,8 @@
   export let onTranslateToAi: ((text: string) => void) | undefined = undefined;
   /** 加入词库（委托 plugin vocabStore.addWord） */
   export let onAddToVocab: ((word: string) => Promise<void> | void) | undefined = undefined;
+  /** 在 REword 侧边栏查词（委托 plugin.openWordInSidebar：切到查词 Tab、自动填词查询、不打断编辑） */
+  export let onOpenInSidebar: ((word: string) => void) | undefined = undefined;
   /** 移出词库（委托 plugin vocabStore.removeWord） */
   export let onRemoveFromVocab: ((word: string) => Promise<void> | void) | undefined = undefined;
   /** 判断单词是否在词库（委托 plugin vocabStore.hasWord） */
@@ -425,6 +427,7 @@
     const t = themeOf();
     const lw = LINE_WIDTH_PRESETS[settings.lineWidth];
     // 委托给 reader-style.ts 纯函数，便于单测与维护
+    // 字号（含 overrideBookFontSize 压平书籍字号）由 fontSizeOverrideStyles 段统一输出（2026-08-27 修复字号无效）
     const { fontFaceCss, fontFamilyStack } = buildFontInjection();
     return buildReaderStyles(
       settings,
@@ -432,7 +435,7 @@
       lw,
       fontFaceCss,
       fontFamilyStack
-    ) + `\nhtml { font-size: ${settings.fontSize}px; }`;
+    );
   }
 
   function applyStyles() {
@@ -638,8 +641,8 @@
     if (hoverHideTimer) { clearTimeout(hoverHideTimer); hoverHideTimer = null; }
   }
 
-  /** 延迟收起悬浮弹窗（给光标移到弹窗留缓冲） */
-  function scheduleHoverHide(delay = 220) {
+  /** 延迟收起悬浮弹窗（给光标移到弹窗留缓冲；2026-08-27 放宽至 450ms 提升稳定性） */
+  function scheduleHoverHide(delay = 450) {
     clearHoverHide();
     hoverHideTimer = setTimeout(() => {
       hoverHideTimer = null;
@@ -656,7 +659,7 @@
     clearHoverHide();
     hoverWord = word;
     dictPopupSource = "hover";
-    dictPopup = { visible: true, x, y, html: renderLoading(), source: "hover" };
+    dictPopup = { visible: true, x, y, html: renderLoading(), word, source: "hover" };
     setTimeout(() => {
       // 期间来源/单词已切换则丢弃旧结果
       if (dictPopupSource !== "hover" || hoverWord !== word) return;
@@ -711,18 +714,24 @@
     };
 
     const onMove = (e: MouseEvent) => {
+      // iframe 内部 clientX/Y 是相对 iframe 视口的坐标，需加 frame 偏移换算成视口坐标，
+      // 才能与父窗口弹窗 rect（getBoundingClientRect 返回视口坐标）正确比对 —— 否则
+      // 移到弹窗途中 isOverDictPopup 恒为 false，弹窗被误判「未悬停」而提前收起。
+      const frameEl = (doc.defaultView as any)?.frameElement as HTMLElement | null;
+      const fr0 = frameEl?.getBoundingClientRect();
+      const vx = e.clientX + (fr0?.left ?? 0);
+      const vy = e.clientY + (fr0?.top ?? 0);
       if (!e.altKey) {
-        // Option 释放：若光标没落在弹窗上，给一段宽限后收起（落在弹窗上则由 mouseenter 取消）
-        if (dictPopupSource === "hover" && !isOverDictPopup(e.clientX, e.clientY)) {
+        // Option 释放：光标没落在弹窗上才宽限收起（落在弹窗上由 mouseenter 取消）
+        if (dictPopupSource === "hover" && !isOverDictPopup(vx, vy)) {
           scheduleHoverHide();
         }
         return;
       }
       const found = getWordAt(e.clientX, e.clientY);
       if (!found) {
-        if (dictPopupSource === "hover" && !isOverDictPopup(e.clientX, e.clientY)) {
-          scheduleHoverHide();
-        }
+        // 2026-08-27 稳定性修复：光标离开单词但未落在弹窗上时不收起，让用户能把鼠标
+        // 移到弹窗上阅读；只有 alt 释放，或离开弹窗（popup mouseleave）才收起。
         return;
       }
       // 同一单词且弹窗已显示：保持，取消待收起
@@ -732,14 +741,14 @@
       }
       // 计算弹窗定位（词下方居中）
       const frame = (doc.defaultView as any)?.frameElement as HTMLElement | null;
-      let vx = found.rect.left + found.rect.width / 2;
-      let vy = found.rect.bottom;
+      let wx = found.rect.left + found.rect.width / 2;
+      let wy = found.rect.bottom;
       if (frame) {
         const fr = frame.getBoundingClientRect();
-        vx += fr.left;
-        vy += fr.top;
+        wx += fr.left;
+        wy += fr.top;
       }
-      const c = toContainerCoords(vx, vy + 4);
+      const c = toContainerCoords(wx, wy + 4);
       let cx = c.x;
       let cy = c.y;
       // 左右防溢出（弹窗宽约 360，transform translateX(-50%) 以 cx 为中点）
@@ -765,9 +774,14 @@
         scheduleHoverHide();
       }
     }) as EventListener);
-    // 光标离开正文文档（如移到弹窗或工具栏）：宽限收起
-    trackDocListener(doc, "mouseleave", (() => {
-      if (dictPopupSource === "hover") scheduleHoverHide();
+    // 光标离开正文 iframe：若正落在弹窗上则保留（由 popup mouseenter 接管），否则宽限收起
+    trackDocListener(doc, "mouseleave", ((ev: MouseEvent) => {
+      if (dictPopupSource !== "hover") return;
+      const frameEl = (doc.defaultView as any)?.frameElement as HTMLElement | null;
+      const fr0 = frameEl?.getBoundingClientRect();
+      const vx = ev.clientX + (fr0?.left ?? 0);
+      const vy = ev.clientY + (fr0?.top ?? 0);
+      if (!isOverDictPopup(vx, vy)) scheduleHoverHide();
     }) as EventListener);
   }
 
@@ -1160,6 +1174,14 @@
     applyStyles();
   }
 
+  /** 统一正文字号开关（2026-08-27）：压平书籍写死字号，让 A+/A- 全局生效 */
+  function setOverrideBookFontSize(e: Event) {
+    settings = settingsStore.update({
+      overrideBookFontSize: (e.target as HTMLInputElement).checked,
+    });
+    applyStyles();
+  }
+
   /* ================= 2026-08-24 新增 4 大设置组 handler ================= */
 
   /** 通用：clamp + 应用样式 */
@@ -1490,7 +1512,7 @@
   let selInfo: { index: number; cfi: string | null; range: Range | null } | null = null;
   // 当前选区矩形（已换算到主文档坐标），供批注编辑器/查看气泡定位使用
   let lastSelRect: SelRect | null = null;
-  let dictPopup: { visible: boolean; x: number; y: number; html: string; source?: "sel" | "hover" | null } = { visible: false, x: 0, y: 0, html: "", source: null };
+  let dictPopup: { visible: boolean; x: number; y: number; html: string; word?: string; source?: "sel" | "hover" | null } = { visible: false, x: 0, y: 0, html: "", word: "", source: null };
   // 2026-08-27：Option+悬浮取词（英文）相关状态
   let dictPopupEl: HTMLElement | null = null;       // 弹窗 DOM 引用（用于命中检测）
   let dictPopupSource: "sel" | "hover" | null = null; // 当前弹窗来源（sel=划词工具栏, hover=悬浮）
@@ -1583,6 +1605,8 @@
     attachedDocs.add(doc);
     // mouseup 用 capture 阶段，确保先于 clickToTurn 的 bubble 监听处理
     trackDocListener(doc, "mouseup", onContentMouseUp, true);
+    // 2026-08-27：iframe 内 mousedown 补盲区（父容器监听收不到 iframe 点击）→ 点空白立即收工具栏
+    trackDocListener(doc, "mousedown", onContentMouseDown, true);
     // selectionchange 在 document 上触发，不会冒泡到 window，必须挂在 doc 上
     trackDocListener(doc, "selectionchange", onContentSelectionChange, true);
     // 翻页/分区点击等交互监听（仅注入一次，guard 由 attachedDocs 保证，避免重复绑定导致翻两页）
@@ -2045,6 +2069,43 @@
     // 等选区稳定后再读取；foliate 内容 doc 可能在该刻尚未就绪，加有限重试兜底
     scheduleReadSelection();
   }
+
+  /**
+   * 2026-08-27 修复（工具栏点空白不收起）：
+   * onContainerMouseDown 绑在父文档 .reader-view 容器上，但 iframe 内 mousedown 不冒泡到
+   * 父文档 —— 阅读区（iframe 正文）点空白永远触发不到它。叠加 scheduleReadSelection 对
+   * edit 态空选区直接 return、create 态要等 ~600ms 重试梯子才收起，表现为
+   * 「点空白工具栏不消失 / 严重滞后」。这里在 iframe doc 上补 mousedown 监听：
+   * - 点空白/普通文本 → 同步立即收起工具栏与批注浮层（无 RAF、无重试延迟，流畅灵敏）
+   * - 点标注/高亮/SVG 绘制层 → 不在此关（show-annotation 接管，与父文档场景 A 行为一致）
+   * capture 阶段触发，先于 foliate 内部 click 处理；随后的拖选/双击选词仍由
+   * onContentMouseUp → scheduleReadSelection 正常弹出新工具栏，互不干扰。
+   */
+  function onContentMouseDown(e: MouseEvent) {
+    if (e.button !== 0) return;
+    // 每次点击重置抑制标志（与父文档 onContainerMouseDown 一致，独立判断每次点击）
+    suppressNextCreateToolbar = false;
+    if (!selToolbar.visible && !noteEditor.visible) return;
+    const t = e.target as HTMLElement | null;
+    const isAnnotationTarget = !!(
+      t?.closest?.("foliate-highlight") || (t as any)?.closest?.("[data-annotation]") ||
+      (t as any)?.namespaceURI === "http://www.w3.org/2000/svg"
+    );
+    if (isAnnotationTarget) {
+      // 场景 A：标注点击由 show-annotation 接管（弹 edit 工具栏/查看卡），
+      // 抑制随后 mouseup → scheduleReadSelection 的创建工具栏；旧工具栏延迟一帧关闭
+      suppressNextCreateToolbar = true;
+      cancelPendingClose();
+      pendingCloseRaf = requestAnimationFrame(() => {
+        pendingCloseRaf = null;
+        if (selToolbar.visible) closeSelToolbar();
+      });
+      return;
+    }
+    // 场景 B：点空白/普通文本 → 立即收起（同步，无延迟）
+    if (selToolbar.visible) closeSelToolbar();
+    if (noteEditor.visible) noteEditor = { ...noteEditor, visible: false, mode: "create", id: null };
+  }
   function onMainSelectionChange() { scheduleReadSelection(); }
 
   /**
@@ -2155,7 +2216,7 @@
     const y = opts?.y ?? (selToolbar.y + toolbarH);
     const source = opts?.source ?? "sel";
     dictPopupSource = source;
-    dictPopup = { visible: true, x, y, html: renderLoading(), source };
+    dictPopup = { visible: true, x, y, html: renderLoading(), word, source };
     setTimeout(() => {
       const entry = lookupSmart(word);
       let html: string;
@@ -3451,6 +3512,12 @@
     dictPopup = { ...dictPopup, visible: false };
   }
 
+  /** 将当前弹窗单词发送到 REword 侧边栏查词（自动填入输入框并查询，不关闭阅读弹窗） */
+  function sendToSidebar() {
+    const w = (dictPopup.word || hoverWord || "").trim();
+    if (w && onOpenInSidebar) onOpenInSidebar(w);
+  }
+
   // 2026-08-27：悬浮弹窗——光标进入/离开时的收起控制
   function onDictPopupEnter() {
     clearHoverHide();
@@ -3625,6 +3692,17 @@
             <span class="reader-setting-value">{settings.fontSize}px</span>
             <button class="reader-mini-btn" on:click={() => changeFont(1)}>A+</button>
           </div>
+        </div>
+        <div class="reader-setting-row reader-setting-toggle-row">
+          <span class="reader-setting-label">统一正文字号</span>
+          <label class="reader-switch" title="压平书籍自带字号（如 font-size: medium），让字号 A+/A- 全局生效；关闭则保留原书字号">
+            <input
+              type="checkbox"
+              checked={settings.overrideBookFontSize !== false}
+              on:change={setOverrideBookFontSize}
+            />
+            <span class="reader-switch-track"></span>
+          </label>
         </div>
         <div class="reader-setting-row">
           <span class="reader-setting-label">字重</span>
@@ -4266,7 +4344,10 @@
          on:mouseenter={onDictPopupEnter} on:mouseleave={onDictPopupLeave}>
       <div class="reader-dict-head">
         <span>词典</span>
-        <button class="reader-dict-close" on:click={closeDictPopup} title="关闭">✕</button>
+        <div class="reader-dict-head-actions">
+          <button class="reader-dict-send" on:click={sendToSidebar} title="在 REword 侧边栏查词（自动填入，无需手动输入）">侧边栏</button>
+          <button class="reader-dict-close" on:click={closeDictPopup} title="关闭">✕</button>
+        </div>
       </div>
       <div class="reader-dict-body" on:click={onDictBodyClick}>{@html dictPopup.html}</div>
     </div>
@@ -4761,6 +4842,25 @@
     position: sticky;
     top: 0;
     background: var(--b3-theme-background, #fff);
+  }
+  .reader-dict-head-actions {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .reader-dict-send {
+    border: 1px solid var(--b3-theme-primary, #4f6ef7);
+    background: var(--b3-theme-primary, #4f6ef7);
+    color: #fff;
+    cursor: pointer;
+    font-size: 12px;
+    line-height: 1;
+    padding: 4px 8px;
+    border-radius: 6px;
+    transition: opacity 0.12s ease;
+  }
+  .reader-dict-send:hover {
+    opacity: 0.85;
   }
   .reader-dict-close {
     border: none;

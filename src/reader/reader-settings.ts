@@ -130,6 +130,8 @@ export interface ReaderSettings {
   clickToTurn?: boolean;
   /** 强制正文使用阅读器字体（霞鹜文楷），覆盖书籍自带死字体；默认开（参考 Readest/思阅「覆盖出版商字体」） */
   overridePublisherFont?: boolean;
+  /** 统一正文字号：压平书籍自带 p/li 级字号（如 font-size: medium），让字号 A+/A- 全局生效；默认开 */
+  overrideBookFontSize?: boolean;
   /** 文本设置（2026-08-24 新增） */
   text: ReaderTextSettings;
   /** 段落设置（2026-08-24 新增） */
@@ -150,6 +152,7 @@ export const READER_DEFAULT_SETTINGS: ReaderSettings = {
   fontMode: "follow-siyuan",
   clickToTurn: false,
   overridePublisherFont: true,
+  overrideBookFontSize: true,
   text: {
     fontWeight: 400,
     letterSpacing: 0,

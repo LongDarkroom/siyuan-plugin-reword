@@ -93,6 +93,8 @@ export class ReaderTabController {
               // 2026-08-27：翻译按钮发送到 AI 精读面板（自动打开）；悬浮取词「加入词库」委托 vocabStore
               onTranslateToAi: (t: string) => self.plugin?.translateToAi?.(t),
               onAddToVocab: (w: string) => self.plugin?.getVocabStore?.()?.addWord?.(w),
+              // 2026-08-27：阅读器词典弹窗「侧边栏」按钮 → 复用主插件 openWordInSidebar
+              onOpenInSidebar: (w: string) => self.plugin?.openWordInSidebar?.(w),
               onRemoveFromVocab: (w: string) => self.plugin?.getVocabStore?.()?.removeWord?.(w),
               isInVocab: (w: string) => !!self.plugin?.getVocabStore?.()?.hasWord?.(w),
               getLabel: self.getLabel,

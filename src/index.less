@@ -2685,8 +2685,11 @@ body.hiword-dragging {
 }
 .hiword-detail-phrase-main {
   display: flex;
-  align-items: baseline;
-  gap: 8px;
+  /* 2026-08-27 修复（词组排版）：弹窗窄（360px）时英文 flex:0 0 auto 不收缩会挤占中文空间，
+     导致中文被压成极窄列逐字断行。改为竖向堆叠：英文整行 + 中文整行，中文恢复整宽自然换行。 */
+  flex-direction: column;
+  align-items: stretch;
+  gap: 2px;
   min-width: 0;
 }
 .hiword-detail-phrase-en {
@@ -2694,11 +2697,14 @@ body.hiword-dragging {
   font-weight: 600;
   color: var(--b3-theme-primary, var(--hw-accent));
   font-family: "SFMono-Regular", Consolas, monospace;
+  /* 超长词组（如 beyond (或 out of, past) all reason）允许在弹窗内换行，不再溢出 */
+  overflow-wrap: anywhere;
 }
 .hiword-detail-phrase-zh {
-  flex: 1;
+  flex: 0 1 auto;
   min-width: 0;
   color: var(--b3-theme-on-surface, var(--b3-theme-on-surface, #555));
+  line-height: 1.5;
 }
 /* 词组例句行（可朗读）—— P1：<blockquote> 引用块式，重置默认 margin，
    背景走 --hw-quote-bg（= --b3-bq-background），与义项例句观感统一 */
