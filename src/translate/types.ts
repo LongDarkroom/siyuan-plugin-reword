@@ -17,6 +17,13 @@ export interface TranslateRequest {
   from: string;
   /** 目标语言：ISO-639-1 代码（如 "zh" / "en" / "ja"） */
   to: string;
+  /**
+   * 书籍 ID（2026-08-28 v1.3.0 新增，可选）。
+   * 用于「本书前提上下文」注入：AI 引擎据此读取该书用户手写的背景资料
+   * （人物/术语/背景），拼进 prompt 使译文前后一致（如 Sludge 恒译为「斯拉奇」）。
+   * 其他引擎（微软/LibreTranslate）忽略此字段。
+   */
+  bookId?: string;
 }
 
 /** 翻译结果（含实际命中的提供方，便于统计 / 调试） */

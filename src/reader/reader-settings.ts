@@ -194,7 +194,7 @@ export const READER_DEFAULT_SETTINGS: ReaderSettings = {
   focusMode: false,
   bilingual: false,
   bilingualTarget: "zh",
-  translationFontSize: 0.70,
+  translationFontSize: 0.62,
   paragraphHover: true,
   text: {
     fontWeight: 400,

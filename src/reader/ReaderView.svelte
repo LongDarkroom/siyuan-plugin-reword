@@ -14,6 +14,9 @@
   import { makeTextBook, isTextBookFile } from "../reader/book-adapters";
   // 脚注检测 + 抽取（scoped 模块，不依赖 foliate vendor 内核）
   import { isFootnoteRef, extractFootnote } from "./footnote";
+  // v1.3.0：本书前提上下文编辑器（思源原生 lite Protyle）+ token 估算
+  import { AnnEditor } from "../annotation/ann-editor.ts";
+  import { estimateTokens, PRIMER_WARN_CHARS } from "./book-primer.ts";
   import type { BookshelfStore, BookMeta } from "../reader/bookshelf-store";
   import {
     ReaderSettingsStore,
@@ -165,6 +168,14 @@
   /** 标签解析（委托插件 LabelStore）：用于阅读批注查看气泡展示标签名/色 */
   export let onProtectTab: (() => void) | undefined = undefined;
   export let getLabel: ((id: string) => { name: string; color: string } | null) | undefined = undefined;
+  /** 本书前提上下文存储（v1.3.0：plugin.bookPrimer，BookPrimerStore 实例；缺省隐藏编辑区） */
+  export let primerStore: any = undefined;
+  /** 本书累计 token 用量读取（v1.3.0：委托 plugin.getBookTokenUsage） */
+  export let getTokenUsage: ((bid: string) => { total: number; prompt: number; completion: number }) | undefined = undefined;
+  /** 重置本书累计 token（v1.3.0：委托 plugin.resetBookTokenUsage） */
+  export let resetTokenUsage: ((bid: string) => Promise<void> | void) | undefined = undefined;
+  /** 最近一次翻译 token 用量（v1.3.0：委托 plugin.lastTranslationUsage；修复原裸 plugin 引用未定义的 bug） */
+  export let getLastUsage: (() => { promptTokens: number; completionTokens: number; totalTokens: number } | null) | undefined = undefined;
 
   // 划词工具栏图标（readest 风格线性 SVG；批注/词典复用 REword 已注册 symbol）
   const SEL_ICONS: Record<string, string> = {
@@ -1249,6 +1260,8 @@
     showSettings = !showSettings;
     showSearch = false;
     showToc = false;
+    // v1.3.0：打开设置时刷新本书 Token 累计显示
+    if (showSettings) refreshBookTokenUsage();
   }
 
   function clearSearch() {
@@ -1347,6 +1360,172 @@
     settings = settingsStore.update({ paragraphHover: v });
     applyStyles();
     applyParagraphHover();
+  }
+
+  /* ================= 本书前提上下文（v1.3.0：lite Protyle 富文本编辑） ================= */
+
+  let primerOpen = false;
+  let primerEditorEl: HTMLElement | null = null;
+  let primerEditor: AnnEditor | null = null;
+  let primerChars = 0;
+  let primerTokens = 0;
+  let primerSaveTimer: any = null;
+
+  /** 本书累计 token（打开设置面板 / 翻译完成后刷新） */
+  let bookTokenTotal = 0;
+  function refreshBookTokenUsage() {
+    const u = getTokenUsage?.(bookId);
+    bookTokenTotal = u?.total || 0;
+  }
+  async function onResetBookTokens() {
+    await resetTokenUsage?.(bookId);
+    refreshBookTokenUsage();
+    toast("本书 Token 统计已重置");
+  }
+
+  function fmtTok(n: number): string {
+    if (n >= 1000000) return `${(n / 1000000).toFixed(1)}M`;
+    if (n >= 1000) return `${(n / 1000).toFixed(1)}K`;
+    return String(n);
+  }
+
+  function togglePrimerEditor() {
+    primerOpen = !primerOpen;
+    if (primerOpen) {
+      // 等 {#if} 渲染出容器且有尺寸后挂载（AnnEditor 内部有 rAF 重试兜底）
+      setTimeout(() => mountPrimerEditor(), 60);
+    } else {
+      flushPrimerSave();
+      destroyPrimerEditor();
+    }
+  }
+
+  function mountPrimerEditor() {
+    if (!primerEditorEl || primerEditor || !primerStore) return;
+    const app = (window as any).siyuan?.ws?.app;
+    primerEditor = new AnnEditor(primerEditorEl, {
+      app,
+      initial: primerStore.get(bookId) || "",
+    });
+    primerEditor.mount();
+    updatePrimerStats();
+    // input 冒泡监听：实时更新字数/token + 防抖保存（Kramdown 落盘）
+    primerEditorEl.addEventListener("input", () => {
+      updatePrimerStats();
+      if (primerSaveTimer) clearTimeout(primerSaveTimer);
+      primerSaveTimer = setTimeout(() => {
+        primerSaveTimer = null;
+        savePrimer();
+      }, 600);
+    });
+  }
+
+  function updatePrimerStats() {
+    if (!primerEditor) return;
+    try {
+      const md = primerEditor.read() || "";
+      primerChars = md.length;
+      primerTokens = estimateTokens(md);
+    } catch {
+      /* 序列化失败时保持上次统计 */
+    }
+  }
+
+  function savePrimer() {
+    if (!primerEditor || !primerStore) return;
+    try {
+      const md = (primerEditor.read() || "").trim();
+      primerStore.set(bookId, md, meta?.title).catch(() => {});
+    } catch {
+      /* ignore */
+    }
+  }
+
+  function flushPrimerSave() {
+    if (primerSaveTimer) {
+      clearTimeout(primerSaveTimer);
+      primerSaveTimer = null;
+    }
+    savePrimer();
+  }
+
+  async function clearPrimer() {
+    if (!primerStore) return;
+    destroyPrimerEditor();
+    await primerStore.remove(bookId);
+    primerChars = 0;
+    primerTokens = 0;
+    primerOpen = false;
+    toast("已清除本书上下文");
+  }
+
+  function destroyPrimerEditor() {
+    try {
+      primerEditor?.destroy?.();
+    } catch {
+      /* ignore */
+    }
+    primerEditor = null;
+    primerEditorEl = null;
+  }
+
+  /* ================= 生词本导出（v1.3.0：Markdown 表格 → 剪贴板） ================= */
+
+  /**
+   * 导出当前书中已显示的双语对照为 Markdown 表格（原文 | 译文 | 章节），
+   * 复制到剪贴板后可直接粘贴进思源笔记做成复习文档。
+   * 数据源：当前已加载内容文档里带 data-reword-translated 标记的段落（即已注入译文的）。
+   */
+  async function exportBilingualNotes() {
+    try {
+      // 直接取 foliate 内容文档（铁律：真 Document 在 .doc 字段）
+      const raw = (view?.renderer?.getContents?.() as any[]) || [];
+      const docs = raw.map((c) => c?.doc).filter(Boolean) as Document[];
+      if (!docs.length) {
+        toast("未找到已翻译内容");
+        return;
+      }
+      const rows: Array<{ src: string; dst: string; ch: string }> = [];
+      const seen = new Set<string>();
+      for (const doc of docs) {
+        const chapter = (doc as any).title || "";
+        const translated = doc.querySelectorAll("[data-reword-translated]");
+        translated.forEach((el) => {
+          const dstEl = el.querySelector(":scope > .reword-bilingual");
+          if (!dstEl) return;
+          // 原文 = 父元素文本去掉译文子节点后的内容
+          const clone = el.cloneNode(true) as Element;
+          clone.querySelectorAll(":scope > .reword-bilingual").forEach((n) => n.remove());
+          const src = (clone.textContent || "").replace(/\s+/g, " ").trim();
+          const dst = (dstEl.textContent || "").replace(/\s+/g, " ").trim();
+          if (!src || !dst) return;
+          const key = src.slice(0, 120);
+          if (seen.has(key)) return; // foliate 多列布局下同段可能出现在多个文档，去重
+          seen.add(key);
+          rows.push({ src, dst, ch: chapter });
+        });
+      }
+      if (!rows.length) {
+        toast("当前章节暂无已翻译段落（请先开启双语并滚动加载）");
+        return;
+      }
+      const title = meta?.title || "本书";
+      const lines = [
+        `# ${title} · 双语生词本`,
+        "",
+        `> 导出于 ${new Date().toLocaleString()} · 共 ${rows.length} 段`,
+        "",
+        "| 原文 | 译文 |",
+        "| --- | --- |",
+        ...rows.map((r) => `| ${r.src.replace(/\|/g, "\\|").slice(0, 300)} | ${r.dst.replace(/\|/g, "\\|")} |`),
+      ];
+      const md = lines.join("\n");
+      await navigator.clipboard.writeText(md);
+      toast(`已复制 ${rows.length} 段生词 Markdown，可粘贴进思源笔记`);
+    } catch (e: any) {
+      console.warn("[REword] 生词本导出失败:", e);
+      toast("导出失败：" + String(e?.message || e));
+    }
   }
 
   /* ================= 2026-08-28 分类字体（Readest 同款）handler ================= */
@@ -3472,11 +3651,12 @@
           setTimeout(() => {
             bilingualProgress = { ...bilingualProgress, active: false };
             // 翻译完成后读取累计 token 用量（由 index.ts 的 aiTranslateBatch 填充）
-            const usage = plugin?.lastTranslationUsage;
+            const usage = getLastUsage?.() ?? null;
             if (usage && usage.totalTokens > 0) {
               bilingualTokenUsage = { ...usage };
-              console.log(`[REword] 双语翻译 token 用量: prompt=${usage.promptTokens} completion=${usage.completionTokens} total=${usage.totalTokens}`);
             }
+            // v1.3.0：同步刷新「本书 Token」累计显示
+            refreshBookTokenUsage();
           }, 800);
         }
       },
@@ -3980,6 +4160,9 @@
     if (toastTimer) clearTimeout(toastTimer);
     if (undoTimer) clearTimeout(undoTimer);
     if (hoverHideTimer) clearTimeout(hoverHideTimer);
+    // v1.3.0：本书上下文编辑器销毁 + 落盘未保存内容
+    flushPrimerSave();
+    destroyPrimerEditor();
     // 2026-08-27：双语注入句柄销毁（移除全部译文节点，零残留）
     try { bilingualHandle?.destroy(); } catch { /* ignore */ }
     bilingualHandle = null;
@@ -4549,9 +4732,9 @@
         <div class="reader-setting-row">
           <span class="reader-setting-label">译文字号</span>
           <div class="reader-setting-control">
-            <button class="reader-mini-btn" on:click={() => setTranslationFontSize((settings.translationFontSize ?? 0.70) - 0.02)}>A-</button>
-            <span class="reader-setting-value">{Math.round((settings.translationFontSize ?? 0.70) * 100)}%</span>
-            <button class="reader-mini-btn" on:click={() => setTranslationFontSize((settings.translationFontSize ?? 0.70) + 0.02)}>A+</button>
+            <button class="reader-mini-btn" on:click={() => setTranslationFontSize((settings.translationFontSize ?? 0.62) - 0.02)}>A-</button>
+            <span class="reader-setting-value">{Math.round((settings.translationFontSize ?? 0.62) * 100)}%</span>
+            <button class="reader-mini-btn" on:click={() => setTranslationFontSize((settings.translationFontSize ?? 0.62) + 0.02)}>A+</button>
           </div>
         </div>
 
@@ -4567,6 +4750,41 @@
             <span class="reader-switch-track"></span>
           </label>
         </div>
+
+        <!-- v1.3.0 本书上下文：手写背景/人物/译法，注入 AI 翻译 prompt（解决专有名词前后不一致） -->
+        {#if primerStore}
+          <div class="reader-setting-row reader-setting-toggle-row">
+            <span class="reader-setting-label" title="为本书手写背景/人物/译法对照，AI 翻译时自动参考（如 Sludge=斯拉奇）">本书上下文</span>
+            <button class="reader-mini-btn" on:click={togglePrimerEditor}>
+              {primerOpen ? "收起" : (primerChars > 0 ? `${primerChars} 字` : "编辑")}
+            </button>
+          </div>
+          {#if primerOpen}
+            <div class="reader-primer-box">
+              <div class="reader-primer-tip">仅对《{meta?.title || "本书"}》生效 · 支持思源排版（列表/加粗/表格）</div>
+              <div class="reader-primer-editor" bind:this={primerEditorEl}></div>
+              <div class="reader-primer-foot">
+                <span class="reader-primer-stats" class:reader-primer-warn={primerChars > PRIMER_WARN_CHARS}>
+                  {primerChars} 字 ≈ {primerTokens}T{primerChars > PRIMER_WARN_CHARS ? " · 过长费token" : " · 建议200~800字"}
+                </span>
+                <button class="reader-mini-btn" title="清除本书上下文" on:click={clearPrimer}>清除</button>
+              </div>
+            </div>
+          {/if}
+
+          <!-- 本书累计 Token + 生词本导出 -->
+          <div class="reader-setting-row reader-setting-toggle-row">
+            <span class="reader-setting-label" title="本书双语翻译累计消耗的 AI Token（跨批次累加）">本书 Token</span>
+            <div class="reader-setting-control">
+              <span class="reader-setting-value">{fmtTok(bookTokenTotal)}</span>
+              <button class="reader-mini-btn" title="重置本书累计" on:click={onResetBookTokens}>↺</button>
+            </div>
+          </div>
+          <div class="reader-setting-row reader-setting-toggle-row">
+            <span class="reader-setting-label" title="把已显示的双语对照导出为 Markdown 表格（复制到剪贴板，可粘贴进思源笔记）">生词本导出</span>
+            <button class="reader-mini-btn" on:click={exportBilingualNotes}>📋 复制</button>
+          </div>
+        {/if}
       </details>
     </div>
   {/if}
@@ -4625,6 +4843,7 @@
         min="0"
         max="1000"
         value={Math.round(progress * 1000)}
+        style="--progress: {progress * 100}%"
         on:input={onProgressInput}
         on:change={onProgressChange}
       />
@@ -6172,6 +6391,47 @@
     padding: 2px 0 4px;
   }
 
+  /* v1.3.0 本书上下文（lite Protyle 编辑区） */
+  .reader-primer-box {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 6px;
+    border: 1px solid var(--b3-border-color, rgba(0, 0, 0, 0.12));
+    border-radius: 8px;
+    margin: 2px 0 6px;
+  }
+  .reader-primer-tip {
+    font-size: 11px;
+    line-height: 1.5;
+    opacity: 0.6;
+  }
+  .reader-primer-editor {
+    /* 容器必须有高度才能挂载 lite Protyle（AnnEditor 内部有 rAF 重试兜底） */
+    height: 180px;
+    overflow-y: auto;
+    border: 1px solid var(--b3-border-color, rgba(0, 0, 0, 0.1));
+    border-radius: 6px;
+    background: var(--b3-theme-background, #fff);
+  }
+  .reader-primer-editor :global(.protyle) {
+    height: 100%;
+  }
+  .reader-primer-foot {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 6px;
+  }
+  .reader-primer-stats {
+    font-size: 11px;
+    opacity: 0.6;
+  }
+  .reader-primer-warn {
+    color: var(--b3-theme-warning, #d97706);
+    opacity: 1;
+  }
+
   .reader-setting-control {
     display: flex;
     align-items: center;
@@ -6270,9 +6530,13 @@
     width: 100%;
     height: 5px;
     border-radius: 999px;
-    background: var(--b3-theme-background-light, rgba(0, 0, 0, 0.12));
+    background: linear-gradient(to right,
+      var(--b3-theme-primary, #378add) 0%,
+      var(--b3-theme-primary, #378add) var(--progress, 0%),
+      var(--b3-theme-background-light, rgba(0, 0, 0, 0.12)) var(--progress, 0%),
+      var(--b3-theme-background-light, rgba(0, 0, 0, 0.12)) 100%
+    );
     box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.04);
-    accent-color: var(--b3-theme-primary, #378add);
     cursor: pointer;
     outline: none;
   }
@@ -6280,7 +6544,12 @@
   .reader-progress-bar::-webkit-slider-runnable-track {
     height: 5px;
     border-radius: 999px;
-    background: var(--b3-theme-background-light, rgba(0, 0, 0, 0.12));
+    background: linear-gradient(to right,
+      var(--b3-theme-primary, #378add) 0%,
+      var(--b3-theme-primary, #378add) var(--progress, 0%),
+      var(--b3-theme-background-light, rgba(0, 0, 0, 0.12)) var(--progress, 0%),
+      var(--b3-theme-background-light, rgba(0, 0, 0, 0.12)) 100%
+    );
   }
   .reader-progress-bar::-webkit-slider-thumb {
     -webkit-appearance: none;
@@ -6296,7 +6565,12 @@
   .reader-progress-bar::-moz-range-track {
     height: 5px;
     border-radius: 999px;
-    background: var(--b3-theme-background-light, rgba(0, 0, 0, 0.12));
+    background: linear-gradient(to right,
+      var(--b3-theme-primary, #378add) 0%,
+      var(--b3-theme-primary, #378add) var(--progress, 0%),
+      var(--b3-theme-background-light, rgba(0, 0, 0, 0.12)) var(--progress, 0%),
+      var(--b3-theme-background-light, rgba(0, 0, 0, 0.12)) 100%
+    );
   }
   .reader-progress-bar::-moz-range-thumb {
     width: 13px;

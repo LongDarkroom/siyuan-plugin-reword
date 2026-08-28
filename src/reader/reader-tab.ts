@@ -101,6 +101,14 @@ export class ReaderTabController {
               onRemoveFromVocab: (w: string) => self.plugin?.getVocabStore?.()?.removeWord?.(w),
               isInVocab: (w: string) => !!self.plugin?.getVocabStore?.()?.hasWord?.(w),
               getLabel: self.getLabel,
+              // v1.3.0：本书前提上下文（用户手写背景/人物/译法，注入 AI 翻译 prompt）
+              primerStore: (self.plugin as any)?.bookPrimer,
+              // v1.3.0：本书累计 Token 统计（读/重置）
+              getTokenUsage: (bid: string) =>
+                (self.plugin as any)?.getBookTokenUsage?.(bid) ?? { total: 0, prompt: 0, completion: 0 },
+              resetTokenUsage: (bid: string) => (self.plugin as any)?.resetBookTokenUsage?.(bid),
+              // v1.3.0：最近一次翻译 token 用量（修复原裸 plugin 引用未定义）
+              getLastUsage: () => (self.plugin as any)?.lastTranslationUsage ?? null,
               // 批注/高亮保存后固定阅读 Tab：官方 tab.pin() 防数量超限回收顶掉
               onProtectTab: () => {
                 try {

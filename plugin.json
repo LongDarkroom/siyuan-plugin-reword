@@ -2,7 +2,7 @@
   "name": "siyuan-plugin-reword",
   "author": "reword-siyuan",
   "url": "https://github.com/LongDarkroom/siyuan-plugin-reword",
-  "version": "1.2.0",
+  "version": "1.3.0",
   "minAppVersion": "3.7.0",
   "backends": ["all"],
   "frontends": ["desktop", "browser-desktop"],

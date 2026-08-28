@@ -302,7 +302,7 @@ export function buildReaderStyles(
     publisherFontOverrideStyles(settings.overridePublisherFont !== false),
     focusModeStyles(settings.focusMode === true),
     paragraphHoverStyles(settings.paragraphHover === true),
-    bilingualStyles(translationStack, o.fg, settings.translationFontSize ?? 0.78),
+    bilingualStyles(translationStack, o.fg, settings.translationFontSize ?? 0.62),
     headingStyles(),
     quoteStyles(o),
     listStyles(),
@@ -618,33 +618,38 @@ export function focusModeStyles(enabled: boolean): string {
  *
  * @param fontFamilyStack 思源阅读字体栈（含用户字体 + CJK 兜底）
  * @param fg 思源正文色（具体 hex，来自 deriveStyleOutput）
- * @param translationFontSize 译文字号 em 倍数（默认 0.78）
+ * @param translationFontSize 译文字号 em 倍数（默认 0.62）
  */
 export function bilingualStyles(fontFamilyStack: string, fg: string, translationFontSize: number): string {
-  const fs = Number.isFinite(translationFontSize) && translationFontSize > 0 ? translationFontSize : 0.70;
+  const fs = Number.isFinite(translationFontSize) && translationFontSize > 0 ? translationFontSize : 0.62;
   return `
-/* ---- 双语译文块（段落内子节点注入，思源字体 + Readest 极简） ---- */
+/* ---- 双语译文块（段落内子节点注入，紧贴书籍排版） ---- */
 .reword-bilingual {
   display: block !important;
-  /* 紧贴原文下方，紧凑不抢空间（对齐 Readest 效果） */
-  margin: 0.22em 0 0 0;
+  /* 紧贴原文，极简间距 */
+  margin: 0.15em 0 0 0;
   padding: 0;
 
-  /* 排版：独立小一号译文（设置可调），行高继承正文自然融入。
-     默认 0.70em（非 0.78）—— 思源 CJK 字体栈渲染尺寸显著大于书籍英文 serif，
-     0.70em 的思源字体 ≈ 0.90em 的书籍字体，视觉上略小一号、与 Readest 一致。 */
+  /* 字号：默认 0.62em —— CJK 字体（霞鹜文楷/苹方）的 x-height 远大于英文 serif，
+     0.62em 渲染后视觉尺寸 ≈ 英文正文的 0.88~0.92 倍，略小一号、不抢焦点 */
   font-size: ${fs}em;
-  line-height: inherit;
+  /* 行高比正文紧凑一点（正文通常 1.6~1.8），避免译文撑开过多空间 */
+  line-height: 1.45;
   font-weight: 400;
 
-  /* 字体：思源阅读字体栈（!important 压过 publisherFontOverride 的 p div inherit） */
+  /* 字体：思源阅读字体栈（!important 压过 publisherFontOverride 的 inherit） */
   font-family: ${fontFamilyStack} !important;
   /* 色彩：思源正文色（具体 hex，iframe 内 --b3-* 不可达） */
   color: ${fg};
-  /* 轻微淡于原文，但不强透明 */
-  opacity: 0.9;
+  /* 轻微透明：译文是辅助信息，淡于原文但不至于看不清 */
+  opacity: 0.82;
 
-  /* 无边框 / 无底色 / 无圆角 —— 与 Readest 一致 */
+  /* 与原文对齐：继承父段落的 text-indent（书籍段落常首行缩进 1~2em） */
+  text-indent: inherit;
+  /* CJK 字间距微调，让中文更紧凑自然 */
+  letter-spacing: 0.02em;
+
+  /* 无边框 / 无底色 / 无圆角 —— Readest 极简哲学 */
 
   /* 行为 */
   word-break: break-word;
@@ -653,14 +658,14 @@ export function bilingualStyles(fontFamilyStack: string, fg: string, translation
   transition: opacity 0.2s ease;
 }
 
-/* 悬停时恢复完全不透明（帮助用户确认这是可交互的译文块） */
+/* 悬停时恢复完全不透明 */
 .reword-bilingual:hover {
   opacity: 1;
 }
 
 /* 列表项内的译文：随原文缩进，避免与项目符号视觉冲突 */
 li > .reword-bilingual {
-  margin: 0.18em 0 0 1em;
+  margin: 0.12em 0 0 1em;
 }`.trim();
 }
 

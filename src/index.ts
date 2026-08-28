@@ -116,6 +116,7 @@ import { runChat as runCopilotChat } from "./copilot/ai/ai-orchestrator.ts";
 import { buildProviders, translateWithFallback } from "./translate/engine";
 import { parseNumberedTranslations, parseTranslationsPositional } from "./translate/providers/ai";
 import { TranslationCache } from "./translate/cache";
+import { BookPrimerStore } from "./reader/book-primer";
 import type {
   AiSettings as CopilotAiSettings,
   ChatSession as CopilotSession,
@@ -124,6 +125,17 @@ import type {
 } from "./copilot/types.ts";
 
 const PLUGIN_NAME = "hiword-vocab";
+
+/**
+ * AI 翻译调试日志开关（2026-08-28 v1.3.0 收敛裸 console.log，避免每次翻页刷屏）。
+ * true = 输出翻译链路流程日志（排查用）；false = 静默（发布默认）。
+ * 异常仍走 console.warn / getLogger().warn，不受此开关影响。
+ * 与 bilingual.ts 的 DEBUG_BILINGUAL 同一套约定。
+ */
+const DEBUG_TRANSLATE = false;
+function trLog(...args: unknown[]): void {
+  if (DEBUG_TRANSLATE) console.log("[REword]", ...args);
+}
 
 /**
  * 2026-08-17：内联 SVG 版图标。
@@ -271,10 +283,18 @@ export default class RewordPlugin extends Plugin {
   private aiSettings!: AiSettings;       // AI 精读设置（persist: hiword-ai.json）
   private aiPanel?: AiPanel;             // AI 精读 dock 面板控制器
   private translationCache!: TranslationCache; // 双语翻译按书缓存（persist: translations/<bookId>.json）
+  /** 本书前提上下文（persist: book-primers.json）——用户手写的背景/人物/译法，注入翻译 prompt */
+  private bookPrimerStore!: BookPrimerStore;
+  /** 供 UI（阅读器设置面板）读写本书上下文 */
+  get bookPrimer() { return this.bookPrimerStore; }
   /** 最近一次双语翻译的累计 token 用量（UI 层读取展示用） */
   private _lastTranslationUsage: { promptTokens: number; completionTokens: number; totalTokens: number } | null = null;
   /** 读取最近一次翻译的 token 用量（null 表示无数据 / 未走 AI） */
   get lastTranslationUsage() { return this._lastTranslationUsage; }
+  /** 按书累计的 AI token 用量（persist: book-token-usage.json） */
+  private bookTokenUsage: Record<string, { total: number; prompt: number; completion: number }> = {};
+  /** token 统计持久化键 */
+  private static readonly TOKEN_USAGE_KEY = "book-token-usage.json";
 
   // ===== Copilot 聊天（照抄 copilot 插件，独立第二个 dock）=====
   private copilotConvo!: ConversationStore; // 会话历史存储
@@ -492,6 +512,14 @@ export default class RewordPlugin extends Plugin {
         this,
         () => this.aiSettings?.translatePrompt || DEFAULT_AI_SETTINGS.translatePrompt
       );
+      // 2026-08-28 v1.3.0：本书前提上下文（用户手写的背景/人物/译法，注入翻译 prompt）
+      this.bookPrimerStore = new BookPrimerStore(this);
+      this.bookPrimerStore.load().catch(() => {
+        /* 加载失败则保持空表，不影响翻译主流程 */
+      });
+      this.loadBookTokenUsage().catch(() => {
+        /* 统计加载失败归零即可 */
+      });
     } catch (e) {
       getLogger().error("[REword] 字段初始化失败:", { error: e });
     }
@@ -1202,21 +1230,21 @@ export default class RewordPlugin extends Plugin {
     // 1) 查缓存（按书）
     const { hits, misses } = await this.translationCache.getBatch(bookId, texts);
     for (const k in hits) out[+k] = hits[k];
-    console.log(`[REword] translateBatch: 缓存命中 ${Object.keys(hits).length}, 未命中 ${misses.length}/${texts.length}`);
+    trLog(`translateBatch: 缓存命中 ${Object.keys(hits).length}, 未命中 ${misses.length}/${texts.length}`);
 
     // 2) 未命中部分走引擎链（2026-08-28：AI 首选 + 批量模式）
     if (misses.length) {
       const reqTexts = misses.map((i) => texts[i]);
       try {
-        console.log("[REword] translateBatch: buildProviders...");
+        trLog("translateBatch: buildProviders...");
         const providers = buildProviders(this.aiSettings, {
-          translateOne: (t, f, t2) => this.aiTranslateText(t, f, t2),
-          translateBatch: (ts, f, t2) => this.aiTranslateBatch(ts, f, t2),
+          translateOne: (t, f, t2, bid) => this.aiTranslateText(t, f, t2, bid),
+          translateBatch: (ts, f, t2, bid) => this.aiTranslateBatch(ts, f, t2, bid),
         });
-        console.log(`[REword] translateBatch: ${providers.length} 个引擎, 调用 translateWithFallback...`);
-        const res = await translateWithFallback(providers, { texts: reqTexts, from, to });
+        trLog(`translateBatch: ${providers.length} 个引擎, 调用 translateWithFallback...`);
+        const res = await translateWithFallback(providers, { texts: reqTexts, from, to, bookId });
         const tr = res.texts || [];
-        console.log(`[REword] translateBatch: 引擎返回 provider=${res.provider}, ${tr.length} 条译文, 非空 ${tr.filter(t=>t?.trim()).length} 条`);
+        trLog(`translateBatch: 引擎返回 provider=${res.provider}, ${tr.length} 条译文, 非空 ${tr.filter(t=>t?.trim()).length} 条`);
         const pairs: Array<[string, string]> = [];
         misses.forEach((idx, j) => {
           const translation = (tr[j] || "").trim();
@@ -1229,7 +1257,7 @@ export default class RewordPlugin extends Plugin {
         getLogger().error("[REword] 批量翻译失败:", { error: e });
       }
     }
-    console.log(`[REword] translateBatch: 最终返回 ${out.length} 条, 非空 ${out.filter(t=>t?.trim()).length} 条`);
+    trLog(`translateBatch: 最终返回 ${out.length} 条, 非空 ${out.filter(t=>t?.trim()).length} 条`);
     return out;
   }
 
@@ -1240,11 +1268,111 @@ export default class RewordPlugin extends Plugin {
    * baseUrl/apiKey/model）——原读 copilotAi（独立 Copilot 设置）导致未配置
    * Copilot 时翻译永远空转。temperature 覆写 0.2 抑制润色倾向。
    */
-  private async aiTranslateText(text: string, from: string, to: string): Promise<string> {
+  /* ================= 本书前提上下文 + Token 统计（2026-08-28 v1.3.0） ================= */
+  // 翻译流程日志走模块级 trLog（DEBUG_TRANSLATE 控制），异常仍走 warn。
+
+  /**
+   * 组装翻译 prompt：把用户为本书手写的「前提上下文」拼在最前面。
+   * 这是解决专有名词前后不一致（如 Sludge 先译「斯拉奇」后译「烂泥」）的关键——
+   * AI 批量翻译本身无状态，只能看到当前这批发过去的段落。
+   *
+   * 上下文用 **Markdown 原文**而非 Lute 渲染的 HTML：
+   *  - 省 60%+ token（`- Nate` vs `<ul><li>Nate</li></ul>`）；
+   *  - 模型完全理解 Markdown，无需渲染。
+   *
+   * @param basePrompt 基础翻译指令（AI 设置里的「翻译预置提示词」）
+   * @param bookId 书籍 ID（空则不加上下文）
+   */
+  private buildTranslatePrompt(basePrompt: string, bookId?: string): string {
+    const base = (basePrompt || "").trim();
+    const primer = bookId ? (this.bookPrimerStore?.get(bookId) || "").trim() : "";
+    if (!primer) return base;
+    return (
+      `【本书背景资料（用户提供的上下文，翻译时必须遵循其中的专有名词译法）】\n${primer}\n\n` +
+      `【翻译要求】\n${base}\n` +
+      `【重要】若上文「本书背景资料」中已给出某专有名词的译法，必须严格采用该译法，不得另译。`
+    );
+  }
+
+  /** 读取本书累计 token 用量（无数据返回零值对象） */
+  public getBookTokenUsage(bookId: string): { total: number; prompt: number; completion: number } {
+    if (!bookId) return { total: 0, prompt: 0, completion: 0 };
+    const v = this.bookTokenUsage[bookId];
+    return v ? { ...v } : { total: 0, prompt: 0, completion: 0 };
+  }
+
+  /** 累计本书 token 用量（内部调用，自动防抖落盘） */
+  private addBookTokenUsage(
+    bookId: string,
+    usage: { promptTokens?: number; completionTokens?: number; totalTokens?: number }
+  ): void {
+    if (!bookId) return;
+    const cur = this.bookTokenUsage[bookId] || { total: 0, prompt: 0, completion: 0 };
+    const p = usage?.promptTokens || 0;
+    const c = usage?.completionTokens || 0;
+    this.bookTokenUsage[bookId] = {
+      total: cur.total + (usage?.totalTokens || p + c),
+      prompt: cur.prompt + p,
+      completion: cur.completion + c,
+    };
+    this.scheduleTokenUsageSave();
+  }
+
+  /** 重置本书 token 统计 */
+  public async resetBookTokenUsage(bookId: string): Promise<void> {
+    if (!bookId) return;
+    delete this.bookTokenUsage[bookId];
+    await this.persistBookTokenUsage();
+  }
+
+  /** 重置全部书籍的 token 统计 */
+  public async resetAllTokenUsage(): Promise<void> {
+    this.bookTokenUsage = {};
+    await this.persistBookTokenUsage();
+  }
+
+  private tokenUsageTimer: any = null;
+
+  private scheduleTokenUsageSave(): void {
+    if (this.tokenUsageTimer) clearTimeout(this.tokenUsageTimer);
+    this.tokenUsageTimer = setTimeout(() => {
+      this.tokenUsageTimer = null;
+      this.persistBookTokenUsage().catch(() => {
+        /* 统计落盘失败无妨：仅影响重启后的累计值 */
+      });
+    }, 1500);
+  }
+
+  private async persistBookTokenUsage(): Promise<void> {
+    try {
+      await this.saveData(RewordPlugin.TOKEN_USAGE_KEY, this.bookTokenUsage);
+    } catch {
+      /* ignore */
+    }
+  }
+
+  private async loadBookTokenUsage(): Promise<void> {
+    try {
+      const raw = await this.loadData(RewordPlugin.TOKEN_USAGE_KEY);
+      if (raw && typeof raw === "object" && !Array.isArray(raw)) {
+        this.bookTokenUsage = raw as Record<string, { total: number; prompt: number; completion: number }>;
+      } else if (typeof raw === "string" && raw.trim()) {
+        const parsed = JSON.parse(raw);
+        if (parsed && typeof parsed === "object") this.bookTokenUsage = parsed;
+      }
+    } catch {
+      this.bookTokenUsage = {};
+    }
+  }
+
+  private async aiTranslateText(text: string, from: string, to: string, bookId?: string): Promise<string> {
     if (!this.aiSettings?.enabled || !this.aiSettings?.apiKey) return ""; // AI 未配置则放弃
-    const prompt = (this.aiSettings?.translatePrompt || DEFAULT_AI_SETTINGS.translatePrompt).trim();
+    const basePrompt = (this.aiSettings?.translatePrompt || DEFAULT_AI_SETTINGS.translatePrompt).trim();
+    // v1.3.0：注入本书前提上下文，保证专有名词与用户手写译法一致
+    const prompt = this.buildTranslatePrompt(basePrompt, bookId);
     const settings = { ...this.aiSettings, systemPrompt: prompt, jsonMode: false, temperature: this.aiSettings?.trTemperature ?? 0.2 } as any;
-    const res = await runCopilotChat(settings, [], [{ role: "user", content: text } as any], undefined, {});
+    const body = bookId ? `请翻译以下内容：\n\n${text}` : text;
+    const res = await runCopilotChat(settings, [], [{ role: "user", content: body } as any], undefined, {});
     return res?.content || "";
   }
 
@@ -1262,7 +1390,12 @@ export default class RewordPlugin extends Plugin {
    * 复用 AI 精读同一模型与设置（仅覆写 systemPrompt/temperature/jsonMode），
    * 不落盘会话、不污染精读面板。
    */
-  private async aiTranslateBatch(texts: string[], from: string, to: string): Promise<string[]> {
+  private async aiTranslateBatch(
+    texts: string[],
+    from: string,
+    to: string,
+    bookId?: string
+  ): Promise<string[]> {
     const out: string[] = new Array(texts.length).fill("");
     if (!Array.isArray(texts) || !texts.length) return out;
     if (!this.aiSettings?.enabled || !this.aiSettings?.apiKey) {
@@ -1273,9 +1406,11 @@ export default class RewordPlugin extends Plugin {
     // 重置 token 用量累计器
     this._lastTranslationUsage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
 
-    const prompt = (this.aiSettings?.translatePrompt || DEFAULT_AI_SETTINGS.translatePrompt).trim();
+    // v1.3.0：注入本书前提上下文（用户手写的背景/人物/译法）
+    const basePrompt = (this.aiSettings?.translatePrompt || DEFAULT_AI_SETTINGS.translatePrompt).trim();
+    const prompt = this.buildTranslatePrompt(basePrompt, bookId);
     const settings = { ...this.aiSettings, systemPrompt: prompt, jsonMode: false, temperature: this.aiSettings?.trTemperature ?? 0.2 } as any;
-    console.log(`[REword] aiTranslateBatch: 入参 ${texts.length} 段, baseUrl=${(settings.baseUrl||"").slice(0,50)}, model=${settings.model||"(空)"}, apiKey=${settings.apiKey?"有":"无"}`);
+    trLog(`aiTranslateBatch: 入参 ${texts.length} 段, bookId=${bookId || "(无)"}, 上下文=${bookId && this.bookPrimerStore?.get(bookId) ? "有" : "无"}, model=${settings.model || "(空)"}`);
 
     // 分桶：段数 + 字符双预算
     const chunks: Array<{ start: number; texts: string[] }> = [];
@@ -1291,7 +1426,7 @@ export default class RewordPlugin extends Plugin {
       cur.texts.push(t);
       curChars += len;
     });
-    console.log(`[REword] aiTranslateBatch: 分桶完成，${chunks.length} 个桶`);
+    trLog(`aiTranslateBatch: 分桶完成，${chunks.length} 个桶`);
 
     const runChunk = async (chunk: { start: number; texts: string[] }): Promise<void> => {
       const numbered = chunk.texts.map((t, j) => `[[${j + 1}]]\n${t}`).join("\n\n");
@@ -1301,7 +1436,7 @@ export default class RewordPlugin extends Plugin {
         `不要合并、不要遗漏、不要添加任何解释或额外内容。\n\n${numbered}`;
       for (let attempt = 0; attempt < 2; attempt++) {
         try {
-          console.log(`[REword] aiTranslateBatch: 桶#${chunks.indexOf(chunk)} 调用 runCopilotChat (attempt=${attempt})...`);
+          trLog(`aiTranslateBatch: 桶#${chunks.indexOf(chunk)} 调用 runCopilotChat (attempt=${attempt})...`);
           const res = await runCopilotChat(
             settings,
             [],
@@ -1309,13 +1444,15 @@ export default class RewordPlugin extends Plugin {
             undefined,
             {}
           );
-          console.log(`[REword] aiTranslateBatch: runCopilotChat 返回 ok=${res?.ok}, content长度=${(res?.content||"").length}, 内容预览="${(res?.content||"").slice(0,120)}", error=${res?.error||"无"}`);
+          trLog(`aiTranslateBatch: runCopilotChat 返回 ok=${res?.ok}, content长度=${(res?.content||"").length}, 内容预览="${(res?.content||"").slice(0,120)}", error=${res?.error||"无"}`);
           // 累计 token 用量（部分 AI 服务商返回 usage，缺失则跳过）
           if (res?.usage) {
             this._lastTranslationUsage!.promptTokens += res.usage.promptTokens || 0;
             this._lastTranslationUsage!.completionTokens += res.usage.completionTokens || 0;
             this._lastTranslationUsage!.totalTokens += res.usage.totalTokens || 0;
-            console.log(`[REword] aiTranslateBatch: 桶#${chunks.indexOf(chunk)} token 用量 prompt=${res.usage.promptTokens} completion=${res.usage.completionTokens} total=${res.usage.totalTokens}`);
+            // v1.3.0：按书累计（供 UI 展示「本书累计 Token」）
+            if (bookId) this.addBookTokenUsage(bookId, res.usage);
+            trLog(`aiTranslateBatch: 桶#${chunks.indexOf(chunk)} token 用量 prompt=${res.usage.promptTokens} completion=${res.usage.completionTokens} total=${res.usage.totalTokens}`);
           }
           let pairs = parseNumberedTranslations(res?.content || "");
           // 2026-08-28 兜底：模型未遵守 [[序号]] 格式（返回纯译文 / 数字编号）时，
@@ -1330,7 +1467,7 @@ export default class RewordPlugin extends Plugin {
           for (const [idx, tr] of pairs) {
             if (idx >= 1 && idx <= chunk.texts.length) out[chunk.start + idx - 1] = tr;
           }
-          console.log(`[REword] aiTranslateBatch: 桶#${chunks.indexOf(chunk)} 完成，out 非空 ${out.filter(Boolean).length}/${texts.length}`);
+          trLog(`aiTranslateBatch: 桶#${chunks.indexOf(chunk)} 完成，out 非空 ${out.filter(Boolean).length}/${texts.length}`);
           return; // 桶完成（漏译序号交给下方逐段兜底）
         } catch (e: any) {
           const msg = String(e?.message || e);
@@ -1349,7 +1486,7 @@ export default class RewordPlugin extends Plugin {
 
     // 桶间并发 2：串行太慢、并发过高易触发限流
     const queue = [...chunks];
-    console.log(`[REword] aiTranslateBatch: 启动 ${Math.min(this.aiSettings?.trConcurrency ?? RewordPlugin.AI_TR_CONCURRENCY, queue.length)} 个 worker 处理 ${queue.length} 个桶`);
+    trLog(`aiTranslateBatch: 启动 ${Math.min(this.aiSettings?.trConcurrency ?? RewordPlugin.AI_TR_CONCURRENCY, queue.length)} 个 worker 处理 ${queue.length} 个桶`);
     const workers = Array.from(
       { length: Math.min(this.aiSettings?.trConcurrency ?? RewordPlugin.AI_TR_CONCURRENCY, queue.length) },
       async () => {
@@ -1361,7 +1498,7 @@ export default class RewordPlugin extends Plugin {
     );
     await Promise.all(workers);
 
-    console.log(`[REword] aiTranslateBatch: 所有桶完成，out 非空 ${out.filter(Boolean).length}/${texts.length}`);
+    trLog(`aiTranslateBatch: 所有桶完成，out 非空 ${out.filter(Boolean).length}/${texts.length}`);
 
     // 漏译逐段兜底：仅当大部分桶成功（空位 ≤ 一半）时执行，
     // 避免批量整体失败（断网/欠费）时触发连环逐段请求。
@@ -1370,7 +1507,7 @@ export default class RewordPlugin extends Plugin {
     if (missIdx.length && missIdx.length <= texts.length / 2) {
       for (const i of missIdx) {
         try {
-          out[i] = (await this.aiTranslateText(texts[i], from, to)) || "";
+          out[i] = (await this.aiTranslateText(texts[i], from, to, bookId)) || "";
         } catch {
           /* 保持空串 */
         }
