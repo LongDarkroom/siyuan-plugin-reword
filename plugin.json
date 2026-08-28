@@ -1,8 +1,8 @@
 {
   "name": "siyuan-plugin-reword",
-  "author": "reword-siyuan",
+  "author": "LongDarkroom",
   "url": "https://github.com/LongDarkroom/siyuan-plugin-reword",
-  "version": "1.3.0",
+  "version": "1.3.1",
   "minAppVersion": "3.7.0",
   "backends": ["all"],
   "frontends": ["desktop", "browser-desktop"],
@@ -13,7 +13,7 @@
   },
   "description": {
     "default": "RE word: select-to-lookup offline dictionary, hotkey word collection for review, AI deep-reading (study/chat modes), custom offline MDX dictionaries, drag SiYuan doc tabs into the chat as context",
-    "zh-CN": "RE word 词汇助手：选中单词一键查离线词典、框选快捷键自动收词复习、AI 精读（学习/对话模式）、支持自定义离线词典库（MDX），可把思源文档页签拖入对话框作为上下文"
+    "zh-CN": "RE word 词汇助手：选中单词一键查离线词典、框选快捷键自动收词复习、AI 精读（学习/对话模式）、支持自定义离线词典库（MDX），可把思源文档页签拖入对话框作为上下文。💡 使用前请先配置离线词典包，获取方式见 README 词典获取指南"
   },
   "readme": {
     "default": "README.md",
