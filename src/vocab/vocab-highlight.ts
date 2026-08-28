@@ -1,3 +1,4 @@
+import { logSwallow } from "../core/safe.ts";
 /**
  * 词库驱动文档单词高亮（2026-08-22 新增）
  * ------------------------------------------------------------------
@@ -374,9 +375,7 @@ export class VocabHighlighter {
     this.scanBlocks(protyleEl).forEach((b) => {
       try {
         this.io!.observe(b);
-      } catch {
-        /* detached */
-      }
+      } catch (__swallowErr) { logSwallow(__swallowErr, "vocab-highlight.ts · start", "debug"); }
     });
 
     // 2) DOM 变化观察:块增删时加入待处理(思源块级动态加载/卸载)
@@ -385,9 +384,7 @@ export class VocabHighlighter {
     });
     try {
       this.blockObserver.observe(protyleEl, { childList: true, subtree: true });
-    } catch {
-      /* root detached */
-    }
+    } catch (__swallowErr) { logSwallow(__swallowErr, "vocab-highlight.ts · start", "debug"); }
 
     // 编辑失焦后重新入队该块,恢复高亮
     // (编辑期间跳过聚焦块,避免反复拆/包 span 干扰思源输入)

@@ -1,3 +1,4 @@
+import { logSwallow } from "../core/safe.ts";
 /**
  * 批注内联编辑器 —— lite Protyle 统一封装（2026-08-17）
  * ------------------------------------------------------------------
@@ -159,7 +160,7 @@ export class AnnEditor {
             this.applyReadonly(p, wysiwyg);
             this.el.classList.add("ann-editor--readonly");
             // 还原构造前快照的焦点（见上方 prevActive），不打断侧栏搜索框等
-            if (prevActive) { try { prevActive.focus(); } catch { /* ignore */ } }
+            if (prevActive) { try { prevActive.focus(); } catch (__swallowErr) { logSwallow(__swallowErr, "ann-editor.ts · try { prevActive.focus(); }", "debug"); } }
             this.opts.onReady?.(true);
           } else {
             // 完整 Protyle 不一定自动插入初始块：显式写占位段落，保证后续 insert/光标可用
@@ -198,7 +199,7 @@ export class AnnEditor {
         }
       } catch (e) {
         getLogger().error("[REword-Ann] Protyle 挂载失败，回退 contenteditable", { error: e });
-        try { this.protyle?.destroy?.(); } catch { /* ignore */ }
+        try { this.protyle?.destroy?.(); } catch (__swallowErr) { logSwallow(__swallowErr, "ann-editor.ts · refreshEmpty", "debug"); }
         this.protyle = null;
         this.fallback();
       }
@@ -282,28 +283,28 @@ export class AnnEditor {
       wysiwyg
         .querySelectorAll('[contenteditable="true"]')
         .forEach((n) => n.setAttribute("contenteditable", "false"));
-    } catch { /* ignore */ }
+    } catch (__swallowErr) { logSwallow(__swallowErr, "ann-editor.ts · applyReadonly", "debug"); }
   }
 
   /** 聚焦编辑器（Protyle 或回退 contenteditable） */
   focus(): void {
-    try { this.protyle?.focus?.(); return; } catch { /* ignore */ }
-    try { this.el.focus(); } catch { /* ignore */ }
+    try { this.protyle?.focus?.(); return; } catch (__swallowErr) { logSwallow(__swallowErr, "ann-editor.ts · focus", "debug"); }
+    try { this.el.focus(); } catch (__swallowErr) { logSwallow(__swallowErr, "ann-editor.ts · focus", "debug"); }
   }
 
   /** 销毁（必须清理 MutationObserver 与内核监听，避免 detached 元素崩溃） */
   destroy(): void {
     this.disposed = true;
-    try { this.emptyObserver?.disconnect(); } catch { /* ignore */ }
+    try { this.emptyObserver?.disconnect(); } catch (__swallowErr) { logSwallow(__swallowErr, "ann-editor.ts · destroy", "debug"); }
     this.emptyObserver = null;
     // 移除挂载时注册的 input 监听，避免 detached 节点残留处理器（D6）
     if (this.inputHandler) {
-      try { this.wysiwygEl?.removeEventListener("input", this.inputHandler); } catch { /* ignore */ }
+      try { this.wysiwygEl?.removeEventListener("input", this.inputHandler); } catch (__swallowErr) { logSwallow(__swallowErr, "ann-editor.ts · destroy", "debug"); }
       this.inputHandler = null;
     }
     this.wysiwygEl = null;
-    try { this.protyle?.destroy?.(); } catch { /* ignore */ }
-    try { this.el.querySelector(".protyle")?.remove(); } catch { /* ignore */ }
+    try { this.protyle?.destroy?.(); } catch (__swallowErr) { logSwallow(__swallowErr, "ann-editor.ts · destroy", "debug"); }
+    try { this.el.querySelector(".protyle")?.remove(); } catch (__swallowErr) { logSwallow(__swallowErr, "ann-editor.ts · destroy", "debug"); }
     // 宿主状态清理（对称于 readonly/fallback 写入，D6）
     this.el.classList.remove("ann-editor--readonly");
     this.el.removeAttribute("contenteditable");
@@ -370,13 +371,13 @@ export class AnnEditor {
   private fallback(): void {
     // 只读预览的回退：不写内容、不设 contenteditable，清空宿主交回静态兜底（由调用方显示）
     if (this.opts.readonly) {
-      try { this.el.querySelector(".protyle")?.remove(); } catch { /* ignore */ }
+      try { this.el.querySelector(".protyle")?.remove(); } catch (__swallowErr) { logSwallow(__swallowErr, "ann-editor.ts · fallback", "debug"); }
       this.el.innerHTML = "";
       this.opts.onReady?.(false);
       return;
     }
     if (this.opts.fallback === false) return;
-    try { this.el.querySelector(".protyle")?.remove(); } catch { /* ignore */ }
+    try { this.el.querySelector(".protyle")?.remove(); } catch (__swallowErr) { logSwallow(__swallowErr, "ann-editor.ts · fallback", "debug"); }
     this.el.setAttribute("contenteditable", "true");
     const init = this.opts.initial || "";
     if (init) {

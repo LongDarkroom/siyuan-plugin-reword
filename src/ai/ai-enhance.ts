@@ -1,3 +1,4 @@
+import { logSwallow } from "../core/safe.ts";
 /**
  * REword · AI 输出思源原生样式增强
  * ------------------------------------------------------------------
@@ -129,9 +130,7 @@ export function applyCode(element: HTMLElement): void {
       block.classList.add("hljs");
       block.setAttribute("data-highlighted", "true");
       if (language) block.setAttribute("data-language", language);
-    } catch {
-      /* 忽略单块高亮失败 */
-    }
+    } catch (__swallowErr) { logSwallow(__swallowErr, "ai-enhance.ts · applyCode", "debug"); }
   });
 }
 

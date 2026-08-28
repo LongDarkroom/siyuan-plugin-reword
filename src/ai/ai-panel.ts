@@ -48,6 +48,7 @@ import {
   renderSaveToNoteTree,
   type SaveToNoteDialogData,
 } from "./ai-dialogs.ts";
+import { logSwallow } from "../core/safe.ts";
 
 /** 精读数据源（由插件从当前块/选区/本地文档取得） */
 export interface AiDeepReadSource {
@@ -237,7 +238,7 @@ export class AiPanel {
         expandBlockRefs: true,
         fetchBlockTextFallback: true,
       };
-    } catch { /* ignore */ }
+    } catch (__swallowErr) { logSwallow(__swallowErr, "ai-panel.ts · render", "debug"); }
 
     const contentEl = dockElement.querySelector("#hiword-dock-content") as HTMLElement;
     if (!contentEl) return;
@@ -497,13 +498,13 @@ export class AiPanel {
 
   /** 卸载 Protyle 输入框（重渲染 / 面板销毁时调用，必须彻底清理观察器） */
   private destroyInput(): void {
-    try { this.emptyObserver?.disconnect(); } catch { /* ignore */ }
+    try { this.emptyObserver?.disconnect(); } catch (__swallowErr) { logSwallow(__swallowErr, "ai-panel.ts · destroyInput", "debug"); }
     this.emptyObserver = null;
-    try { this.protyle?.destroy(); } catch { /* ignore */ }
+    try { this.protyle?.destroy(); } catch (__swallowErr) { logSwallow(__swallowErr, "ai-panel.ts · destroyInput", "debug"); }
     // 无论 destroy 是否异常，强制移除容器内残留的 Protyle DOM——
     // 思源内核在该 DOM 上绑定的 dragover/click 监听器随元素移除失效，
     // 避免「contentElement=null 的失效实例」在拖拽/点击时触发 getBoundingClientRect 崩溃
-    try { this.inputEl?.querySelector(".protyle")?.remove(); } catch { /* ignore */ }
+    try { this.inputEl?.querySelector(".protyle")?.remove(); } catch (__swallowErr) { logSwallow(__swallowErr, "ai-panel.ts · destroyInput", "debug"); }
     this.protyle = null;
     this.mountAttempts = 0;
     this.pendingPrefill = null;
@@ -617,7 +618,7 @@ export class AiPanel {
       } catch (e) {
         getLogger().error("Protyle 实例化/初始化失败，回退 contenteditable", { operation: "挂载AI输入框", error: e as Error });
         // 失败路径：销毁可能已创建的部分实例并清空引用，残留 DOM 由 fallbackToContentEditable 统一清理
-        try { this.protyle?.destroy(); } catch { /* ignore */ }
+        try { this.protyle?.destroy(); } catch (__swallowErr) { logSwallow(__swallowErr, "ai-panel.ts · try { this.protyle?.destroy(); }", "debug"); }
         this.protyle = null;
         this.fallbackToContentEditable();
       }
@@ -631,7 +632,7 @@ export class AiPanel {
     if (!inputEl) return;
     // 先移除容器内残留的 Protyle DOM（失效实例的内核 dragover/click 监听器随之失效），
     // 再启用 contenteditable，杜绝双模式叠加
-    try { inputEl.querySelector(".protyle")?.remove(); } catch { /* ignore */ }
+    try { inputEl.querySelector(".protyle")?.remove(); } catch (__swallowErr) { logSwallow(__swallowErr, "ai-panel.ts · fallbackToContentEditable", "debug"); }
     inputEl.setAttribute("contenteditable", "true");
     inputEl.classList.add("hiword-ai-input--empty");
     const refreshEmpty = () => {
@@ -774,7 +775,7 @@ export class AiPanel {
           return;
         }
       }
-    } catch { /* ignore */ }
+    } catch (__swallowErr) { logSwallow(__swallowErr, "ai-panel.ts · try { const htmlData = dt?.getData(\"text/html\")?.trim() || \"\"; …", "debug"); }
     logger.warn("drop 未提取到任何可插入内容", { operation: "拖块插入" });
   }
 
@@ -968,7 +969,7 @@ export class AiPanel {
     logger.info("页签拖入文档引用卡片已插入", { operation: "页签拖入", data: { docId, shortId } });
     try {
       (window as any).siyuan?.showMessage?.(`已添加文档上下文(发送时实时拉取)`, 2000, "info");
-    } catch { /* ignore */ }
+    } catch (__swallowErr) { logSwallow(__swallowErr, "ai-panel.ts · try { (window as any).siyuan?.showMessage?.(`已添加文档上下文(发送时实时拉取)`…", "debug"); }
   }
 
   /** 直接向 wysiwyg DOM 写入块引用卡片（绕开思源 insertHTML 所有静默失败点） */
@@ -1013,7 +1014,7 @@ export class AiPanel {
             range.collapse(true);
             sel?.removeAllRanges();
             sel?.addRange(range);
-          } catch { /* selection 可能被锁定 */ }
+          } catch (__swallowErr) { logSwallow(__swallowErr, "ai-panel.ts · try { const sel = window.getSelection(); const range = document…", "debug"); }
         }
         return;
       }
@@ -1034,7 +1035,7 @@ export class AiPanel {
         range.collapse(false); // 折叠到末尾
         sel.removeAllRanges();
         sel.addRange(range);
-      } catch { /* selection 可能被锁定 */ }
+      } catch (__swallowErr) { logSwallow(__swallowErr, "ai-panel.ts · try { const range = document.createRange(); range.selectNodeCon…", "debug"); }
     }
   }
 
@@ -2617,7 +2618,7 @@ export class AiPanel {
         btn.setAttribute("aria-label", "收起输入区");
         btn.textContent = "▾";
       }
-      try { localStorage.setItem(COLLAPSE_KEY, String(collapsed)); } catch { /* ignore */ }
+      try { localStorage.setItem(COLLAPSE_KEY, String(collapsed)); } catch (__swallowErr) { logSwallow(__swallowErr, "ai-panel.ts · applyCollapsedState", "debug"); }
     };
 
     /** 应用高度并持久化 */
@@ -2633,7 +2634,7 @@ export class AiPanel {
 
     // 2026-08-22 新增：初始化收起态
     let isCollapsed = false;
-    try { isCollapsed = localStorage.getItem(COLLAPSE_KEY) === "true"; } catch { /* ignore */ }
+    try { isCollapsed = localStorage.getItem(COLLAPSE_KEY) === "true"; } catch (__swallowErr) { logSwallow(__swallowErr, "ai-panel.ts · applyFooterHeight", "debug"); }
     if (isCollapsed && footerEl && panelEl && toggleBtn) {
       applyCollapsedState(panelEl, footerEl, toggleBtn, true, savedH);
     }
@@ -2703,7 +2704,7 @@ export class AiPanel {
         // 收起前记下当前高度
         const h = footerEl.offsetHeight;
         if (h >= MIN_FOOTER_H) {
-          try { localStorage.setItem(FOOTER_H_KEY, String(h)); } catch { /* ignore */ }
+          try { localStorage.setItem(FOOTER_H_KEY, String(h)); } catch (__swallowErr) { logSwallow(__swallowErr, "ai-panel.ts · try { localStorage.setItem(FOOTER_H_KEY, String(h)); }", "debug"); }
         }
         applyCollapsedState(panelEl, footerEl, toggleBtn, true, h);
         isCollapsed = true;
@@ -3509,7 +3510,7 @@ export class AiPanel {
           inheritThemeTags: true,
         });
         if (r.added) added++;
-      } catch { /* 单条失败不阻断 */ }
+      } catch (__swallowErr) { logSwallow(__swallowErr, "ai-panel.ts · try { const r = await this.host.collectWord(w, bookId, themeId,…", "debug"); }
     }
     if (statusEl) statusEl.textContent = `入库完成：新增 ${added} 个单词`;
     // 把已入库的复选框置灰
@@ -3590,7 +3591,7 @@ export class AiPanel {
         try {
           const r = await this.host.collectWord(w, bookId, themeId, { example, markUnmastered: unmasteredOn, inheritThemeTags: themeOn });
           if (r.added) added++;
-        } catch { /* 忽略单个失败 */ }
+        } catch (__swallowErr) { logSwallow(__swallowErr, "ai-panel.ts · try { const r = await this.host.collectWord(w, bookId, themeId,…", "debug"); }
       }
       overlay!.style.display = "none";
       overlay!.innerHTML = "";

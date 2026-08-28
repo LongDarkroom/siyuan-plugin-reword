@@ -1,3 +1,4 @@
+import { logSwallow } from "../core/safe.ts";
 /**
  * 思源 Lute 引擎单例访问封装（2026-08-18）。
  * ------------------------------------------------------------------
@@ -31,7 +32,7 @@ export function getLute(): any {
       // 个别版本：window.Lute 本身是已实例化实例
       if (typeof w.Lute === "object" && typeof w.Lute.Md2HTML === "function") return w.Lute;
     }
-  } catch { /* ignore */ }
+  } catch (__swallowErr) { logSwallow(__swallowErr, "lute.ts · getLute", "debug"); }
   return null;
 }
 
@@ -46,7 +47,7 @@ export function configureKramdownLute(lute: any): void {
   const opt = (name: string, val: boolean) => {
     const fn = lute[name];
     if (typeof fn === "function") {
-      try { fn.call(lute, val); } catch { /* ignore */ }
+      try { fn.call(lute, val); } catch (__swallowErr) { logSwallow(__swallowErr, "lute.ts · opt", "debug"); }
     }
   };
   opt("SetSanitize", true);           // XSS 防护（note 来自用户/AI，不可信）
@@ -76,7 +77,7 @@ function escapeHtml(s: string): string {
 export function htmlToMd(html: string): string {
   const lute = getLute();
   if (lute && typeof lute.HTML2Md === "function") {
-    try { return lute.HTML2Md(html || ""); } catch { /* fallback below */ }
+    try { return lute.HTML2Md(html || ""); } catch (__swallowErr) { logSwallow(__swallowErr, "lute.ts · htmlToMd", "debug"); }
   }
   return html || "";
 }
@@ -91,7 +92,7 @@ export function mdToHtml(md: string): string {
     try {
       configureKramdownLute(lute);      // 开启 GFM Table 等，避免表格 fallback 失效
       return lute.Md2HTML(md || "");
-    } catch { /* fallback below */ }
+    } catch (__swallowErr) { logSwallow(__swallowErr, "lute.ts · mdToHtml", "debug"); }
   }
   return escapeHtml(md).replace(/\n/g, "<br>");
 }

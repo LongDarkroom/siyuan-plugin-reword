@@ -1,3 +1,4 @@
+import { logSwallow } from "../core/safe.ts";
 /**
  * 阅读器 - Dock 集成控制器（书架容器）
  * ---------------------------------------------------------------
@@ -80,9 +81,7 @@ export class ReaderDockController {
     // 销毁旧组件与旧视图，避免重复挂载泄漏
     try {
       this.comp?.$destroy?.();
-    } catch {
-      /* ignore */
-    }
+    } catch (__swallowErr) { logSwallow(__swallowErr, "reader-dock.ts · render", "debug"); }
     this.comp = null;
     target.innerHTML = "";
     this.mountShelf(target);
@@ -106,15 +105,11 @@ export class ReaderDockController {
   dispose(): void {
     try {
       this.comp?.$destroy?.();
-    } catch {
-      /* ignore */
-    }
+    } catch (__swallowErr) { logSwallow(__swallowErr, "reader-dock.ts · dispose", "debug"); }
     this.comp = null;
     try {
       this.tabs.dispose();
-    } catch {
-      /* ignore */
-    }
+    } catch (__swallowErr) { logSwallow(__swallowErr, "reader-dock.ts · dispose", "debug"); }
   }
 
   /** 编程式导入书籍（工具栏/命令可复用） */

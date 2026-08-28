@@ -1,3 +1,4 @@
+import { logSwallow } from "../core/safe.ts";
 /**
  * REword · 微阅批注 AI 助手小弹窗（2026-08-22）
  * ------------------------------------------------------------------
@@ -224,9 +225,7 @@ export function applyAnnoAiCollapsedState(
   }
   try {
     localStorage.setItem("hiword-anno-ai-collapsed", String(isCollapsed));
-  } catch {
-    /* 隐私模式静默 */
-  }
+  } catch (__swallowErr) { logSwallow(__swallowErr, "anno-ai-dialog.ts · applyAnnoAiCollapsedState", "debug"); }
 }
 
 /**
@@ -661,7 +660,7 @@ export function openAnnoAiDialog(opts: AnnoAiDialogOptions): void {
         const nh = parseInt(sh, 10);
         if (Number.isFinite(nh) && nh >= 240 && nh <= window.innerHeight - 40) h = nh;
       }
-    } catch { /* 默认尺寸 */ }
+    } catch (__swallowErr) { logSwallow(__swallowErr, "anno-ai-dialog.ts · positionPopup", "debug"); }
     root.style.width = `${w}px`;
     root.style.height = `${h}px`;
     // 首次定位(用户拖动后 style.left 已存在,不再覆盖)

@@ -1,3 +1,4 @@
+import { logSwallow } from "../core/safe.ts";
 /**
  * 批注只读预览实例池（2026-08-18）
  * ------------------------------------------------------------------
@@ -261,7 +262,7 @@ function evictIfNeeded(): void {
 function sweepDetached(): void {
   for (const [id, ed] of [...live.entries()]) {
     if (!ed.el?.isConnected) {
-      try { ed.destroy(); } catch { /* ignore */ }
+      try { ed.destroy(); } catch (__swallowErr) { logSwallow(__swallowErr, "ann-preview.ts · sweepDetached", "debug"); }
       live.delete(id);
     }
   }

@@ -1,3 +1,4 @@
+import { logSwallow } from "../core/safe.ts";
 /**
  * 阅读器 - 分类字体的 DOM 侧处理（2026-08-28 新增，参考 Readest utils/style.ts）
  * ------------------------------------------------------------------------------
@@ -115,9 +116,7 @@ function walkRules(rules: CSSRuleList | undefined): number {
       if (grouped && grouped.cssRules && grouped.cssRules.length) {
         n += walkRules(grouped.cssRules);
       }
-    } catch {
-      /* 单条规则失败不影响整体 */
-    }
+    } catch (__swallowErr) { logSwallow(__swallowErr, "reader-font-classify.ts · walkRules", "debug"); }
   }
   return n;
 }
@@ -150,9 +149,7 @@ export function rewriteFontKeywordsInDocument(doc: Document): number {
       }
       n += walkRules(rules);
     }
-  } catch {
-    /* 整体失败静默 */
-  }
+  } catch (__swallowErr) { logSwallow(__swallowErr, "reader-font-classify.ts · rewriteFontKeywordsInDocument", "debug"); }
 
   // 2) adoptedStyleSheets（现代 foliate 可能用 constructable stylesheets）
   try {
@@ -168,9 +165,7 @@ export function rewriteFontKeywordsInDocument(doc: Document): number {
         n += walkRules(rules);
       }
     }
-  } catch {
-    /* 不支持则跳过 */
-  }
+  } catch (__swallowErr) { logSwallow(__swallowErr, "reader-font-classify.ts · rewriteFontKeywordsInDocument", "debug"); }
 
   return n;
 }
@@ -197,9 +192,7 @@ export function rewriteFontKeywordsInAllContents(
     if (!doc) continue; // 项目铁律：必须解 .doc，直接把 c 当 Document 会抛 TypeError
     try {
       n += rewriteFontKeywordsInDocument(doc);
-    } catch {
-      /* 单文档失败跳过 */
-    }
+    } catch (__swallowErr) { logSwallow(__swallowErr, "reader-font-classify.ts · getContents", "debug"); }
   }
   return n;
 }

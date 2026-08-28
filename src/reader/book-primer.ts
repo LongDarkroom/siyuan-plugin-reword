@@ -1,3 +1,4 @@
+import { logSwallow } from "../core/safe.ts";
 /**
  * 本书前提上下文（Book Primer）存储
  * ------------------------------------------------------------------
@@ -156,8 +157,6 @@ export class BookPrimerStore {
     }
     try {
       await this.plugin?.saveData?.(BOOK_PRIMER_KEY, this.data);
-    } catch {
-      /* ignore */
-    }
+    } catch (__swallowErr) { logSwallow(__swallowErr, "book-primer.ts · flush", "error"); }
   }
 }

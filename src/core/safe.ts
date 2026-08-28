@@ -31,6 +31,44 @@ export function reportError(e: unknown, label?: string): void {
   }
 }
 
+/**
+ * 静默捕获登记（2026-08-28）
+ * ------------------------------------------------------------------
+ * 历史上大量「catch 后仅跟一句注释」的空捕获把异常完全吞掉：既不弹提示、
+ * 也不写日志，导致线上出问题时**没有任何信号**——用户只看到"点了没反应"，
+ * 排查全靠猜。2026-08-28 全库体检实测：此类捕获约 100 处（index.ts 31 处、
+ * ai-panel 15 处、ReaderView 14 处、ann-editor 11 处、dict-engine 6 处等）。
+ *
+ * 本函数用于替换这类空捕获，**严格保持原有「吞掉异常、继续执行」的语义**
+ * （只改 catch 体内，不改变任何控制流，零行为变更风险），仅补记一条运行日志，
+ * 让原本不可见的失败变得可观测。
+ *
+ * 分级建议：
+ *  - "debug"（默认）：预期内的容错。如 JSON 解析试探、localStorage 不可用时降级。
+ *  - "warn"        ：不该发生、吞掉后可继续。如单条记录写入失败、可选能力缺失。
+ *  - "error"       ：会造成用户数据丢失或功能失效。如持久化失败、词典加载失败。
+ *
+ * @param e     捕获到的异常
+ * @param label 操作标签（写明是哪个操作），会写入日志的 operation 字段
+ * @param level 日志级别
+ */
+export function logSwallow(
+  e: unknown,
+  label?: string,
+  level: "debug" | "warn" | "error" = "debug"
+): void {
+  try {
+    const msg = e instanceof Error ? e.message : String(e);
+    const text = label ? `[${label}] 已忽略异常: ${msg}` : `已忽略异常: ${msg}`;
+    const logger = getLogger();
+    if (level === "error") logger.error(text, { operation: label, error: e });
+    else if (level === "warn") logger.warn(text, { operation: label, error: e });
+    else logger.debug(text, { operation: label, error: e });
+  } catch {
+    /* 日志层自身异常绝不能反噬主流程：本函数定位是"可观测性增强"，不能成为新的失败点 */
+  }
+}
+
 /** 安全执行：成功返回结果，失败上报并返回 fallback */
 export async function safeRun<T>(
   fn: () => Promise<T>,

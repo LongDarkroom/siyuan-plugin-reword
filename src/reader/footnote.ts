@@ -1,3 +1,4 @@
+import { logSwallow } from "../core/safe.ts";
 // src/reader/footnote.ts
 // 脚注检测 + 内容抽取 + 类型分类。
 // 设计：scoped 复制 foliate-js/footnotes.js 的检测思路，并额外加「不规范书籍」兜底
@@ -61,7 +62,7 @@ function elLooksLikeNote(el: any): boolean {
   // 隐藏块（Calibre 常见：脚注 aside 设 display:none）
   try {
     if (getComputedStyle(el).display === 'none') return true
-  } catch { /* ignore */ }
+  } catch (__swallowErr) { logSwallow(__swallowErr, "footnote.ts · elLooksLikeNote", "debug"); }
   // id/class 含 note/foot/fn 等特征词
   const sig = `${el.id} ${typeof el.className === 'string' ? el.className : ''}`.toLowerCase()
   return /\b(note|foot|fn|endnote|rearnote)\b/.test(sig)
@@ -163,8 +164,6 @@ async function resolveImages(el: any, book: any, index: number) {
         const url = URL.createObjectURL(blob instanceof Blob ? blob : new Blob([blob as any]))
         img.setAttribute('src', url)
       }
-    } catch {
-      /* 单个图片失败不影响整体 */
-    }
+    } catch (__swallowErr) { logSwallow(__swallowErr, "footnote.ts · resolveImages", "debug"); }
   }
 }

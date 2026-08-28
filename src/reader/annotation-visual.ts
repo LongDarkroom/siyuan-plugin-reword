@@ -1,3 +1,4 @@
+import { logSwallow } from "../core/safe.ts";
 /**
  * annotation-visual.ts — 阅读面板高亮「视觉层」确定性同步工具
  * -------------------------------------------------------------------
@@ -28,9 +29,7 @@ export function notifyAnnotationsChanged(bookId: string): void {
   for (const fn of [...annChangedListeners]) {
     try {
       fn(bookId);
-    } catch {
-      /* 单个订阅者异常不阻断其它订阅者 */
-    }
+    } catch (__swallowErr) { logSwallow(__swallowErr, "annotation-visual.ts · notifyAnnotationsChanged", "debug"); }
   }
 }
 
@@ -67,9 +66,7 @@ export function hasOverlayKey(view: any, cfi: string): boolean {
     if (typeof overlayer?.hasBy !== "function") continue;
     try {
       if (overlayer.hasBy((key: string) => cfiMatch(key, cfi))) return true;
-    } catch {
-      /* ignore */
-    }
+    } catch (__swallowErr) { logSwallow(__swallowErr, "annotation-visual.ts · hasOverlayKey", "debug"); }
   }
   return false;
 }
@@ -82,9 +79,7 @@ export function eraseOverlayKey(view: any, cfi: string): number {
     if (typeof overlayer?.removeBy !== "function") continue;
     try {
       removed += overlayer.removeBy((key: string) => cfiMatch(key, cfi));
-    } catch {
-      /* ignore */
-    }
+    } catch (__swallowErr) { logSwallow(__swallowErr, "annotation-visual.ts · eraseOverlayKey", "debug"); }
   }
   return removed;
 }
@@ -116,9 +111,7 @@ export function syncVisualWithStore(view: any, annStore: BookAnnotationsLike | n
     if (typeof overlayer?.removeBy !== "function") continue;
     try {
       removed += overlayer.removeBy((key: string) => !isActive(key));
-    } catch {
-      /* ignore */
-    }
+    } catch (__swallowErr) { logSwallow(__swallowErr, "annotation-visual.ts · isActive", "debug"); }
   }
   return removed;
 }
@@ -138,15 +131,11 @@ export function nukeAndRedrawOverlays(view: any): number {
       // removeBy(() => true) 删除该 overlay 中所有 annotation
       const count = overlayer.removeBy(() => true);
       nuked += (count > 0 ? 1 : 0);
-    } catch {
-      /* ignore */
-    }
+    } catch (__swallowErr) { logSwallow(__swallowErr, "annotation-visual.ts · nukeAndRedrawOverlays", "debug"); }
   }
   // 触发 foliate 的 create-overlay 事件 → onCreateOverlay 回调重绘所有活跃标注
   try {
     view.dispatchEvent(new CustomEvent('create-overlay', { detail: {} }));
-  } catch {
-    /* dispatchEvent 失败时，overlay 已清空但不会自动重绘；翻页时会重绘 */
-  }
+  } catch (__swallowErr) { logSwallow(__swallowErr, "annotation-visual.ts · nukeAndRedrawOverlays", "debug"); }
   return nuked;
 }

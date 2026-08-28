@@ -1,3 +1,4 @@
+import { logSwallow } from "../core/safe.ts";
 /**
  * 全局编辑会话（2026-08-18，D6 / D8）。
  * ------------------------------------------------------------------
@@ -18,7 +19,7 @@ function setEditorOpen(v: boolean): void {
     const g: any = typeof globalThis !== "undefined" ? globalThis : {};
     const m = g.WhaleAnnotationManager;
     if (m) m.editorOpen = v;
-  } catch { /* ignore */ }
+  } catch (__swallowErr) { logSwallow(__swallowErr, "edit-session.ts · setEditorOpen", "debug"); }
 }
 
 /** 申请编辑会话：成功返回 true；已有会话则 false */

@@ -1,3 +1,4 @@
+import { logSwallow } from "../core/safe.ts";
 /**
  * 阅读器 - 独立 Tab 控制器
  * ---------------------------------------------------------------
@@ -72,19 +73,15 @@ export class ReaderTabController {
               onCloseTab: () => {
                 try {
                   custom.tab?.close?.();
-                } catch {
-                  /* ignore */
-                }
+                } catch (__swallowErr) { logSwallow(__swallowErr, "reader-tab.ts · onCloseTab", "debug"); }
               },
               onTitleChange: (t: string) => {
                 try {
                   custom.tab?.updateTitle?.(t);
-                } catch {
-                  /* ignore */
-                }
+                } catch (__swallowErr) { logSwallow(__swallowErr, "reader-tab.ts · onTitleChange", "debug"); }
               },
               // 阅读器划词工具栏委托插件能力：朗读 / 发送笔记本 / 翻译
-              onSpeak: (t: string) => { try { self.plugin?.speakText?.(t); } catch { /* ignore */ } },
+              onSpeak: (t: string) => { try { self.plugin?.speakText?.(t); } catch (__swallowErr) { logSwallow(__swallowErr, "reader-tab.ts · onSpeak", "debug"); } },
               onSendToNote: (opts: { markdown: string; title: string }) =>
                 self.plugin?.sendReaderSelection?.(opts) ?? undefined,
               onInsertToCurrentDoc: (markdown: string) =>
@@ -109,14 +106,22 @@ export class ReaderTabController {
               resetTokenUsage: (bid: string) => (self.plugin as any)?.resetBookTokenUsage?.(bid),
               // v1.3.0：最近一次翻译 token 用量（修复原裸 plugin 引用未定义）
               getLastUsage: () => (self.plugin as any)?.lastTranslationUsage ?? null,
+              // 2026-08-28：翻译缓存统计 / 清空（按书；UI 展示已缓存条数 + 清空按钮）
+              getTranslationCacheStats: (bid: string) =>
+                (self.plugin as any)?.getTranslationCacheStats?.(bid) ?? Promise.resolve({ count: 0 }),
+              clearTranslationCache: (bid: string) => (self.plugin as any)?.clearTranslationCache?.(bid),
+              // 2026-08-28：列出所有有翻译缓存的书籍（bookId + 书名），供「选择书籍」下拉
+              listCachedBooks: () =>
+                (self.plugin as any)?.listCachedBooks?.() ?? Promise.resolve([]),
+              // 2026-08-28：翻译成功入缓存后回传「节」序号（1-based），用于 UI「第 X-Y 页缓存成功」
+              recordCachedSections: (bid: string, sections: number[]) =>
+                (self.plugin as any)?.recordCachedSections?.(bid, sections),
               // 批注/高亮保存后固定阅读 Tab：官方 tab.pin() 防数量超限回收顶掉
               onProtectTab: () => {
                 try {
                   const t = self.openTabs.get(bookId)?.tab;
                   t?.pin?.();
-                } catch {
-                  /* ignore */
-                }
+                } catch (__swallowErr) { logSwallow(__swallowErr, "reader-tab.ts · onProtectTab", "debug"); }
               },
             },
           });
@@ -131,9 +136,7 @@ export class ReaderTabController {
         // 自定义 Tab 本身不参与文档页签的替换判定，但明确命名可彻底排除误判。
         try {
           custom.tab?.updateTitle?.(custom.data?.title || "阅读");
-        } catch {
-          /* ignore */
-        }
+        } catch (__swallowErr) { logSwallow(__swallowErr, "reader-tab.ts · onProtectTab", "debug"); }
       },
       destroy: function (this: any) {
         const custom = this;
@@ -143,9 +146,7 @@ export class ReaderTabController {
         if (rec) {
           try {
             rec.comp?.$destroy?.();
-          } catch {
-            /* ignore */
-          }
+          } catch (__swallowErr) { logSwallow(__swallowErr, "reader-tab.ts · onProtectTab", "debug"); }
           self.openTabs.delete(bookId);
         }
       },
@@ -158,9 +159,7 @@ export class ReaderTabController {
     if (existing?.tab) {
       try {
         existing.tab.parent?.switchTab?.(existing.tab.headElement);
-      } catch {
-        /* ignore */
-      }
+      } catch (__swallowErr) { logSwallow(__swallowErr, "reader-tab.ts · openBookTab", "debug"); }
       return;
     }
     // 2026-08-24 修复（问题3）：防重入。书架连点/并发调用时，init 尚未把 tab 写回
@@ -197,9 +196,7 @@ export class ReaderTabController {
             if (opened) {
               opened.parent?.switchTab?.(opened.headElement);
             }
-          } catch {
-            /* ignore */
-          }
+          } catch (__swallowErr) { logSwallow(__swallowErr, "reader-tab.ts · afterOpen", "debug"); }
         },
       });
       console.log("[REword] openBookTab openTab 返回", { tabExists: !!tab, tabType: (tab as any)?.type });
@@ -208,9 +205,7 @@ export class ReaderTabController {
         // 兜底：若 afterOpen 因时序未触发，立即再切一次
         try {
           tab.parent?.switchTab?.(tab.headElement);
-        } catch {
-          /* ignore */
-        }
+        } catch (__swallowErr) { logSwallow(__swallowErr, "reader-tab.ts · afterOpen", "debug"); }
       }
     } catch (e) {
       console.warn("[REword] 打开阅读 Tab 失败:", e);
@@ -225,9 +220,7 @@ export class ReaderTabController {
     for (const rec of this.openTabs.values()) {
       try {
         rec.tab?.close?.();
-      } catch {
-        /* ignore */
-      }
+      } catch (__swallowErr) { logSwallow(__swallowErr, "reader-tab.ts · dispose", "debug"); }
     }
     this.openTabs.clear();
   }

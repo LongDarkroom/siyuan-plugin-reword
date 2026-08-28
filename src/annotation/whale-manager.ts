@@ -1,3 +1,4 @@
+import { logSwallow } from "../core/safe.ts";
 /**
  * 微阅快速批注 —— 核心交互管理器
  * ------------------------------------------------------------------
@@ -654,9 +655,7 @@ export class WhaleAnnotationManager {
     accordion?.addEventListener("toggle", () => {
       try {
         localStorage.setItem(ACCORDION_KEY, accordion.open ? "true" : "false");
-      } catch {
-        /* 隐私模式等 localStorage 不可用时静默忽略 */
-      }
+      } catch (__swallowErr) { logSwallow(__swallowErr, "whale-manager.ts · try { localStorage.setItem(ACCORDION_KEY, accordion.open ? \"tru…", "debug"); }
     });
 
     // ====== 2026-08-22 新增：底部 resize 手柄（拖动调整编辑区高度）======

@@ -1,3 +1,4 @@
+import { logSwallow } from "../core/safe.ts";
 /**
  * 阅读器 - 文本样式与阅读设置（持久化）
  * ---------------------------------------------------------------
@@ -162,6 +163,8 @@ export interface ReaderSettings {
   bilingualTarget?: string;
   /** 译文字号（em 倍数，相对正文；默认 0.70；思源 CJK 字体大，0.70≈书籍字体的 0.90；2026-08-28） */
   translationFontSize?: number;
+  /** 双语预取页数：当前屏之后额外预译并缓存的「面」数（默认 2；值越大越省翻页等待但越费 token；2026-08-28 新增可调） */
+  bilingualPrefetchPages?: number;
   /** 段落悬停高亮：鼠标悬停段落时轻微底色（默认开，2026-08-28 增强项） */
   paragraphHover?: boolean;
   /** 文本设置（2026-08-24 新增） */
@@ -195,6 +198,7 @@ export const READER_DEFAULT_SETTINGS: ReaderSettings = {
   bilingual: false,
   bilingualTarget: "zh",
   translationFontSize: 0.62,
+  bilingualPrefetchPages: 2,
   paragraphHover: true,
   text: {
     fontWeight: 400,
@@ -420,9 +424,7 @@ export class ReaderSettingsStore {
           ...data,
         };
       }
-    } catch {
-      /* 使用默认 */
-    }
+    } catch (__swallowErr) { logSwallow(__swallowErr, "reader-settings.ts · load", "debug"); }
     this.loaded = true;
     // 加载完成后推送最新值 → 订阅者（含其它已开 Tab）立即生效
     this._store.set({ ...this.settings });

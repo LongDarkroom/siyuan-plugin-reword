@@ -1,3 +1,4 @@
+import { logSwallow } from "../core/safe.ts";
 /**
  * 标注默认配置（持久化）
  * ------------------------------------------------------------------
@@ -63,9 +64,7 @@ export async function loadAnnotationConfig(): Promise<AnnotationConfig> {
         tagPresets: Array.isArray(data.tagPresets) && data.tagPresets.length ? data.tagPresets : [...DEFAULT_TAG_PRESETS],
       };
     }
-  } catch {
-    /* 使用默认 */
-  }
+  } catch (__swallowErr) { logSwallow(__swallowErr, "annotation-config.ts · loadAnnotationConfig", "debug"); }
   loaded = true;
   return getAnnotationConfig();
 }

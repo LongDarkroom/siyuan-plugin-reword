@@ -1,3 +1,4 @@
+import { logSwallow } from "../core/safe.ts";
 /**
  * REword · AI 结果渲染
  * ------------------------------------------------------------------
@@ -61,7 +62,7 @@ function getRenderLute(): any {
     const opt = (name: string, val: boolean) => {
       const fn = (lute as any)[name];
       if (typeof fn === "function") {
-        try { fn.call(lute, val); } catch { /* ignore */ }
+        try { fn.call(lute, val); } catch (__swallowErr) { logSwallow(__swallowErr, "ai-render.ts · opt", "debug"); }
       }
     };
     opt("SetSanitize", true);                         // XSS 防护（AI 内容不可信）
@@ -131,7 +132,7 @@ export function renderKramdown(md: string): string {
       const opt = (name: string, val: boolean) => {
         const fn = (lute as any)[name];
         if (typeof fn === "function") {
-          try { fn.call(lute, val); } catch { /* ignore */ }
+          try { fn.call(lute, val); } catch (__swallowErr) { logSwallow(__swallowErr, "ai-render.ts · opt", "debug"); }
         }
       };
       opt("SetSanitize", true);

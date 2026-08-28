@@ -1,3 +1,4 @@
+import { logSwallow } from "../core/safe.ts";
 /**
  * 词典查询结果渲染
  *
@@ -361,9 +362,7 @@ function inheritNotePos(note: string): string | undefined {
   try {
     const meta = lookupWordMeta(target);
     if (meta && meta.pos) pos = normalizePos(meta.pos) || undefined;
-  } catch {
-    /* ignore */
-  }
+  } catch (__swallowErr) { logSwallow(__swallowErr, "dict-renderer.ts · inheritNotePos", "debug"); }
   notePosCache.set(target, pos || "");
   return pos;
 }

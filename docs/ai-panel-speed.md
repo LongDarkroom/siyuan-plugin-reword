@@ -46,7 +46,7 @@
 | **P1-1** | **传输层模式开关 + 失败透明化** | 设置增加「流式传输：直连 SSE（默认）/ 内核代理缓冲」；直连失败回退时在状态栏提示「已切换为缓冲模式」 |
 | **P1-2** | **缓冲模式也走增量 UI** | 回退路径 `onToken` 一次性回调时同样触发"首屏即出"，并按 chunk 切分模拟打字机效果 |
 | **P1-3** | **完成前异步化** | ① 对话模式：先渲染气泡，`saveMessages` 改 `void`（fire-and-forget，失败打日志）；② 学习模式：词库写回改为 `Promise.allSettled` 并行，`savedWords` 提示延迟更新 |
-| **P2-1** | **历史上下文裁剪** | 按 token 预算（如 maxTokens 的 60%）保留最近 N 条消息，最旧消息压缩为 1 行摘要；参照 `copilot-src/utils/contextEstimator.ts` |
+| **P2-1** | **历史上下文裁剪** | 按 token 预算（如 maxTokens 的 60%）保留最近 N 条消息，最旧消息压缩为 1 行摘要；可复用 `estimateTokens`（`src/copilot/ai/ai-client.ts`）与 `src/ai/chat-trim.ts`。注：原参照的 `copilot-src/utils/contextEstimator.ts` 已于 2026-08-28 随死代码清理移除 |
 | **P2-2** | **渲染优化** | `renderWithLute` 缓存复用 Lute 实例（模块级单例）；KaTeX/highlight 改为**空闲时异步增强**，先出文本后补公式/高亮 |
 | **P3-1** | **块引用展开缓存** | 会话内按 blockId → 正文 LRU 缓存；限制展开总量（如 8000 字截断） |
 | **P3-2** | **移除冗余属性** | `data-raw-md` 改存 JS 侧 Map（按 msgIndex），不再塞进 DOM 属性 |

@@ -1,3 +1,4 @@
+import { logSwallow } from "../../core/safe.ts";
 /**
  * AI 请求客户端
  * ------------------------------------------------------------------
@@ -174,9 +175,7 @@ export function extractContentFromBody(raw: string): { content: string; reasonin
           if (msg && typeof msg.content === "string") acc += msg.content;
           if (msg && typeof msg.reasoning_content === "string") reason += msg.reasoning_content;
         }
-      } catch {
-        /* 跳过无法解析的行 */
-      }
+      } catch (__swallowErr) { logSwallow(__swallowErr, "ai-client.ts · extractContentFromBody", "debug"); }
     }
     if (acc || reason) return { content: acc, reasoning: reason || undefined };
   }
@@ -190,9 +189,7 @@ export function extractContentFromBody(raw: string): { content: string; reasonin
     else if (typeof obj?.content === "string") content = obj.content;
     if (msg && typeof msg.reasoning_content === "string") reasoning = msg.reasoning_content;
     return { content: content || trimmed, reasoning };
-  } catch {
-    /* 非 JSON，走兜底 */
-  }
+  } catch (__swallowErr) { logSwallow(__swallowErr, "ai-client.ts · try { const obj = JSON.parse(trimmed); const msg = obj?.choices…", "debug"); }
   return { content: trimmed };
 }
 
@@ -227,7 +224,7 @@ export function extractUsageFromBody(raw: string): AiUsage | undefined {
       try {
         const u = parseUsage(JSON.parse(payload));
         if (u) last = u;
-      } catch { /* 跳过无法解析的行 */ }
+      } catch (__swallowErr) { logSwallow(__swallowErr, "ai-client.ts · try { const u = parseUsage(JSON.parse(payload)); if (u) last = …", "debug"); }
     }
     return last;
   }
@@ -323,9 +320,7 @@ export async function requestAIGenerate(
       };
     }
     if (j?.choices?.[0]?.finish_reason === "length") truncated = true;
-  } catch {
-    /* 忽略 */
-  }
+  } catch (__swallowErr) { logSwallow(__swallowErr, "ai-client.ts · try { const j = JSON.parse(res.body); if (typeof j?.model === \"…", "debug"); }
   return { content, raw: res.body, model, reasoning, usage, truncated };
 }
 
@@ -389,9 +384,7 @@ export async function requestAIStream(opts: AiStreamOptions): Promise<AiStreamRe
         const u = extractUsageFromBody(payload);
         if (u) usage = u;
       }
-    } catch {
-      /* 跳过无法解析的行 */
-    }
+    } catch (__swallowErr) { logSwallow(__swallowErr, "ai-client.ts · processLine", "debug"); }
   };
 
   try {

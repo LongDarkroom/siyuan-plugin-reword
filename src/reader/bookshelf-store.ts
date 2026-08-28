@@ -1,3 +1,4 @@
+import { logSwallow } from "../core/safe.ts";
 /**
  * 阅读器 - 书架存储
  * ---------------------------------------------------------------
@@ -187,9 +188,7 @@ export class BookshelfStore {
       if (meta.cover) {
         try {
           await putFile(`${dir}/covers`, true, null);
-        } catch {
-          /* 目录可能已存在 */
-        }
+        } catch (__swallowErr) { logSwallow(__swallowErr, "bookshelf-store.ts · importBook", "debug"); }
         const coverPath = `${dir}/covers/${id}.${meta.cover.ext}`;
         const coverOk = await putFile(coverPath, false, meta.cover.blob);
         if (coverOk) cover = coverPath;
@@ -253,15 +252,11 @@ export class BookshelfStore {
       if (opts.deleteFile) {
         try {
           await removeFile(meta.path);
-        } catch {
-          /* 文件删除失败不阻断索引清理 */
-        }
+        } catch (__swallowErr) { logSwallow(__swallowErr, "bookshelf-store.ts · removeBook", "warn"); }
         if (meta.cover) {
           try {
             await removeFile(meta.cover);
-          } catch {
-            /* ignore */
-          }
+          } catch (__swallowErr) { logSwallow(__swallowErr, "bookshelf-store.ts · removeBook", "warn"); }
         }
       }
       this.books = this.books.filter((b) => b.id !== id);

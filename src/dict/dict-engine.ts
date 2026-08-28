@@ -1,3 +1,4 @@
+import { logSwallow } from "../core/safe.ts";
 /**
  * 词典查询模块（MDX + StarDict 双引擎）
  *
@@ -218,7 +219,7 @@ export async function initDict(
     // 若已存在同名词典，先关闭旧的
     const existing = dicts.get(id);
     if (existing) {
-      try { existing.mdx.close(); } catch { /* ignore */ }
+      try { existing.mdx.close(); } catch (__swallowErr) { logSwallow(__swallowErr, "dict-engine.ts · initDict", "debug"); }
     }
 
     dicts.set(id, { id, name, backend: "mdx", lang, mdx, stardict: null as any, count });
@@ -263,7 +264,7 @@ export async function initStarDict(
 
     const existing = dicts.get(id);
     if (existing) {
-      try { closeSource(existing); } catch { /* ignore */ }
+      try { closeSource(existing); } catch (__swallowErr) { logSwallow(__swallowErr, "dict-engine.ts · initStarDict", "debug"); }
     }
 
     dicts.set(id, { id, name, backend: "stardict", lang, mdx: null as any, stardict: sd, count });
@@ -290,7 +291,7 @@ function closeSource(d: DictSource): void {
     } else if (d.backend === "stardict" && d.stardict) {
       d.stardict.close();
     }
-  } catch { /* ignore */ }
+  } catch (__swallowErr) { logSwallow(__swallowErr, "dict-engine.ts · closeSource", "debug"); }
 }
 
 /**
@@ -500,9 +501,7 @@ function lookupCrossrefTarget(
         if (r && r.definition) return { keyText: kt, definition: String(r.definition) };
       }
     }
-  } catch {
-    /* ignore */
-  }
+  } catch (__swallowErr) { logSwallow(__swallowErr, "dict-engine.ts · lookupCrossrefTarget", "debug"); }
   return null;
 }
 
@@ -537,9 +536,7 @@ function followCrossrefZh(
     }
     // 目标词也是互见型 → 继续跟随（深度受限）
     if (extractCrossrefTarget(tDef)) followCrossrefZh(src, entry, tDef, depth + 1, seen);
-  } catch {
-    /* ignore */
-  }
+  } catch (__swallowErr) { logSwallow(__swallowErr, "dict-engine.ts · followCrossrefZh", "debug"); }
 }
 
 /**
@@ -601,9 +598,7 @@ function rawLookupInSrc(
         if (r && r.definition) return { keyText: r.keyText || kt, definition: String(r.definition) };
       }
     }
-  } catch {
-    /* ignore */
-  }
+  } catch (__swallowErr) { logSwallow(__swallowErr, "dict-engine.ts · try { const target = clean.toLowerCase(); const items: any[] = …", "debug"); }
   return null;
 }
 
@@ -1088,7 +1083,7 @@ function searchSimilarIn(targets: DictSource[], word: string, limit: number): st
     for (const src of targets) {
       try {
         push(searchPrefixIn(src, p, lim));
-      } catch { /* ignore */ }
+      } catch (__swallowErr) { logSwallow(__swallowErr, "dict-engine.ts · pushPrefix", "debug"); }
       if (results.length >= lim) break;
     }
   };
@@ -1096,7 +1091,7 @@ function searchSimilarIn(targets: DictSource[], word: string, limit: number): st
     for (const src of targets) {
       try {
         push(searchFuzzyIn(src, q, lim * 2));
-      } catch { /* ignore */ }
+      } catch (__swallowErr) { logSwallow(__swallowErr, "dict-engine.ts · pushFuzzy", "debug"); }
       if (results.length >= lim) break;
     }
   };
@@ -1114,7 +1109,7 @@ function searchSimilarIn(targets: DictSource[], word: string, limit: number): st
     for (const src of targets) {
       try {
         push(fuzzyLevenIn(src, clean, limit));
-      } catch { /* ignore */ }
+      } catch (__swallowErr) { logSwallow(__swallowErr, "dict-engine.ts · pushFuzzy", "debug"); }
       if (results.length >= limit) break;
     }
   }

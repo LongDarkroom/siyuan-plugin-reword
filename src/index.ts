@@ -123,6 +123,7 @@ import type {
   ContextDoc as CopilotDoc,
   PromptItem as CopilotPrompt,
 } from "./copilot/types.ts";
+import { logSwallow } from "./core/safe.ts";
 
 const PLUGIN_NAME = "hiword-vocab";
 
@@ -392,7 +393,7 @@ export default class RewordPlugin extends Plugin {
 
     // 2026-08-23:安装 console + window.onerror 过滤(降级 iframe sandbox 警告 + ResizeObserver loop
     // 异常,让真实错误可见)。在 logger 初始化后立即调用,幂等。
-    try { installConsoleFilter(); } catch { /* 过滤安装失败不阻断主流程 */ }
+    try { installConsoleFilter(); } catch (__swallowErr) { logSwallow(__swallowErr, "index.ts · onload", "debug"); }
 
     // ========== 0. 注册自定义图标（必须在 addTopBar/addDock 之前）==========
     // 关键修复（2026-08-17）：原先把 5 个 <symbol> 拼成一条字符串传给 addIcons，
@@ -1002,9 +1003,7 @@ export default class RewordPlugin extends Plugin {
         }
         // 兼容旧 key:如果用户有旧的 collapsed=true 设置,迁移为全部展开(避免数据丢失)
         // 注:旧版语义"全局折叠",新版默认折叠,所以这里不迁移,直接忽略
-      } catch {
-        /* 损坏的 JSON,忽略,走默认(全收起) */
-      }
+      } catch (__swallowErr) { logSwallow(__swallowErr, "index.ts · try { const raw = localStorage.getItem(\"reword-vocab-status-exp…", "debug"); }
       const mode = localStorage.getItem("hiword-annotation-sort-mode");
       if (mode === "time" || mode === "doc" || mode === "style") this.whaleSortMode = mode;
       const dir = localStorage.getItem("hiword-annotation-sort-time-dir");
@@ -1021,13 +1020,11 @@ export default class RewordPlugin extends Plugin {
             const ns = s === "dotted" ? "wavy" : s === "dashed" || s === "double" ? "solid" : s;
             return `${c}|${ns}`;
           });
-        } catch { /* noop */ }
+        } catch (__swallowErr) { logSwallow(__swallowErr, "index.ts · try { // 2026-08-24 迁移：旧线型（dashed/double→solid, dotted→wavy）在过滤…", "debug"); }
       }
       const gm = localStorage.getItem("hiword-annotation-group-mode");
       if (gm === "time" || gm === "doc") this.whaleGroupMode = gm;
-    } catch {
-      /* localStorage 不可用时忽略（思源 Electron 默认支持；HMR/dev 失败兜底） */
-    }
+    } catch (__swallowErr) { logSwallow(__swallowErr, "index.ts · try { // 2026-08-24 迁移：旧线型（dashed/double→solid, dotted→wavy）在过滤…", "debug"); }
   }
 
   // ========== AI 精读（适配 copilot，最小可用对话能力）==========
@@ -1262,6 +1259,50 @@ export default class RewordPlugin extends Plugin {
   }
 
   /**
+   * 翻译缓存统计（用于阅读器设置面板展示「本书已缓存 N 段」+ 页码范围）。
+   * @param bookId 书籍 ID
+   * @returns 已缓存段落译文条数 + 已缓存节总数 + 连续区间文本（如「第 1-4 页」）
+   */
+  public async getTranslationCacheStats(
+    bookId: string
+  ): Promise<{ count: number; cachedPages: number; pageRangeText: string; title: string }> {
+    if (!bookId) return { count: 0, cachedPages: 0, pageRangeText: "0 页", title: "" };
+    const count = await this.translationCache.size(bookId);
+    const sec = await this.translationCache.getCachedSections(bookId);
+    return { count, cachedPages: sec.total, pageRangeText: sec.rangeText, title: sec.title };
+  }
+
+  /**
+   * 记录某书已成功缓存的「节」序号（1-based），用于 UI「第 X-Y 页缓存成功」。
+   * 由双语注入管线在每批翻译入缓存后回调触发。
+   * @param bookId 书籍 ID
+   * @param sections 本次涉及的书「节」序号（1-based，升序）
+   * @param title 书名（用于「选择书籍」下拉展示），可选
+   */
+  public recordCachedSections(bookId: string, sections: number[], title?: string): void {
+    if (!bookId || !sections || !sections.length) return;
+    this.translationCache.recordSections(bookId, sections, title);
+  }
+
+  /**
+   * 列出所有有翻译缓存的书籍（bookId + 书名），供阅读器设置面板「选择书籍」下拉。
+   */
+  public async listCachedBooks(): Promise<Array<{ bookId: string; title: string }>> {
+    return this.translationCache.listCachedBooks();
+  }
+
+  /**
+   * 清空某书的翻译缓存（翻页/重开书后释义会重新按提示词翻译）。
+   * 仅在用户主动点击「清空缓存」时调用；正常关闭双语不清除缓存，
+   * 以实现「重开书籍与翻页之前释义不消失」的持久化语义。
+   * @param bookId 书籍 ID
+   */
+  public async clearTranslationCache(bookId: string): Promise<void> {
+    if (!bookId) return;
+    await this.translationCache.clear(bookId);
+  }
+
+  /**
    * 自有 AI 兜底翻译（单条）：直接走对话编排，不污染 AI 精读面板会话。
    * 用 AI 设置里的「翻译预置提示词」作为系统提示，关闭 JSON 输出，求纯译文。
    * 2026-08-28 修复：改读 AI 精读设置（this.aiSettings，即用户实际配置的
@@ -1346,9 +1387,7 @@ export default class RewordPlugin extends Plugin {
   private async persistBookTokenUsage(): Promise<void> {
     try {
       await this.saveData(RewordPlugin.TOKEN_USAGE_KEY, this.bookTokenUsage);
-    } catch {
-      /* ignore */
-    }
+    } catch (__swallowErr) { logSwallow(__swallowErr, "index.ts · persistBookTokenUsage", "error"); }
   }
 
   private async loadBookTokenUsage(): Promise<void> {
@@ -1508,9 +1547,7 @@ export default class RewordPlugin extends Plugin {
       for (const i of missIdx) {
         try {
           out[i] = (await this.aiTranslateText(texts[i], from, to, bookId)) || "";
-        } catch {
-          /* 保持空串 */
-        }
+        } catch (__swallowErr) { logSwallow(__swallowErr, "index.ts · try { out[i] = (await this.aiTranslateText(texts[i], from, to, …", "debug"); }
       }
     } else if (missIdx.length) {
       getLogger().warn("[REword] AI 批量翻译大面积失败，跳过逐段兜底:", {
@@ -1616,13 +1653,13 @@ export default class RewordPlugin extends Plugin {
     this.persistConvo.update(this.copilotConvo.toJSON());
   }
   private async saveCopilotAi(): Promise<void> {
-    try { await this.saveData("copilot-ai.json", this.copilotAi); } catch { /* ignore */ }
+    try { await this.saveData("copilot-ai.json", this.copilotAi); } catch (__swallowErr) { logSwallow(__swallowErr, "index.ts · saveCopilotAi", "error"); }
   }
   private async saveCopilotPrompts(): Promise<void> {
-    try { await this.saveData("copilot-prompts.json", this.copilotPromptRaw); } catch { /* ignore */ }
+    try { await this.saveData("copilot-prompts.json", this.copilotPromptRaw); } catch (__swallowErr) { logSwallow(__swallowErr, "index.ts · saveCopilotPrompts", "error"); }
   }
   private async saveCopilotConfig(): Promise<void> {
-    try { await this.saveData("copilot-config.json", this.copilotConfig); } catch { /* ignore */ }
+    try { await this.saveData("copilot-config.json", this.copilotConfig); } catch (__swallowErr) { logSwallow(__swallowErr, "index.ts · saveCopilotConfig", "error"); }
   }
 
   /** HTML 转义（属性用） */
@@ -1808,9 +1845,7 @@ export default class RewordPlugin extends Plugin {
         );
         const md = rows?.[0]?.markdown;
         if (md && md.trim()) return md;
-      } catch {
-        /* SQL 兜底失败不阻断，交给上层锚文本兜底 */
-      }
+      } catch (__swallowErr) { logSwallow(__swallowErr, "index.ts · fetchBlockText", "debug"); }
       return null;
     } catch (e) {
       getLogger().debug("[REword] 读取块正文失败（已静默降级）:", { error: e });
@@ -1878,8 +1913,8 @@ export default class RewordPlugin extends Plugin {
           const parsed = JSON.parse(trimmed);
           if (parsed.id && /^[a-z0-9_-]{14,}$/i.test(parsed.id)) { getLogger().debug("[REword] ✅ 策略1命中(JSON.id): " + parsed.id); return parsed.id; }
           if (parsed.blockId && /^[a-z0-9_-]{14,}$/i.test(parsed.blockId)) { getLogger().debug("[REword] ✅ 策略1命中(JSON.blockId): " + parsed.blockId); return parsed.blockId; }
-        } catch { /* not JSON */ }
-      } catch { /* 某些类型可能不可读 */ }
+        } catch (__swallowErr) { logSwallow(__swallowErr, "index.ts · try { const parsed = JSON.parse(trimmed); if (parsed.id && /^[a…", "debug"); }
+      } catch (__swallowErr) { logSwallow(__swallowErr, "index.ts · try { const parsed = JSON.parse(trimmed); if (parsed.id && /^[a…", "debug"); }
     }
 
     // 策略 2: 从 text/plain 中提取
@@ -1892,7 +1927,7 @@ export default class RewordPlugin extends Plugin {
       // 纯 blockId 格式（14+ 位字母数字）
       const plainMatch = plainText.match(/\b([a-z0-9_-]{18,})\b/i);
       if (plainMatch) { getLogger().debug("[REword] ✅ 策略2命中(纯ID): " + plainMatch[1]); return plainMatch[1]; }
-    } catch { /* ignore */ }
+    } catch (__swallowErr) { logSwallow(__swallowErr, "index.ts · try { const plainText = e.dataTransfer.getData(\"text/plain\") ||…", "debug"); }
 
     // 策略 3: 尝试从拖拽源元素获取（部分浏览器支持）
     try {
@@ -1903,7 +1938,7 @@ export default class RewordPlugin extends Plugin {
         // 保留原始连字符（思源 API 不识别去连字符格式，否则列表块等拉不到正文）
         if (/^[a-z0-9-]{14,}$/i.test(nodeId)) { getLogger().debug("[REword] ✅ 策略3命中(目标元素nodeId): " + nodeId); return nodeId; }
       }
-    } catch { /* ignore */ }
+    } catch (__swallowErr) { logSwallow(__swallowErr, "index.ts · try { const target = e.target as HTMLElement | null; const drag…", "debug"); }
 
     getLogger().info("[REword] 所有策略均未命中，返回 null");
     return null;
@@ -2054,13 +2089,13 @@ export default class RewordPlugin extends Plugin {
     }
     const labelIds: string[] = [];
     if (opts?.markUnmastered) {
-      try { labelIds.push(this.vocabLabelStore.add("未掌握").id); } catch { /* 忽略 */ }
+      try { labelIds.push(this.vocabLabelStore.add("未掌握").id); } catch (__swallowErr) { logSwallow(__swallowErr, "index.ts · try { labelIds.push(this.vocabLabelStore.add(\"未掌握\").id); }", "debug"); }
     }
     if (opts?.inheritThemeTags) {
       const docId = this.lastDeepReadDocId || "";
       const tags = await this.getDocTagLabels(docId);
       for (const t of tags) {
-        try { labelIds.push(this.vocabLabelStore.add(t).id); } catch { /* 忽略 */ }
+        try { labelIds.push(this.vocabLabelStore.add(t).id); } catch (__swallowErr) { logSwallow(__swallowErr, "index.ts · try { labelIds.push(this.vocabLabelStore.add(t).id); }", "debug"); }
       }
     }
     const r = await this.vocabStore.addWord(
@@ -2599,7 +2634,7 @@ export default class RewordPlugin extends Plugin {
     for (const n of names) {
       const name = (n || "").trim();
       if (!name) continue;
-      try { ids.push(this.vocabLabelStore.add(name).id); } catch { /* 忽略 */ }
+      try { ids.push(this.vocabLabelStore.add(name).id); } catch (__swallowErr) { logSwallow(__swallowErr, "index.ts · resolveLabelNames", "debug"); }
     }
     return ids;
   }
@@ -2868,7 +2903,7 @@ export default class RewordPlugin extends Plugin {
   private async migrateDockLayoutOnce(): Promise<void> {
     const marker = "hiword-dock-layout-migrated-v2";
     let done = false;
-    try { done = !!(await this.loadData(marker)); } catch { /* ignore */ }
+    try { done = !!(await this.loadData(marker)); } catch (__swallowErr) { logSwallow(__swallowErr, "index.ts · migrateDockLayoutOnce", "debug"); }
     if (done) return;
     try {
       await this.saveData("hiword-dock-layout.json", {});
@@ -2876,7 +2911,7 @@ export default class RewordPlugin extends Plugin {
     } catch (e) {
       getLogger().warn("[REword] 面板布局迁移失败", { error: e });
     }
-    try { await this.saveData(marker, true); } catch { /* ignore */ }
+    try { await this.saveData(marker, true); } catch (__swallowErr) { logSwallow(__swallowErr, "index.ts · migrateDockLayoutOnce", "error"); }
   }
 
   /** 根据 data-type 找到承载该 dock 的思源 Dock 实例（left/right/bottom） */
@@ -3482,7 +3517,7 @@ export default class RewordPlugin extends Plugin {
             "reword-vocab-status-expanded",
             JSON.stringify(Array.from(this.vocabStatusBarExpandedWords))
           );
-        } catch { /* ignore */ }
+        } catch (__swallowErr) { logSwallow(__swallowErr, "index.ts · try { localStorage.setItem( \"reword-vocab-status-expanded\", JSO…", "debug"); }
         // 局部刷新:只切该单词那根 bar 的 class 与 chevron
         const safe = (window as any).CSS?.escape ? (window as any).CSS.escape(word) : word.replace(/"/g, '\\"');
         const bar = contentEl.querySelector(
@@ -4808,9 +4843,7 @@ export default class RewordPlugin extends Plugin {
         }
         if (migrated) await this.saveData("hiword-dicts.json", m);
       }
-    } catch {
-      /* 无清单文件，使用默认 */
-    }
+    } catch (__swallowErr) { logSwallow(__swallowErr, "index.ts · loadDictManifest", "error"); }
 
     if (!m) {
       await this.saveData("hiword-dicts.json", DEFAULT_MANIFEST);
@@ -4877,9 +4910,7 @@ export default class RewordPlugin extends Plugin {
       if (s && (s.engine === "offline" || s.engine === "auto" || s.engine === "online" || s.engine === "system")) {
         return { ...DEFAULT_TTS, ...s };
       }
-    } catch {
-      /* 无设置，使用默认 */
-    }
+    } catch (__swallowErr) { logSwallow(__swallowErr, "index.ts · loadTtsSettings", "debug"); }
     return { ...DEFAULT_TTS };
   }
 
@@ -4900,9 +4931,7 @@ export default class RewordPlugin extends Plugin {
       if (s && typeof s.enabled === "boolean") {
         return { ...DEFAULT_ONLINE, ...s };
       }
-    } catch {
-      /* 无设置，使用默认 */
-    }
+    } catch (__swallowErr) { logSwallow(__swallowErr, "index.ts · loadOnlineSettings", "debug"); }
     return { ...DEFAULT_ONLINE };
   }
 
@@ -4923,7 +4952,7 @@ export default class RewordPlugin extends Plugin {
       if (s && typeof s.size === "string" && ["small", "medium", "large", "xlarge"].includes(s.size)) {
         return s.size;
       }
-    } catch { /* 无设置，使用默认 */ }
+    } catch (__swallowErr) { logSwallow(__swallowErr, "index.ts · loadFontSize", "debug"); }
     return "medium";
   }
 
@@ -5060,7 +5089,7 @@ export default class RewordPlugin extends Plugin {
           const p = typeof ws === "string" ? ws : (ws && ws.path) || "";
           if (p) candidates.push(clean(path.join(p, "data", "plugins", PLUGIN_NAME)));
         }
-      } catch { /* ignore */ }
+      } catch (__swallowErr) { logSwallow(__swallowErr, "index.ts · try { if (!fs.existsSync(wsFile)) continue; const raw = JSON.pa…", "debug"); }
     }
 
     // 4. cwd 相对路径
@@ -5214,7 +5243,7 @@ export default class RewordPlugin extends Plugin {
         try {
           const ok = await this.loadDictFile(meta);
           if (ok) { loadedCount++; break; } // 至少加载一个
-        } catch (e) { /* skip */ }
+        } catch (e) { logSwallow(e, "index.ts · initDictionary", "debug"); }
       }
     }
 
@@ -5843,7 +5872,7 @@ export default class RewordPlugin extends Plugin {
           if (r.width === 0 && r.height === 0) continue;
           const dist = Math.abs(r.left + r.width / 2 - x);
           if (dist < bestDist) { bestDist = dist; best = tok; }
-        } catch { /* ignore */ }
+        } catch (__swallowErr) { logSwallow(__swallowErr, "index.ts · wordNearPoint", "debug"); }
         break; // 该 token 已在某文本节点找到，跳出文本节点循环
       }
     }
@@ -5993,9 +6022,7 @@ export default class RewordPlugin extends Plugin {
       if (ws && typeof ws.call === "function") {
         ws.call("dock.show", ["hiword-sidebar"]);
       }
-    } catch {
-      /* 呼出失败静默：Dock 若已展开则无影响 */
-    }
+    } catch (__swallowErr) { logSwallow(__swallowErr, "index.ts · openWordInSidebar", "debug"); }
 
     // 切到「查词典」Tab（renderDictPanel 会重建输入框，因此先切 Tab 再填充）
     const tabBtn = dockEl.querySelector('[data-tab="dict"]') as HTMLElement;
@@ -7111,7 +7138,7 @@ export default class RewordPlugin extends Plugin {
       importBtn?.addEventListener("click", async () => {
         if (!csvWords.length) return;
         let added = 0;
-        for (const w of csvWords) { try { await this.vocabStore.addWord(w); added++; } catch { /* skip */ } }
+        for (const w of csvWords) { try { await this.vocabStore.addWord(w); added++; } catch (__swallowErr) { logSwallow(__swallowErr, "index.ts · try { await this.vocabStore.addWord(w); added++; }", "debug"); } }
         showMessage(`已导入 ${added}/${csvWords.length} 个单词`, 3000, "success" as any);
         this.renderVocabPanel(this.dockElement!);
         csvWords = [];
@@ -7383,7 +7410,7 @@ export default class RewordPlugin extends Plugin {
     const st = this.readerDock.settingsStoreRef.get();
     type RdPatch = Partial<import("./reader/reader-settings").ReaderSettings>;
     const apply = (patch: RdPatch) => {
-      try { this.readerDock!.settingsStoreRef.update(patch); } catch { /* ignore */ }
+      try { this.readerDock!.settingsStoreRef.update(patch); } catch (__swallowErr) { logSwallow(__swallowErr, "index.ts · apply", "debug"); }
     };
 
     const sel = (id: string, label: string, options: Array<[string, string]>, cur: string) => `
@@ -9158,13 +9185,11 @@ export default class RewordPlugin extends Plugin {
       document.querySelectorAll(".protyle-wysiwyg [data-node-id]").forEach((el) => {
         clearInlineMarks(el as HTMLElement);
       });
-    } catch {
-      /* ignore */
-    }
+    } catch (__swallowErr) { logSwallow(__swallowErr, "index.ts · onunload", "debug"); }
     this.aiPanel?.destroy();
     this.copilotPanel?.destroy();
     // 阅读器：销毁挂载组件（触发 foliate-view close 释放 blob URL）
-    try { this.readerDock?.dispose(); } catch { /* ignore */ }
+    try { this.readerDock?.dispose(); } catch (__swallowErr) { logSwallow(__swallowErr, "index.ts · onunload", "debug"); }
     // 彻底断开预览实例池与 IntersectionObserver（2026-08-18）
     disposePreviewRegistry();
     // 关闭可能残留的浮层
@@ -10914,7 +10939,7 @@ export default class RewordPlugin extends Plugin {
         localStorage.setItem("hiword-annotation-sort-time-dir", this.whaleSortTimeDir);
         localStorage.setItem("hiword-annotation-sort-doc", this.whaleSortDoc || "");
         localStorage.setItem("hiword-annotation-sort-styles", JSON.stringify(this.whaleSortStyles));
-      } catch { /* noop */ }
+      } catch (__swallowErr) { logSwallow(__swallowErr, "index.ts · persistSort", "error"); }
     };
 
     contentEl.querySelectorAll("[data-sort-action]").forEach((btn) => {
@@ -11007,7 +11032,7 @@ export default class RewordPlugin extends Plugin {
       localStorage.removeItem("hiword-annotation-sort-time-dir");
       localStorage.removeItem("hiword-annotation-sort-doc");
       localStorage.removeItem("hiword-annotation-sort-styles");
-    } catch { /* noop */ }
+    } catch (__swallowErr) { logSwallow(__swallowErr, "index.ts · resetWhaleFilters", "debug"); }
     // 重渲染（清空搜索框）
     if (this.dockElement) {
       const contentEl = this.dockElement.querySelector("#hiword-dock-content") as HTMLElement | null;
@@ -11255,7 +11280,7 @@ export default class RewordPlugin extends Plugin {
         const mode = (btn as HTMLElement).dataset.groupAction as WhaleGroupMode;
         if (mode !== "time" && mode !== "doc") return;
         this.whaleGroupMode = mode;
-        try { localStorage.setItem("hiword-annotation-group-mode", mode); } catch { /* noop */ }
+        try { localStorage.setItem("hiword-annotation-group-mode", mode); } catch (__swallowErr) { logSwallow(__swallowErr, "index.ts · try { localStorage.setItem(\"hiword-annotation-group-mode\", mode…", "debug"); }
         const kw = (contentEl.querySelector("#whale-search-input") as HTMLInputElement)?.value || "";
         const allItems = this.annotationStore.getAll();
         this.applyWhalePanelHTML(contentEl, renderWhalePanel(
@@ -11752,7 +11777,7 @@ export default class RewordPlugin extends Plugin {
 
   private closeInlineAnnotationPopover(): void {
     if (this.popNotePreview) {
-      try { this.popNotePreview.destroy(); } catch { /* ignore */ }
+      try { this.popNotePreview.destroy(); } catch (__swallowErr) { logSwallow(__swallowErr, "index.ts · closeInlineAnnotationPopover", "debug"); }
       this.popNotePreview = null;
     }
     if (this.inlinePopoverEl) {
@@ -12012,7 +12037,7 @@ export default class RewordPlugin extends Plugin {
         document.execCommand("copy");
         ta.remove();
         cb?.();
-      } catch { /* 复制失败静默 */ }
+      } catch (__swallowErr) { logSwallow(__swallowErr, "index.ts · fallbackCopy", "warn"); }
     };
   }
 
@@ -12219,7 +12244,7 @@ export default class RewordPlugin extends Plugin {
       if (!ok) return;
       let done = 0;
       for (const w of words) {
-        try { await this.vocabStore.removeWord(w); done++; } catch { /* 忽略单个失败 */ }
+        try { await this.vocabStore.removeWord(w); done++; } catch (__swallowErr) { logSwallow(__swallowErr, "index.ts · try { await this.vocabStore.removeWord(w); done++; }", "debug"); }
       }
       dialogBatchMode = false;
       if (batchBar) batchBar.style.display = "none";
@@ -12306,7 +12331,7 @@ export default class RewordPlugin extends Plugin {
       return false;
     }
     // 取消上一条，避免排队堆积
-    try { synth.cancel(); } catch { /* ignore */ }
+    try { synth.cancel(); } catch (__swallowErr) { logSwallow(__swallowErr, "index.ts · speakSystem", "debug"); }
 
     const u = new SpeechSynthesisUtterance(word);
     u.lang = "en-US";
@@ -12367,7 +12392,7 @@ export default class RewordPlugin extends Plugin {
     this._listReadWords = [];
     if (this._listReadTimer) { clearTimeout(this._listReadTimer); this._listReadTimer = null; }
     if (this._listReadAbort) { this._listReadAbort.abort(); this._listReadAbort = null; }
-    try { window.speechSynthesis?.cancel(); } catch { /* ignore */ }
+    try { window.speechSynthesis?.cancel(); } catch (__swallowErr) { logSwallow(__swallowErr, "index.ts · stopListReading", "debug"); }
     // 清除高亮
     this.dockElement?.querySelectorAll(".hiword-vb-row.reading").forEach((el) => el.classList.remove("reading"));
     const dockEl = this.dockElement;
@@ -12442,7 +12467,7 @@ export default class RewordPlugin extends Plugin {
     };
     load(); // 立即尝试（Safari/Firefox 同步可用）
     // Chrome 异步：voiceschanged 触发后才有完整列表
-    try { synth.onvoiceschanged = load; } catch { /* ignore */ }
+    try { synth.onvoiceschanged = load; } catch (__swallowErr) { logSwallow(__swallowErr, "index.ts · load", "debug"); }
   }
 
   /** 从可用 voice 中挑选最佳英文发音（优先用户指定 > 神经网络/Google/Microsoft/Samantha） */

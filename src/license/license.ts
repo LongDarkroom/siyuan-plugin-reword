@@ -1,3 +1,4 @@
+import { logSwallow } from "../core/safe.ts";
 /**
  * REword · 离线许可证激活模块
  * ------------------------------------------------------------------
@@ -168,10 +169,10 @@ export async function getDeviceId(): Promise<string> {
       deviceId = stored.id;
       return deviceId;
     }
-  } catch { /* ignore */ }
+  } catch (__swallowErr) { logSwallow(__swallowErr, "license.ts · getDeviceId", "debug"); }
   const id = "dev-" + b64urlEncodeBytes(c ? c.getRandomValues(new Uint8Array(16)) : new Uint8Array(16));
   deviceId = id;
-  try { await io?.save(DEVICE_ID_KEY, { id }); } catch { /* ignore */ }
+  try { await io?.save(DEVICE_ID_KEY, { id }); } catch (__swallowErr) { logSwallow(__swallowErr, "license.ts · getDeviceId", "debug"); }
   return deviceId;
 }
 
@@ -186,7 +187,7 @@ export async function initLicense(opts: PersistIO): Promise<void> {
       currentStatus = await verifyLicenseCode(data.code, deviceId);
       return;
     }
-  } catch { /* ignore */ }
+  } catch (__swallowErr) { logSwallow(__swallowErr, "license.ts · initLicense", "debug"); }
   currentStatus = { valid: false, plan: "", exp: 0, reason: "未激活" };
 }
 
@@ -195,7 +196,7 @@ export async function activate(code: string): Promise<LicenseStatus> {
   const status = await verifyLicenseCode(code, deviceId);
   if (status.valid) {
     currentCode = code;
-    try { await io?.save(LICENSE_DATA_KEY, { code, activatedAt: Date.now() }); } catch { /* ignore */ }
+    try { await io?.save(LICENSE_DATA_KEY, { code, activatedAt: Date.now() }); } catch (__swallowErr) { logSwallow(__swallowErr, "license.ts · activate", "debug"); }
   }
   currentStatus = status;
   return status;
@@ -205,7 +206,7 @@ export async function activate(code: string): Promise<LicenseStatus> {
 export async function deactivate(): Promise<void> {
   currentCode = null;
   currentStatus = { valid: false, plan: "", exp: 0, reason: "已解除激活" };
-  try { await io?.save(LICENSE_DATA_KEY, {}); } catch { /* ignore */ }
+  try { await io?.save(LICENSE_DATA_KEY, {}); } catch (__swallowErr) { logSwallow(__swallowErr, "license.ts · deactivate", "debug"); }
 }
 
 export function isActivated(feature?: string): boolean {
@@ -233,8 +234,8 @@ export function requireLicense(feature?: string): boolean {
   if (isActivated(feature)) return true;
   try {
     showMessage("该功能需要激活许可证，请在「设置 → 许可证」中输入激活码。", 4000, "info");
-  } catch { /* ignore */ }
-  try { openLicenseSettings(); } catch { /* ignore */ }
+  } catch (__swallowErr) { logSwallow(__swallowErr, "license.ts · requireLicense", "debug"); }
+  try { openLicenseSettings(); } catch (__swallowErr) { logSwallow(__swallowErr, "license.ts · requireLicense", "debug"); }
   return false;
 }
 
@@ -242,5 +243,5 @@ export function setOpener(fn: () => void): void {
   opener = fn;
 }
 export function openLicenseSettings(): void {
-  try { opener?.(); } catch { /* ignore */ }
+  try { opener?.(); } catch (__swallowErr) { logSwallow(__swallowErr, "license.ts · openLicenseSettings", "debug"); }
 }

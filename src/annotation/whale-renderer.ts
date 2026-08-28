@@ -1,3 +1,4 @@
+import { logSwallow } from "../core/safe.ts";
 /**
  * 微阅风格 —— 侧边栏批注汇总面板渲染器
  * ------------------------------------------------------------------
@@ -167,7 +168,7 @@ export function renderAnnotationText(text: string | undefined, kind: "sentence" 
       const blockDOM = lute.Md2BlockDOM(ensureBlockSeparators(kd));
       const html = lute.Md2HTML(lute.BlockDOM2Md(blockDOM));
       if (html && html.trim()) return applyMarkColors(stripIal(html));
-    } catch { /* 落到下方单层 Md2HTML 兜底 */ }
+    } catch (__swallowErr) { logSwallow(__swallowErr, "whale-renderer.ts · try { // 双转换（对齐 ai-render.renderKramdown）：Md2BlockDOM（与编辑器写入一致）…", "debug"); }
     // 单层兜底（双转换异常或产出空时）
     return applyMarkColors(stripIal(lute.Md2HTML(ensureBlockSeparators(kd))));
   }

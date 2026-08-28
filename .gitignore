@@ -16,3 +16,8 @@ books/covers/*.jpeg
 books/covers/*.jpg
 # 上架素材生成脚本（本地使用，不进库）
 scripts/gen_assets.py
+# 离线词典数据（77MB，本地使用，不进公共仓库）
+# 用 /dict/ 锚定根目录，避免误伤已跟踪的 src/dict/ 源码目录
+/dict/
+# vite 构建临时文件
+vite.config.mts.timestamp-*.mjs

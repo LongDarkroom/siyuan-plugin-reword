@@ -1,3 +1,4 @@
+import { logSwallow } from "../core/safe.ts";
 /**
  * foliate-js customElement 注册保护
  * ---------------------------------------------------------------
@@ -22,9 +23,7 @@
   CE.define = function (name: string, ctor: CustomElementConstructor, opts?: ElementDefinitionOptions): void {
     try {
       if (CE.get(name)) return; // 已注册则跳过（热重载场景）
-    } catch {
-      /* get 在某些早期实现可能抛错；fallback 到正常 define */
-    }
+    } catch (__swallowErr) { logSwallow(__swallowErr, "foliate-shim.ts · origDefine", "debug"); }
     return origDefine(name, ctor, opts);
   };
 })();

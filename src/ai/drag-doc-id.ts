@@ -1,3 +1,4 @@
+import { logSwallow } from "../core/safe.ts";
 /**
  * AI 面板拖入：A 任务 —— 思源页签 / 文档树拖入识别
  * ------------------------------------------------------------------
@@ -65,9 +66,7 @@ function findDocIdInCustomTypes(dt: DataTransfer): string | null {
       if (isValidDocId(parsed?.docId)) return parsed.docId;
       if (isValidDocId(parsed?.rootID)) return parsed.rootID;
       if (isValidDocId(parsed?.rootId)) return parsed.rootId;
-    } catch {
-      /* not JSON */
-    }
+    } catch (__swallowErr) { logSwallow(__swallowErr, "drag-doc-id.ts · findDocIdInCustomTypes", "debug"); }
   }
   return null;
 }
@@ -96,9 +95,7 @@ function isInsideDocContainer(el: HTMLElement): boolean {
       try {
         if (hasQuerySelector && (parent as any).querySelector(sel)) return true;
         if (hasMatches && (parent as any).matches(sel)) return true;
-      } catch {
-        /* 无效选择器,跳过 */
-      }
+      } catch (__swallowErr) { logSwallow(__swallowErr, "drag-doc-id.ts · isInsideDocContainer", "debug"); }
     }
     parent = parent.parentElement;
   }
@@ -240,8 +237,8 @@ import { getLogger } from "../core/logger.ts";
 
 function logDiag(msg: string): void {
   // 双通道: console 给浏览器控制台 / logger 给 plugin log viewer
-  try { console.log("[REword]", msg); } catch { /* ignore */ }
-  try { getLogger().info(msg); } catch { /* ignore */ }
+  try { console.log("[REword]", msg); } catch (__swallowErr) { logSwallow(__swallowErr, "drag-doc-id.ts · logDiag", "debug"); }
+  try { getLogger().info(msg); } catch (__swallowErr) { logSwallow(__swallowErr, "drag-doc-id.ts · logDiag", "debug"); }
 }
 
 /** 测试辅助：暴露默认 doc 容器选择器列表 */

@@ -1,3 +1,4 @@
+import { logSwallow } from "../core/safe.ts";
 /**
  * 阅读器 - 字体管理
  * ---------------------------------------------------------------
@@ -107,9 +108,7 @@ export class FontStore {
     if (font) {
       try {
         await removeFile(font.path);
-      } catch {
-        /* 文件删除失败不阻断注册清理 */
-      }
+      } catch (__swallowErr) { logSwallow(__swallowErr, "reader-fonts.ts · removeFont", "warn"); }
       this.fonts = this.fonts.filter((f) => f.id !== id);
       await this.save();
       this._store.set([...this.fonts]);
@@ -163,9 +162,7 @@ export function collectHostFontFaces(doc?: Document): string[] {
         if (css && !out.includes(css)) out.push(css);
       }
     }
-  } catch {
-    /* ignore */
-  }
+  } catch (__swallowErr) { logSwallow(__swallowErr, "reader-fonts.ts · collectHostFontFaces", "debug"); }
   // 2) 扫 document.fonts 已注册 FontFace（思源字体插件常用 API）
   //    拿到每个 family，注入 local() fallback @font-face
   //    - 命中本机已装字体 → 立即可用
@@ -187,9 +184,7 @@ export function collectHostFontFaces(doc?: Document): string[] {
         if (!out.includes(css)) out.push(css);
       });
     }
-  } catch {
-    /* ignore */
-  }
+  } catch (__swallowErr) { logSwallow(__swallowErr, "reader-fonts.ts · try { const seen = new Set<string>(); const fonts: any = (d as …", "debug"); }
   return out;
 }
 
@@ -211,23 +206,17 @@ export function getHostFontStack(
   try {
     const cssVar = cs(d.documentElement).getPropertyValue("--b3-font-family");
     if (cssVar && cssVar.trim()) return cssVar.trim();
-  } catch {
-    /* ignore */
-  }
+  } catch (__swallowErr) { logSwallow(__swallowErr, "reader-fonts.ts · getHostFontStack", "debug"); }
   // 2) body 计算字体
   try {
     const body = cs(d.body).fontFamily;
     if (body) return body.trim();
-  } catch {
-    /* ignore */
-  }
+  } catch (__swallowErr) { logSwallow(__swallowErr, "reader-fonts.ts · getHostFontStack", "debug"); }
   // 3) html 计算字体（兜底）
   try {
     const html = cs(d.documentElement).fontFamily;
     if (html) return html.trim();
-  } catch {
-    /* ignore */
-  }
+  } catch (__swallowErr) { logSwallow(__swallowErr, "reader-fonts.ts · getHostFontStack", "debug"); }
   return "";
 }
 
@@ -271,9 +260,7 @@ export function collectHostFontUrls(doc?: Document): { url: string; family: stri
         if (!out.some((x) => x.url === abs)) out.push({ url: abs, family: fam });
       }
     }
-  } catch {
-    /* ignore */
-  }
+  } catch (__swallowErr) { logSwallow(__swallowErr, "reader-fonts.ts · stFontUrls", "debug"); }
   return out;
 }
 

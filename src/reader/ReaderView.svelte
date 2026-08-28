@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { logSwallow } from "../core/safe.ts";
   /**
    * 阅读器 - 阅读面板（P0 + P1 打磨）
    * ---------------------------------------------------------------
@@ -176,6 +177,13 @@
   export let resetTokenUsage: ((bid: string) => Promise<void> | void) | undefined = undefined;
   /** 最近一次翻译 token 用量（v1.3.0：委托 plugin.lastTranslationUsage；修复原裸 plugin 引用未定义的 bug） */
   export let getLastUsage: (() => { promptTokens: number; completionTokens: number; totalTokens: number } | null) | undefined = undefined;
+  // 2026-08-28：翻译缓存统计 / 清空（按书；由 reader-tab 透传 plugin 能力）
+  export let getTranslationCacheStats: ((bid: string) => Promise<{ count: number; cachedPages: number; pageRangeText: string; title: string }>) | undefined = undefined;
+  export let clearTranslationCache: ((bid: string) => Promise<void> | void) | undefined = undefined;
+  // 2026-08-28：翻译成功入缓存后回传「节」序号（1-based）+ 书名，供 UI「第 X-Y 页缓存成功」+「选择书籍」
+  export let recordCachedSections: ((bid: string, sections: number[], title?: string) => void) | undefined = undefined;
+  // 2026-08-28：列出所有有翻译缓存的书籍（bookId + 书名），供「选择书籍」下拉
+  export let listCachedBooks: (() => Promise<Array<{ bookId: string; title: string }>>) | undefined = undefined;
 
   // 划词工具栏图标（readest 风格线性 SVG；批注/词典复用 REword 已注册 symbol）
   const SEL_ICONS: Record<string, string> = {
@@ -285,17 +293,13 @@
           if (!res.ok) continue;
           const blob = await res.blob();
           blobs.push({ family: it.family, blobUrl: URL.createObjectURL(blob) });
-        } catch {
-          /* 单个字体失败跳过 */
-        }
+        } catch (__swallowErr) { logSwallow(__swallowErr, "ReaderView.svelte · prepareHostFontBlobs", "debug"); }
       }
       if (blobs.length) {
         hostFontBlobs = blobs;
         applyStyles(); // blob 就绪后立即重刷 iframe 样式
       }
-    } catch {
-      /* ignore */
-    }
+    } catch (__swallowErr) { logSwallow(__swallowErr, "ReaderView.svelte · prepareHostFontBlobs", "debug"); }
   }
   const FONT_ACCEPT = ".ttf,.otf,.woff,.woff2";
 
@@ -504,9 +508,7 @@
     if (view?.renderer?.setStyles) {
       try {
         view.renderer.setStyles(buildStyles());
-      } catch {
-        /* 渲染中忽略 */
-      }
+      } catch (__swallowErr) { logSwallow(__swallowErr, "ReaderView.svelte · applyStyles", "debug"); }
     }
     // 同步容器兜底背景（深色模式切换时避免透出旧色/黑底闪屏）
     applyContainerBg();
@@ -613,14 +615,10 @@
           setTimeout(() => {
             try {
               view.goToFraction(progress);
-            } catch {
-              /* ignore */
-            }
+            } catch (__swallowErr) { logSwallow(__swallowErr, "ReaderView.svelte · applyFlow", "debug"); }
           }, 60);
         }
-      } catch {
-        /* ignore */
-      }
+      } catch (__swallowErr) { logSwallow(__swallowErr, "ReaderView.svelte · applyFlow", "debug"); }
     }
   }
 
@@ -628,9 +626,7 @@
     if (view?.renderer?.setAttribute) {
       try {
         view.renderer.setAttribute("turn-style", settings.turnStyle === "default" ? "" : settings.turnStyle);
-      } catch {
-        /* ignore */
-      }
+      } catch (__swallowErr) { logSwallow(__swallowErr, "ReaderView.svelte · applyTurnStyle", "debug"); }
     }
   }
 
@@ -714,9 +710,7 @@
         setTimeout(() => {
           try {
             searchInput?.focus();
-          } catch {
-            /* ignore */
-          }
+          } catch (__swallowErr) { logSwallow(__swallowErr, "ReaderView.svelte · onKeyDown", "debug"); }
         }, 30);
         return;
       }
@@ -1032,9 +1026,7 @@
       prepareHostFontBlobs();
       try {
         view.renderer?.focusView?.();
-      } catch {
-        /* ignore */
-      }
+      } catch (__swallowErr) { logSwallow(__swallowErr, "ReaderView.svelte · try { view.renderer?.focusView?.(); }", "debug"); }
       opened = true;
       attachAllContentDocs();
       attachTimer1 = setTimeout(attachAllContentDocs, 400);
@@ -1060,9 +1052,7 @@
     try {
       await view.goTo(href);
       showToc = false;
-    } catch {
-      /* ignore */
-    }
+    } catch (__swallowErr) { logSwallow(__swallowErr, "ReaderView.svelte · goToc", "debug"); }
   }
 
   /* ================= TOC 展开 / 阅读统计 ================= */
@@ -1139,9 +1129,7 @@
       setTimeout(() => {
         try {
           searchInput?.focus();
-        } catch {
-          /* ignore */
-        }
+        } catch (__swallowErr) { logSwallow(__swallowErr, "ReaderView.svelte · onGlobalKey", "debug"); }
       }, 30);
     }
   }
@@ -1166,7 +1154,7 @@
       bubbles: true,
       cancelable: true,
     } as KeyboardEventInit);
-    try { pw.document.dispatchEvent(ne); } catch { /* ignore */ }
+    try { pw.document.dispatchEvent(ne); } catch (__swallowErr) { logSwallow(__swallowErr, "ReaderView.svelte · forwardKeyToParent", "debug"); }
   }
 
 
@@ -1197,9 +1185,7 @@
     searchIndex = (searchIndex + delta + searchResults.length) % searchResults.length;
     try {
       await view.goTo(searchResults[searchIndex].cfi);
-    } catch {
-      /* ignore */
-    }
+    } catch (__swallowErr) { logSwallow(__swallowErr, "ReaderView.svelte · goSearchResult", "debug"); }
   }
 
   function onSearchKeydown(e: KeyboardEvent) {
@@ -1267,9 +1253,7 @@
   function clearSearch() {
     try {
       view?.clearSearch?.();
-    } catch {
-      /* ignore */
-    }
+    } catch (__swallowErr) { logSwallow(__swallowErr, "ReaderView.svelte · clearSearch", "debug"); }
     searchResults = [];
     searchIndex = -1;
     searchQuery = "";
@@ -1362,6 +1346,16 @@
     applyParagraphHover();
   }
 
+  /** 双语预取页数（0–8，默认 2；值越大越省翻页等待但越费 token） */
+  function setBilingualPrefetchPages(v: number) {
+    settings = settingsStore.update({
+      bilingualPrefetchPages: clamp(Math.round(v * 10) / 10, 0, 8),
+    });
+    // 预取窗口变化后，下一轮 injectAll（relocate/load）会自动按新值补译；
+    // 若已开启双语，立即触发一次增量刷新让后面新范围入缓存。
+    if (bilingualOn) ensureBilingualHandle().refresh();
+  }
+
   /* ================= 本书前提上下文（v1.3.0：lite Protyle 富文本编辑） ================= */
 
   let primerOpen = false;
@@ -1387,6 +1381,77 @@
     if (n >= 1000000) return `${(n / 1000000).toFixed(1)}M`;
     if (n >= 1000) return `${(n / 1000).toFixed(1)}K`;
     return String(n);
+  }
+
+  /* ================= 2026-08-28 翻译缓存统计（按书） ================= */
+  /** 当前查看书籍的已缓存译文条数（设置面板展示「已缓存 N 段」） */
+  let bilingualCacheCount = 0;
+  /** 当前查看书籍已缓存的「节」总数（用于「共缓存 N 页」） */
+  let bilingualCachedPages = 0;
+  /** 当前查看书籍已缓存连续区间文本（如「第 1-4 页」） */
+  let bilingualPageRange = "0 页";
+  /** 清空缓存进行中（防重复点击） */
+  let clearingCache = false;
+  /** 有翻译缓存的书籍列表（bookId + 书名），供「选择书籍」下拉 */
+  let cacheBookList: Array<{ bookId: string; title: string }> = [];
+  /** 当前下拉选中的书籍（默认本书；可切到其他有缓存的书查看） */
+  let selectedCacheBookId = bookId || "";
+
+  /** 拉取有缓存的书籍列表（书名 + bookId） */
+  async function refreshCacheBookList() {
+    if (!listCachedBooks) return;
+    try {
+      const list = await listCachedBooks();
+      cacheBookList = Array.isArray(list) ? list : [];
+    } catch {
+      cacheBookList = [];
+    }
+  }
+
+  /** 拉取某书翻译缓存统计（条数 + 页数 + 区间），写入面板状态。默认本书 */
+  async function refreshCacheStats(bid?: string) {
+    const target = bid || bookId;
+    selectedCacheBookId = target;
+    if (!target || !getTranslationCacheStats) {
+      bilingualCacheCount = 0;
+      bilingualCachedPages = 0;
+      bilingualPageRange = "0 页";
+      return;
+    }
+    try {
+      const r = await getTranslationCacheStats(target);
+      bilingualCacheCount = r?.count || 0;
+      bilingualCachedPages = r?.cachedPages || 0;
+      bilingualPageRange = r?.pageRangeText || "0 页";
+    } catch {
+      bilingualCacheCount = 0;
+      bilingualCachedPages = 0;
+      bilingualPageRange = "0 页";
+    }
+  }
+
+  /** 下拉切换查看的书籍：刷新该书统计 */
+  async function onSelectCacheBook(e: Event) {
+    const bid = (e.target as HTMLSelectElement).value;
+    await refreshCacheStats(bid);
+  }
+
+  /** 清空当前选中书籍的翻译缓存（用户主动点「清空缓存」；正常关闭双语不清） */
+  async function onClearBilingualCache() {
+    const target = selectedCacheBookId || bookId;
+    if (!target || !clearTranslationCache || clearingCache) return;
+    clearingCache = true;
+    try {
+      await clearTranslationCache(target);
+      await refreshCacheStats(target);
+      await refreshCacheBookList();
+      toast(target === bookId ? "本书翻译缓存已清空" : "已清空所选书籍翻译缓存");
+    } catch (e) {
+      console.warn("[REword] 清空翻译缓存失败:", e);
+      toast("清空缓存失败，请重试", 2600, "error" as any);
+    } finally {
+      clearingCache = false;
+    }
   }
 
   function togglePrimerEditor() {
@@ -1426,9 +1491,7 @@
       const md = primerEditor.read() || "";
       primerChars = md.length;
       primerTokens = estimateTokens(md);
-    } catch {
-      /* 序列化失败时保持上次统计 */
-    }
+    } catch (__swallowErr) { logSwallow(__swallowErr, "ReaderView.svelte · updatePrimerStats", "debug"); }
   }
 
   function savePrimer() {
@@ -1436,9 +1499,7 @@
     try {
       const md = (primerEditor.read() || "").trim();
       primerStore.set(bookId, md, meta?.title).catch(() => {});
-    } catch {
-      /* ignore */
-    }
+    } catch (__swallowErr) { logSwallow(__swallowErr, "ReaderView.svelte · savePrimer", "error"); }
   }
 
   function flushPrimerSave() {
@@ -1462,9 +1523,7 @@
   function destroyPrimerEditor() {
     try {
       primerEditor?.destroy?.();
-    } catch {
-      /* ignore */
-    }
+    } catch (__swallowErr) { logSwallow(__swallowErr, "ReaderView.svelte · destroyPrimerEditor", "debug"); }
     primerEditor = null;
     primerEditorEl = null;
   }
@@ -1656,9 +1715,7 @@
         if (fontBlobUrl) URL.revokeObjectURL(fontBlobUrl);
         fontBlobUrl = URL.createObjectURL(blob);
       }
-    } catch {
-      /* ignore */
-    }
+    } catch (__swallowErr) { logSwallow(__swallowErr, "ReaderView.svelte · loadFontBlob", "debug"); }
   }
 
   async function onSetFontMode(key: string) {
@@ -1746,9 +1803,7 @@
     if (view) {
       try {
         view.goToFraction(v);
-      } catch {
-        /* ignore */
-      }
+      } catch (__swallowErr) { logSwallow(__swallowErr, "ReaderView.svelte · onProgressChange", "debug"); }
     }
   }
 
@@ -2011,9 +2066,7 @@
     if (settings.fontMode === "classified") {
       try {
         rewriteFontKeywordsInDocument(doc);
-      } catch {
-        /* 单文档失败不影响阅读 */
-      }
+      } catch (__swallowErr) { logSwallow(__swallowErr, "ReaderView.svelte · try { rewriteFontKeywordsInDocument(doc); }", "debug"); }
     }
   }
 
@@ -2023,7 +2076,7 @@
       const arr = docCleanups.get(doc);
       if (arr) {
         for (const h of arr) {
-          try { doc.removeEventListener(h.type, h.fn, h.opts); } catch { /* ignore */ }
+          try { doc.removeEventListener(h.type, h.fn, h.opts); } catch (__swallowErr) { logSwallow(__swallowErr, "ReaderView.svelte · detachAllContentDocs", "debug"); }
         }
       }
       docCleanups.delete(doc);
@@ -2036,7 +2089,7 @@
     let contents: any[] = [];
     try { contents = view.renderer.getContents() || []; } catch { return; }
     contents.forEach((c: any) => {
-      try { attachContentDoc(c.doc); } catch { /* ignore */ }
+      try { attachContentDoc(c.doc); } catch (__swallowErr) { logSwallow(__swallowErr, "ReaderView.svelte · attachAllContentDocs", "debug"); }
     });
   }
 
@@ -2072,7 +2125,7 @@
         if (typeof c.index === "number" && typeof view.getCFI === "function") {
           cfi = view.getCFI(c.index, range);
         }
-      } catch { /* 计算失败不阻塞 UI */ }
+      } catch (__swallowErr) { logSwallow(__swallowErr, "ReaderView.svelte · try { if (typeof c.index === \"number\" && typeof view.getCFI ===…", "debug"); }
       return { text, rect: { left, top, right, bottom }, index: c.index, cfi, range };
     }
     return null;
@@ -2417,7 +2470,7 @@
   function dispatchAnnotationChanged() {
     try {
       window.dispatchEvent(new CustomEvent("reword:annotation-store-changed"));
-    } catch { /* ignore */ }
+    } catch (__swallowErr) { logSwallow(__swallowErr, "ReaderView.svelte · dispatchAnnotationChanged", "debug"); }
   }
 
   // 自动聚焦批注输入框（create/edit 态 textarea 渲染后聚焦，readest 批注即打字）
@@ -3161,13 +3214,13 @@
           const f = (c?.doc?.defaultView as any)?.frameElement as HTMLElement | null;
           if (f) { frame = f; if (evIndex !== undefined) break; }
         }
-      } catch { /* ignore */ }
+      } catch (__swallowErr) { logSwallow(__swallowErr, "ReaderView.svelte · try { for (const c of view?.renderer?.getContents?.() ?? []) { …", "debug"); }
       if (!frame) {
         // 没拿到 index 或匹配失败：退而求其次，取第一个可见 content 的 frame
         try {
           const first = (view?.renderer?.getContents?.() ?? [])[0];
           frame = (first?.doc?.defaultView as any)?.frameElement as HTMLElement | null;
-        } catch { /* ignore */ }
+        } catch (__swallowErr) { logSwallow(__swallowErr, "ReaderView.svelte · try { const first = (view?.renderer?.getContents?.() ?? [])[0];…", "debug"); }
       }
       if (frame) {
         const fr = frame.getBoundingClientRect();
@@ -3245,7 +3298,7 @@
   function onSelCopy() {
     const text = selToolbar.text?.trim();
     if (!text) return;
-    try { navigator.clipboard?.writeText(text); } catch { /* ignore */ }
+    try { navigator.clipboard?.writeText(text); } catch (__swallowErr) { logSwallow(__swallowErr, "ReaderView.svelte · onSelCopy", "warn"); }
     closeSelToolbar();
     toast("已复制");
   }
@@ -3340,7 +3393,7 @@
   function onViewerCopy() {
     const text = (noteEditor.text || "").trim();
     if (!text) return;
-    try { navigator.clipboard?.writeText(text); } catch { /* ignore */ }
+    try { navigator.clipboard?.writeText(text); } catch (__swallowErr) { logSwallow(__swallowErr, "ReaderView.svelte · onViewerCopy", "warn"); }
     closeNoteEditor();
     toast("已复制");
   }
@@ -3351,7 +3404,7 @@
     const note = (noteEditor.note || "").trim();
     const md = [text ? `> ${text}` : "", note ? note : ""].filter(Boolean).join("\n\n");
     if (!md) { toast("无内容可导出"); return; }
-    try { navigator.clipboard?.writeText(md); } catch { /* ignore */ }
+    try { navigator.clipboard?.writeText(md); } catch (__swallowErr) { logSwallow(__swallowErr, "ReaderView.svelte · onViewerExport", "warn"); }
     toast("已导出批注到剪贴板");
   }
 
@@ -3385,7 +3438,7 @@
         const win = c.doc?.defaultView;
         if (win) { const sel = win.getSelection(); if (sel) sel.removeAllRanges(); }
       }
-    } catch { /* ignore */ }
+    } catch (__swallowErr) { logSwallow(__swallowErr, "ReaderView.svelte · nc", "debug"); }
     // 通知侧边栏：标注已变更，需重新渲染
     dispatchAnnotationChanged();
   }
@@ -3639,6 +3692,17 @@
       translateBatch: (texts, from, to) =>
         onTranslateBatch ? onTranslateBatch(texts, from, to) : Promise.resolve([]),
       to: target,
+      // 2026-08-28：预取页数动态读设置（用户可在面板调 0~8；默认 2）
+      getPrefetchPages: () => settingsStore.get().bilingualPrefetchPages ?? 2,
+      // 2026-08-28：每批翻译成功入缓存后，回传「节」序号（1-based）+ 书名，刷新「第 X-Y 页」统计
+      onSectionsCached: (bid: string, sections: number[]) => {
+        recordCachedSections?.(bid, sections, meta?.title || title || "");
+        // 若当前查看的正是该书，立即刷新计数与书名列表
+        if (!selectedCacheBookId || selectedCacheBookId === bid) {
+          refreshCacheStats(bid);
+        }
+        refreshCacheBookList();
+      },
       onProgress: (done, total) => {
         bilingualProgress = { done, total, active: done < total };
         // 2026-08-28 修复：整批翻译失败（total>0 且 done===0）明确告知用户，
@@ -3657,6 +3721,8 @@
             }
             // v1.3.0：同步刷新「本书 Token」累计显示
             refreshBookTokenUsage();
+            // 2026-08-28：刷新「已缓存 N 段」统计（翻译后缓存条数会变）
+            refreshCacheStats(selectedCacheBookId || bookId);
           }, 800);
         }
       },
@@ -3672,6 +3738,8 @@
     if (!isTranslationConfigured || isTranslationConfigured()) {
       ensureBilingualHandle().setEnabled(true);
       bilingualOn = true;
+      refreshCacheStats(bookId);
+      refreshCacheBookList();
     } else {
       toast("请先在「AI 设置 → AI 服务」中配置并启用 AI（翻译默认走 AI）", 3200, "info" as any);
     }
@@ -3969,7 +4037,7 @@
           if (sel) sel.removeAllRanges();
         }
       }
-    } catch { /* ignore */ }
+    } catch (__swallowErr) { logSwallow(__swallowErr, "ReaderView.svelte · try { const contents = view?.renderer?.getContents?.() || []; f…", "debug"); }
     closeSelToolbar();
     // 提供撤销：缓存刚删除的记录，3 秒后可恢复（P2 O4）；撤销即清 deletedAt
     pendingDelete = removed;
@@ -4131,6 +4199,9 @@
       refreshFonts();
       applyContainerBg();
       await openBook();
+      // 2026-08-28：打开书后刷新翻译缓存统计 + 有缓存的书籍列表（默认查看本书）
+      refreshCacheStats(bookId);
+      refreshCacheBookList();
     })();
     // 2026-08-23 修复：mousedown 监听绑到 readerViewEl 容器（不是 document），
     //   避免影响思源顶栏"管理"等原生 UI 的点击时序（用户在阅读 Tab 时点不动"管理"）。
@@ -4164,7 +4235,7 @@
     flushPrimerSave();
     destroyPrimerEditor();
     // 2026-08-27：双语注入句柄销毁（移除全部译文节点，零残留）
-    try { bilingualHandle?.destroy(); } catch { /* ignore */ }
+    try { bilingualHandle?.destroy(); } catch (__swallowErr) { logSwallow(__swallowErr, "ReaderView.svelte · try { bilingualHandle?.destroy(); }", "debug"); }
     bilingualHandle = null;
     if (sessionReadMs > 0) void store.addReadingTime(bookId, sessionReadMs);
     // 2026-08-23 修复：listener 绑在 readerViewEl（不是 document）
@@ -4180,12 +4251,10 @@
     // 避免反复进出阅读 Tab 造成的事件泄漏/悬空回调（P0 #1/#2）与残留搜索高亮干扰 hitTest（P1 #7）。
     teardownAnnotationLayer();
     detachAllContentDocs();
-    try { view?.clearSearch?.(); } catch { /* ignore */ }
+    try { view?.clearSearch?.(); } catch (__swallowErr) { logSwallow(__swallowErr, "ReaderView.svelte · try { view?.clearSearch?.(); }", "debug"); }
     try {
       view?.close?.();
-    } catch {
-      /* ignore */
-    }
+    } catch (__swallowErr) { logSwallow(__swallowErr, "ReaderView.svelte · try { view?.close?.(); }", "debug"); }
     view = null;
   });
 </script>
@@ -4751,6 +4820,17 @@
           </label>
         </div>
 
+        <!-- 2026-08-28 新增：翻译预取页数（眼前屏 + 后续 N 面） -->
+        <div class="reader-setting-row">
+          <span class="reader-setting-label" title="当前屏之后额外预译并缓存的页数（默认 2 面）。页数越多翻页越无需等待，但首次翻译越费 token">翻译预取页数</span>
+          <div class="reader-setting-control">
+            <button class="reader-mini-btn" on:click={() => setBilingualPrefetchPages((settings.bilingualPrefetchPages ?? 2) - 1)}>-</button>
+            <span class="reader-setting-value">{(settings.bilingualPrefetchPages ?? 2)} 面</span>
+            <button class="reader-mini-btn" on:click={() => setBilingualPrefetchPages((settings.bilingualPrefetchPages ?? 2) + 1)}>+</button>
+          </div>
+        </div>
+        <div class="reader-setting-tip reader-setting-tip-warn">⚠️ 不要填太多：页数越多，首次翻译消耗的 AI Token 越多、也越慢。日常阅读 1–3 面足够。</div>
+
         <!-- v1.3.0 本书上下文：手写背景/人物/译法，注入 AI 翻译 prompt（解决专有名词前后不一致） -->
         {#if primerStore}
           <div class="reader-setting-row reader-setting-toggle-row">
@@ -4785,6 +4865,46 @@
             <button class="reader-mini-btn" on:click={exportBilingualNotes}>📋 复制</button>
           </div>
         {/if}
+
+        <!-- 2026-08-28 翻译缓存：按书落盘，重开书/翻页不消失；支持「选择书籍」+ 按页统计 -->
+        <div class="reader-cache-block">
+          <div class="reader-setting-row">
+            <span class="reader-setting-label" title="已翻译的段落释义保存在本地（按书），重开本书或翻页后命中缓存秒出，不重复消耗 token">翻译缓存</span>
+            {#if cacheBookList.length > 1}
+              <div class="reader-setting-control">
+                <select
+                  class="reader-select"
+                  value={selectedCacheBookId}
+                  on:change={onSelectCacheBook}
+                  title="选择要查看缓存的书籍"
+                >
+                  {#each cacheBookList as b}
+                    <option value={b.bookId}>{b.title || b.bookId}</option>
+                  {/each}
+                </select>
+              </div>
+            {/if}
+          </div>
+          <!-- 明确书名：当前查看书籍（默认本书，可在下拉切换） -->
+          <div class="reader-cache-book" title="当前查看缓存的书籍">
+            📖 《{selectedCacheBookId === bookId ? (meta?.title || title || "本书") : (cacheBookList.find((b) => b.bookId === selectedCacheBookId)?.title || "所选书籍")}》
+          </div>
+          <div class="reader-setting-row reader-setting-toggle-row">
+            <span class="reader-setting-label">已缓存</span>
+            <div class="reader-setting-control">
+              <span class="reader-setting-value">共 {bilingualCacheCount} 段 · {bilingualCachedPages} 页</span>
+              <button
+                class="reader-mini-btn"
+                title="清空所选书籍翻译缓存（之后翻页会重新翻译）"
+                on:click={onClearBilingualCache}
+                disabled={clearingCache || bilingualCacheCount === 0}
+              >清空</button>
+            </div>
+          </div>
+          <div class="reader-setting-tip">
+            共缓存 {bilingualCachedPages} 页，{bilingualPageRange} 缓存成功。已翻译释义保存在本地，重开书籍与翻页都不会消失；换书互不影响。
+          </div>
+        </div>
       </details>
     </div>
   {/if}
@@ -6454,6 +6574,48 @@
     min-width: 34px;
     text-align: center;
     color: var(--b3-theme-on-background, #333);
+  }
+  /* 2026-08-28：设置面板内说明文案（token 警告 / 缓存说明） */
+  .reader-setting-tip {
+    font-size: 11px;
+    line-height: 1.5;
+    opacity: 0.62;
+    margin: 1px 0 4px;
+    padding-left: 2px;
+  }
+  .reader-setting-tip-warn {
+    color: var(--b3-theme-warning, #d97706);
+    opacity: 1;
+  }
+  /* 2026-08-28：翻译缓存块（书名 + 选择器 + 页数统计） */
+  .reader-cache-block {
+    border: 1px solid var(--b3-border-color, rgba(0, 0, 0, 0.12));
+    border-radius: 8px;
+    padding: 8px 10px;
+    margin: 4px 0 6px;
+    background: var(--b3-list-hover, rgba(127, 127, 127, 0.06));
+  }
+  .reader-cache-book {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--b3-theme-on-background, #333);
+    margin: 2px 0 6px;
+    padding-left: 2px;
+    word-break: break-all;
+  }
+  .reader-select {
+    max-width: 160px;
+    font-size: 12px;
+    padding: 2px 4px;
+    border-radius: 6px;
+    border: 1px solid var(--b3-border-color, rgba(0, 0, 0, 0.18));
+    background: var(--b3-theme-background, #fff);
+    color: var(--b3-theme-on-background, #333);
+    cursor: pointer;
+  }
+  .reader-mini-btn:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
   }
   .reader-seg {
     background: none;

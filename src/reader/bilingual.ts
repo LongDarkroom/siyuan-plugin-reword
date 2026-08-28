@@ -37,6 +37,10 @@ export interface BilingualOptions {
   onTokenUsage?: (usage: { promptTokens: number; completionTokens: number; totalTokens: number }) => void;
   /** 可视过滤开关（默认 true；测试可关掉以翻译全部段落） */
   visibleOnly?: boolean;
+  /** 预取页数（动态回调）：当前屏之后额外预译并缓存的「面」数；默认 2.5。值越大越省翻页等待但越费 token */
+  getPrefetchPages?: () => number;
+  /** 节号回调（1-based）：每当一批段落翻译并成功入缓存后，回传本次涉及的书「节」序号，用于 UI「第 X-Y 页缓存成功」 */
+  onSectionsCached?: (bookId: string, sections: number[]) => void;
 }
 
 export interface BilingualHandle {
@@ -88,7 +92,8 @@ function cleanText(s: string): string {
  *  - 前面（已读）的段落不预取，靠之前已写入的缓存兜底。
  *
  * 「面」的近似：滚动模式下一屏高 ≈ 一面（纵向 vh）；分页（CSS columns）
- * 模式下一页宽 ≈ 一面（横向 vw）。预取窗口取后面 2.5 屏（即 2-3 面）。
+ * 模式下一页宽 ≈ 一面（横向 vw）。预取窗口取后面 N 屏（N 由设置面板
+ * bilingualPrefetchPages 控制，默认 2.5 屏 ≈ 2-3 面；可调 0~8）。
  */
 
 /** 眼前屏：段落严格落在当前视口内 */
@@ -111,8 +116,9 @@ function isImmediateScreen(el: Element): boolean {
   }
 }
 
-/** 后面预取范围：当前屏之后 2-3 面（单向往后，不预取前面——前面靠缓存） */
-function isPrefetchAhead(el: Element): boolean {
+/** 后面预取范围：当前屏之后 N 面（单向往后，不预取前面——前面靠缓存）。
+ *  @param prefetchPages 预取页数（来自 getPrefetchPages 回调，默认 2.5） */
+function isPrefetchAhead(el: Element, prefetchPages: number): boolean {
   try {
     const win = el.ownerDocument?.defaultView;
     if (!win) return false;
@@ -120,11 +126,11 @@ function isPrefetchAhead(el: Element): boolean {
     const vh = win.innerHeight || 800;
     const r = el.getBoundingClientRect();
     if (!r || (r.width === 0 && r.height === 0)) return false; // 未布局
-    // 预取窗口：后面 2.5 屏（即 2-3 面）
-    const PF = 2.5;
-    // 滚动模式：当前屏下方 2.5 屏内（横向需仍在视口列内，避免预取隔页内容）
+    // 预取窗口：当前屏之后 prefetchPages 屏（即 prefetchPages 面）
+    const PF = prefetchPages > 0 ? prefetchPages : 2.5;
+    // 滚动模式：当前屏下方 PF 屏内（横向需仍在视口列内，避免预取隔页内容）
     const below = r.top >= 0 && r.top < vh * (1 + PF) && r.left < vw && r.right > 0;
-    // 分页模式：当前屏右方 2.5 页内（纵向需仍在视口行内）
+    // 分页模式：当前屏右方 PF 页内（纵向需仍在视口行内）
     const right = r.left >= 0 && r.left < vw * (1 + PF) && r.top < vh && r.bottom > 0;
     return below || right;
   } catch {
@@ -191,34 +197,39 @@ export function createBilingual(opts: BilingualOptions): BilingualHandle {
 
     const docs = opts.getContents() || [];
     log("[REword] 双语 injectAll: getContents 返回", docs.length, "个文档");
-    // 两阶段收集：imm = 眼前屏（注入显示）；prefetch = 后面 2-3 面（翻译+缓存，不注入）
-    interface Pending { doc: Document; el: Element; text: string }
+    // 预取页数（动态，来自设置面板；默认 2.5 屏 ≈ 2-3 面）
+    const prefetchPages = opts.getPrefetchPages ? (opts.getPrefetchPages() || 2.5) : 2.5;
+    // 两阶段收集：imm = 眼前屏（注入显示）；prefetch = 后面 N 面（翻译+缓存，不注入）
+    // section = 该段所属「节」序号（1-based，对应 docs 数组下标 +1），用于缓存页码统计
+    interface Pending { doc: Document; el: Element; text: string; section: number }
     const imm: Pending[] = [];
     const prefetch: Pending[] = [];
-    for (const doc of docs) {
+    docs.forEach((doc, di) => {
+      const section = di + 1;
       const segs = getSegments(doc);
-      log(`[REword] 双语 doc#${docs.indexOf(doc)}: getSegments 找到 ${segs.length} 段`);
+      log(`[REword] 双语 doc#${di}: getSegments 找到 ${segs.length} 段`);
       for (const seg of segs) {
         if (!visibleOnly) {
           // 测试 / 全译模式：所有段都当眼前屏（注入）
-          imm.push({ doc, el: seg.el, text: seg.text });
+          imm.push({ doc, el: seg.el, text: seg.text, section });
           continue;
         }
-        // 2026-08-28 两阶段：眼前屏立即注入；后面 2-3 面预取缓存
-        if (isImmediateScreen(seg.el)) imm.push({ doc, el: seg.el, text: seg.text });
-        else if (isPrefetchAhead(seg.el)) prefetch.push({ doc, el: seg.el, text: seg.text });
+        // 2026-08-28 两阶段：眼前屏立即注入；后面 N 面预取缓存（N=prefetchPages 可调）
+        if (isImmediateScreen(seg.el)) imm.push({ doc, el: seg.el, text: seg.text, section });
+        else if (isPrefetchAhead(seg.el, prefetchPages)) prefetch.push({ doc, el: seg.el, text: seg.text, section });
       }
-    }
+    });
     log(`[REword] 双语: 眼前屏 ${imm.length} 段，预取 ${prefetch.length} 段 (visibleOnly=${visibleOnly})`);
     // 2026-08-28 安全阀：visibleOnly 全过滤（未布局异常）时降级译前 8 段当眼前屏
     if (!imm.length && !prefetch.length && visibleOnly) {
       log("[REword] 双语: visibleOnly 全过滤，触发安全阀取前 8 段");
-      for (const doc of docs) {
+      for (let di = 0; di < docs.length && imm.length < 8; di++) {
+        const doc = docs[di];
+        const section = di + 1;
         for (const seg of getSegments(doc)) {
-          imm.push({ doc, el: seg.el, text: seg.text });
+          imm.push({ doc, el: seg.el, text: seg.text, section });
           if (imm.length >= 8) break;
         }
-        if (imm.length >= 8) break;
       }
     }
     // 合并一次翻译（眼前 + 预取一起送，省 token）；预取段译文由
@@ -246,6 +257,17 @@ export function createBilingual(opts: BilingualOptions): BilingualHandle {
         ),
       ]);
       log(`[REword] 双语: AI 返回 ${translations.length} 条，非空 ${translations.filter(t => t?.trim()).length} 条`);
+      // 2026-08-28：记录本次成功缓存的「节」序号（1-based），供 UI 展示「第 X-Y 页缓存成功」
+      if (opts.onSectionsCached) {
+        const secSet = new Set<number>();
+        pending.forEach((p, i) => {
+          const tr = (translations[i] || "").trim();
+          if (tr && typeof p.section === "number" && p.section > 0) secSet.add(p.section);
+        });
+        if (secSet.size) {
+          opts.onSectionsCached(opts.bookId, [...secSet].sort((a, b) => a - b));
+        }
+      }
       // 中断安全：等待期间用户已关闭双语 → 丢弃结果，不注入
       if (!enabled) { injecting = false; return; }
       let done = 0;

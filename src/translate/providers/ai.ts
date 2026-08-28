@@ -1,3 +1,4 @@
+import { logSwallow } from "../../core/safe.ts";
 /**
  * 自有 AI 首选翻译
  * ------------------------------------------------------------------
@@ -56,9 +57,7 @@ export class AiTranslator implements Translator {
       try {
         const out = await this.deps.translateBatch(req.texts, req.from, req.to, bookId);
         if (Array.isArray(out) && out.length === req.texts.length) return out;
-      } catch {
-        /* 落到逐段兜底 */
-      }
+      } catch (__swallowErr) { logSwallow(__swallowErr, "ai.ts · translate", "debug"); }
     }
     // ② 逐段兜底：简单可靠，仅在小批量 / 批量失败时承担成本
     if (typeof this.deps.translateOne === "function") {
