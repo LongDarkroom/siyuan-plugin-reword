@@ -22,9 +22,18 @@
  *       思阅 / Readest 通用做法：注入 user CSS 覆盖 epub 默认样式。
  */
 
+import {
+  SERIF_FONT_PRESETS,
+  SANS_SERIF_FONT_PRESETS,
+  MONOSPACE_FONT_PRESETS,
+} from "./reader-settings.ts";
+
 export type ReaderStyleTheme = "light" | "almond" | "autumn" | "green" | "blue" | "night" | "dark" | "gold" | "custom";
 
 export type ReaderStyleLineWidth = "narrow" | "normal" | "wide";
+
+/** 正文默认字体链（2026-08-28 分类字体） */
+export type ReaderStyleDefaultFontFamily = "serif" | "sans-serif";
 
 export interface ReaderStyleInput {
   /** 字号 12-28 px */
@@ -38,14 +47,29 @@ export interface ReaderStyleInput {
   customBgImage?: string;
   lineWidth: ReaderStyleLineWidth;
   /** 字体来源（只用于决定 fontCss 是否非空；不参与本模块其他逻辑） */
-  fontMode: "follow-siyuan" | "custom" | "system";
+  fontMode: "follow-siyuan" | "custom" | "system" | "classified";
   customFontId?: string;
+  /* ---- 2026-08-28 分类字体（fontMode=classified 时生效）---- */
+  /** 正文默认走哪条链 */
+  defaultFontFamily?: ReaderStyleDefaultFontFamily;
+  /** 衬线链首选字体 */
+  serifFont?: string;
+  /** 无衬线链首选字体 */
+  sansSerifFont?: string;
+  /** 等宽链首选字体 */
+  monospaceFont?: string;
+  /** 中文字体：插入每条链次位（留空=不插入） */
+  defaultCJKFont?: string;
   /** 是否强制正文继承 body 字体栈（覆盖 epub 内联死字体）；默认 true（运行时总为 boolean） */
   overridePublisherFont?: boolean;
   /** 统一正文字号：压平书籍 p/li 级写死字号（如 font-size: medium），默认 true（运行时总为 boolean） */
   overrideBookFontSize?: boolean;
   /** 专注模式（运行时开关）：高亮视口中心段落、其余淡出；仅滚动模式生效 */
   focusMode?: boolean;
+  /** 译文字号（em 倍数，相对正文；默认 0.78；由阅读设置「译文字号」调节，2026-08-28） */
+  translationFontSize?: number;
+  /** 段落悬停高亮（运行时开关，2026-08-28）：鼠标悬停段落时轻微底色，提升阅读定位感 */
+  paragraphHover?: boolean;
   /** 文本设置（2026-08-24 新增） */
   text?: { fontWeight: number; letterSpacing: number };
   /** 段落设置（2026-08-24 新增） */
@@ -127,6 +151,106 @@ export function getDefaultCjkFontStack(): string {
   ].join(", ");
 }
 
+/* ================= 分类字体（2026-08-28，参考 Readest utils/style.ts:30-63） ================= */
+
+/** 三条字体链（各为可直接用于 font-family 的完整 CSS 字符串） */
+export interface FontFamilyLists {
+  serif: string;
+  sansSerif: string;
+  monospace: string;
+}
+
+/** 字体名 → CSS 字面量（含空格/中文必须加引号，否则 CSS 解析失败） */
+function q(name: string): string {
+  return /^[\w-]+$/.test(name) ? name : `"${name.replace(/"/g, '\\"')}"`;
+}
+
+/**
+ * 把用户选的「首选字体」拼成三条完整 fallback 链。
+ *
+ * 参考 Readest `buildFontFamilyLists()`：用户只选首选字体名，系统自动补全
+ * 同类候选池 + CJK 兜底 + 通用族，保证任何字符都有字形（不会方块/乱码）。
+ *
+ * 链结构（以衬线为例）：
+ *   [首选衬线] → [CJK 指定字体] → [衬线候选池其余] → [跨平台 CJK 兜底栈] → serif
+ *
+ * 为什么每条链都要带 CJK 兜底：英文衬线字体（Georgia/Literata）**没有汉字字形**，
+ * 若链尾只有 `serif`，浏览器会用系统默认衬线渲染中文（macOS 上是 Songti SC，
+ * Windows 上是 SimSun，观感参差）；显式带 CJK 兜底栈可保证跨平台一致。
+ * 等宽链同理——Fira Code 等西文等宽字体同样缺汉字字形。
+ *
+ * @param serif 衬线链首选字体（空=不指定，走候选池）
+ * @param sansSerif 无衬线链首选字体
+ * @param monospace 等宽链首选字体
+ * @param defaultCJKFont 中文字体（插入每条链次位；空=不插入）
+ */
+export function buildFontFamilyLists(
+  serif: string,
+  sansSerif: string,
+  monospace: string,
+  defaultCJKFont: string
+): FontFamilyLists {
+  const cjk = (defaultCJKFont || "").trim();
+  const cjkFallback = getDefaultCjkFontStack();
+
+  // 衬线链
+  const serifChain = [
+    ...(serif ? [q(serif)] : []),
+    ...(cjk && cjk !== serif ? [q(cjk)] : []),
+    ...SERIF_FONT_PRESETS.filter((f) => f !== serif && f !== cjk).map(q),
+    cjkFallback,
+    "serif",
+  ].join(", ");
+
+  // 无衬线链
+  const sansSerifChain = [
+    ...(sansSerif ? [q(sansSerif)] : []),
+    ...(cjk && cjk !== sansSerif ? [q(cjk)] : []),
+    ...SANS_SERIF_FONT_PRESETS.filter((f) => f !== sansSerif && f !== cjk).map(q),
+    cjkFallback,
+    "sans-serif",
+  ].join(", ");
+
+  // 等宽链：不插 CJK 指定字体（中文正文不该用等宽），但仍带 CJK 兜底
+  // 保证代码注释里的中文有字形；ui-monospace 让 macOS/Windows 走系统最优等宽。
+  const monospaceChain = [
+    ...(monospace ? [q(monospace)] : []),
+    ...MONOSPACE_FONT_PRESETS.filter((f) => f !== monospace).map(q),
+    "ui-monospace",
+    cjkFallback,
+    "monospace",
+  ].join(", ");
+
+  return { serif: serifChain, sansSerif: sansSerifChain, monospace: monospaceChain };
+}
+
+/** 三条链输出为 CSS 变量（供 body / 代码块 / EPUB 内联关键词替换引用） */
+export function fontVariableStyles(lists: FontFamilyLists): string {
+  return `:root {
+  --reword-serif: ${lists.serif};
+  --reword-sans-serif: ${lists.sansSerif};
+  --reword-monospace: ${lists.monospace};
+}`;
+}
+
+/**
+ * 分类字体的应用段：body 走默认链，代码类元素走等宽链。
+ *
+ * 代码块选择器覆盖 EPUB 常见写法：原生 <pre>/<code>/<kbd>/<samp>/<tt>
+ * + 常见 class（.code / .monospace / .programlisting / .highlight）。
+ * 用 !important 压过书籍内联字体（内联 style specificity 1,0,0,0）。
+ */
+export function classifiedFontStyles(defaultFamily: ReaderStyleDefaultFontFamily): string {
+  const body = defaultFamily === "sans-serif" ? "var(--reword-sans-serif)" : "var(--reword-serif)";
+  return `body {
+  font-family: ${body} !important;
+}
+pre, code, kbd, samp, tt,
+.code, .monospace, .programlisting, .highlight, .hljs {
+  font-family: var(--reword-monospace) !important;
+}`.trim();
+}
+
 /**
  * 主样式生成器：把现有 buildStyles() 的内容 + EPUB 排版增强 CSS 拼成完整字符串。
  *
@@ -145,6 +269,30 @@ export function buildReaderStyles(
   fontFamilyStack: string
 ): string {
   const o = deriveStyleOutput(settings, preset, lineWidthPreset);
+
+  // 分类字体模式（2026-08-28）：本模块自行构建三条链，忽略传入的 fontFamilyStack
+  const lists =
+    settings.fontMode === "classified"
+      ? buildFontFamilyLists(
+          settings.serifFont ?? "",
+          settings.sansSerifFont ?? "",
+          settings.monospaceFont ?? "",
+          settings.defaultCJKFont ?? ""
+        )
+      : null;
+
+  // 字体段：分类模式输出「三条链变量 + body/代码块应用」，其余模式输出单一 body 栈
+  const fontSegments = lists
+    ? [fontVariableStyles(lists), classifiedFontStyles(settings.defaultFontFamily ?? "serif")]
+    : [fontFamilyStyles(fontFamilyStack)];
+
+  // 译文字体栈：分类模式下用正文默认链，保证译文与正文视觉同源
+  const translationStack = lists
+    ? settings.defaultFontFamily === "sans-serif"
+      ? lists.sansSerif
+      : lists.serif
+    : fontFamilyStack;
+
   return [
     fontCss,
     paragraphStyles(o),
@@ -153,7 +301,8 @@ export function buildReaderStyles(
     inlineOverrideStyles(),
     publisherFontOverrideStyles(settings.overridePublisherFont !== false),
     focusModeStyles(settings.focusMode === true),
-    bilingualStyles(),
+    paragraphHoverStyles(settings.paragraphHover === true),
+    bilingualStyles(translationStack, o.fg, settings.translationFontSize ?? 0.78),
     headingStyles(),
     quoteStyles(o),
     listStyles(),
@@ -162,7 +311,7 @@ export function buildReaderStyles(
     textStyles(settings.text),
     paragraphLayoutStyles(settings.paragraph),
     layoutMarginStyles(settings.layout),
-    fontFamilyStyles(fontFamilyStack),
+    ...fontSegments,
     linkStyles(o),
     codeStyles(o),
     colorSchemeStyles(o),
@@ -249,7 +398,7 @@ export function fontFamilyStyles(stack: string): string {
   return `body { font-family: ${stack} !important; }`;
 }
 
-/** 段落 p 段距 + 对齐 + 取消内联 line-height */
+/** 段落 p 段距 + 对齐 + 取消内联 line-height（2026-08-28 加 text-rendering 精修） */
 export function paragraphStyles(o: ReaderStyleOutput): string {
   return `
 p {
@@ -257,6 +406,7 @@ p {
   line-height: inherit !important;
   text-align: justify !important;
   text-indent: 0 !important;
+  text-rendering: optimizeLegibility !important;
 }`.trim();
 }
 
@@ -308,13 +458,14 @@ blockquote span, blockquote div, blockquote b, blockquote i {
 }`.trim();
 }
 
-/** 标题层级（h1-h6） */
+/** 标题层级（h1-h6）（2026-08-28 加字距精修） */
 export function headingStyles(): string {
   return `
 h1, h2, h3, h4, h5, h6 {
   font-family: inherit !important;
   font-weight: 600 !important;
   line-height: 1.3 !important;
+  letter-spacing: 0.02em !important;
   margin: 1em 0 0.5em !important;
   page-break-after: avoid;
   break-after: avoid;
@@ -327,14 +478,15 @@ h5 { font-size: 1.05em !important; }
 h6 { font-size: 1em !important; }`.trim();
 }
 
-/** 引用块 blockquote */
+/** 引用块 blockquote（2026-08-28 柔和化：左边线 + 微底色 + 圆角，不再整块压暗） */
 export function quoteStyles(o: ReaderStyleOutput): string {
   return `
 blockquote {
   margin: 0.8em 1.5em !important;
   padding: 0.4em 1em !important;
   border-left: 3px solid currentColor !important;
-  opacity: 0.85;
+  background: rgba(128, 128, 128, 0.06) !important;
+  border-radius: 0 4px 4px 0 !important;
   font-style: italic !important;
 }`.trim();
 }
@@ -351,12 +503,17 @@ li {
 }`.trim();
 }
 
-/** 图片 figure/figcaption */
+/** 图片 figure/figcaption（2026-08-28 加 img 约束：自适应宽度、不溢出、圆角） */
 export function figureStyles(o: ReaderStyleOutput): string {
   return `
 figure {
   margin: 1em 0 !important;
   text-align: center !important;
+}
+figure img {
+  max-width: 100% !important;
+  height: auto !important;
+  border-radius: 4px !important;
 }
 figcaption {
   font-size: 0.85em !important;
@@ -446,29 +603,82 @@ export function focusModeStyles(enabled: boolean): string {
 }
 
 /**
- * 双语对照译文样式（2026-08-27 重设计）：
- * 顶栏「双语」开启后，每段正文后注入 `.reword-bilingual` 译文块。
+ * 双语对照译文样式（2026-08-28 v2「思源字体 + Readest 极简」）：
+ * 顶栏「双语」开启后，每段正文内注入 `.reword-bilingual` 译文块（appendChild 子节点）。
  * 该节点位于 foliate 内容 iframe 内，必须由 user CSS 注入（Svelte 组件 scoped 样式够不到）。
- * 设计：比正文略小、绿色系（呼应「译文」语义），左侧细强调线，浅底，与原文区隔但同列对齐。
+ *
+ * 设计原则（结合思源笔记 + Readest 实践）：
+ * 1. 译文用「思源阅读字体栈」(fontFamilyStack !important) + 思源正文色(具体 hex fg)：
+ *    iframe 内**读不到**思源父文档的 --b3-* CSS 变量，故必须传具体值；用思源字体栈
+ *    保证译文与思源笔记视觉一致（而非继承书籍 serif 英文字体发虚）。
+ * 2. 字号由 translationFontSize（默认 0.78em，设置可调）控制，相对正文独立、不抢焦点。
+ * 3. 仅轻微透明（opacity 0.9）—— 译文是辅助信息但不被强压暗。
+ * 4. 无边框 / 无底色 / 无圆角 —— 与 Readest 一致，译文自然融入正文作为「内容的一部分」。
+ * 5. user-select:none 防误选；data-translation-mark 保护划词 CFI。
+ *
+ * @param fontFamilyStack 思源阅读字体栈（含用户字体 + CJK 兜底）
+ * @param fg 思源正文色（具体 hex，来自 deriveStyleOutput）
+ * @param translationFontSize 译文字号 em 倍数（默认 0.78）
  */
-export function bilingualStyles(): string {
+export function bilingualStyles(fontFamilyStack: string, fg: string, translationFontSize: number): string {
+  const fs = Number.isFinite(translationFontSize) && translationFontSize > 0 ? translationFontSize : 0.70;
   return `
+/* ---- 双语译文块（段落内子节点注入，思源字体 + Readest 极简） ---- */
 .reword-bilingual {
-  margin: 0.25em 0 0.85em;
-  padding: 0.45em 0.65em;
-  font-size: 0.92em;
-  line-height: 1.7;
-  color: #2f9e44;
-  background: rgba(127, 200, 140, 0.10);
-  border-left: 3px solid rgba(47, 158, 68, 0.55);
-  border-radius: 4px;
+  display: block !important;
+  /* 紧贴原文下方，紧凑不抢空间（对齐 Readest 效果） */
+  margin: 0.22em 0 0 0;
+  padding: 0;
+
+  /* 排版：独立小一号译文（设置可调），行高继承正文自然融入。
+     默认 0.70em（非 0.78）—— 思源 CJK 字体栈渲染尺寸显著大于书籍英文 serif，
+     0.70em 的思源字体 ≈ 0.90em 的书籍字体，视觉上略小一号、与 Readest 一致。 */
+  font-size: ${fs}em;
+  line-height: inherit;
+  font-weight: 400;
+
+  /* 字体：思源阅读字体栈（!important 压过 publisherFontOverride 的 p div inherit） */
+  font-family: ${fontFamilyStack} !important;
+  /* 色彩：思源正文色（具体 hex，iframe 内 --b3-* 不可达） */
+  color: ${fg};
+  /* 轻微淡于原文，但不强透明 */
+  opacity: 0.9;
+
+  /* 无边框 / 无底色 / 无圆角 —— 与 Readest 一致 */
+
+  /* 行为 */
   word-break: break-word;
+  overflow-wrap: break-word;
+  user-select: none;
+  transition: opacity 0.2s ease;
 }
+
+/* 悬停时恢复完全不透明（帮助用户确认这是可交互的译文块） */
+.reword-bilingual:hover {
+  opacity: 1;
+}
+
+/* 列表项内的译文：随原文缩进，避免与项目符号视觉冲突 */
 li > .reword-bilingual {
-  /* 列表项内置译文：去掉左侧强调线，避免与项目符号视觉冲突 */
-  margin-left: 0;
-  border-left: none;
-  background: rgba(127, 200, 140, 0.07);
+  margin: 0.18em 0 0 1em;
+}`.trim();
+}
+
+/**
+ * 段落悬停高亮（2026-08-28，C2 增强项）：
+ * 鼠标悬停段落时轻微底色 + 圆角，提升阅读定位感（专注模式外的轻量辅助）。
+ * 必须由 ReaderView 在 body 上加 `.reword-p-hover` 类才生效（避免默认开启干扰）。
+ * 颜色用具体 rgba（iframe 内 --b3-* 不可达），深浅主题统一柔和灰。
+ */
+export function paragraphHoverStyles(enabled: boolean): string {
+  if (!enabled) return "";
+  return `
+.reword-p-hover p:hover,
+.reword-p-hover li:hover,
+.reword-p-hover blockquote:hover {
+  background: rgba(128, 128, 128, 0.07) !important;
+  border-radius: 4px !important;
+  transition: background 0.15s ease;
 }`.trim();
 }
 
@@ -480,6 +690,6 @@ li > .reword-bilingual {
  */
 function _sanityCheckUnused(): void {
   // 占位，让 buildReaderStyles 引用所有子函数以避免 tree-shake 误删
-  const _x = [paragraphStyles, inlineOverrideStyles, headingStyles, quoteStyles, listStyles, figureStyles, bodyStyles, textStyles, paragraphLayoutStyles, layoutMarginStyles, linkStyles, codeStyles, colorSchemeStyles, wordWrapStyles, fontSizeOverrideStyles, focusModeStyles, bilingualStyles];
+  const _x = [paragraphStyles, inlineOverrideStyles, headingStyles, quoteStyles, listStyles, figureStyles, bodyStyles, textStyles, paragraphLayoutStyles, layoutMarginStyles, linkStyles, codeStyles, colorSchemeStyles, wordWrapStyles, fontSizeOverrideStyles, focusModeStyles, bilingualStyles, paragraphHoverStyles, buildFontFamilyLists, fontVariableStyles, classifiedFontStyles, fontFamilyStyles];
   void _x;
 }

@@ -38,10 +38,20 @@ export interface AiSettings {
   msKey?: string;
   /** 翻译引擎：微软 Translator 区域（如 eastasia / westeurope） */
   msRegion?: string;
+  /** 翻译引擎：启用微软 Translator（默认关闭；AI 恒为首选，此为兜底开关） */
+  msEnabled?: boolean;
   /** 翻译引擎：LibreTranslate 实例地址（如 https://libretranslate.com） */
   libreUrl?: string;
+  /** 翻译引擎：启用 LibreTranslate（默认关闭；AI 恒为首选，此为兜底开关） */
+  libreEnabled?: boolean;
   /** 免费翻译引擎优先级（按数组顺序尝试；AI 永远兜底，不在此列） */
   translatePriority?: string[];
+  /** AI 翻译参数：每批段数（单次 API 请求合并的段落数，默认 8） */
+  trBatchSize?: number;
+  /** AI 翻译参数：翻译温度（覆写「AI 服务」的 temperature，默认 0.2，直译低稳） */
+  trTemperature?: number;
+  /** AI 翻译参数：并发桶数（同时发送的批次数，默认 2） */
+  trConcurrency?: number;
 
   // 2026-08-21 精简：以下字段已删除(从 21 个 → 14 个,-33%)
   //  - chatApi: 强制 OpenAI 兼容,不再支持多格式
@@ -107,9 +117,13 @@ export const DEFAULT_AI_DEEPREAD_SYSTEM = `你是 REword 英语学习助手，�
  *   旧的"对话模式"提示词由 normalizeAiSettings 自动迁移到 promptTemplate 末尾。
  */
 
-/** 阅读器「翻译」按钮发送到 AI 精读时预置的默认提示词 */
+/**
+ * 翻译默认提示词（2026-08-28 改直译版）。
+ * 阅读器「翻译」按钮与双语对照共用：直译、不为了流畅而润色改写，
+ * 仅在不改变单词基本意思的前提下做极轻微调整以助记。
+ */
 export const DEFAULT_TRANSLATE_PROMPT =
-  "请把下面这句话翻译成中文，要求准确、通顺、符合中文表达习惯；如有必要请附上重点词组或难词解释：";
+  "你是一位严谨的英译中翻译器。请遵循「直译」原则：逐句忠实翻译，不要为了阅读流畅而过度润色、改写或合并句子；仅在不改变单词基本意思的前提下做极轻微调整，以帮助单词认识与学习。保持原文的段落与句子顺序一一对应。只输出译文本身，不要添加解释、注音或任何额外内容。";
 
 export const DEFAULT_AI_SETTINGS: AiSettings = {
   enabled: false,
@@ -138,8 +152,14 @@ export const DEFAULT_AI_SETTINGS: AiSettings = {
   // 2026-08-27 翻译引擎配置（微软 / LibreTranslate / 优先级；AI 兜底固定末位）
   msKey: "",
   msRegion: "",
+  msEnabled: false,
   libreUrl: "",
+  libreEnabled: false,
   translatePriority: ["microsoft", "libretranslate"],
+  // 2026-08-28 AI 翻译参数（翻译引擎 Tab 可调；默认值与 index.ts 常量一致）
+  trBatchSize: 8,
+  trTemperature: 0.2,
+  trConcurrency: 2,
   // 2026-08-21 精简：双模式字段 defaultMode / chatPromptTemplate 已删除
 };
 
@@ -217,13 +237,19 @@ export function normalizeAiSettings(raw: any): AiSettings {
     translatePrompt: (typeof r.translatePrompt === "string" && r.translatePrompt.trim())
       ? r.translatePrompt
       : DEFAULT_TRANSLATE_PROMPT,
-    // 2026-08-27 翻译引擎配置
+    // 2026-08-27 翻译引擎配置（2026-08-28 起默认关闭，AI 为首选引擎）
     msKey: str(r.msKey, ""),
     msRegion: str(r.msRegion, ""),
+    msEnabled: bool(r.msEnabled, false),
     libreUrl: str(r.libreUrl, ""),
+    libreEnabled: bool(r.libreEnabled, false),
     translatePriority: Array.isArray(r.translatePriority) && r.translatePriority.length
       ? r.translatePriority.filter((x: any) => x === "microsoft" || x === "libretranslate")
       : ["microsoft", "libretranslate"],
+    // 2026-08-28 AI 翻译参数（与翻译引擎 Tab 联动）
+    trBatchSize: Math.round(num(r.trBatchSize, 8, 1, 30)),
+    trTemperature: num(r.trTemperature, 0.2, 0, 1),
+    trConcurrency: Math.round(num(r.trConcurrency, 2, 1, 8)),
     // 2026-08-21 精简：defaultMode / chatPromptTemplate 双模式字段已删除
     //   若 raw 中存在,normalize 会忽略(用户可自行编辑 promptTemplate)
   };

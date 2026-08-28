@@ -7,12 +7,18 @@
  * - 目标语言：简体中文映射到 "zh-Hans"。
  * - 批量：请求体为 [{Text}, ...]，响应为 [{translations:[{text}]}, ...]。
  */
-import type { Translator, TranslateRequest } from "../types";
+import type { Translator, TranslateRequest } from "../types.ts";
 
 export class MicrosoftTranslator implements Translator {
   readonly name = "microsoft" as const;
 
-  constructor(private key: string, private region: string) {}
+  private key: string;
+  private region: string;
+
+  constructor(key: string, region: string) {
+    this.key = key;
+    this.region = region;
+  }
 
   get available(): boolean {
     return !!(this.key && this.region);

@@ -114,6 +114,7 @@ import {
 } from "./copilot/copilot/prompt-manager.ts";
 import { runChat as runCopilotChat } from "./copilot/ai/ai-orchestrator.ts";
 import { buildProviders, translateWithFallback } from "./translate/engine";
+import { parseNumberedTranslations, parseTranslationsPositional } from "./translate/providers/ai";
 import { TranslationCache } from "./translate/cache";
 import type {
   AiSettings as CopilotAiSettings,
@@ -270,6 +271,10 @@ export default class RewordPlugin extends Plugin {
   private aiSettings!: AiSettings;       // AI 精读设置（persist: hiword-ai.json）
   private aiPanel?: AiPanel;             // AI 精读 dock 面板控制器
   private translationCache!: TranslationCache; // 双语翻译按书缓存（persist: translations/<bookId>.json）
+  /** 最近一次双语翻译的累计 token 用量（UI 层读取展示用） */
+  private _lastTranslationUsage: { promptTokens: number; completionTokens: number; totalTokens: number } | null = null;
+  /** 读取最近一次翻译的 token 用量（null 表示无数据 / 未走 AI） */
+  get lastTranslationUsage() { return this._lastTranslationUsage; }
 
   // ===== Copilot 聊天（照抄 copilot 插件，独立第二个 dock）=====
   private copilotConvo!: ConversationStore; // 会话历史存储
@@ -482,7 +487,11 @@ export default class RewordPlugin extends Plugin {
       this.aiPresetStore = new AiPresetStore(() => this.persistAiPresets.update(this.aiPresetStore.export()));
       this.promptTemplateStore = new PromptTemplateStore(() => this.persistAiPrompts.update(this.promptTemplateStore.export()));
       this.aiSettings = { ...DEFAULT_AI_SETTINGS };
-      this.translationCache = new TranslationCache(this);
+      // 2026-08-28：缓存 hash 拼入当前翻译提示词（salt），提示词改版后旧译文自动失效
+      this.translationCache = new TranslationCache(
+        this,
+        () => this.aiSettings?.translatePrompt || DEFAULT_AI_SETTINGS.translatePrompt
+      );
     } catch (e) {
       getLogger().error("[REword] 字段初始化失败:", { error: e });
     }
@@ -1193,16 +1202,21 @@ export default class RewordPlugin extends Plugin {
     // 1) 查缓存（按书）
     const { hits, misses } = await this.translationCache.getBatch(bookId, texts);
     for (const k in hits) out[+k] = hits[k];
+    console.log(`[REword] translateBatch: 缓存命中 ${Object.keys(hits).length}, 未命中 ${misses.length}/${texts.length}`);
 
-    // 2) 未命中部分走引擎链
+    // 2) 未命中部分走引擎链（2026-08-28：AI 首选 + 批量模式）
     if (misses.length) {
       const reqTexts = misses.map((i) => texts[i]);
       try {
+        console.log("[REword] translateBatch: buildProviders...");
         const providers = buildProviders(this.aiSettings, {
           translateOne: (t, f, t2) => this.aiTranslateText(t, f, t2),
+          translateBatch: (ts, f, t2) => this.aiTranslateBatch(ts, f, t2),
         });
+        console.log(`[REword] translateBatch: ${providers.length} 个引擎, 调用 translateWithFallback...`);
         const res = await translateWithFallback(providers, { texts: reqTexts, from, to });
         const tr = res.texts || [];
+        console.log(`[REword] translateBatch: 引擎返回 provider=${res.provider}, ${tr.length} 条译文, 非空 ${tr.filter(t=>t?.trim()).length} 条`);
         const pairs: Array<[string, string]> = [];
         misses.forEach((idx, j) => {
           const translation = (tr[j] || "").trim();
@@ -1211,30 +1225,174 @@ export default class RewordPlugin extends Plugin {
         });
         if (pairs.length) await this.translationCache.setBatch(bookId, pairs);
       } catch (e) {
+        console.error("[REword] translateBatch: 引擎链异常:", e);
         getLogger().error("[REword] 批量翻译失败:", { error: e });
       }
     }
+    console.log(`[REword] translateBatch: 最终返回 ${out.length} 条, 非空 ${out.filter(t=>t?.trim()).length} 条`);
     return out;
   }
 
   /**
    * 自有 AI 兜底翻译（单条）：直接走对话编排，不污染 AI 精读面板会话。
    * 用 AI 设置里的「翻译预置提示词」作为系统提示，关闭 JSON 输出，求纯译文。
+   * 2026-08-28 修复：改读 AI 精读设置（this.aiSettings，即用户实际配置的
+   * baseUrl/apiKey/model）——原读 copilotAi（独立 Copilot 设置）导致未配置
+   * Copilot 时翻译永远空转。temperature 覆写 0.2 抑制润色倾向。
    */
   private async aiTranslateText(text: string, from: string, to: string): Promise<string> {
-    if (!this.copilotAi?.apiKey) return ""; // 未配置 AI 服务则直接放弃兜底
+    if (!this.aiSettings?.enabled || !this.aiSettings?.apiKey) return ""; // AI 未配置则放弃
     const prompt = (this.aiSettings?.translatePrompt || DEFAULT_AI_SETTINGS.translatePrompt).trim();
-    const settings = { ...this.copilotAi, systemPrompt: prompt, jsonMode: false } as any;
+    const settings = { ...this.aiSettings, systemPrompt: prompt, jsonMode: false, temperature: this.aiSettings?.trTemperature ?? 0.2 } as any;
     const res = await runCopilotChat(settings, [], [{ role: "user", content: text } as any], undefined, {});
     return res?.content || "";
   }
 
-  /** 是否已配置任一可用的翻译引擎（供阅读器双语开关前置提示） */
+  /** AI 批量翻译分桶参数：段数上限 / 字符预算（防超长 prompt 与输出截断） */
+  private static readonly AI_TR_CHUNK = 8;
+  private static readonly AI_TR_CHUNK_CHARS = 3000;
+  /** 桶间并发数与 429 退避等待 */
+  private static readonly AI_TR_CONCURRENCY = 2;
+  private static readonly AI_TR_RETRY_WAIT = 1500;
+
+  /**
+   * 2026-08-28：AI 批量翻译（双语首选路径）。
+   * 一批段落按 [[序号]] 编号后合并进尽量少的请求，要求模型按序号逐段
+   * 回传译文，解析对齐后回填；漏译空位再逐段 aiTranslateText 兜底。
+   * 复用 AI 精读同一模型与设置（仅覆写 systemPrompt/temperature/jsonMode），
+   * 不落盘会话、不污染精读面板。
+   */
+  private async aiTranslateBatch(texts: string[], from: string, to: string): Promise<string[]> {
+    const out: string[] = new Array(texts.length).fill("");
+    if (!Array.isArray(texts) || !texts.length) return out;
+    if (!this.aiSettings?.enabled || !this.aiSettings?.apiKey) {
+      console.warn("[REword] aiTranslateBatch: AI 未配置(enabled/apiKey)，返回空");
+      return out;
+    }
+
+    // 重置 token 用量累计器
+    this._lastTranslationUsage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
+
+    const prompt = (this.aiSettings?.translatePrompt || DEFAULT_AI_SETTINGS.translatePrompt).trim();
+    const settings = { ...this.aiSettings, systemPrompt: prompt, jsonMode: false, temperature: this.aiSettings?.trTemperature ?? 0.2 } as any;
+    console.log(`[REword] aiTranslateBatch: 入参 ${texts.length} 段, baseUrl=${(settings.baseUrl||"").slice(0,50)}, model=${settings.model||"(空)"}, apiKey=${settings.apiKey?"有":"无"}`);
+
+    // 分桶：段数 + 字符双预算
+    const chunks: Array<{ start: number; texts: string[] }> = [];
+    let cur: { start: number; texts: string[] } | null = null;
+    let curChars = 0;
+    texts.forEach((t, i) => {
+      const len = t.length;
+      if (!cur || cur.texts.length >= (this.aiSettings?.trBatchSize ?? RewordPlugin.AI_TR_CHUNK) || curChars + len > RewordPlugin.AI_TR_CHUNK_CHARS) {
+        cur = { start: i, texts: [] };
+        curChars = 0;
+        chunks.push(cur);
+      }
+      cur.texts.push(t);
+      curChars += len;
+    });
+    console.log(`[REword] aiTranslateBatch: 分桶完成，${chunks.length} 个桶`);
+
+    const runChunk = async (chunk: { start: number; texts: string[] }): Promise<void> => {
+      const numbered = chunk.texts.map((t, j) => `[[${j + 1}]]\n${t}`).join("\n\n");
+      const userContent =
+        `请把下面 ${chunk.texts.length} 段各自翻译成中文直译。每段以 [[序号]] 开头标记，` +
+        `回答时同样用 [[序号]] 开头逐段给出译文，序号与原文一一对应，` +
+        `不要合并、不要遗漏、不要添加任何解释或额外内容。\n\n${numbered}`;
+      for (let attempt = 0; attempt < 2; attempt++) {
+        try {
+          console.log(`[REword] aiTranslateBatch: 桶#${chunks.indexOf(chunk)} 调用 runCopilotChat (attempt=${attempt})...`);
+          const res = await runCopilotChat(
+            settings,
+            [],
+            [{ role: "user", content: userContent } as any],
+            undefined,
+            {}
+          );
+          console.log(`[REword] aiTranslateBatch: runCopilotChat 返回 ok=${res?.ok}, content长度=${(res?.content||"").length}, 内容预览="${(res?.content||"").slice(0,120)}", error=${res?.error||"无"}`);
+          // 累计 token 用量（部分 AI 服务商返回 usage，缺失则跳过）
+          if (res?.usage) {
+            this._lastTranslationUsage!.promptTokens += res.usage.promptTokens || 0;
+            this._lastTranslationUsage!.completionTokens += res.usage.completionTokens || 0;
+            this._lastTranslationUsage!.totalTokens += res.usage.totalTokens || 0;
+            console.log(`[REword] aiTranslateBatch: 桶#${chunks.indexOf(chunk)} token 用量 prompt=${res.usage.promptTokens} completion=${res.usage.completionTokens} total=${res.usage.totalTokens}`);
+          }
+          let pairs = parseNumberedTranslations(res?.content || "");
+          // 2026-08-28 兜底：模型未遵守 [[序号]] 格式（返回纯译文 / 数字编号）时，
+          // 按位置顺序回填到 1..N，避免整批译文因格式不符而静默全丢。
+          if (pairs.length === 0 && chunk.texts.length > 0 && (res?.content || "").trim()) {
+            pairs = parseTranslationsPositional(res.content, chunk.texts.length);
+            console.warn(`[REword] aiTranslateBatch: 未命中[[序号]]格式，位置兜底得 ${pairs.length} 对`);
+            getLogger().warn("[REword] AI 批量翻译未命中 [[序号]] 格式，启用位置兜底", {
+              data: { start: chunk.start, size: chunk.texts.length, got: pairs.length },
+            });
+          }
+          for (const [idx, tr] of pairs) {
+            if (idx >= 1 && idx <= chunk.texts.length) out[chunk.start + idx - 1] = tr;
+          }
+          console.log(`[REword] aiTranslateBatch: 桶#${chunks.indexOf(chunk)} 完成，out 非空 ${out.filter(Boolean).length}/${texts.length}`);
+          return; // 桶完成（漏译序号交给下方逐段兜底）
+        } catch (e: any) {
+          const msg = String(e?.message || e);
+          console.warn(`[REword] aiTranslateBatch: 桶#${chunks.indexOf(chunk)} 异常: ${msg}`);
+          if (attempt === 0 && /429|rate|too many/i.test(msg)) {
+            await new Promise((r) => setTimeout(r, RewordPlugin.AI_TR_RETRY_WAIT));
+            continue; // 限流退避后重试一次
+          }
+          getLogger().warn("[REword] AI 批量翻译桶失败:", {
+            data: { start: chunk.start, size: chunk.texts.length, error: msg },
+          });
+          return;
+        }
+      }
+    };
+
+    // 桶间并发 2：串行太慢、并发过高易触发限流
+    const queue = [...chunks];
+    console.log(`[REword] aiTranslateBatch: 启动 ${Math.min(this.aiSettings?.trConcurrency ?? RewordPlugin.AI_TR_CONCURRENCY, queue.length)} 个 worker 处理 ${queue.length} 个桶`);
+    const workers = Array.from(
+      { length: Math.min(this.aiSettings?.trConcurrency ?? RewordPlugin.AI_TR_CONCURRENCY, queue.length) },
+      async () => {
+        while (queue.length) {
+          const c = queue.shift();
+          if (c) await runChunk(c);
+        }
+      }
+    );
+    await Promise.all(workers);
+
+    console.log(`[REword] aiTranslateBatch: 所有桶完成，out 非空 ${out.filter(Boolean).length}/${texts.length}`);
+
+    // 漏译逐段兜底：仅当大部分桶成功（空位 ≤ 一半）时执行，
+    // 避免批量整体失败（断网/欠费）时触发连环逐段请求。
+    const missIdx: number[] = [];
+    for (let i = 0; i < texts.length; i++) if (!out[i]) missIdx.push(i);
+    if (missIdx.length && missIdx.length <= texts.length / 2) {
+      for (const i of missIdx) {
+        try {
+          out[i] = (await this.aiTranslateText(texts[i], from, to)) || "";
+        } catch {
+          /* 保持空串 */
+        }
+      }
+    } else if (missIdx.length) {
+      getLogger().warn("[REword] AI 批量翻译大面积失败，跳过逐段兜底:", {
+        data: { total: texts.length, missed: missIdx.length },
+      });
+    }
+    return out;
+  }
+
+  /**
+   * 是否已配置任一可用的翻译引擎（供阅读器双语开关前置提示）。
+   * 2026-08-28：AI（精读设置）为首选引擎；微软/LibreTranslate 仅在
+   * 「开关开启 + 已配置」时才计入。
+   */
   public isTranslationConfigured(): boolean {
     return (
-      !!(this.aiSettings?.msKey && this.aiSettings?.msRegion) ||
-      !!this.aiSettings?.libreUrl ||
-      !!this.copilotAi?.apiKey
+      !!(this.aiSettings?.enabled && this.aiSettings?.apiKey) ||
+      !!(this.aiSettings?.msEnabled && this.aiSettings?.msKey && this.aiSettings?.msRegion) ||
+      !!(this.aiSettings?.libreEnabled && this.aiSettings?.libreUrl)
     );
   }
 
@@ -7816,12 +7974,54 @@ export default class RewordPlugin extends Plugin {
               </div>
             </section>
 
-            <!-- ===== Tab 5: 翻译引擎（2026-08-27 重设计：双语段落 + 划词兜底） ===== -->
+            <!-- ===== Tab 5: 翻译引擎（2026-08-28：AI 首选，免费引擎默认关闭、可开关兜底） ===== -->
             <section class="hiword-ai-settings-page" data-page="translate" style="display:none;">
               <div class="hiword-ai-setting-group">
                 <div class="hiword-ai-setting-label">
+                  <span class="hiword-ai-setting-name">翻译引擎说明</span>
+                  <span class="hiword-ai-setting-desc">双语对照 / 划词翻译默认使用上方「AI 服务」中配置的模型（AI 首选，批量直译）。以下免费引擎默认关闭，仅作为 AI 失败时的兜底。</span>
+                </div>
+              </div>
+              <!-- ===== 2026-08-28 AI 翻译参数（首选引擎，默认同 index.ts 常量） ===== -->
+              <div class="hiword-ai-setting-group" style="border: 0.5px solid var(--b3-theme-primary, #4285f4); border-radius: 8px; padding: 14px 16px;">
+                <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 8px;">
+                  <span class="hiword-ai-setting-name" style="font-size: 14px; font-weight: 500;">AI 翻译参数</span>
+                  <span style="font-size: 11px; background: var(--b3-theme-primary, #4285f4); color: #fff; padding: 1px 7px; border-radius: 10px;">首选引擎</span>
+                </div>
+                <p class="hiword-ai-setting-desc" style="margin-bottom: 12px;">调节 AI 批量翻译的行为。大部分情况保持默认即可；模型较弱或网络不稳时可降低每批段数。以下参数与「精读提示词」Tab 共用同一翻译提示词。</p>
+                <div class="hiword-ai-field">
+                  <label class="hiword-ai-field-label" for="ais-tr-prompt">翻译提示词</label>
+                  <textarea id="ais-tr-prompt" class="hiword-ai-setting-textarea" spellcheck="false">${this.escapeHtml(s.translatePrompt)}</textarea>
+                  <span class="hiword-ai-setting-desc" style="display: block; margin-top: 3px;">发送给模型的系统提示词，控制翻译风格与输出格式（与「精读提示词」Tab 同步）。</span>
+                </div>
+                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-top: 10px;">
+                  <div class="hiword-ai-field">
+                    <label class="hiword-ai-field-label" for="ais-tr-batch-size">每批段数</label>
+                    <input id="ais-tr-batch-size" class="hiword-ai-input" type="number" min="2" max="20" step="1" value="${s.trBatchSize ?? 8}" />
+                    <span class="hiword-ai-setting-desc" style="display: block; margin-top: 3px;">每次 API 请求合并的段落数（默认 8）。值越大越省 token 但易截断。</span>
+                  </div>
+                  <div class="hiword-ai-field">
+                    <label class="hiword-ai-field-label" for="ais-tr-temperature">翻译温度</label>
+                    <input id="ais-tr-temperature" class="hiword-ai-input" type="number" min="0" max="1" step="0.1" value="${s.trTemperature ?? 0.2}" />
+                    <span class="hiword-ai-setting-desc" style="display: block; margin-top: 3px;">直译建议 0~0.3（低=稳定）；调高会增加润色/改写。</span>
+                  </div>
+                </div>
+                <div class="hiword-ai-field" style="margin-top: 12px;">
+                  <label class="hiword-ai-field-label" for="ais-tr-concurrency">并发请求数：<span id="ais-tr-concurrency-val">${s.trConcurrency ?? 2}</span></label>
+                  <input id="ais-tr-concurrency" class="hiword-ai-input" type="range" min="1" max="5" step="1" value="${s.trConcurrency ?? 2}" style="width: 100%; accent-color: var(--b3-theme-primary, #4285f4);" />
+                  <span class="hiword-ai-setting-desc" style="display: block; margin-top: 3px;">同时发送的批次数（默认 2）。网络好可提高到 3~4 加速。</span>
+                </div>
+              </div>
+              <div class="hiword-ai-setting-group">
+                <div class="hiword-ai-setting-label">
                   <span class="hiword-ai-setting-name">Microsoft Translator</span>
-                  <span class="hiword-ai-setting-desc">Azure 认知服务翻译，免费 200 万字符/月，官方支持浏览器跨域。需订阅 Key 与区域。</span>
+                  <span class="hiword-ai-setting-desc">Azure 认知服务翻译，免费 200 万字符/月。默认关闭。</span>
+                </div>
+                <div class="hiword-ai-field-row">
+                  <label class="hiword-ai-check">
+                    <input type="checkbox" id="ais-ms-enabled" ${s.msEnabled ? "checked" : ""} />
+                    <span>启用（AI 失败时兜底）</span>
+                  </label>
                 </div>
                 <div class="hiword-ai-field">
                   <label class="hiword-ai-field-label" for="ais-ms-key">订阅 Key</label>
@@ -7835,27 +8035,17 @@ export default class RewordPlugin extends Plugin {
               <div class="hiword-ai-setting-group">
                 <div class="hiword-ai-setting-label">
                   <span class="hiword-ai-setting-name">LibreTranslate</span>
-                  <span class="hiword-ai-setting-desc">开源免费翻译，可填公共实例（如 https://libretranslate.com）。限流/隐私较弱，作备选。</span>
+                  <span class="hiword-ai-setting-desc">开源免费翻译，可填公共实例（如 https://libretranslate.com）。限流/隐私较弱。默认关闭。</span>
+                </div>
+                <div class="hiword-ai-field-row">
+                  <label class="hiword-ai-check">
+                    <input type="checkbox" id="ais-libre-enabled" ${s.libreEnabled ? "checked" : ""} />
+                    <span>启用（AI 失败时兜底）</span>
+                  </label>
                 </div>
                 <div class="hiword-ai-field">
                   <label class="hiword-ai-field-label" for="ais-libre-url">实例地址</label>
                   <input id="ais-libre-url" class="hiword-ai-input" value="${this.escapeAttr(s.libreUrl || "")}" placeholder="https://libretranslate.com" />
-                </div>
-              </div>
-              <div class="hiword-ai-setting-group">
-                <div class="hiword-ai-setting-label">
-                  <span class="hiword-ai-setting-name">引擎优先级</span>
-                  <span class="hiword-ai-setting-desc">免费引擎按勾选顺序尝试；自有 AI 始终作为最后兜底。</span>
-                </div>
-                <div class="hiword-ai-field-row">
-                  <label class="hiword-ai-check">
-                    <input type="checkbox" id="ais-pri-microsoft" ${s.translatePriority?.includes("microsoft") ? "checked" : ""} />
-                    <span>微软 Translator</span>
-                  </label>
-                  <label class="hiword-ai-check">
-                    <input type="checkbox" id="ais-pri-libre" ${s.translatePriority?.includes("libretranslate") ? "checked" : ""} />
-                    <span>LibreTranslate</span>
-                  </label>
                 </div>
               </div>
             </section>
@@ -7897,6 +8087,11 @@ export default class RewordPlugin extends Plugin {
       const tempSlider = dlg.querySelector("#ais-temp") as HTMLInputElement;
       const tempVal = dlg.querySelector("#ais-temp-val") as HTMLElement;
       tempSlider?.addEventListener("input", () => { if (tempVal) tempVal.textContent = tempSlider.value; });
+
+      // 2026-08-28 AI 翻译并发滑块实时值
+      const trConcSlider = dlg.querySelector("#ais-tr-concurrency") as HTMLInputElement;
+      const trConcVal = dlg.querySelector("#ais-tr-concurrency-val") as HTMLElement;
+      trConcSlider?.addEventListener("input", () => { if (trConcVal) trConcVal.textContent = trConcSlider.value; });
 
       // 模型变化时自动推断上下文窗口（仅在用户未手动修改过时）
       const aisModelInput = dlg.querySelector("#ais-model") as HTMLInputElement;
@@ -8143,6 +8338,26 @@ export default class RewordPlugin extends Plugin {
     const inputVal = (sel: string) => (q(sel) as HTMLInputElement)?.value?.trim() || "";
     const selectVal = (sel: string) => (q(sel) as HTMLSelectElement)?.value || "";
     const checkboxVal = (sel: string) => !!(q(sel) as HTMLInputElement)?.checked;
+    // 2026-08-28 AI 翻译参数：数字输入容错
+    const inputNum = (sel: string): number | null => {
+      const raw = (q(sel) as HTMLInputElement)?.value?.trim();
+      if (raw == null || raw === "") return null;
+      const n = parseFloat(raw);
+      return isFinite(n) ? n : null;
+    };
+    const numOr = (v: number | null, fallback: number, min: number, max: number): number => {
+      if (v == null || !isFinite(v)) return fallback;
+      return Math.min(max, Math.max(min, Math.round(v)));
+    };
+    // 翻译提示词：精读提示词 Tab(ais-translate-prompt) 与翻译引擎 Tab(ais-tr-prompt) 共用，取有改动的那个
+    const resolveTranslatePrompt = (): string => {
+      const cur = this.aiSettings?.translatePrompt || DEFAULT_AI_SETTINGS.translatePrompt;
+      const trVal = (q("tr-prompt") as HTMLTextAreaElement)?.value?.trim();
+      const deepVal = (q("translate-prompt") as HTMLTextAreaElement)?.value?.trim();
+      if (trVal && trVal !== cur) return trVal;
+      if (deepVal && deepVal !== cur) return deepVal;
+      return cur;
+    };
 
     // 模型列表：从 DOM 列表项读取
     const modelListEl = dlg.querySelector("#" + prefix + "model-list") as HTMLElement | null;
@@ -8176,21 +8391,19 @@ export default class RewordPlugin extends Plugin {
       exportSavePath: inputVal("export-path"),
       // 记忆文档
       soulDocId: inputVal("soul-id"),
-      // 2026-08-27 阅读器「翻译」预置提示词
-      translatePrompt: (q("translate-prompt") as HTMLTextAreaElement)?.value?.trim() || DEFAULT_AI_SETTINGS.translatePrompt,
-      // 2026-08-27 翻译引擎配置
+      // 2026-08-27 阅读器「翻译」预置提示词（与「翻译引擎」Tab 的 ais-tr-prompt 共用同一字段，取有改动的那个）
+      translatePrompt: resolveTranslatePrompt(),
+      // 2026-08-28 AI 翻译参数（翻译引擎 Tab 可调）
+      trBatchSize: numOr(inputNum("tr-batch-size"), 8, 1, 30),
+      trTemperature: numOr(inputNum("tr-temperature"), 0.2, 0, 1),
+      trConcurrency: numOr(inputNum("tr-concurrency"), 2, 1, 8),
+      // 2026-08-27 翻译引擎配置（2026-08-28：开关默认关闭，AI 首选；优先级固定 微软→Libre）
       msKey: inputVal("ms-key"),
       msRegion: inputVal("ms-region"),
+      msEnabled: checkboxVal("ms-enabled"),
       libreUrl: inputVal("libre-url").replace(/\/+$/, ""),
-      translatePriority: ([
-        checkboxVal("pri-microsoft") ? "microsoft" : null,
-        checkboxVal("pri-libre") ? "libretranslate" : null,
-      ].filter(Boolean) as string[]).length
-        ? ([
-            checkboxVal("pri-microsoft") ? "microsoft" : null,
-            checkboxVal("pri-libre") ? "libretranslate" : null,
-          ].filter(Boolean) as string[])
-        : ["microsoft", "libretranslate"],
+      libreEnabled: checkboxVal("libre-enabled"),
+      translatePriority: ["microsoft", "libretranslate"],
       // 2026-08-21 精简：defaultMode 已删除
     } as AiSettings;
   }

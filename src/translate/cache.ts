@@ -7,17 +7,26 @@
  * - 内存层（mem）缓存已加载的书，避免重复读盘。
  * - 写入防抖 500ms，避免海量段落瞬间触发几百次 saveData。
  * - hash 用 FNV-1a（短、稳定、无依赖），足以区分不同段落文本。
+ * - 2026-08-28：hash 拼入 salt（默认取当前翻译提示词），提示词 / 直译
+ *   风格改版后旧 key 自然不命中，无需清缓存文件。
  */
 export class TranslationCache {
   private mem = new Map<string, Record<string, string>>();
   private timers = new Map<string, any>();
+  private plugin: any;
+  private saltFn?: () => string;
 
-  constructor(private plugin: any) {}
+  constructor(plugin: any, saltFn?: () => string) {
+    this.plugin = plugin;
+    this.saltFn = saltFn;
+  }
 
   private hash(s: string): string {
+    const salt = this.saltFn ? this.saltFn() : "";
+    const input = salt ? salt + "\u0001" + s : s;
     let h = 0x811c9dc5;
-    for (let i = 0; i < s.length; i++) {
-      h ^= s.charCodeAt(i);
+    for (let i = 0; i < input.length; i++) {
+      h ^= input.charCodeAt(i);
       h = Math.imul(h, 0x01000193);
     }
     return (h >>> 0).toString(36);

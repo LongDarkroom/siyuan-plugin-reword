@@ -61,6 +61,8 @@ export interface ChatResult {
   error?: string;
   /** 因取消信号中断而结束（content 为已生成的部分内容） */
   aborted?: boolean;
+  /** token 用量（部分 AI 服务商返回；缺失则 undefined） */
+  usage?: import("./ai-client.ts").AiUsage;
 }
 
 /** 流式参数：提供 onToken 时走流式，否则走缓冲式生成 */
@@ -95,13 +97,13 @@ export async function runChat(
         onToken: stream.onToken,
       });
       if (!gen.ok) return { ok: false, content: "", error: gen.error };
-      return { ok: true, content: gen.content, model: gen.model, aborted: gen.aborted };
+      return { ok: true, content: gen.content, model: gen.model, aborted: gen.aborted, usage: gen.usage };
     }
     const gen = await requestAIGenerate(
       { messages, settings, jsonMode: settings.jsonMode },
       transport
     );
-    return { ok: true, content: gen.content, model: gen.model };
+    return { ok: true, content: gen.content, model: gen.model, usage: gen.usage };
   } catch (e: any) {
     return {
       ok: false,

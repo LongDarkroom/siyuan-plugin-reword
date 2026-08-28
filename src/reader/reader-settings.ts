@@ -26,8 +26,17 @@ export type ReaderTheme =
 export type ReaderLineWidth = "narrow" | "normal" | "wide";
 export type ReaderFlow = "paginated" | "scrolled";
 export type ReaderTurnStyle = "default" | "slide" | "curl";
-/** 字体来源：跟随思源 / 自定义导入 / 系统默认（不注入） */
-export type ReaderFontMode = "follow-siyuan" | "custom" | "system";
+/**
+ * 字体来源：跟随思源 / 自定义导入 / 系统默认（不注入）/ 分类设置
+ *
+ * 2026-08-28 新增 `classified`（分类设置，参考 Readest 字体面板）：
+ * 衬线 / 无衬线 / 等宽三条独立字体链 + 可选中文字体，与「跟随思源」单栈模式并列，
+ * 由用户在设置面板切换。保留双模式——跟随思源零配置够用，分类模式给进阶用户。
+ */
+export type ReaderFontMode = "follow-siyuan" | "custom" | "system" | "classified";
+
+/** 正文默认走哪条字体链（2026-08-28，Readest 的「默认字体」概念） */
+export type ReaderDefaultFontFamily = "serif" | "sans-serif";
 /** 笔记插入位置：剪贴板 / 当前文档 / 笔记本 */
 export type NoteInsertPosition = "clipboard" | "currentDoc" | "notebook";
 /** 笔记模板预设 */
@@ -128,6 +137,17 @@ export interface ReaderSettings {
   fontMode: ReaderFontMode;
   /** fontMode=custom 时选中的自定义字体 id */
   customFontId?: string;
+  /* ---- 2026-08-28 分类字体（fontMode=classified，参考 Readest 字体面板） ---- */
+  /** 正文默认走衬线还是无衬线链（默认 serif） */
+  defaultFontFamily?: ReaderDefaultFontFamily;
+  /** 衬线链首选字体（默认「霞鹜文楷」，思源笔记常用） */
+  serifFont?: string;
+  /** 无衬线链首选字体（默认「苹方」） */
+  sansSerifFont?: string;
+  /** 等宽链首选字体（默认「Fira Code」，代码块专用） */
+  monospaceFont?: string;
+  /** 中文字体：插入每条链的次位（留空=不插入，仅用跨平台 CJK 兜底栈） */
+  defaultCJKFont?: string;
   /** 点击正文左右三分之一区域翻页（默认关，防误触） */
   clickToTurn?: boolean;
   /** 强制正文使用阅读器字体（霞鹜文楷），覆盖书籍自带死字体；默认开（参考 Readest/思阅「覆盖出版商字体」） */
@@ -140,6 +160,10 @@ export interface ReaderSettings {
   bilingual?: boolean;
   /** 双语目标语言（ISO-639-1，默认 "zh"） */
   bilingualTarget?: string;
+  /** 译文字号（em 倍数，相对正文；默认 0.70；思源 CJK 字体大，0.70≈书籍字体的 0.90；2026-08-28） */
+  translationFontSize?: number;
+  /** 段落悬停高亮：鼠标悬停段落时轻微底色（默认开，2026-08-28 增强项） */
+  paragraphHover?: boolean;
   /** 文本设置（2026-08-24 新增） */
   text: ReaderTextSettings;
   /** 段落设置（2026-08-24 新增） */
@@ -158,12 +182,20 @@ export const READER_DEFAULT_SETTINGS: ReaderSettings = {
   flow: "paginated",
   turnStyle: "default",
   fontMode: "follow-siyuan",
+  // 分类字体默认值（对齐 Readest 面板默认：衬线=霞鹜文楷 / 无衬线=微软雅黑 / 等宽=Fira Code）
+  defaultFontFamily: "serif",
+  serifFont: "霞鹜文楷",
+  sansSerifFont: "苹方",
+  monospaceFont: "Fira Code",
+  defaultCJKFont: "",
   clickToTurn: false,
   overridePublisherFont: true,
   overrideBookFontSize: true,
   focusMode: false,
   bilingual: false,
   bilingualTarget: "zh",
+  translationFontSize: 0.70,
+  paragraphHover: true,
   text: {
     fontWeight: 400,
     letterSpacing: 0,
@@ -203,7 +235,87 @@ export const FONT_MODE_PRESETS: Record<ReaderFontMode, { label: string; hint: st
   "follow-siyuan": { label: "跟随思源", hint: "使用思源笔记当前的字体（含字体插件/主题）" },
   custom: { label: "自定义", hint: "使用导入的字体文件" },
   system: { label: "系统默认", hint: "不注入字体，用阅读器内核默认" },
+  classified: {
+    label: "分类",
+    hint: "衬线 / 无衬线 / 等宽三条字体链分别设置（参考 Readest），代码块自动用等宽",
+  },
 };
+
+/** 正文默认链（Readest「默认字体」） */
+export const DEFAULT_FONT_FAMILY_PRESETS: Record<
+  ReaderDefaultFontFamily,
+  { label: string; hint: string }
+> = {
+  serif: { label: "衬线字体", hint: "笔画末端有饰线，长文阅读更省力，适合小说/文学" },
+  "sans-serif": { label: "无衬线字体", hint: "笔画均匀简洁，小字号更清晰，适合技术/新闻" },
+};
+
+/* ================= 分类字体候选池（2026-08-28，参考 Readest services/constants.ts） =================
+ * 排序原则：思源笔记常用字体 → macOS → Windows → 跨平台开源 → 通用兜底。
+ * 说明：Reword 运行在思源插件 iframe 内，**不能枚举系统已装字体**（无原生 API），
+ * 因此用预设池覆盖主流场景；未命中的字体浏览器自动跳过，由链尾 CJK 兜底栈接管。
+ */
+
+/** 衬线链候选池 */
+export const SERIF_FONT_PRESETS: string[] = [
+  "霞鹜文楷",
+  "LXGW WenKai",
+  "LXGW WenKai Screen",
+  "Songti SC",
+  "宋体",
+  "SimSun",
+  "Source Han Serif CN",
+  "Noto Serif CJK SC",
+  "Noto Serif SC",
+  "Georgia",
+  "Times New Roman",
+  "Literata",
+  "Merriweather",
+];
+
+/** 无衬线链候选池 */
+export const SANS_SERIF_FONT_PRESETS: string[] = [
+  "苹方",
+  "PingFang SC",
+  "微软雅黑",
+  "Microsoft YaHei",
+  "思源黑体",
+  "Source Han Sans CN",
+  "Noto Sans SC",
+  "Helvetica",
+  "Arial",
+  "Roboto",
+  "Open Sans",
+];
+
+/** 等宽链候选池（代码块 / <pre> / <code> 专用） */
+export const MONOSPACE_FONT_PRESETS: string[] = [
+  "Fira Code",
+  "JetBrains Mono",
+  "Source Code Pro",
+  "SF Mono",
+  "Menlo",
+  "Monaco",
+  "Consolas",
+  "Courier New",
+  "Noto Sans Mono CJK SC",
+];
+
+/** 中文字体候选池（插入每条链次位，留空则不插入） */
+export const CJK_FONT_PRESETS: string[] = [
+  "霞鹜文楷",
+  "LXGW WenKai",
+  "苹方",
+  "PingFang SC",
+  "微软雅黑",
+  "Microsoft YaHei",
+  "思源黑体",
+  "Source Han Sans CN",
+  "Noto Sans SC",
+  "Songti SC",
+  "宋体",
+  "SimSun",
+];
 
 /** 笔记插入位置选项（用于设置面板 dropdown） */
 export const NOTE_INSERT_POSITION_PRESETS: Record<NoteInsertPosition, { label: string; hint: string }> = {
@@ -278,8 +390,16 @@ export class ReaderSettingsStore {
   private _store = writable<ReaderSettings>({ ...READER_DEFAULT_SETTINGS });
   private loaded = false;
   private saveTimer: any = null;
+  /** 思源插件实例（loadData / saveData）。
+   *  2026-08-28：原为 TS 参数属性 `constructor(private plugin: any)` —— Node 的
+   *  strip-only 类型擦除（--experimental-strip-types）**不支持参数属性**，
+   *  一旦有测试文件 import 本模块就会抛 ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX 整个崩掉。
+   *  改为显式字段 + 构造函数赋值（语义等价，且 strip 兼容）。 */
+  private plugin: any;
 
-  constructor(private plugin: any) {}
+  constructor(plugin: any) {
+    this.plugin = plugin;
+  }
 
   /** 实现 Svelte store 契约：返回退订函数（支持 `$settingsStore` 自动订阅） */
   subscribe(run: (value: ReaderSettings) => void, invalidate?: (value?: ReaderSettings) => void): () => void {

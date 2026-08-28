@@ -2,47 +2,57 @@
  * 翻译引擎编排
  * ------------------------------------------------------------------
  * buildProviders：根据 AI 设置里的引擎配置，组装一条带优先级的 provider 链。
- *   - 微软 / LibreTranslate 按 translatePriority 排序（仅当已配置 key/url）。
- *   - 自有 AI 永远作为最后兜底（不进 priority 列表）。
+ *   - 2026-08-28：AI 升为链首首选（支持批量，一次请求译 N 段）；
+ *     微软 / LibreTranslate 按 translatePriority 排在后面，仅当已配置
+ *     key/url 时加入，作为 AI 失败时的兜底。
  *
  * translateWithFallback：依次尝试，返回第一个「成功且译文非空」的结果；
  *   全部失败则返回全空串（provider: "none"）。
  */
-import type { Translator, TranslateRequest, TranslateOutcome } from "./types";
-import { MicrosoftTranslator } from "./providers/microsoft";
-import { LibreTranslator } from "./providers/libretranslate";
-import { AiTranslator, AiTranslateFn } from "./providers/ai";
+import type { Translator, TranslateRequest, TranslateOutcome } from "./types.ts";
+import { MicrosoftTranslator } from "./providers/microsoft.ts";
+import { LibreTranslator } from "./providers/libretranslate.ts";
+import { AiTranslator } from "./providers/ai.ts";
+import type { AiTranslateFn, AiTranslateBatchFn } from "./providers/ai.ts";
 
 /** 引擎配置（来自 AiSettings 的翻译相关字段） */
 export interface EngineConfig {
   msKey?: string;
   msRegion?: string;
+  /** 兜底引擎开关（2026-08-28 默认关闭；AI 恒为首选） */
+  msEnabled?: boolean;
   libreUrl?: string;
-  /** 免费引擎优先级（AI 永远兜底，不在此列） */
+  libreEnabled?: boolean;
+  /** 免费引擎兜底顺序（仅当开关开启且已配置才生效） */
   priority?: string[];
 }
 
-/** 引擎依赖（注入自有 AI 兜底函数） */
+/** 引擎依赖（注入自有 AI 翻译函数） */
 export interface EngineDeps {
   translateOne: AiTranslateFn;
+  /** 批量翻译（可选）：注入后 AI 走「一次请求译 N 段」的批量模式 */
+  translateBatch?: AiTranslateBatchFn;
 }
 
-/** 组装 provider 链：免费引擎按优先级在前，AI 兜底在末 */
+/** 组装 provider 链：AI 首选，免费引擎按配置兜底在后 */
 export function buildProviders(cfg: EngineConfig, deps: EngineDeps): Translator[] {
+  const providers: Translator[] = [];
+  // 2026-08-28：AI 首选（批量模式），微软/LibreTranslate 失效场景直接命中
+  providers.push(
+    new AiTranslator({ translateOne: deps.translateOne, translateBatch: deps.translateBatch })
+  );
+
   const order = Array.isArray(cfg.priority) && cfg.priority.length
     ? cfg.priority
     : ["microsoft", "libretranslate"];
 
-  const providers: Translator[] = [];
   for (const name of order) {
-    if (name === "microsoft" && cfg.msKey && cfg.msRegion) {
+    if (name === "microsoft" && cfg.msEnabled && cfg.msKey && cfg.msRegion) {
       providers.push(new MicrosoftTranslator(cfg.msKey, cfg.msRegion));
-    } else if (name === "libretranslate" && cfg.libreUrl) {
+    } else if (name === "libretranslate" && cfg.libreEnabled && cfg.libreUrl) {
       providers.push(new LibreTranslator(cfg.libreUrl));
     }
   }
-  // 自有 AI 永远作为最后兜底
-  providers.push(new AiTranslator(deps.translateOne));
   return providers;
 }
 

@@ -7,12 +7,16 @@
  * - 目标语言：简体中文用 "zh"（LibreTranslate 同时接受 "zh"、"zh-CN"）。
  * - 批量：官方 API 的 q 字段支持字符串数组，返回 [{translatedText}, ...]。
  */
-import type { Translator, TranslateRequest } from "../types";
+import type { Translator, TranslateRequest } from "../types.ts";
 
 export class LibreTranslator implements Translator {
   readonly name = "libretranslate" as const;
 
-  constructor(private baseUrl: string) {}
+  private baseUrl: string;
+
+  constructor(baseUrl: string) {
+    this.baseUrl = baseUrl;
+  }
 
   get available(): boolean {
     return !!this.baseUrl?.trim();

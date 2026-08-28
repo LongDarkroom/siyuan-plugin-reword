@@ -23,6 +23,11 @@
     FLOW_PRESETS,
     TURN_STYLE_PRESETS,
     FONT_MODE_PRESETS,
+    DEFAULT_FONT_FAMILY_PRESETS,
+    SERIF_FONT_PRESETS,
+    SANS_SERIF_FONT_PRESETS,
+    MONOSPACE_FONT_PRESETS,
+    CJK_FONT_PRESETS,
     NOTE_INSERT_POSITION_PRESETS,
     NOTE_TEMPLATE_PRESETS,
     PROGRESS_STYLE_PRESETS,
@@ -41,7 +46,16 @@
     customFontFaceCss,
     type CustomFont,
   } from "../reader/reader-fonts";
-  import { buildReaderStyles, getDefaultCjkFontStack } from "../reader/reader-style";
+  import {
+    buildReaderStyles,
+    getDefaultCjkFontStack,
+    buildFontFamilyLists,
+  } from "../reader/reader-style";
+  // 2026-08-28 分类字体：EPUB 内联 serif/sans-serif/monospace 关键词 → CSS 变量（Readest 同款）
+  import {
+    rewriteFontKeywordsInAllContents,
+    rewriteFontKeywordsInDocument,
+  } from "../reader/reader-font-classify";
   // 2026-08-27 重设计：双语段落注入（顶栏「双语」开关）
   import { createBilingual, type BilingualHandle } from "./bilingual";
   import { getFileBlob } from "../siyuan/api";
@@ -174,6 +188,8 @@
   let bilingualHandle: BilingualHandle | null = null;
   let bilingualProgress = { done: 0, total: 0, active: false };
   let bilingualInitDone = false; // 设置恢复只执行一次
+  // 2026-08-28：最近一次双语翻译的 AI token 用量（null = 无数据 / 未走 AI）
+  let bilingualTokenUsage: { promptTokens: number; completionTokens: number; totalTokens: number } | null = null;
   // ========== 2026-08-26 调试 HUD：高亮渲染链路诊断（foliate 原生管线） ==========
   // 退回 foliate 原生：view.addAnnotation + draw-annotation 事件 + Overlayer 静态方法。
   // 不再自建 SVG 层（rewordOverlays / rewordHighlights 已移除）。
@@ -398,6 +414,28 @@
       // system：仅 CJK fallback 兜底（不注入 @font-face，不接管 epub 默认字体栈）
       return { fontFaceCss: "", fontFamilyStack: `${cjkFallback}, sans-serif` };
     }
+    if (settings.fontMode === "classified") {
+      // 2026-08-28 分类字体（Readest 同款三条链）：
+      // - @font-face：注入宿主 blob 字体，让「霞鹜文楷」等思源插件加载的网页字体
+      //   在 iframe 内真正可用（否则只命中本机已装字体，未装则 fallback）。
+      // - font-family 三条链由 buildReaderStyles 内部构建并输出 CSS 变量，
+      //   此处返回的栈仅作兜底（正文链，供双语译文等同源消费）。
+      const blobFaces = hostFontBlobs
+        .map(
+          (b) =>
+            `@font-face{font-family:"${b.family}";src:url("${b.blobUrl}");font-display:swap;}`
+        )
+        .join("\n");
+      const lists = buildFontFamilyLists(
+        settings.serifFont ?? "",
+        settings.sansSerifFont ?? "",
+        settings.monospaceFont ?? "",
+        settings.defaultCJKFont ?? ""
+      );
+      const stack =
+        settings.defaultFontFamily === "sans-serif" ? lists.sansSerif : lists.serif;
+      return { fontFaceCss: blobFaces, fontFamilyStack: stack };
+    }
     if (settings.fontMode === "custom") {
       if (!settings.customFontId || !fontBlobUrl) {
         // 自定义字体未就绪 → 走 follow-siyuan 兜底
@@ -461,6 +499,11 @@
     }
     // 同步容器兜底背景（深色模式切换时避免透出旧色/黑底闪屏）
     applyContainerBg();
+    // 分类字体：样式注入后再重写 EPUB 内联关键词
+    // （需等 --reword-* 变量真正落到内容文档，故推迟到下一帧）
+    if (settings.fontMode === "classified") {
+      requestAnimationFrame(() => applyFontKeywordRewrite());
+    }
   }
 
   /** 给阅读容器设置与主题一致的兜底背景，避免 iframe 渲染前/透明时透出黑底（黑底闪屏根因之一） */
@@ -513,6 +556,40 @@
         doc.body.classList.remove("reword-focus");
         doc.querySelectorAll(".in-center").forEach((el: Element) => el.classList.remove("in-center"));
       }
+    }
+  }
+
+  /** 段落悬停高亮（2026-08-28 C2）：给已挂载内容文档 body 加/去 .reword-p-hover */
+  function applyParagraphHover() {
+    if (!view?.renderer?.getContents) return;
+    let contents: any[] = [];
+    try { contents = view.renderer.getContents() || []; } catch { return; }
+    for (const c of contents) {
+      const doc: Document | undefined = c?.doc;
+      if (!doc?.body) continue;
+      if (settings.paragraphHover) doc.body.classList.add("reword-p-hover");
+      else doc.body.classList.remove("reword-p-hover");
+    }
+  }
+
+  /**
+   * 分类字体关键词重写（2026-08-28，Readest 同款）：
+   * 把 EPUB 作者样式表里的 serif / sans-serif / monospace 关键词替换成
+   * --reword-* CSS 变量，让标题、各类 class 段落也走用户选的字体链。
+   *
+   * 只在 fontMode=classified 时执行；全部异常已被下游 try-catch 吞掉，
+   * 最坏情况退化为「分类字体部分生效」，不影响阅读。
+   *
+   * 注意：foliate 翻页会重建内容文档 → 需在 relocate 后重复调用（见 handleRelocate 侧）。
+   * @returns 被改写的规则条数（调试用）
+   */
+  function applyFontKeywordRewrite(): number {
+    if (settings.fontMode !== "classified") return 0;
+    if (!view?.renderer?.getContents) return 0;
+    try {
+      return rewriteFontKeywordsInAllContents(() => view.renderer.getContents());
+    } catch {
+      return 0;
     }
   }
 
@@ -894,6 +971,8 @@
         updateEta(frac);
         scheduleProgressSave({ cfi: d?.cfi, fraction: frac });
         attachAllContentDocs();
+        // 2026-08-28：滚动 / 跳转（relocate）也触发双语按需补译（内部 300ms 防抖）
+        bilingualHandle?.onViewLoad();
       });
 
       view.addEventListener("load", (e: any) => {
@@ -1249,6 +1328,49 @@
     settings = settingsStore.update({
       overrideBookFontSize: (e.target as HTMLInputElement).checked,
     });
+    applyStyles();
+  }
+
+  /* ================= 2026-08-28 双语 + 阅读增强 handler ================= */
+
+  /** 译文字号（em 倍数，0.6–1.0，步长 0.02） */
+  function setTranslationFontSize(v: number) {
+    settings = settingsStore.update({
+      translationFontSize: clamp(Math.round(v * 100) / 100, 0.6, 1.0),
+    });
+    applyStyles();
+  }
+
+  /** 段落悬停高亮开关（2026-08-28 C2） */
+  function setParagraphHover(e: Event) {
+    const v = (e.target as HTMLInputElement).checked;
+    settings = settingsStore.update({ paragraphHover: v });
+    applyStyles();
+    applyParagraphHover();
+  }
+
+  /* ================= 2026-08-28 分类字体（Readest 同款）handler ================= */
+
+  /** 正文默认走哪条链：衬线 / 无衬线 */
+  function setDefaultFontFamily(key: string) {
+    settings = settingsStore.update({
+      defaultFontFamily: (key === "sans-serif" ? "sans-serif" : "serif") as
+        | "serif"
+        | "sans-serif",
+    });
+    applyStyles();
+  }
+
+  /**
+   * 设置某条链的首选字体。
+   * defaultCJKFont 传空串 = 不插入（仅用跨平台 CJK 兜底栈）。
+   * applyStyles() 内部已带 rAF → applyFontKeywordRewrite()，无需重复调用。
+   */
+  function setFontFace(
+    field: "serifFont" | "sansSerifFont" | "monospaceFont" | "defaultCJKFont",
+    v: string
+  ) {
+    settings = settingsStore.update({ [field]: v } as Partial<ReaderSettings>);
     applyStyles();
   }
 
@@ -1702,6 +1824,18 @@
     injectPageTurn(doc);
     // 2026-08-27 晚（P2.2）：新文档就绪时按当前专注模式状态应用高亮 class
     if (settings.focusMode) applyFocusMode();
+    // 2026-08-28 C2：新文档就绪时按段落悬停开关应用 class
+    applyParagraphHover();
+    // 2026-08-28 分类字体：新文档就绪时重写 EPUB 内联字体族关键词。
+    // 挂在 attachContentDoc 而非 relocate——foliate 翻页会重建内容文档，
+    // 只有这里能保证每个新 section 都被处理到（CSS 变量运行时解析，不依赖先后顺序）。
+    if (settings.fontMode === "classified") {
+      try {
+        rewriteFontKeywordsInDocument(doc);
+      } catch {
+        /* 单文档失败不影响阅读 */
+      }
+    }
   }
 
   /** 卸载所有内容文档上的监听（与 attachContentDoc 对称），反复进出阅读 Tab 不泄漏 */
@@ -3289,6 +3423,9 @@
   }
 
   // ========== 2026-08-27 重设计：双语对照开关 ==========
+  /** 双语整批失败 toast 冷却时间戳：避免滚动补译时反复弹 */
+  let bilingualFailToastAt = 0;
+
   /** 懒创建双语注入句柄（仅一次） */
   function ensureBilingualHandle(): BilingualHandle {
     if (bilingualHandle) return bilingualHandle;
@@ -3297,8 +3434,26 @@
       bookId,
       getContents: () => {
         try {
-          return (view?.renderer?.getContents?.() as Document[]) || [];
-        } catch {
+          // 2026-08-28 致命修复：foliate 的 getContents() 返回的是
+          // [{index, overlayer, doc}, ...]，真正的 Document 在 .doc 字段
+          // （见 vendor/foliate-js/view.js:288/544/688 均以 { doc } 解构）。
+          // 原代码直接把数组元素当 Document 用 → doc.querySelectorAll 抛
+          // TypeError → injectAll 在收集段落阶段崩溃 → 译文全空、按钮却绿。
+          const raw = (view?.renderer?.getContents?.() as any[]) || [];
+          const mapped = raw.map((c) => c?.doc).filter(Boolean) as Document[];
+          if (mapped.length === 0) {
+            console.warn("[REword] 双语 getContents: 返回空文档数组", {
+              hasView: !!view,
+              hasRenderer: !!(view?.renderer),
+              rawLength: raw.length,
+              rawKeys: raw[0] ? Object.keys(raw[0]) : [],
+            });
+          } else {
+            console.log(`[REword] 双语 getContents: ${raw.length} 个分节 → ${mapped.length} 个有效文档`);
+          }
+          return mapped;
+        } catch (e) {
+          console.error("[REword] 双语 getContents 异常:", e);
           return [];
         }
       },
@@ -3307,11 +3462,26 @@
       to: target,
       onProgress: (done, total) => {
         bilingualProgress = { done, total, active: done < total };
+        // 2026-08-28 修复：整批翻译失败（total>0 且 done===0）明确告知用户，
+        // 否则 AI 配置错误/网络/限流被静默吞掉、用户无感知。8 秒冷却防刷屏。
+        if (total > 0 && done === 0 && Date.now() - bilingualFailToastAt > 8000) {
+          bilingualFailToastAt = Date.now();
+          toast("双语翻译失败：请检查「AI 设置 → AI 服务」配置与网络", 3200, "error" as any);
+        }
         if (done >= total) {
           setTimeout(() => {
             bilingualProgress = { ...bilingualProgress, active: false };
+            // 翻译完成后读取累计 token 用量（由 index.ts 的 aiTranslateBatch 填充）
+            const usage = plugin?.lastTranslationUsage;
+            if (usage && usage.totalTokens > 0) {
+              bilingualTokenUsage = { ...usage };
+              console.log(`[REword] 双语翻译 token 用量: prompt=${usage.promptTokens} completion=${usage.completionTokens} total=${usage.totalTokens}`);
+            }
           }, 800);
         }
+      },
+      onTokenUsage: (usage) => {
+        bilingualTokenUsage = { ...usage };
       },
     });
     return bilingualHandle;
@@ -3323,30 +3493,53 @@
       ensureBilingualHandle().setEnabled(true);
       bilingualOn = true;
     } else {
-      toast("请先在 AI 设置配置翻译引擎（微软 / LibreTranslate）或开启 AI", 3200, "info" as any);
+      toast("请先在「AI 设置 → AI 服务」中配置并启用 AI（翻译默认走 AI）", 3200, "info" as any);
     }
   }
 
   /** 关闭双语（移除全部注入节点） */
   function disableBilingual(): void {
-    bilingualHandle?.setEnabled(false);
+    // 2026-08-28 修复：先把 UI 状态置回 false，再调 handle。
+    // 原顺序下若 setEnabled(false) 内部 removeAll() 抛异常（foliate 分节文档
+    // 被部分销毁时可能抛 DOMException），会导致 bilingualOn 永远停在 true，
+    // 按钮「关不掉」。现在即使 handle 失败，状态也已正确复位。
     bilingualOn = false;
     bilingualProgress = { done: 0, total: 0, active: false };
+    bilingualTokenUsage = null;
+    try {
+      bilingualHandle?.setEnabled(false);
+    } catch (e) {
+      // eslint-disable-next-line no-console
+      console.warn("[REword] 关闭双语时移除注入失败（已忽略）:", e);
+    }
   }
 
   /** 顶栏「双语」按钮：切换并持久化到阅读设置 */
   function toggleBilingual(): void {
-    if (bilingualOn) {
-      disableBilingual();
-      settingsStore.update({ bilingual: false });
-    } else {
-      if (!isTranslationConfigured || isTranslationConfigured()) {
-        ensureBilingualHandle().setEnabled(true);
-        bilingualOn = true;
-        settingsStore.update({ bilingual: true });
+    console.log("[REword] 双语按钮点击, 当前状态:", bilingualOn);
+    try {
+      if (bilingualOn) {
+        disableBilingual();
+        settingsStore.update({ bilingual: false });
       } else {
-        toast("请先在 AI 设置配置翻译引擎（微软 / LibreTranslate）或开启 AI", 3200, "info" as any);
+        const configured = !isTranslationConfigured || isTranslationConfigured();
+        console.log("[REword] 双语: 开启检查, isTranslationConfigured=", configured);
+        if (configured) {
+          console.log("[REword] 双语: 调用 setEnabled(true)");
+          ensureBilingualHandle().setEnabled(true);
+          bilingualOn = true;
+          settingsStore.update({ bilingual: true });
+        } else {
+          toast("请先在「AI 设置 → AI 服务」中配置并启用 AI（翻译默认走 AI）", 3200, "info" as any);
+        }
       }
+    } catch (e) {
+      // 2026-08-28 防御：任何异常都不应锁死按钮状态
+      console.warn("[REword] 双语切换异常:", e);
+      bilingualOn = false;
+      bilingualProgress = { done: 0, total: 0, active: false };
+      settingsStore.update({ bilingual: false });
+      toast("双语功能异常，请重试或重启插件", 2500, "error" as any);
     }
   }
 
@@ -3821,9 +4014,9 @@
       title={onCloseTab ? "关闭阅读（书架在侧边栏）" : "返回书架"}
       on:click={() => (onCloseTab ? onCloseTab() : onBack())}
     >‹</button>
-    <span class="reader-title" title={title}>{title}</span>
+    <span class="reader-title" title={title} style="user-select:text;cursor:text">{title}</span>
     {#if chapterLabel}
-      <span class="reader-chapter" title={chapterLabel}>{chapterLabel}</span>
+      <span class="reader-chapter" title={chapterLabel} style="user-select:text;cursor:text">{chapterLabel}</span>
     {/if}
     <span class="reader-spacer"></span>
     <span class="reader-progress">{progressText}</span>
@@ -3831,15 +4024,23 @@
       class="reader-btn reader-bilingual-btn"
       class:reader-btn-active={bilingualOn}
       class:reader-btn-busy={bilingualProgress.active}
-      title="双语对照：在每段正文后注入译文（微软 / LibreTranslate / AI 兜底）"
+      title={bilingualTokenUsage
+        ? `双语对照 · AI Token: ${bilingualTokenUsage.totalTokens}（输入 ${bilingualTokenUsage.promptTokens} + 输出 ${bilingualTokenUsage.completionTokens}）`
+        : "双语对照：在每段正文后注入译文（AI 翻译）"}
       on:click={toggleBilingual}
-    >双语{bilingualProgress.active ? ` ${bilingualProgress.done}/${bilingualProgress.total}` : ""}</button>
+    >双语{bilingualProgress.active ? ` ${bilingualProgress.done}/${bilingualProgress.total}` : ""}{bilingualTokenUsage && !bilingualProgress.active ? ` · ${bilingualTokenUsage.totalTokens}T` : ""}</button>
     <button
       class="reader-btn reader-settings-btn"
       title="设置"
       class:reader-btn-active={showSettings}
       on:click={toggleSettings}
     >⚙</button>
+    <button
+      class="reader-btn"
+      title="搜索全书（F3 / ⌘F）"
+      class:reader-btn-active={showSearch}
+      on:click={toggleSearch}
+    >🔍</button>
   </div>
 
   {#if showToc}
@@ -4164,6 +4365,84 @@
           </label>
         </div>
 
+        {#if settings.fontMode === "classified"}
+          <div class="reader-setting-row">
+            <span class="reader-setting-label">默认字体</span>
+            <div class="reader-setting-control">
+              {#each Object.entries(DEFAULT_FONT_FAMILY_PRESETS) as [key, preset]}
+                <button
+                  class="reader-seg"
+                  class:reader-seg-active={(settings.defaultFontFamily || "serif") === key}
+                  title={preset.hint}
+                  on:click={() => setDefaultFontFamily(key)}
+                >{preset.label}</button>
+              {/each}
+            </div>
+          </div>
+
+          <div class="reader-setting-row reader-setting-row-stack">
+            <span class="reader-setting-label">衬线字体</span>
+            <select
+              class="reader-font-select"
+              value={settings.serifFont || ""}
+              on:change={(e) => setFontFace("serifFont", e.currentTarget.value)}
+            >
+              <option value="">未指定（用候选池顺序）</option>
+              {#each SERIF_FONT_PRESETS as f}
+                <option value={f}>{f}</option>
+              {/each}
+            </select>
+          </div>
+
+          <div class="reader-setting-row reader-setting-row-stack">
+            <span class="reader-setting-label">无衬线字体</span>
+            <select
+              class="reader-font-select"
+              value={settings.sansSerifFont || ""}
+              on:change={(e) => setFontFace("sansSerifFont", e.currentTarget.value)}
+            >
+              <option value="">未指定（用候选池顺序）</option>
+              {#each SANS_SERIF_FONT_PRESETS as f}
+                <option value={f}>{f}</option>
+              {/each}
+            </select>
+          </div>
+
+          <div class="reader-setting-row reader-setting-row-stack">
+            <span class="reader-setting-label">等宽字体</span>
+            <select
+              class="reader-font-select"
+              title="代码块 / <pre> / <code> 专用；正文绝不用等宽"
+              value={settings.monospaceFont || ""}
+              on:change={(e) => setFontFace("monospaceFont", e.currentTarget.value)}
+            >
+              <option value="">未指定（用候选池顺序）</option>
+              {#each MONOSPACE_FONT_PRESETS as f}
+                <option value={f}>{f}</option>
+              {/each}
+            </select>
+          </div>
+
+          <div class="reader-setting-row reader-setting-row-stack">
+            <span class="reader-setting-label">中文字体</span>
+            <select
+              class="reader-font-select"
+              title="插入每条链的次位；留空则只用跨平台 CJK 兜底栈"
+              value={settings.defaultCJKFont || ""}
+              on:change={(e) => setFontFace("defaultCJKFont", e.currentTarget.value)}
+            >
+              <option value="">留空（跨平台兜底）</option>
+              {#each CJK_FONT_PRESETS as f}
+                <option value={f}>{f}</option>
+              {/each}
+            </select>
+          </div>
+
+          <div class="reader-font-hint">
+            三条链各自带跨平台 CJK 兜底，未安装的字体会自动跳过。代码类元素固定走等宽链。
+          </div>
+        {/if}
+
         {#if settings.fontMode === "custom"}
           <div class="reader-font-list">
             {#each customFonts as f}
@@ -4261,6 +4540,34 @@
           </label>
         </div>
       </details>
+
+      <!-- 2026-08-28：双语对照增强（译文字号独立调节 + 段落悬停高亮） -->
+      <details class="reader-setting-section">
+        <summary class="reader-setting-section-title">🌐 双语对照</summary>
+
+        <!-- 译文字号（em 倍数，相对正文；默认 0.78） -->
+        <div class="reader-setting-row">
+          <span class="reader-setting-label">译文字号</span>
+          <div class="reader-setting-control">
+            <button class="reader-mini-btn" on:click={() => setTranslationFontSize((settings.translationFontSize ?? 0.70) - 0.02)}>A-</button>
+            <span class="reader-setting-value">{Math.round((settings.translationFontSize ?? 0.70) * 100)}%</span>
+            <button class="reader-mini-btn" on:click={() => setTranslationFontSize((settings.translationFontSize ?? 0.70) + 0.02)}>A+</button>
+          </div>
+        </div>
+
+        <!-- 段落悬停高亮（C2） -->
+        <div class="reader-setting-row reader-setting-toggle-row">
+          <span class="reader-setting-label">段落悬停高亮</span>
+          <label class="reader-switch" title="鼠标悬停段落时轻微底色，提升阅读定位感">
+            <input
+              type="checkbox"
+              checked={settings.paragraphHover !== false}
+              on:change={setParagraphHover}
+            />
+            <span class="reader-switch-track"></span>
+          </label>
+        </div>
+      </details>
     </div>
   {/if}
 
@@ -4327,7 +4634,6 @@
       <span class="reader-eta" title="按当前阅读速度估算">{etaText}</span>
     {/if}
     <button class="reader-btn" title="下一页" on:click={turnNext}>▶</button>
-    <button class="reader-btn" title="搜索" class:reader-btn-active={showSearch} on:click={toggleSearch}>🔍</button>
   </div>
 
   {#if errorMsg}
@@ -4641,8 +4947,11 @@
     display: flex;
     align-items: center;
     gap: 6px;
-    padding: 5px 8px;
-    border-bottom: 1px solid var(--b3-border-color, rgba(0, 0, 0, 0.1));
+    padding: 6px 8px;
+    /* 2026-08-28 B2：柔和底 + 细边 + 轻投影，提升原生感（仍低于思源原生 UI） */
+    background: var(--b3-theme-surface, var(--b3-theme-background, #fff));
+    border-bottom: 1px solid var(--b3-border-color, rgba(0, 0, 0, 0.08));
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.05);
     flex-shrink: 0;
     /* 2026-08-24 修复：position:relative 仍需保留（确保 toolbar 绘制在 stage 之上），
        但 z-index 从 50 降到 1——阅读器内所有层都不应高于思源原生 UI
@@ -4657,8 +4966,9 @@
     font-size: 13px;
     line-height: 1;
     padding: 5px 7px;
-    border-radius: 6px;
+    border-radius: var(--b3-border-radius-s, 6px);
     color: var(--b3-theme-on-background, #333);
+    transition: background 150ms ease, color 150ms ease;
   }
   .reader-btn:hover {
     background: var(--b3-theme-background-light, rgba(0, 0, 0, 0.06));
@@ -4683,6 +4993,8 @@
     text-overflow: ellipsis;
     white-space: nowrap;
     color: var(--b3-theme-on-background, #333);
+    user-select: auto;
+    cursor: text;
   }
   .reader-chapter {
     font-size: 12px;
@@ -4691,6 +5003,8 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+    user-select: auto;
+    cursor: text;
   }
   .reader-spacer {
     flex: 1;
@@ -5832,6 +6146,32 @@
     background: var(--b3-theme-background-light, rgba(0, 0, 0, 0.06));
   }
 
+  /* ---- 2026-08-28 分类字体设置（衬线/无衬线/等宽/中文）---- */
+  /* 下拉行：标签在上、选择器在下——长字体名不会挤压标签 */
+  .reader-setting-row-stack {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 4px;
+  }
+  .reader-font-select {
+    width: 100%;
+    box-sizing: border-box;
+    border: 1px solid var(--b3-border-color, rgba(0, 0, 0, 0.15));
+    border-radius: 6px;
+    padding: 5px 8px;
+    font-size: 12px;
+    cursor: pointer;
+    color: var(--b3-theme-on-background, #333);
+    background: var(--b3-theme-background, #fff);
+    font-family: var(--b3-font-family, inherit);
+  }
+  .reader-font-hint {
+    font-size: 11px;
+    line-height: 1.5;
+    opacity: 0.6;
+    padding: 2px 0 4px;
+  }
+
   .reader-setting-control {
     display: flex;
     align-items: center;
@@ -5905,8 +6245,13 @@
     display: flex;
     align-items: center;
     gap: 4px;
-    padding: 3px 8px;
-    border-top: 1px solid var(--b3-border-color, rgba(0, 0, 0, 0.1));
+    padding: 5px 8px;
+    /* 2026-08-28 B2：悬浮药丸条质感——思源 surface 底 + 圆角 + 柔和投影，
+       替代原 border-top 直条，更贴合思源原生工具栏观感。 */
+    margin: 5px 6px 2px;
+    border-radius: var(--b3-border-radius, 8px);
+    background: var(--b3-theme-surface, var(--b3-theme-background, #fff));
+    box-shadow: var(--b3-point-shadow, 0 2px 10px rgba(0, 0, 0, 0.12));
     flex-shrink: 0;
     /* 2026-08-23 修复：与 toolbar 保持一致，z-index 需配合 position 才生效 */
     position: relative;
@@ -5920,10 +6265,46 @@
     padding: 0 4px;
   }
   .reader-progress-bar {
+    -webkit-appearance: none;
+    appearance: none;
     width: 100%;
+    height: 5px;
+    border-radius: 999px;
+    background: var(--b3-theme-background-light, rgba(0, 0, 0, 0.12));
+    box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.04);
     accent-color: var(--b3-theme-primary, #378add);
-    height: 4px;
     cursor: pointer;
+    outline: none;
+  }
+  /* 跨浏览器：细滑块圆点 + 主色填充（webkit / firefox） */
+  .reader-progress-bar::-webkit-slider-runnable-track {
+    height: 5px;
+    border-radius: 999px;
+    background: var(--b3-theme-background-light, rgba(0, 0, 0, 0.12));
+  }
+  .reader-progress-bar::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 13px;
+    height: 13px;
+    margin-top: -4px;
+    border-radius: 50%;
+    background: var(--b3-theme-primary, #378add);
+    border: 2px solid var(--b3-theme-background, #fff);
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.28);
+  }
+  .reader-progress-bar::-moz-range-track {
+    height: 5px;
+    border-radius: 999px;
+    background: var(--b3-theme-background-light, rgba(0, 0, 0, 0.12));
+  }
+  .reader-progress-bar::-moz-range-thumb {
+    width: 13px;
+    height: 13px;
+    border-radius: 50%;
+    background: var(--b3-theme-primary, #378add);
+    border: 2px solid var(--b3-theme-background, #fff);
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.28);
   }
   .reader-progress-text {
     font-size: 11px;
