@@ -113,6 +113,8 @@ import {
   parsePrompts as parseCopilotPrompts,
 } from "./copilot/copilot/prompt-manager.ts";
 import { runChat as runCopilotChat } from "./copilot/ai/ai-orchestrator.ts";
+import { buildProviders, translateWithFallback } from "./translate/engine";
+import { TranslationCache } from "./translate/cache";
 import type {
   AiSettings as CopilotAiSettings,
   ChatSession as CopilotSession,
@@ -267,6 +269,7 @@ export default class RewordPlugin extends Plugin {
   private disposables = new Disposables();
   private aiSettings!: AiSettings;       // AI 精读设置（persist: hiword-ai.json）
   private aiPanel?: AiPanel;             // AI 精读 dock 面板控制器
+  private translationCache!: TranslationCache; // 双语翻译按书缓存（persist: translations/<bookId>.json）
 
   // ===== Copilot 聊天（照抄 copilot 插件，独立第二个 dock）=====
   private copilotConvo!: ConversationStore; // 会话历史存储
@@ -479,6 +482,7 @@ export default class RewordPlugin extends Plugin {
       this.aiPresetStore = new AiPresetStore(() => this.persistAiPresets.update(this.aiPresetStore.export()));
       this.promptTemplateStore = new PromptTemplateStore(() => this.persistAiPrompts.update(this.promptTemplateStore.export()));
       this.aiSettings = { ...DEFAULT_AI_SETTINGS };
+      this.translationCache = new TranslationCache(this);
     } catch (e) {
       getLogger().error("[REword] 字段初始化失败:", { error: e });
     }
@@ -722,9 +726,12 @@ export default class RewordPlugin extends Plugin {
       this.scheduleInlineMarksAfterFocusLoss();
     });
 
-    // 阅读器标注变更→侧边栏刷新：监听阅读器派发的事件，自动重新渲染批注面板
+    // 阅读器标注变更→侧边栏刷新：监听阅读器派发的事件。
+    // 2026-08-27 修复（Tab 覆盖）：原实现无差别 renderAnnotationsPanel 会把当前正显示的
+    // 词库 / AI 精读等 Tab 内容直接覆盖成微阅批注面板。改为 renderDockIfTab：
+    // 仅批注 Tab 激活时刷新，否则标记脏、切回该 Tab 时由 tab handler 重渲染。
     this.disposables.addEventListener(window, "reword:annotation-store-changed", () => {
-      if (this.dockElement) this.renderAnnotationsPanel(this.dockElement);
+      this.renderDockIfTab("annotations");
     });
   }
 
@@ -1167,19 +1174,68 @@ export default class RewordPlugin extends Plugin {
     return { ok: res.ok, content: res.content, error: res.error, aborted: res.aborted };
   }
 
-  /** 阅读器划词翻译：复用 Copilot AI 链路，返回中英双语 markdown */
-  public async translateText(text: string): Promise<string> {
-    if (!text?.trim()) return "";
-    try {
-      const res = await this.copilotSendToAI(
-        `请将下面内容翻译为中文，并保留「原文 / 译文」双语对照格式：\n\n${text}`,
-        { onToken: () => {} }
-      );
-      return res?.ok ? res.content || "" : "";
-    } catch (e) {
-      getLogger().error("[REword] 翻译失败:", { error: e });
-      return "";
+  /**
+   * 批量翻译（双语注入核心）：先查按书缓存，未命中走引擎链。
+   * @param texts 待译文本数组
+   * @param from  源语言（"auto" 或 ISO 代码）
+   * @param to    目标语言（默认 "zh"）
+   * @param bookId 书籍 ID（用于按书缓存；传空串则不落盘缓存）
+   */
+  public async translateBatch(
+    texts: string[],
+    from: string,
+    to: string,
+    bookId: string
+  ): Promise<string[]> {
+    if (!Array.isArray(texts) || texts.length === 0) return [];
+    const out: string[] = new Array(texts.length).fill("");
+
+    // 1) 查缓存（按书）
+    const { hits, misses } = await this.translationCache.getBatch(bookId, texts);
+    for (const k in hits) out[+k] = hits[k];
+
+    // 2) 未命中部分走引擎链
+    if (misses.length) {
+      const reqTexts = misses.map((i) => texts[i]);
+      try {
+        const providers = buildProviders(this.aiSettings, {
+          translateOne: (t, f, t2) => this.aiTranslateText(t, f, t2),
+        });
+        const res = await translateWithFallback(providers, { texts: reqTexts, from, to });
+        const tr = res.texts || [];
+        const pairs: Array<[string, string]> = [];
+        misses.forEach((idx, j) => {
+          const translation = (tr[j] || "").trim();
+          out[idx] = translation;
+          if (translation) pairs.push([texts[idx], translation]);
+        });
+        if (pairs.length) await this.translationCache.setBatch(bookId, pairs);
+      } catch (e) {
+        getLogger().error("[REword] 批量翻译失败:", { error: e });
+      }
     }
+    return out;
+  }
+
+  /**
+   * 自有 AI 兜底翻译（单条）：直接走对话编排，不污染 AI 精读面板会话。
+   * 用 AI 设置里的「翻译预置提示词」作为系统提示，关闭 JSON 输出，求纯译文。
+   */
+  private async aiTranslateText(text: string, from: string, to: string): Promise<string> {
+    if (!this.copilotAi?.apiKey) return ""; // 未配置 AI 服务则直接放弃兜底
+    const prompt = (this.aiSettings?.translatePrompt || DEFAULT_AI_SETTINGS.translatePrompt).trim();
+    const settings = { ...this.copilotAi, systemPrompt: prompt, jsonMode: false } as any;
+    const res = await runCopilotChat(settings, [], [{ role: "user", content: text } as any], undefined, {});
+    return res?.content || "";
+  }
+
+  /** 是否已配置任一可用的翻译引擎（供阅读器双语开关前置提示） */
+  public isTranslationConfigured(): boolean {
+    return (
+      !!(this.aiSettings?.msKey && this.aiSettings?.msRegion) ||
+      !!this.aiSettings?.libreUrl ||
+      !!this.copilotAi?.apiKey
+    );
   }
 
   /**
@@ -1884,7 +1940,8 @@ export default class RewordPlugin extends Plugin {
     });
     this.applyAnnotationBlockMarks();
     showMessage("已添加句子批注", 2000, "success" as any);
-    if (this.dockElement) this.renderAnnotationsPanel(this.dockElement);
+    // 2026-08-27 修复（Tab 覆盖）：按 Tab 刷新，不再覆盖非批注 Tab 的当前内容
+    this.renderDockIfTab("annotations");
   }
 
   /**
@@ -2297,7 +2354,8 @@ export default class RewordPlugin extends Plugin {
     }
     this.applyAnnotationBlockMarks();
     showMessage(`已批量添加 ${ok} 条 AI 批注`, 2000, "success" as any);
-    if (this.dockElement) this.renderAnnotationsPanel(this.dockElement);
+    // 2026-08-27 修复（Tab 覆盖）：按 Tab 刷新，不覆盖非批注 Tab 的当前内容
+    this.renderDockIfTab("annotations");
     return ok;
   }
 
@@ -4120,8 +4178,9 @@ export default class RewordPlugin extends Plugin {
     manageBtn?.addEventListener("click", () => this.openDictManager());
 
     // 绑定「朗读设置」按钮
+    // 绑定「朗读设置」按钮：2026-08-27 起统一跳主设置「朗读设置」页（旧版独立小窗已删除）
     const ttsBtn = contentEl.querySelector("#hiword-tts-setting");
-    ttsBtn?.addEventListener("click", () => this.openTtsSettings());
+    ttsBtn?.addEventListener("click", () => this.openUnifiedSettings("tts"));
 
     // 绑定搜索事件
     const input = contentEl.querySelector("#hiword-dict-input") as HTMLInputElement;
@@ -6425,169 +6484,11 @@ export default class RewordPlugin extends Plugin {
     this.renderDictManagerContent(dialog);
   }
 
-  /** 朗读设置对话框（含字体大小设置） */
-  private openTtsSettings() {
-    const s = this.ttsSettings || { ...DEFAULT_TTS };
-    const fs = this.fontSize || "medium";
-    const fsLabels: Record<string, string> = { small: "小", medium: "默认", large: "大", xlarge: "特大" };
-    const dialog = new Dialog({
-      title: "RE word 设置",
-      width: "480px",
-      content: `
-        <div class="hiword-tts-setting">
-          <div class="b3-dialog__content">
-            <!-- 字体大小 -->
-            <fieldset class="hiword-fs-fieldset">
-              <legend class="hiword-fs-legend">字体大小</legend>
-              <div class="hiword-fs-slider-wrap">
-                <span class="hiword-fs-label">小</span>
-                <input id="hiword-font-size" class="hiword-fs-slider" type="range" min="0" max="3" step="1" value="${fs === "small" ? "0" : fs === "large" ? "2" : fs === "xlarge" ? "3" : "1"}" />
-                <span class="hiword-fs-label">特大</span>
-              </div>
-              <div class="hiword-fs-ticks">
-                <span class="hiword-fs-tick"></span>
-                <span class="hiword-fs-tick hiword-fs-tick--active" id="hiword-fs-thumb-label">${fsLabels[fs]}</span>
-                <span class="hiword-fs-tick"></span>
-                <span class="hiword-fs-tick"></span>
-                <span class="hiword-fs-tick"></span>
-              </div>
-            </fieldset>
-            <hr class="hiword-fs-divider" />
-            <!-- 朗读设置 -->
-            <label class="b3-label">
-              <span>朗读引擎</span>
-              <select id="tts-engine" class="b3-select">
-                <option value="offline" ${s.engine === "offline" ? "selected" : ""}>离线优先（系统语音，无语音时回退在线真人音）✅</option>
-                <option value="auto" ${s.engine === "auto" ? "selected" : ""}>自动（在线真人音优先，离线回退系统语音）</option>
-                <option value="online" ${s.engine === "online" ? "selected" : ""}>仅在线真人音（有道，需联网）</option>
-                <option value="system" ${s.engine === "system" ? "selected" : ""}>仅系统语音（离线）</option>
-              </select>
-            </label>
-            <label class="b3-label">
-              <span>口音（在线真人音）</span>
-              <select id="tts-accent" class="b3-select">
-                <option value="us" ${s.accent === "us" ? "selected" : ""}>美音 (American)</option>
-                <option value="uk" ${s.accent === "uk" ? "selected" : ""}>英音 (British)</option>
-              </select>
-            </label>
-            <label class="b3-label">
-              <span>语速 <b id="tts-rate-val">${s.rate}</b></span>
-              <input id="tts-rate" class="b3-slider" type="range" min="0.5" max="2" step="0.1" value="${s.rate}" />
-            </label>
-            <label class="b3-label">
-              <span>音高 <b id="tts-pitch-val">${s.pitch}</b>（系统语音）</span>
-              <input id="tts-pitch" class="b3-slider" type="range" min="0.5" max="2" step="0.1" value="${s.pitch}" />
-            </label>
-            <hr class="hiword-fs-divider" />
-            <div style="font-size:12px;color:var(--b3-theme-on-surface,#555);margin-bottom:8px;font-weight:600;">📋 列表朗读</div>
-            <label class="b3-label">
-              <span>朗读间隔 <b id="tts-interval-val">${s.interval ?? 800}ms</b></span>
-              <input id="tts-interval" class="b3-slider" type="range" min="200" max="3000" step="100" value="${s.interval ?? 800}" />
-            </label>
-            <p style="font-size:11px;color:var(--b3-theme-on-surface-light,#999);margin:0 0 6px;">单词之间的停顿时间，建议 600~1200ms</p>
-            <label class="b3-label">
-              <span>系统语音音色</span>
-              <select id="tts-voice" class="b3-select">
-                <option value="">（自动优选最佳英文发音）</option>
-              </select>
-            </label>
-            <div class="b3-dialog__action">
-              <button class="b3-button" id="tts-test">试听</button>
-              <button class="b3-button b3-button--text" id="tts-save">保存</button>
-            </div>
-          </div>
-        </div>
-      `,
-    });
-
-    setTimeout(() => {
-      const dlg = dialog.element as HTMLElement;
-      const sel = dlg.querySelector("#tts-voice") as HTMLSelectElement;
-      if (sel && "speechSynthesis" in window) {
-        const fill = () => {
-          const voices = window.speechSynthesis.getVoices() || [];
-          sel.innerHTML = `<option value="">（自动优选最佳英文发音）</option>` +
-            voices
-              .map((v) => `<option value="${v.voiceURI}" ${v.voiceURI === s.preferVoiceURI ? "selected" : ""}>${v.name} (${v.lang})</option>`)
-              .join("");
-        };
-        fill();
-        window.speechSynthesis.onvoiceschanged = fill;
-      }
-
-      const rateInput = dlg.querySelector("#tts-rate") as HTMLInputElement;
-      const rateVal = dlg.querySelector("#tts-rate-val") as HTMLElement;
-      rateInput?.addEventListener("input", () => {
-        rateVal.textContent = rateInput.value;
-      });
-
-      // 字体大小滑块
-      const fsSlider = dlg.querySelector("#hiword-font-size") as HTMLInputElement;
-      const fsThumbLabel = dlg.querySelector("#hiword-fs-thumb-label") as HTMLElement;
-      const fsSizeMap: Record<number, "small" | "medium" | "large" | "xlarge"> = { 0: "small", 1: "medium", 2: "large", 3: "xlarge" };
-      const fsLabels: Record<string, string> = { small: "小", medium: "默认", large: "大", xlarge: "特大" };
-      fsSlider?.addEventListener("input", () => {
-        const size = fsSizeMap[parseInt(fsSlider.value, 10)] || "medium";
-        if (fsThumbLabel) fsThumbLabel.textContent = fsLabels[size];
-        // 实时预览
-        this.fontSize = size;
-        this.applyFontSize();
-      });
-
-      const pitchInput = dlg.querySelector("#tts-pitch") as HTMLInputElement;
-      const pitchVal = dlg.querySelector("#tts-pitch-val") as HTMLElement;
-      pitchInput?.addEventListener("input", () => { if (pitchVal) pitchVal.textContent = pitchInput.value; });
-
-      // 朗读间隔滑块
-      const intervalInput = dlg.querySelector("#tts-interval") as HTMLInputElement;
-      const intervalVal = dlg.querySelector("#tts-interval-val") as HTMLElement;
-      intervalInput?.addEventListener("input", () => { if (intervalVal) intervalVal.textContent = intervalInput.value + "ms"; });
-      const accentSel = dlg.querySelector("#tts-accent") as HTMLSelectElement;
-
-      dlg.querySelector("#tts-test")?.addEventListener("click", () => {
-        const engine = (dlg.querySelector("#tts-engine") as HTMLSelectElement).value as TtsEngine;
-        const rate = parseFloat(rateInput.value);
-        const pitch = parseFloat(pitchInput.value);
-        const accent = (accentSel.value as "uk" | "us");
-        const voiceURI = (dlg.querySelector("#tts-voice") as HTMLSelectElement).value || undefined;
-        const interval = parseFloat((dlg.querySelector("#tts-interval") as HTMLInputElement).value) || 800;
-        const cfg: TtsSettings = { engine, rate, pitch, accent, preferVoiceURI: voiceURI, interval };
-        // 试听走与正式朗读一致的路径，便于对比效果
-        if (engine === "offline") {
-          if (!this.speakSystem("Hello world", cfg)) this.speakOnline("Hello world", accent);
-        } else if (engine === "system") {
-          this.speakSystem("Hello world", cfg);
-        } else if (engine === "online") {
-          this.speakOnline("Hello world", accent);
-        } else {
-          this.speakOnline("Hello world", accent).then((ok) => {
-            if (!ok) this.speakSystem("Hello world", cfg);
-          });
-        }
-      });
-
-      dlg.querySelector("#tts-save")?.addEventListener("click", async () => {
-        const engine = (dlg.querySelector("#tts-engine") as HTMLSelectElement).value as TtsEngine;
-        const rate = parseFloat(rateInput.value);
-        const pitch = parseFloat(pitchInput.value);
-        const accent = (accentSel.value as "uk" | "us");
-        const voiceURI = (dlg.querySelector("#tts-voice") as HTMLSelectElement).value || undefined;
-        const interval = parseFloat((dlg.querySelector("#tts-interval") as HTMLInputElement).value) || 800;
-        await this.saveTtsSettings({ engine, rate, pitch, accent, preferVoiceURI: voiceURI, interval });
-        // 保存字体大小
-        const fsVal = fsSlider ? parseInt(fsSlider.value, 10) : 1;
-        await this.saveFontSize(fsSizeMap[fsVal] || "medium");
-        dialog.destroy();
-        showMessage("设置已保存", 2000, "success" as any);
-      });
-    }, 50);
-  }
-
   /**
-   * 统一全局设置界面（多模块 Tab：朗读 | 查词典 | AI 精读）
-   * AI 精读内含双模式切换：自由聊天 / 英语学习
+   * 统一全局设置界面（多模块 Tab：朗读 | 阅读 | 查词典 | AI 精读 | 标注与批注 | 复习计划 | 快捷键 | 数据与备份 | 关于）
+   * @param initialTab 打开时定位到的导航页（如 "tts"）；缺省停在第一页
    */
-  public openUnifiedSettings() {
+  public openUnifiedSettings(initialTab?: string) {
     const s = this.ttsSettings || { ...DEFAULT_TTS };
     const fs = this.fontSize || "medium";
     const ai = this.aiSettings;
@@ -6610,8 +6511,14 @@ export default class RewordPlugin extends Plugin {
             <div class="hiword-up-nav-item active" data-up-tab="tts">
               <span class="hiword-up-nav-icon">🎤</span>朗读设置
             </div>
+            <div class="hiword-up-nav-item" data-up-tab="reader">
+              <span class="hiword-up-nav-icon">📚</span>阅读设置
+            </div>
             <div class="hiword-up-nav-item" data-up-tab="dict">
               <span class="hiword-up-nav-icon">📖</span>查词典管理
+            </div>
+            <div class="hiword-up-nav-item" data-up-tab="ai">
+              <span class="hiword-up-nav-icon">🤖</span>AI 精读
             </div>
             <div class="hiword-up-nav-item" data-up-tab="annotation">
               <span class="hiword-up-nav-icon">🖍️</span>标注与批注
@@ -6641,12 +6548,14 @@ export default class RewordPlugin extends Plugin {
                 <fieldset class="hiword-fs-fieldset">
                   <div class="hiword-fs-slider-wrap">
                     <span class="hiword-fs-label">小</span>
-                    <input id="up-font-size" class="hiword-fs-slider" type="range" min="0" max="3" step="1" value="${fs === "small" ? "0" : fs === "large" ? "2" : fs === "xlarge" ? "3" : "1"}" />
+                    <div class="hiword-fs-track-wrap">
+                      <input id="up-font-size" class="hiword-fs-slider" type="range" min="0" max="3" step="1" value="${fs === "small" ? "0" : fs === "large" ? "2" : fs === "xlarge" ? "3" : "1"}" />
+                      <output class="hiword-fs-thumblabel" id="up-fs-thumb-label" style="left:${(fs === "small" ? 0 : fs === "large" ? 2 : fs === "xlarge" ? 3 : 1) / 3 * 100}%">${fsLabels[fs]}</output>
+                    </div>
                     <span class="hiword-fs-label">特大</span>
                   </div>
                   <div class="hiword-fs-ticks">
                     <span class="hiword-fs-tick"></span>
-                    <span class="hiword-fs-tick hiword-fs-tick--active" id="up-fs-thumb-label">${fsLabels[fs]}</span>
                     <span class="hiword-fs-tick"></span>
                     <span class="hiword-fs-tick"></span>
                     <span class="hiword-fs-tick"></span>
@@ -6666,7 +6575,7 @@ export default class RewordPlugin extends Plugin {
                 <div class="hiword-up-field">
                   <label class="hiword-up-field-label" for="up-tts-engine">朗读引擎</label>
                   <select id="up-tts-engine" class="hiword-up-select">
-                    <option value="offline" ${s.engine === "offline" ? "selected" : ""}>离线优先（系统语音，无语音时回退在线）✅</option>
+                    <option value="offline" ${s.engine === "offline" ? "selected" : ""}>离线优先（系统语音，无语音时回退在线）</option>
                     <option value="auto" ${s.engine === "auto" ? "selected" : ""}>自动（在线优先，离线回退）</option>
                     <option value="online" ${s.engine === "online" ? "selected" : ""}>仅在线真人音（有道）</option>
                     <option value="system" ${s.engine === "system" ? "selected" : ""}>仅系统语音（离线）</option>
@@ -6727,14 +6636,24 @@ export default class RewordPlugin extends Plugin {
               </div>
             </section>
 
-            <!-- ===== Tab 2: 查词典管理 ===== -->
+            <!-- ===== Tab 2: 阅读设置（2026-08-27 统一：与阅读器内文本面板共用同一 ReaderSettingsStore，改动即时生效到已开 Tab） ===== -->
+            <section class="hiword-up-page" data-page="reader" style="display:none;">
+              <div id="up-reader-settings"><p style="color:#888;padding:20px;text-align:center;">加载中…</p></div>
+            </section>
+
+            <!-- ===== Tab 3: 查词典管理 ===== -->
             <section class="hiword-up-page" data-page="dict" style="display:none;">
               <div class="hiword-dict-manager" id="up-dict-manager">
                 <p style="color:#888;padding:20px;text-align:center;">加载中…</p>
               </div>
             </section>
 
-            <!-- ===== Tab 3: 标注与批注 ===== -->
+            <!-- ===== Tab 4: AI 精读（2026-08-27 统一：复用 renderAiSettingsInto，与独立入口同源） ===== -->
+            <section class="hiword-up-page" data-page="ai" style="display:none;">
+              <div id="up-ai-settings"><p style="color:#888;padding:20px;text-align:center;">加载中…</p></div>
+            </section>
+
+            <!-- ===== Tab 5: 标注与批注 ===== -->
             <section class="hiword-up-page" data-page="annotation" style="display:none;">
               <div id="up-annotation-settings"><p style="color:#888;padding:20px;text-align:center;">加载中…</p></div>
             </section>
@@ -6775,6 +6694,11 @@ export default class RewordPlugin extends Plugin {
       `,
     });
 
+    // 2026-08-27 视觉：收敛思源弹窗容器默认投影（过重，左侧出现明显暗带），
+    // 统一容器圆角与面板一致，避免角落露底
+    const dlgShell = dialog.element.closest(".b3-dialog__container") as HTMLElement | null;
+    if (dlgShell) dlgShell.classList.add("hw-settings-dialog");
+
     setTimeout(() => {
       const dlg = dialog.element as HTMLElement;
 
@@ -6789,6 +6713,8 @@ export default class RewordPlugin extends Plugin {
           // 切到对应 tab 时懒渲染内容（首次渲染后由各自 rendered 标记防止重复）
           const tab = (item as HTMLElement).dataset.upTab;
           if (tab === "dict") this.renderUnifiedDictPanel(dlg, dialog);
+          else if (tab === "reader") this.renderReaderSettings(dlg);
+          else if (tab === "ai") this.renderAiSettingsInto(dlg.querySelector("#up-ai-settings") as HTMLElement);
           else if (tab === "annotation") this.renderAnnotationSettings(dlg, dialog);
           else if (tab === "review") this.renderReviewSettings(dlg, dialog);
           else if (tab === "shortcuts") this.renderShortcutSettings(dlg, dialog);
@@ -6796,6 +6722,11 @@ export default class RewordPlugin extends Plugin {
           else if (tab === "about") this.renderAboutSettings(dlg, dialog);
         });
       });
+
+      // 2026-08-27：支持外部入口指定初始页（如查词面板 🔊 → 朗读设置）
+      if (initialTab) {
+        (dlg.querySelector(`.hiword-up-nav-item[data-up-tab="${initialTab}"]`) as HTMLElement | null)?.click();
+      }
 
       // 2026-08-22 许可证已封存：原「打开时定位到指定 tab（requireLicense 引导到许可证）」逻辑已移除
 
@@ -6805,8 +6736,13 @@ export default class RewordPlugin extends Plugin {
       const upFsSlider = dlg.querySelector("#up-font-size") as HTMLInputElement;
       const upFsLabel = dlg.querySelector("#up-fs-thumb-label") as HTMLElement;
       upFsSlider?.addEventListener("input", () => {
-        const size = fsSizeMap[parseInt(upFsSlider.value, 10)] || "medium";
-        if (upFsLabel) upFsLabel.textContent = fsLabels[size];
+        const v = parseInt(upFsSlider.value, 10);
+        const size = fsSizeMap[v] || "medium";
+        if (upFsLabel) {
+          upFsLabel.textContent = fsLabels[size];
+          // 标签跟随滑块位置（百分比定位，配合 .hiword-fs-thumblabel 绝对居中）
+          upFsLabel.style.left = `${(v / 3) * 100}%`;
+        }
         this.fontSize = size;
         this.applyFontSize();
         const previewCard = dlg.querySelector(".us-preview-card") as HTMLElement;
@@ -7135,6 +7071,162 @@ export default class RewordPlugin extends Plugin {
       this.renderUnifiedDictPanel(dlg, dialog);
       showMessage("已刷新", 2000, "info");
     });
+  }
+
+  /**
+   * 统一设置面板 - 阅读设置（2026-08-27 新增）。
+   * 直接读写 ReaderSettingsStore：变更经 svelte store 即时推送到所有已打开的阅读 Tab 并自动持久化，
+   * 与阅读器内「文本设置」浮层同源同步，双入口互不冲突。
+   */
+  private renderReaderSettings(dlg: HTMLElement) {
+    const host = dlg.querySelector("#up-reader-settings") as HTMLElement | null;
+    if (!host) return;
+    if (!this.readerDock) {
+      host.innerHTML = '<p style="color:#888;padding:20px;text-align:center;">阅读器未就绪</p>';
+      return;
+    }
+    const st = this.readerDock.settingsStoreRef.get();
+    type RdPatch = Partial<import("./reader/reader-settings").ReaderSettings>;
+    const apply = (patch: RdPatch) => {
+      try { this.readerDock!.settingsStoreRef.update(patch); } catch { /* ignore */ }
+    };
+
+    const sel = (id: string, label: string, options: Array<[string, string]>, cur: string) => `
+      <div class="hiword-up-field">
+        <label class="hiword-up-field-label" for="${id}">${label}</label>
+        <select id="${id}" class="hiword-up-select">
+          ${options.map(([v, n]) => `<option value="${v}" ${v === cur ? "selected" : ""}>${n}</option>`).join("")}
+        </select>
+      </div>`;
+    const rng = (id: string, label: string, min: number, max: number, step: number, val: number, suffix = "") => `
+      <div class="hiword-up-field">
+        <label class="hiword-up-field-label" for="${id}">${label} <em id="${id}-val">${val}${suffix}</em></label>
+        <input id="${id}" class="hiword-up-slider" type="range" min="${min}" max="${max}" step="${step}" value="${val}" />
+      </div>`;
+    const sw = (id: string, label: string, on: boolean) => `
+      <label class="hiword-up-switch-row"><input type="checkbox" id="${id}" class="b3-switch" ${on ? "checked" : ""} /><span>${label}</span></label>`;
+
+    host.innerHTML = `
+      <div class="hiword-up-group">
+        <div class="hiword-up-group-label"><span class="hiword-up-group-name">主题与字体</span><span class="hiword-up-group-desc">修改即时生效到所有已打开的阅读 Tab</span></div>
+        ${sel("up-rd-theme", "阅读主题", [
+          ["auto", "跟随思源"], ["light", "默认"], ["almond", "杏仁黄"], ["autumn", "秋叶褐"],
+          ["green", "青草绿"], ["blue", "海天蓝"], ["night", "夜间"], ["dark", "暗黑"],
+          ["gold", "赤金"], ["custom", "自定义（在阅读器内调色）"],
+        ], String(st.theme))}
+        ${sel("up-rd-fontmode", "正文字体", [
+          ["follow-siyuan", "跟随思源（霞鹜文楷等）"], ["custom", "自定义导入字体"], ["system", "系统默认"],
+        ], String(st.fontMode))}
+        ${sel("up-rd-linewidth", "正文行宽", [["narrow", "窄"], ["normal", "标准"], ["wide", "宽"]], String(st.lineWidth))}
+      </div>
+
+      <div class="hiword-up-group">
+        <div class="hiword-up-group-label"><span class="hiword-up-group-name">字号与排版</span></div>
+        ${rng("up-rd-fontsize", "正文字号", 12, 28, 1, st.fontSize, "px")}
+        ${rng("up-rd-lineheight", "行距", 1.4, 2.2, 0.05, st.lineHeight)}
+        ${sw("up-rd-ovpub", "覆盖出版商字体（强制使用所选字体）", st.overridePublisherFont !== false)}
+        ${sw("up-rd-ovfs", "统一正文字号（压平书籍写死字号，A+/A- 全局生效）", st.overrideBookFontSize !== false)}
+      </div>
+
+      <div class="hiword-up-group">
+        <div class="hiword-up-group-label"><span class="hiword-up-group-name">文本与段落</span></div>
+        ${rng("up-rd-fw", "字重", 100, 900, 100, st.text?.fontWeight ?? 400)}
+        ${rng("up-rd-ls", "字距", -2, 8, 0.5, st.text?.letterSpacing ?? 0, "px")}
+        ${rng("up-rd-ps", "段距", 0, 2, 0.1, st.paragraph?.paragraphSpacing ?? 0.8, "em")}
+        ${rng("up-rd-ti", "首行缩进", 0, 4, 0.5, st.paragraph?.textIndent ?? 0, "em")}
+      </div>
+
+      <div class="hiword-up-group">
+        <div class="hiword-up-group-label"><span class="hiword-up-group-name">阅读模式</span></div>
+        ${sel("up-rd-flow", "阅读模式", [["paginated", "分页"], ["scrolled", "连续滚动"]], String(st.flow))}
+        ${sel("up-rd-turn", "翻页动画", [["default", "默认"], ["slide", "滑动"], ["curl", "卷页"]], String(st.turnStyle))}
+        ${sw("up-rd-clickturn", "点击正文左右区域翻页", !!st.clickToTurn)}
+      </div>
+
+      <div class="hiword-up-group">
+        <div class="hiword-up-group-label"><span class="hiword-up-group-name">页面布局</span></div>
+        ${sw("up-rd-header", "显示页眉（书名 · 章节）", st.layout?.showHeader !== false)}
+        ${sw("up-rd-footer", "显示页脚（底部工具栏）", st.layout?.showFooter !== false)}
+        ${sw("up-rd-progress", "显示阅读进度", st.layout?.showProgress !== false)}
+        ${sel("up-rd-progstyle", "进度样式", [["fraction", "分数（如 5/100）"], ["page", "页码（如 12）"], ["percent", "百分比（如 5%）"]], String(st.layout?.progressStyle ?? "fraction"))}
+        ${sw("up-rd-time", "页眉显示当前时间", !!st.layout?.showCurrentTime)}
+        <div class="hiword-up-field">
+          <label class="hiword-up-field-label">页面边距（px，上下左右）</label>
+          <div style="display:flex;gap:8px;">
+            <input id="up-rd-mt" class="b3-text-field" type="number" min="0" max="120" value="${st.layout?.marginTopPx ?? 16}" title="上边距" style="width:64px;" />
+            <input id="up-rd-mb" class="b3-text-field" type="number" min="0" max="120" value="${st.layout?.marginBottomPx ?? 16}" title="下边距" style="width:64px;" />
+            <input id="up-rd-ml" class="b3-text-field" type="number" min="0" max="160" value="${st.layout?.marginLeftPx ?? 16}" title="左边距" style="width:64px;" />
+            <input id="up-rd-mr" class="b3-text-field" type="number" min="0" max="160" value="${st.layout?.marginRightPx ?? 16}" title="右边距" style="width:64px;" />
+          </div>
+        </div>
+      </div>
+    `;
+
+    // ---- 绑定（全部改动即写即存即推送） ----
+    // 嵌套键更新助手：每次从 store 取最新值做合并，避免用渲染时快照导致的互相覆盖
+    const setNested = (path: string, value: unknown) => {
+      const [top, sub] = path.split(".");
+      const cur = this.readerDock!.settingsStoreRef.get() as any;
+      const base = cur[top] ?? {};
+      apply({ [top]: { ...base, [sub]: value } } as RdPatch);
+    };
+    const bindSel = (id: string, key: string) => {
+      const el = host.querySelector("#" + id) as HTMLSelectElement | null;
+      el?.addEventListener("change", () => {
+        if (key.includes(".")) setNested(key, el.value);
+        else apply({ [key]: el.value } as RdPatch);
+      });
+    };
+    const bindSw = (id: string, key: string) => {
+      const el = host.querySelector("#" + id) as HTMLInputElement | null;
+      el?.addEventListener("change", () => {
+        if (key.includes(".")) setNested(key, el.checked);
+        else apply({ [key]: el.checked } as RdPatch);
+      });
+    };
+    const bindRng = (id: string, key: string, suffix = "") => {
+      const el = host.querySelector("#" + id) as HTMLInputElement | null;
+      const valEl = host.querySelector("#" + id + "-val") as HTMLElement | null;
+      el?.addEventListener("input", () => {
+        if (valEl) valEl.textContent = el.value + suffix;
+        const v = parseFloat(el.value);
+        if (key.includes(".")) setNested(key, v);
+        else apply({ [key]: v } as RdPatch);
+      });
+    };
+    bindSel("up-rd-theme", "theme");
+    bindSel("up-rd-fontmode", "fontMode");
+    bindSel("up-rd-linewidth", "lineWidth");
+    bindRng("up-rd-fontsize", "fontSize", "px");
+    bindRng("up-rd-lineheight", "lineHeight");
+    bindSw("up-rd-ovpub", "overridePublisherFont");
+    bindSw("up-rd-ovfs", "overrideBookFontSize");
+    bindRng("up-rd-fw", "text.fontWeight");
+    bindRng("up-rd-ls", "text.letterSpacing", "px");
+    bindRng("up-rd-ps", "paragraph.paragraphSpacing", "em");
+    bindRng("up-rd-ti", "paragraph.textIndent", "em");
+    bindSel("up-rd-flow", "flow");
+    bindSel("up-rd-turn", "turnStyle");
+    bindSw("up-rd-clickturn", "clickToTurn");
+    bindSw("up-rd-header", "layout.showHeader");
+    bindSw("up-rd-footer", "layout.showFooter");
+    bindSw("up-rd-progress", "layout.showProgress");
+    bindSel("up-rd-progstyle", "layout.progressStyle");
+    bindSw("up-rd-time", "layout.showCurrentTime");
+
+    // 页面边距（4 个数字输入，input 时合并写回）
+    const bindMargin = (id: string, key: string) => {
+      const el = host.querySelector("#" + id) as HTMLInputElement | null;
+      el?.addEventListener("change", () => {
+        const v = Math.max(0, parseInt(el.value, 10) || 0);
+        el.value = String(v);
+        setNested("layout." + key, v);
+      });
+    };
+    bindMargin("up-rd-mt", "marginTopPx");
+    bindMargin("up-rd-mb", "marginBottomPx");
+    bindMargin("up-rd-ml", "marginLeftPx");
+    bindMargin("up-rd-mr", "marginRightPx");
   }
 
   /** 统一设置面板 - 标注与批注（默认色/线型/调色板/标签预设） */
@@ -7531,13 +7623,20 @@ export default class RewordPlugin extends Plugin {
    * 从 AI 面板工具栏 ⚙ 或命令「RE word: AI 设置」打开
    */
   /** 打开 AI 精读设置面板（Copilot 风格：左侧导航 + 右侧内容） */
-  public openAiSettings() {
+  /**
+   * AI 精读设置渲染核心（2026-08-27 重构）：模板与绑定抽为可复用方法，
+   * 主设置「AI 精读」页与独立入口共用一套实现，避免双份维护漂移。
+   * @param host 渲染容器（清空后填充）
+   * @param onClose 关闭回调：独立对话框模式销毁弹窗；嵌入主设置模式不传（保存后停留在面板）
+   */
+  private renderAiSettingsInto(host: HTMLElement, onClose?: () => void) {
+    if (!host) return;
+    // 嵌入主设置时容器跨 Tab 持久存在：已渲染过则跳过（避免切 Tab 往返丢失未保存的编辑）
+    if ((host as HTMLElement).dataset.rendered === "1" && onClose == null) return;
+    (host as HTMLElement).dataset.rendered = "1";
     const s = this.aiSettings;
-    const dialog = new Dialog({
-      title: "设置面板",
-      width: "720px",
-      height: "520px",
-      content: `
+    const dlg = host;
+    dlg.innerHTML = `
         <div class="hiword-ai-settings-panel">
           <!-- 左侧导航 -->
           <nav class="hiword-ai-settings-nav">
@@ -7545,6 +7644,7 @@ export default class RewordPlugin extends Plugin {
             <div class="hiword-ai-settings-tab" data-tab="service">AI 服务</div>
             <div class="hiword-ai-settings-tab" data-tab="prompt">精读提示词</div>
             <div class="hiword-ai-settings-tab" data-tab="memory">记忆与导出</div>
+            <div class="hiword-ai-settings-tab" data-tab="translate">翻译引擎</div>
             <!-- 2026-08-22 调整：许可证已迁到总设置面板 -->
           </nav>
           <!-- 右侧内容区 -->
@@ -7716,13 +7816,53 @@ export default class RewordPlugin extends Plugin {
               </div>
             </section>
 
+            <!-- ===== Tab 5: 翻译引擎（2026-08-27 重设计：双语段落 + 划词兜底） ===== -->
+            <section class="hiword-ai-settings-page" data-page="translate" style="display:none;">
+              <div class="hiword-ai-setting-group">
+                <div class="hiword-ai-setting-label">
+                  <span class="hiword-ai-setting-name">Microsoft Translator</span>
+                  <span class="hiword-ai-setting-desc">Azure 认知服务翻译，免费 200 万字符/月，官方支持浏览器跨域。需订阅 Key 与区域。</span>
+                </div>
+                <div class="hiword-ai-field">
+                  <label class="hiword-ai-field-label" for="ais-ms-key">订阅 Key</label>
+                  <input id="ais-ms-key" class="hiword-ai-input" type="password" value="${this.escapeAttr(s.msKey || "")}" placeholder="xxxxxxxxxxxxxxxx" />
+                </div>
+                <div class="hiword-ai-field">
+                  <label class="hiword-ai-field-label" for="ais-ms-region">区域</label>
+                  <input id="ais-ms-region" class="hiword-ai-input" value="${this.escapeAttr(s.msRegion || "")}" placeholder="如 eastasia / westeurope" />
+                </div>
+              </div>
+              <div class="hiword-ai-setting-group">
+                <div class="hiword-ai-setting-label">
+                  <span class="hiword-ai-setting-name">LibreTranslate</span>
+                  <span class="hiword-ai-setting-desc">开源免费翻译，可填公共实例（如 https://libretranslate.com）。限流/隐私较弱，作备选。</span>
+                </div>
+                <div class="hiword-ai-field">
+                  <label class="hiword-ai-field-label" for="ais-libre-url">实例地址</label>
+                  <input id="ais-libre-url" class="hiword-ai-input" value="${this.escapeAttr(s.libreUrl || "")}" placeholder="https://libretranslate.com" />
+                </div>
+              </div>
+              <div class="hiword-ai-setting-group">
+                <div class="hiword-ai-setting-label">
+                  <span class="hiword-ai-setting-name">引擎优先级</span>
+                  <span class="hiword-ai-setting-desc">免费引擎按勾选顺序尝试；自有 AI 始终作为最后兜底。</span>
+                </div>
+                <div class="hiword-ai-field-row">
+                  <label class="hiword-ai-check">
+                    <input type="checkbox" id="ais-pri-microsoft" ${s.translatePriority?.includes("microsoft") ? "checked" : ""} />
+                    <span>微软 Translator</span>
+                  </label>
+                  <label class="hiword-ai-check">
+                    <input type="checkbox" id="ais-pri-libre" ${s.translatePriority?.includes("libretranslate") ? "checked" : ""} />
+                    <span>LibreTranslate</span>
+                  </label>
+                </div>
+              </div>
+            </section>
+
           </main>
         </div>
-      `,
-    });
-
-    setTimeout(() => {
-      const dlg = dialog.element as HTMLElement;
+      `;
       const nav = dlg.querySelector(".hiword-ai-settings-nav") as HTMLElement;
       const pages = dlg.querySelectorAll(".hiword-ai-settings-page");
       const tabs = dlg.querySelectorAll(".hiword-ai-settings-tab");
@@ -7977,13 +8117,24 @@ export default class RewordPlugin extends Plugin {
       dlg.querySelector("#ais-save")?.addEventListener("click", () => {
         this.aiSettings = this.readAiSettingsFromDlg(dlg, "ais-");
         this.saveAiSettings();
-        dialog.destroy();
+        onClose?.();
         showMessage("AI 设置已保存", 2000, "success" as any);
       });
       dlg.querySelector("#ais-cancel")?.addEventListener("click", () => {
-        dialog.destroy();
+        onClose?.();
       });
-    }, 50);
+  }
+
+  /** 独立 AI 设置入口（顶栏 cog / 命令 / whale 面板桥接）：薄壳包一层 Dialog，内容复用 renderAiSettingsInto */
+  public openAiSettings() {
+    const dialog = new Dialog({
+      title: "AI 精读设置",
+      width: "720px",
+      height: "520px",
+      content: `<div class="hw-ai-settings-host"></div>`,
+    });
+    const host = dialog.element.querySelector(".hw-ai-settings-host") as HTMLElement;
+    if (host) this.renderAiSettingsInto(host, () => dialog.destroy());
   }
 
   /** 从 AI 设置对话框读取值（prefix 区分统一设置 vs 独立对话框的 ID） */
@@ -8027,6 +8178,19 @@ export default class RewordPlugin extends Plugin {
       soulDocId: inputVal("soul-id"),
       // 2026-08-27 阅读器「翻译」预置提示词
       translatePrompt: (q("translate-prompt") as HTMLTextAreaElement)?.value?.trim() || DEFAULT_AI_SETTINGS.translatePrompt,
+      // 2026-08-27 翻译引擎配置
+      msKey: inputVal("ms-key"),
+      msRegion: inputVal("ms-region"),
+      libreUrl: inputVal("libre-url").replace(/\/+$/, ""),
+      translatePriority: ([
+        checkboxVal("pri-microsoft") ? "microsoft" : null,
+        checkboxVal("pri-libre") ? "libretranslate" : null,
+      ].filter(Boolean) as string[]).length
+        ? ([
+            checkboxVal("pri-microsoft") ? "microsoft" : null,
+            checkboxVal("pri-libre") ? "libretranslate" : null,
+          ].filter(Boolean) as string[])
+        : ["microsoft", "libretranslate"],
       // 2026-08-21 精简：defaultMode 已删除
     } as AiSettings;
   }

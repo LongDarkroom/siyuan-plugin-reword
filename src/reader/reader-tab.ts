@@ -89,9 +89,12 @@ export class ReaderTabController {
                 self.plugin?.sendReaderSelection?.(opts) ?? undefined,
               onInsertToCurrentDoc: (markdown: string) =>
                 self.plugin?.insertReaderSelectionToCurrentDoc?.({ markdown }) ?? undefined,
-              onTranslate: (t: string) => self.plugin?.translateText?.(t) ?? undefined,
               // 2026-08-27：翻译按钮发送到 AI 精读面板（自动打开）；悬浮取词「加入词库」委托 vocabStore
               onTranslateToAi: (t: string) => self.plugin?.translateToAi?.(t),
+              // 2026-08-27：双语段落批量翻译（按书缓存，引擎链兜底）
+              onTranslateBatch: (texts: string[], from: string, to: string) =>
+                self.plugin?.translateBatch?.(texts, from, to, bookId) ?? Promise.resolve([]),
+              isTranslationConfigured: () => !!self.plugin?.isTranslationConfigured?.(),
               onAddToVocab: (w: string) => self.plugin?.getVocabStore?.()?.addWord?.(w),
               // 2026-08-27：阅读器词典弹窗「侧边栏」按钮 → 复用主插件 openWordInSidebar
               onOpenInSidebar: (w: string) => self.plugin?.openWordInSidebar?.(w),
@@ -167,7 +170,12 @@ export class ReaderTabController {
         custom: {
           id: `${this.plugin.name}${READER_TAB_TYPE}`,
           type: READER_TAB_TYPE,
-          icon: "iconBook",
+          // 2026-08-27 修复（pin 后空白胶囊）：原用 "iconBook"，但该图标 ID 在当前版本
+          // 思源桌面端不存在（grep 全量 JS 为 0 引用）→ <use href="#iconBook"> 空引用。
+          // 平时 tab 有 title 文本看不出问题；一旦批注保存触发 pin()，思源会隐藏文本只显
+          // 图标 → 34px 空白胶囊且被移到标签栏最前（用户看到的"左上角没信息的小页签"）。
+          // 改用插件自身已注入 DOM 的 SVG symbol（onload addIcons 注册），保证 pin 态可见。
+          icon: "iconREwordReader",
           title: title || "阅读",
           data: { bookId, title },
         } as any,

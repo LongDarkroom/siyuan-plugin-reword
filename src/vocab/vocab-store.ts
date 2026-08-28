@@ -100,6 +100,17 @@ export class VocabStore {
     if (valid) {
       this.data = raw as VocabStoreData;
       if (!Array.isArray(this.data.reviewEvents)) this.data.reviewEvents = [];
+      // 2026-08-27 老数据前向兼容:补全 preferredDefinitions(旧版词库记录无该字段)。
+      // 仅对缺失字段归一为 [],幂等,不影响已有数据。
+      for (const book of this.data.books) {
+        for (const theme of book.themes) {
+          for (const word of theme.words) {
+            if (!Array.isArray((word as any).preferredDefinitions)) {
+              (word as any).preferredDefinitions = [];
+            }
+          }
+        }
+      }
       this.ensureActiveValid();
       this.rebuildByWordIndex();
     } else {

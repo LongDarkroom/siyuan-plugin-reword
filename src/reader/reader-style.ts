@@ -34,6 +34,8 @@ export interface ReaderStyleInput {
   theme: ReaderStyleTheme;
   customFg?: string;
   customBg?: string;
+  /** 自定义背景图 URL（theme=custom 时生效，2026-08-27 晚 P2.3） */
+  customBgImage?: string;
   lineWidth: ReaderStyleLineWidth;
   /** 字体来源（只用于决定 fontCss 是否非空；不参与本模块其他逻辑） */
   fontMode: "follow-siyuan" | "custom" | "system";
@@ -42,6 +44,8 @@ export interface ReaderStyleInput {
   overridePublisherFont?: boolean;
   /** 统一正文字号：压平书籍 p/li 级写死字号（如 font-size: medium），默认 true（运行时总为 boolean） */
   overrideBookFontSize?: boolean;
+  /** 专注模式（运行时开关）：高亮视口中心段落、其余淡出；仅滚动模式生效 */
+  focusMode?: boolean;
   /** 文本设置（2026-08-24 新增） */
   text?: { fontWeight: number; letterSpacing: number };
   /** 段落设置（2026-08-24 新增） */
@@ -148,6 +152,8 @@ export function buildReaderStyles(
     fontSizeOverrideStyles(settings.fontSize, settings.overrideBookFontSize !== false),
     inlineOverrideStyles(),
     publisherFontOverrideStyles(settings.overridePublisherFont !== false),
+    focusModeStyles(settings.focusMode === true),
+    bilingualStyles(),
     headingStyles(),
     quoteStyles(o),
     listStyles(),
@@ -204,6 +210,23 @@ p, li, blockquote, div, dd, dt, td, th {
  *  这样能避免与 fontCss() 注入的宿主字体（如「霞鹜文楷」）冲突。
  */
 export function bodyStyles(o: ReaderStyleOutput, settings: ReaderStyleInput): string {
+  const rawImg = settings.theme === "custom" ? (settings.customBgImage || "").trim() : "";
+  const img = rawImg ? rawImg.replace(/"/g, "%22").replace(/\)/g, "%29") : "";
+  if (img) {
+    // 2026-08-27 晚（P2.3 自定义背景图）：拆简写 background，避免 image 被覆盖
+    return `
+body {
+  background-color: ${o.bg} !important;
+  background-image: url("${img}") !important;
+  background-size: cover !important;
+  background-position: center !important;
+  background-repeat: no-repeat !important;
+  background-attachment: fixed !important;
+  color: ${o.fg} !important;
+  line-height: ${settings.lineHeight} !important;
+  padding: ${o.padding} !important;
+}`.trim();
+  }
   return `
 body {
   background: ${o.bg} !important;
@@ -401,6 +424,54 @@ export function layoutMarginStyles(input?: {
   return `body { margin: ${mt}px ${mr}px ${mb}px ${ml}px !important; column-gap: ${gap}px; }`;
 }
 
+/**
+ * 专注模式（2026-08-27 晚 P2.2）：高亮视口中心段落、其余淡出。
+ * 由 ReaderView 在 iframe 内容文档给 <body> 加 .reword-focus、给中心 <p>/<li>/<blockquote> 加 .in-center；
+ * 本段只负责「非中心元素淡出」的样式（注入到 foliate 内容文档，与字号/字体同属 user CSS）。
+ * 仅滚动模式有意义（分页模式无滚动，中心段落概念不成立 → 调用方不开启 .reword-focus）。
+ */
+export function focusModeStyles(enabled: boolean): string {
+  if (!enabled) return "";
+  return `
+.reword-focus p:not(.in-center),
+.reword-focus li:not(.in-center),
+.reword-focus blockquote:not(.in-center) {
+  opacity: 0.32 !important;
+  transition: opacity 0.25s ease;
+}
+.reword-focus .in-center {
+  opacity: 1 !important;
+  transition: opacity 0.25s ease;
+}`.trim();
+}
+
+/**
+ * 双语对照译文样式（2026-08-27 重设计）：
+ * 顶栏「双语」开启后，每段正文后注入 `.reword-bilingual` 译文块。
+ * 该节点位于 foliate 内容 iframe 内，必须由 user CSS 注入（Svelte 组件 scoped 样式够不到）。
+ * 设计：比正文略小、绿色系（呼应「译文」语义），左侧细强调线，浅底，与原文区隔但同列对齐。
+ */
+export function bilingualStyles(): string {
+  return `
+.reword-bilingual {
+  margin: 0.25em 0 0.85em;
+  padding: 0.45em 0.65em;
+  font-size: 0.92em;
+  line-height: 1.7;
+  color: #2f9e44;
+  background: rgba(127, 200, 140, 0.10);
+  border-left: 3px solid rgba(47, 158, 68, 0.55);
+  border-radius: 4px;
+  word-break: break-word;
+}
+li > .reword-bilingual {
+  /* 列表项内置译文：去掉左侧强调线，避免与项目符号视觉冲突 */
+  margin-left: 0;
+  border-left: none;
+  background: rgba(127, 200, 140, 0.07);
+}`.trim();
+}
+
 /* ================= 内部辅助（不导出，避免外部误用） ================= */
 
 /**
@@ -409,6 +480,6 @@ export function layoutMarginStyles(input?: {
  */
 function _sanityCheckUnused(): void {
   // 占位，让 buildReaderStyles 引用所有子函数以避免 tree-shake 误删
-  const _x = [paragraphStyles, inlineOverrideStyles, headingStyles, quoteStyles, listStyles, figureStyles, bodyStyles, textStyles, paragraphLayoutStyles, layoutMarginStyles, linkStyles, codeStyles, colorSchemeStyles, wordWrapStyles, fontSizeOverrideStyles];
+  const _x = [paragraphStyles, inlineOverrideStyles, headingStyles, quoteStyles, listStyles, figureStyles, bodyStyles, textStyles, paragraphLayoutStyles, layoutMarginStyles, linkStyles, codeStyles, colorSchemeStyles, wordWrapStyles, fontSizeOverrideStyles, focusModeStyles, bilingualStyles];
   void _x;
 }

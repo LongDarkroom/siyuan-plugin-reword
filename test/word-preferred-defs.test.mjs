@@ -86,7 +86,7 @@ test("PreferredDefs:byWord 索引同步(增/删词后 preferredDefinitions 一�
   assert.equal(s.__byWordIndexSizeForTest(), 0);
 });
 
-test("PreferredDefs:老数据无 preferredDefinitions 字段:加载后视为空数组", () => {
+test("PreferredDefs:老数据无 preferredDefinitions 字段:加载后视为空数组", async () => {
   // 模拟老数据(无 preferredDefinitions 字段)
   const raw = {
     books: [
@@ -103,11 +103,10 @@ test("PreferredDefs:老数据无 preferredDefinitions 字段:加载后视为空�
   const s = new VocabStore();
   s.load(raw);
   // 老数据 addWord → 写入新字段
-  s.addWord("ink").then(() => {
-    const rec = s.findRecord("ink");
-    assert.ok(rec);
-    assert.deepEqual(rec.preferredDefinitions, []);
-  });
+  await s.addWord("ink");
+  const rec = s.findRecord("ink");
+  assert.ok(rec);
+  assert.deepEqual(rec.preferredDefinitions, []);
 });
 
 test("PreferredDefs:持久化往返:preferredDefinitions 序列化/反序列化不丢", async () => {

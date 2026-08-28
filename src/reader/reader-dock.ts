@@ -57,6 +57,11 @@ export class ReaderDockController {
     return this.store;
   }
 
+  /** 阅读设置存储（2026-08-27：主设置「阅读设置」页直接读写，变更经 svelte store 推送到所有已开阅读 Tab） */
+  get settingsStoreRef(): ReaderSettingsStore {
+    return this.settingsStore;
+  }
+
   get tabController(): ReaderTabController {
     return this.tabs;
   }

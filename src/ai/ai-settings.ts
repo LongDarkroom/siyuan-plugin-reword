@@ -34,6 +34,14 @@ export interface AiSettings {
   soulDocId: string;         // SOUL 文档 ID（用于记忆上下文）
   /** 阅读器「翻译」按钮发送到 AI 精读时预置的提示词（如「请把下面这句话翻译一下」） */
   translatePrompt: string;
+  /** 翻译引擎：微软 Translator 订阅 Key（Azure 认知服务） */
+  msKey?: string;
+  /** 翻译引擎：微软 Translator 区域（如 eastasia / westeurope） */
+  msRegion?: string;
+  /** 翻译引擎：LibreTranslate 实例地址（如 https://libretranslate.com） */
+  libreUrl?: string;
+  /** 免费翻译引擎优先级（按数组顺序尝试；AI 永远兜底，不在此列） */
+  translatePriority?: string[];
 
   // 2026-08-21 精简：以下字段已删除(从 21 个 → 14 个,-33%)
   //  - chatApi: 强制 OpenAI 兼容,不再支持多格式
@@ -127,6 +135,11 @@ export const DEFAULT_AI_SETTINGS: AiSettings = {
   soulDocId: "",
   // 2026-08-27 阅读器「翻译」预置提示词
   translatePrompt: DEFAULT_TRANSLATE_PROMPT,
+  // 2026-08-27 翻译引擎配置（微软 / LibreTranslate / 优先级；AI 兜底固定末位）
+  msKey: "",
+  msRegion: "",
+  libreUrl: "",
+  translatePriority: ["microsoft", "libretranslate"],
   // 2026-08-21 精简：双模式字段 defaultMode / chatPromptTemplate 已删除
 };
 
@@ -204,6 +217,13 @@ export function normalizeAiSettings(raw: any): AiSettings {
     translatePrompt: (typeof r.translatePrompt === "string" && r.translatePrompt.trim())
       ? r.translatePrompt
       : DEFAULT_TRANSLATE_PROMPT,
+    // 2026-08-27 翻译引擎配置
+    msKey: str(r.msKey, ""),
+    msRegion: str(r.msRegion, ""),
+    libreUrl: str(r.libreUrl, ""),
+    translatePriority: Array.isArray(r.translatePriority) && r.translatePriority.length
+      ? r.translatePriority.filter((x: any) => x === "microsoft" || x === "libretranslate")
+      : ["microsoft", "libretranslate"],
     // 2026-08-21 精简：defaultMode / chatPromptTemplate 双模式字段已删除
     //   若 raw 中存在,normalize 会忽略(用户可自行编辑 promptTemplate)
   };

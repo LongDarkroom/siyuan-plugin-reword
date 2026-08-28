@@ -42,6 +42,8 @@
     type CustomFont,
   } from "../reader/reader-fonts";
   import { buildReaderStyles, getDefaultCjkFontStack } from "../reader/reader-style";
+  // 2026-08-27 重设计：双语段落注入（顶栏「双语」开关）
+  import { createBilingual, type BilingualHandle } from "./bilingual";
   import { getFileBlob } from "../siyuan/api";
   // Phase 1：划词即时词典——复用现有离线词典引擎与卡片渲染（与「查词典」Tab 同源）
   import { lookupSmart, searchCandidates } from "../dict/dict-engine";
@@ -132,10 +134,12 @@
   export let onSendToNote: ((opts: { markdown: string; title: string }) => Promise<string> | void) | undefined = undefined;
   /** 插入到当前思源文档（2026-08-24 新增，可选） */
   export let onInsertToCurrentDoc: ((markdown: string) => Promise<string> | void) | undefined = undefined;
-  /** 翻译选中文本（委托 plugin.translateText，返回双语结果） */
-  export let onTranslate: ((text: string) => Promise<string> | void) | undefined = undefined;
   /** 翻译选中文本并直接发送到 AI 精读面板（委托 plugin.translateToAi） */
   export let onTranslateToAi: ((text: string) => void) | undefined = undefined;
+  /** 双语段落批量翻译（委托 plugin.translateBatch，按书缓存 + 引擎链兜底） */
+  export let onTranslateBatch: ((texts: string[], from: string, to: string) => Promise<string[]>) | undefined = undefined;
+  /** 是否已配置任一翻译引擎（用于双语开关前置提示） */
+  export let isTranslationConfigured: (() => boolean) | undefined = undefined;
   /** 加入词库（委托 plugin vocabStore.addWord） */
   export let onAddToVocab: ((word: string) => Promise<void> | void) | undefined = undefined;
   /** 在 REword 侧边栏查词（委托 plugin.openWordInSidebar：切到查词 Tab、自动填词查询、不打断编辑） */
@@ -165,6 +169,11 @@
   let readerViewEl: HTMLDivElement;  // 2026-08-23 新增：.reader-view 容器 ref（用于浮层 offset 与全局 mousedown 监听）
   let readerStageEl: HTMLDivElement;  // 2026-08-25 新增：.reader-stage 内容区 ref（浮层上下避让判定改用内容区坐标系，避免工具栏贴顶导航栏/越界）
   let view: any = null;
+  // 2026-08-27 重设计：双语对照状态与注入句柄
+  let bilingualOn = false;
+  let bilingualHandle: BilingualHandle | null = null;
+  let bilingualProgress = { done: 0, total: 0, active: false };
+  let bilingualInitDone = false; // 设置恢复只执行一次
   // ========== 2026-08-26 调试 HUD：高亮渲染链路诊断（foliate 原生管线） ==========
   // 退回 foliate 原生：view.addAnnotation + draw-annotation 事件 + Overlayer 静态方法。
   // 不再自建 SVG 层（rewordOverlays / rewordHighlights 已移除）。
@@ -204,6 +213,10 @@
   let footnoteHTML = "";
   let footnoteType = "脚注";
   let footnoteEl: HTMLElement;
+  // 2026-08-27 晚（P2.1）：脚注「悬停预览」——在点击之外补充 hover 触发
+  let footnoteHoverTimer: any = null;
+  let footnoteHoverAnchor: any = null; // 当前 hover 触发锚点（<a>），用于去重/收起判定
+  let footnotePinned = false;          // 点击锁定的气泡（hover 移开不自动收起，点空白才关）
   // 思源主题跟随（auto 模式）
   let siyuanThemeMode: "light" | "dark" = "light";
   let themeObserver: MutationObserver | null = null;
@@ -454,6 +467,53 @@
   function applyContainerBg() {
     const bg = themeOf().bg;
     if (container) container.style.background = bg;
+  }
+
+  // 2026-08-27 晚（P2.2 专注模式）：滚动时高亮视口中心段落、其余淡出
+  let focusScrollRaf: any = null;
+  function onFocusScroll(doc: Document) {
+    if (!(settings.focusMode && settings.flow === "scrolled")) return;
+    if (focusScrollRaf) return;
+    focusScrollRaf = requestAnimationFrame(() => {
+      focusScrollRaf = null;
+      highlightCenterParagraph(doc);
+    });
+  }
+  /** 找视口垂直中心附近的 <p>/<li>/<blockquote>，给它加 .in-center（其余移除） */
+  function highlightCenterParagraph(doc: Document) {
+    const win = doc.defaultView;
+    if (!win) return;
+    const midY = win.innerHeight / 2;
+    const paras = doc.querySelectorAll("p, li, blockquote");
+    let best: Element | null = null;
+    let bestDist = Infinity;
+    for (const p of Array.from(paras)) {
+      const r = (p as Element).getBoundingClientRect();
+      if (r.bottom < 0 || r.top > win.innerHeight) continue; // 视口外跳过
+      const c = r.top + r.height / 2;
+      const d = Math.abs(c - midY);
+      if (d < bestDist) { bestDist = d; best = p; }
+    }
+    for (const p of Array.from(paras)) p.classList.remove("in-center");
+    if (best) best.classList.add("in-center");
+  }
+  /** 应用专注模式：给已挂载内容文档的 body 加/去 .reword-focus，并立即高亮一次 */
+  function applyFocusMode() {
+    if (!view?.renderer?.getContents) return;
+    let contents: any[] = [];
+    try { contents = view.renderer.getContents() || []; } catch { return; }
+    const on = settings.focusMode && settings.flow === "scrolled";
+    for (const c of contents) {
+      const doc: Document | undefined = c?.doc;
+      if (!doc?.body) continue;
+      if (on) {
+        doc.body.classList.add("reword-focus");
+        highlightCenterParagraph(doc);
+      } else {
+        doc.body.classList.remove("reword-focus");
+        doc.querySelectorAll(".in-center").forEach((el: Element) => el.classList.remove("in-center"));
+      }
+    }
   }
 
   function applyFlow() {
@@ -842,6 +902,8 @@
           // 用最新设置（用户可能在书架改过 clickToTurn/flow）
           attachAllContentDocs();
         }
+        // 2026-08-27 重设计：翻页 / 加载新内容后，双语译文按需补注入
+        bilingualHandle?.onViewLoad();
       });
 
       let book: any;
@@ -1167,6 +1229,14 @@
     settings = settingsStore.update({ clickToTurn: (e.target as HTMLInputElement).checked });
   }
 
+  /** 专注模式开关（2026-08-27 晚 P2.2）：重新注入样式 + 给当前文档加/去 .reword-focus */
+  function setFocusMode(e: Event) {
+    const v = (e.target as HTMLInputElement).checked;
+    settings = settingsStore.update({ focusMode: v });
+    applyStyles();
+    applyFocusMode();
+  }
+
   function setOverridePublisherFont(e: Event) {
     settings = settingsStore.update({
       overridePublisherFont: (e.target as HTMLInputElement).checked,
@@ -1256,6 +1326,20 @@
 
   function onCustomColor(kind: "customFg" | "customBg", e: Event) {
     setCustomColor(kind, (e.target as HTMLInputElement).value);
+  }
+
+  // 2026-08-27 晚（P2.3 自定义背景图）：URL 输入实时预览
+  function onCustomBgImage(e: Event) {
+    const url = (e.target as HTMLInputElement).value.trim();
+    settings = settingsStore.update({ theme: "custom", customBgImage: url || undefined } as any);
+    applyStyles();
+  }
+
+  function clearCustomBgImage() {
+    const input = document.querySelector<HTMLInputElement>(".reader-text-input");
+    if (input) input.value = "";
+    settings = settingsStore.update({ customBgImage: undefined } as any);
+    applyStyles();
   }
 
   /* ================= 字体 ================= */
@@ -1516,6 +1600,7 @@
   // 2026-08-27：Option+悬浮取词（英文）相关状态
   let dictPopupEl: HTMLElement | null = null;       // 弹窗 DOM 引用（用于命中检测）
   let dictPopupSource: "sel" | "hover" | null = null; // 当前弹窗来源（sel=划词工具栏, hover=悬浮）
+
   let hoverHideTimer: any = null;                   // 悬浮弹窗延迟收起计时器
   let hoverWord: string | null = null;             // 当前悬浮命中的单词（去重用）
   let toastMsg = "";
@@ -1609,8 +1694,14 @@
     trackDocListener(doc, "mousedown", onContentMouseDown, true);
     // selectionchange 在 document 上触发，不会冒泡到 window，必须挂在 doc 上
     trackDocListener(doc, "selectionchange", onContentSelectionChange, true);
+    // 2026-08-27 晚（P2.1）：脚注悬停预览——mouseover 委托，命中脚注引用防抖弹气泡
+    trackDocListener(doc, "mouseover", onFootnoteHover as EventListener);
+    // 2026-08-27 晚（P2.2）：专注模式滚动高亮（capture 捕获内部滚动容器）
+    trackDocListener(doc, "scroll", ((_e: Event) => onFocusScroll(doc)) as EventListener, true);
     // 翻页/分区点击等交互监听（仅注入一次，guard 由 attachedDocs 保证，避免重复绑定导致翻两页）
     injectPageTurn(doc);
+    // 2026-08-27 晚（P2.2）：新文档就绪时按当前专注模式状态应用高亮 class
+    if (settings.focusMode) applyFocusMode();
   }
 
   /** 卸载所有内容文档上的监听（与 attachContentDoc 对称），反复进出阅读 Tab 不泄漏 */
@@ -2346,6 +2437,17 @@
     if (!isFootnoteRef(a)) return; // 非脚注：不拦截，foliate 默认 goTo
     // 是脚注：阻止跳转
     e.preventDefault();
+    // 点击锁定：hover 移开也不自动收起，点空白（onContainerMouseDown）才关
+    footnotePinned = true;
+    clearTimeout(footnoteHoverTimer);
+    footnoteHoverAnchor = a;
+    await showFootnoteFor(a, href);
+  }
+
+  /** 抽取脚注内容并弹气泡（点击 / 悬停共用）。坐标转换对齐工具栏已验证管线。 */
+  async function showFootnoteFor(a: any, href: string) {
+    if (!a || !href) return;
+    if (!isFootnoteRef(a)) return; // 非脚注：不拦截，foliate 默认 goTo
     try {
       const result = await extractFootnote(view?.book, href);
       if (!result.html) {
@@ -2383,6 +2485,40 @@
       toast("脚注展示异常");
     }
   }
+
+  /** 悬停脚注引用 → 防抖 350ms 弹气泡；移出 → 延迟收起（除非点击锁定） */
+  function onFootnoteHover(e: MouseEvent) {
+    // 划词工具栏 / 批注编辑可见时不弹 hover 脚注，避免干扰
+    if (selToolbar.visible || noteEditor.visible) {
+      clearTimeout(footnoteHoverTimer);
+      return;
+    }
+    const a = (e.target as Element | null)?.closest?.("a");
+    if (!a || !isFootnoteRef(a)) {
+      scheduleFootnoteHoverHide();
+      return;
+    }
+    // 同一引用已在显示：忽略
+    if (showFootnote && footnoteHoverAnchor === a) return;
+    clearTimeout(footnoteHoverTimer);
+    const el = a as any;
+    footnoteHoverTimer = setTimeout(() => {
+      footnotePinned = false; // hover 触发不锁定
+      footnoteHoverAnchor = el;
+      showFootnoteFor(el, el.getAttribute("href") || "");
+    }, 350);
+  }
+
+  /** 鼠标移出脚注引用：延迟收起（点击锁定的气泡不收起） */
+  function scheduleFootnoteHoverHide() {
+    clearTimeout(footnoteHoverTimer);
+    setTimeout(() => {
+      if (showFootnote && !footnotePinned && footnoteHoverAnchor) {
+        closeFootnote();
+      }
+    }, 220);
+  }
+
 
   /** 定位脚注气泡：基于主文档视口坐标的锚点，智能四向避让
    *  anchorX/Y 已是主文档视口坐标（iframe 偏移已加），内部用 toContainerCoords 转容器相对坐标
@@ -2486,6 +2622,9 @@
     showFootnote = false;
     footnoteHTML = "";
     footnoteType = "脚注";
+    footnoteHoverAnchor = null;
+    footnotePinned = false;
+    if (footnoteHoverTimer) clearTimeout(footnoteHoverTimer);
   }
 
   /** 把单条批注绘制进 foliate（异步；用返回 index 回填 cfi→章节缓存） */
@@ -3134,18 +3273,83 @@
     closeSelToolbar();
   }
 
-  // 翻译选中文本（弹双语卡片）
+  // 翻译选中文本（2026-08-27 原行为：仅发 AI 精读面板；
+  // 2026-08-27 晚 改：弹内联即译气泡，展示原文/译文，并保留「发 AI 精读」入口）
+  /**
+   * 划词工具栏「翻译」按钮（2026-08-27 重设计）：
+   * 直接把选中文本拼上 AI 设置里的「翻译预置提示词」，发送并聚焦 AI 精读面板。
+   * 不再弹内联即译卡片（内联卡片已移除，译文改为顶栏「双语」开关逐段注入）。
+   */
   function onSelTranslate() {
     const text = selToolbar.text?.trim();
-    if (!text) return;
     closeSelToolbar();
-    // 2026-08-27：翻译按钮仅发送到 AI 精读面板（自动打开），不再弹内联双语卡片
-    if (onTranslateToAi) {
-      onTranslateToAi(text);
+    if (!text) return;
+    if (onTranslateToAi) onTranslateToAi(text);
+    else toast("翻译未配置：请先在 AI 设置中开启并填写 API");
+  }
+
+  // ========== 2026-08-27 重设计：双语对照开关 ==========
+  /** 懒创建双语注入句柄（仅一次） */
+  function ensureBilingualHandle(): BilingualHandle {
+    if (bilingualHandle) return bilingualHandle;
+    const target = settingsStore.get().bilingualTarget || "zh";
+    bilingualHandle = createBilingual({
+      bookId,
+      getContents: () => {
+        try {
+          return (view?.renderer?.getContents?.() as Document[]) || [];
+        } catch {
+          return [];
+        }
+      },
+      translateBatch: (texts, from, to) =>
+        onTranslateBatch ? onTranslateBatch(texts, from, to) : Promise.resolve([]),
+      to: target,
+      onProgress: (done, total) => {
+        bilingualProgress = { done, total, active: done < total };
+        if (done >= total) {
+          setTimeout(() => {
+            bilingualProgress = { ...bilingualProgress, active: false };
+          }, 800);
+        }
+      },
+    });
+    return bilingualHandle;
+  }
+
+  /** 开启双语（前置检查引擎是否已配置） */
+  function enableBilingual(): void {
+    if (!isTranslationConfigured || isTranslationConfigured()) {
+      ensureBilingualHandle().setEnabled(true);
+      bilingualOn = true;
     } else {
-      toast("翻译未配置：请先在 AI 设置中配置翻译引擎");
+      toast("请先在 AI 设置配置翻译引擎（微软 / LibreTranslate）或开启 AI", 3200, "info" as any);
     }
   }
+
+  /** 关闭双语（移除全部注入节点） */
+  function disableBilingual(): void {
+    bilingualHandle?.setEnabled(false);
+    bilingualOn = false;
+    bilingualProgress = { done: 0, total: 0, active: false };
+  }
+
+  /** 顶栏「双语」按钮：切换并持久化到阅读设置 */
+  function toggleBilingual(): void {
+    if (bilingualOn) {
+      disableBilingual();
+      settingsStore.update({ bilingual: false });
+    } else {
+      if (!isTranslationConfigured || isTranslationConfigured()) {
+        ensureBilingualHandle().setEnabled(true);
+        bilingualOn = true;
+        settingsStore.update({ bilingual: true });
+      } else {
+        toast("请先在 AI 设置配置翻译引擎（微软 / LibreTranslate）或开启 AI", 3200, "info" as any);
+      }
+    }
+  }
+
 
   /**
    * 笔记模板渲染（纯函数，2026-08-24 新增）
@@ -3537,6 +3741,11 @@
       settings = s;
       applyContainerBg();
       if (view) applyStyles();
+      // 2026-08-27：双语状态从设置一次性恢复（仅首次订阅时）
+      if (!bilingualInitDone) {
+        bilingualInitDone = true;
+        if (s.bilingual) enableBilingual();
+      }
     });
     unsubAnnChanged = subscribeAnnotationsChanged((bid) => {
       if (bid === bookId && view) syncVisualWithStore(view, annStore, bookId);
@@ -3578,6 +3787,9 @@
     if (toastTimer) clearTimeout(toastTimer);
     if (undoTimer) clearTimeout(undoTimer);
     if (hoverHideTimer) clearTimeout(hoverHideTimer);
+    // 2026-08-27：双语注入句柄销毁（移除全部译文节点，零残留）
+    try { bilingualHandle?.destroy(); } catch { /* ignore */ }
+    bilingualHandle = null;
     if (sessionReadMs > 0) void store.addReadingTime(bookId, sessionReadMs);
     // 2026-08-23 修复：listener 绑在 readerViewEl（不是 document）
     if (readerViewEl) {
@@ -3615,6 +3827,13 @@
     {/if}
     <span class="reader-spacer"></span>
     <span class="reader-progress">{progressText}</span>
+    <button
+      class="reader-btn reader-bilingual-btn"
+      class:reader-btn-active={bilingualOn}
+      class:reader-btn-busy={bilingualProgress.active}
+      title="双语对照：在每段正文后注入译文（微软 / LibreTranslate / AI 兜底）"
+      on:click={toggleBilingual}
+    >双语{bilingualProgress.active ? ` ${bilingualProgress.done}/${bilingualProgress.total}` : ""}</button>
     <button
       class="reader-btn reader-settings-btn"
       title="设置"
@@ -3903,6 +4122,19 @@
               on:change={(e) => onCustomColor("customBg", e)}
             />
           </div>
+          <div class="reader-setting-row reader-setting-col">
+            <span class="reader-setting-label">背景图（URL）</span>
+            <input
+              class="reader-text-input"
+              type="text"
+              placeholder="https://… 或 data:image/… 图片地址，留空则只用背景色"
+              value={settings.customBgImage || ""}
+              on:input={(e) => onCustomBgImage(e)}
+            />
+            {#if settings.customBgImage}
+              <button class="reader-text-clear" title="清除背景图" on:click={clearCustomBgImage}>清除</button>
+            {/if}
+          </div>
         {/if}
 
         <!-- 字体 -->
@@ -4011,6 +4243,19 @@
               type="checkbox"
               checked={!!settings.clickToTurn}
               on:change={setClickToTurn}
+            />
+            <span class="reader-switch-track"></span>
+          </label>
+        </div>
+
+        <!-- 专注模式（P2.2）：滚动时高亮中心段落、其余淡出，仅滚动模式生效 -->
+        <div class="reader-setting-row reader-setting-toggle-row">
+          <span class="reader-setting-label">专注模式</span>
+          <label class="reader-switch" title="滚动时高亮当前阅读段落、其余淡出，减少干扰（仅「滚动」模式下生效）">
+            <input
+              type="checkbox"
+              checked={!!settings.focusMode}
+              on:change={setFocusMode}
             />
             <span class="reader-switch-track"></span>
           </label>
@@ -4421,6 +4666,14 @@
   .reader-btn-active {
     background: var(--b3-theme-primary-light, rgba(55, 138, 221, 0.18));
     color: var(--b3-theme-primary, #378add);
+  }
+  /* 双语按钮：开启态用绿色强调（呼应译文色），翻译进行中显示忙碌态 */
+  .reader-bilingual-btn.reader-btn-active {
+    background: rgba(47, 158, 68, 0.18);
+    color: #2f9e44;
+  }
+  .reader-btn-busy {
+    opacity: 0.85;
   }
   .reader-title {
     font-size: 13px;
@@ -5549,6 +5802,36 @@
     color: var(--b3-theme-on-surface, #666);
     flex-shrink: 0;
   }
+  .reader-setting-col {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 6px;
+  }
+  .reader-text-input {
+    width: 100%;
+    box-sizing: border-box;
+    border: 1px solid var(--b3-border-color, rgba(0, 0, 0, 0.15));
+    border-radius: 6px;
+    padding: 5px 8px;
+    font-size: 12px;
+    color: var(--b3-theme-on-background, #333);
+    background: var(--b3-theme-background, #fff);
+    font-family: var(--b3-font-family, inherit);
+  }
+  .reader-text-clear {
+    align-self: flex-end;
+    background: none;
+    border: 1px solid var(--b3-border-color, rgba(0, 0, 0, 0.15));
+    border-radius: 6px;
+    padding: 3px 10px;
+    font-size: 12px;
+    cursor: pointer;
+    color: var(--b3-theme-on-background, #333);
+  }
+  .reader-text-clear:hover {
+    background: var(--b3-theme-background-light, rgba(0, 0, 0, 0.06));
+  }
+
   .reader-setting-control {
     display: flex;
     align-items: center;

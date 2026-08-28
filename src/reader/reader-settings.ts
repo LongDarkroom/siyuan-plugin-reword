@@ -117,6 +117,8 @@ export interface ReaderSettings {
   /** 自定义主题文字色/背景色（theme=custom 时生效） */
   customFg?: string;
   customBg?: string;
+  /** 自定义背景图 URL（theme=custom 时生效，2026-08-27 晚 P2.3） */
+  customBgImage?: string;
   lineWidth: ReaderLineWidth;
   /** 阅读模式：分页 / 连续滚动 */
   flow: ReaderFlow;
@@ -132,6 +134,12 @@ export interface ReaderSettings {
   overridePublisherFont?: boolean;
   /** 统一正文字号：压平书籍自带 p/li 级字号（如 font-size: medium），让字号 A+/A- 全局生效；默认开 */
   overrideBookFontSize?: boolean;
+  /** 专注模式：滚动时高亮视口中心段落、其余淡出（仅滚动模式生效）；默认关 */
+  focusMode?: boolean;
+  /** 双语对照：开启后每段正文后注入译文（2026-08-27 重设计） */
+  bilingual?: boolean;
+  /** 双语目标语言（ISO-639-1，默认 "zh"） */
+  bilingualTarget?: string;
   /** 文本设置（2026-08-24 新增） */
   text: ReaderTextSettings;
   /** 段落设置（2026-08-24 新增） */
@@ -153,6 +161,9 @@ export const READER_DEFAULT_SETTINGS: ReaderSettings = {
   clickToTurn: false,
   overridePublisherFont: true,
   overrideBookFontSize: true,
+  focusMode: false,
+  bilingual: false,
+  bilingualTarget: "zh",
   text: {
     fontWeight: 400,
     letterSpacing: 0,
