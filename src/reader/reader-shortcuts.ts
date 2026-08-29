@@ -1,9 +1,9 @@
 /**
  * 阅读器 - 键盘快捷键（注册表 + 冲突检测 + hint overlay 数据源）
  * --------------------------------------------------------------------
- * - 12 项快捷键注册表（←→翻页 / Home/End 跳头尾 / Space 下一段 / Ctrl± 字号 /
+ * - 18 项快捷键注册表（←→翻页 / Home/End 跳头尾 / Space 下一段 / Ctrl± 字号 /
  *   Ctrl+F 搜索 / Ctrl+B 书签 / Ctrl+T TTS / Ctrl+S 设置 / Ctrl+Shift+L 主题 /
- *   F11 全屏 / ? 显隐 hint / Esc 关闭浮窗）
+ *   F11 全屏 / Ctrl ± 0 1 2 3 PDF 缩放 / ? 显隐 hint / Esc 关闭浮窗）
  * - 冲突检测：与思源全局快捷键冲突时跳过（不抢），由 ReaderHint 标注
  * - 跨平台：Mac 用 Cmd，其它用 Ctrl
  * - 注册/注销生命周期：mount 时注册，dispose 时清理（避免热重载泄漏）
@@ -28,7 +28,14 @@ export type ShortcutAction =
   | "toggleTheme"
   | "toggleFullscreen"
   | "showHint"
-  | "closeOverlay";
+  | "closeOverlay"
+  // [REword patch 2026-08-29] PDF 缩放（参考 Obsidian PDF++ 风格）
+  | "zoomIn"            // Cmd/Ctrl + =    放大到下一档
+  | "zoomOut"           // Cmd/Ctrl + -    缩小到上一档
+  | "zoomReset"         // Cmd/Ctrl + 0    重置到 fit-page
+  | "fitWidth"          // Cmd/Ctrl + 1    适应宽度
+  | "fitPage"           // Cmd/Ctrl + 2    适应整页
+  | "cycleZoomPreset";  // Cmd/Ctrl + 3    循环切换预设档位（50/75/100/125/150/200%）
 
 export interface ShortcutSpec {
   action: ShortcutAction;
@@ -46,7 +53,7 @@ export interface ShortcutSpec {
   key: string;
 }
 
-/** 完整快捷键注册表（12 项；不含 ?/Esc 因为它们无修饰键，单独处理） */
+/** 完整快捷键注册表（18 项；不含 ?/Esc 因为它们无修饰键，单独处理） */
 export const READER_SHORTCUTS: ShortcutSpec[] = [
   { action: "prevPage",       label: "上一页",                key: "ArrowLeft" },
   { action: "nextPage",       label: "下一页",                key: "ArrowRight" },
@@ -63,6 +70,15 @@ export const READER_SHORTCUTS: ShortcutSpec[] = [
   { action: "openSettings",   label: "设置",      ctrl: true, cmd: true,  key: "s" },
   { action: "toggleTheme",    label: "切换主题（明/暗）", ctrl: true, cmd: true, shift: true, key: "l" },
   { action: "toggleFullscreen", label: "全屏",  key: "F11" },
+  // [REword patch 2026-08-29] PDF 缩放快捷键（参考 Obsidian PDF++）
+  // 注意：fontIncrease / fontDecrease 跟 zoomIn / zoomOut 都用 "=" / "-"，
+  // 实际触发哪个由"当前是否在 PDF"决定（ReaderView 内部按格式分流）。
+  { action: "zoomIn",         label: "PDF 放大",    ctrl: true, cmd: true,  key: "=" },
+  { action: "zoomOut",        label: "PDF 缩小",    ctrl: true, cmd: true,  key: "-" },
+  { action: "zoomReset",      label: "PDF 重置缩放", ctrl: true, cmd: true,  key: "0" },
+  { action: "fitWidth",       label: "PDF 适应宽度", ctrl: true, cmd: true,  key: "1" },
+  { action: "fitPage",        label: "PDF 适应整页", ctrl: true, cmd: true,  key: "2" },
+  { action: "cycleZoomPreset",label: "PDF 切换缩放档位", ctrl: true, cmd: true,  key: "3" },
 ];
 
 /** 无修饰键快捷键（独立处理） */

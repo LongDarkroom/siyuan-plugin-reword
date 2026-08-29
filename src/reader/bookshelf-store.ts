@@ -11,12 +11,23 @@ import { putFile, getFileBlob, removeFile } from "../siyuan/api";
 import { unzipSync } from "fflate";
 import { writable } from "svelte/store";
 
-/** 阅读进度：cfi（EPUB 定位）或 fraction（通用比例定位） */
+/** 阅读进度：cfi（EPUB 定位）/ fraction（通用比例定位 0-1）/ index（章节或页码 0-based） */
 export interface ReadingProgress {
   cfi?: string;
   fraction?: number;
   index?: number;
+  // [REword patch 2026-08-29] PDF 缩放状态（仅 PDF 用，optional 字段，老数据兼容）
+  zoom?: ZoomState;
 }
+
+/** PDF 缩放状态（per-file 持久化） */
+export type ZoomState =
+  | { kind: "fit-width" }
+  | { kind: "fit-page" }
+  | { kind: "custom"; scale: number };  // 0.25 - 4.0
+
+/** 缩放预设档位（Zoom in/out 步进用，参考 Obsidian PDF++） */
+export const ZOOM_PRESETS: readonly number[] = [0.5, 0.75, 1.0, 1.25, 1.5, 2.0] as const;
 
 export interface BookMeta {
   id: string;
@@ -24,7 +35,7 @@ export interface BookMeta {
   author?: string;
   /** EPUB 语言（dc:language） */
   language?: string;
-  /** epub / mobi / azw3 / fb2 / cbz / txt / md */
+  /** epub / mobi / azw3 / fb2 / cbz / pdf / txt / md */
   format: string;
   /** 思源 data 内路径 */
   path: string;
@@ -83,6 +94,109 @@ export class BookshelfStore {
       await this.plugin.saveData(INDEX_KEY, this.books);
     } catch (e) {
       console.warn("[REword] 书架索引持久化失败:", e);
+    }
+  }
+
+  /**
+   * 从 PDF 中解析元数据与封面
+   * - 元数据：PDF.js getMetadata().info（Title / Author / Subject）
+   * - 封面：渲染第 1 页为缩略图（scale 0.3, jpeg 80%）
+   *
+   * [REword patch 2026-08-29] PDF 适配 Phase 1：复用 foliate-js vendor 里的 pdf.mjs
+   * pdf.mjs 第 45 行 `var __webpack_exports__ = globalThis.pdfjsLib = {};` 自挂载，
+   * 这里动态 import 一次触发副作用即可拿到 pdfjsLib。
+   *
+   * 失败容错：解析失败不阻断导入（返回空对象，调用方用文件名 fallback）
+   */
+  private async extractPdfMeta(file: File): Promise<{
+    title?: string;
+    author?: string;
+    cover?: { blob: Blob; ext: string };
+  }> {
+    try {
+      // 动态 import 触发 pdf.mjs 自挂载到 globalThis.pdfjsLib
+      // @ts-expect-error vendor/pdfjs/pdf.mjs 无 .d.ts，运行时类型已挂 globalThis
+      await import("./vendor/foliate-js/vendor/pdfjs/pdf.mjs");
+      const pdfjsLib = (globalThis as any).pdfjsLib;
+      if (!pdfjsLib?.getDocument) return {};
+
+      // PDF.js worker：与 foliate-js/pdf.js 一致，用独立 worker 文件
+      // Phase 1.5：copy-dist.mjs 已把 pdf.worker.mjs 复制到插件根目录
+      // 思源 webview 通过 /plugins/siyuan-plugin-reword/pdf.worker.mjs 访问
+      // [REword patch 2026-08-29] Phase 1 移动端：弱设备/iOS WKWebView 用主线程模式
+      // 原因：iOS 15.4+ WKWebView 对 Web Worker 严格 CORS 校验，
+      // 且 iOS 15.6 以下无 OffscreenCanvas，worker 加载失败导致白屏。
+      // 弱设备（移动端 / < 4 核 / iOS）→ workerSrc 设空走 fake worker（主线程跑）
+      try {
+        const isWeakDevice = (() => {
+          try {
+            const ua = navigator.userAgent;
+            const cores = navigator.hardwareConcurrency ?? 4;
+            const isMob = /Mobi|Android|iPhone|iPad|iPod/.test(ua);
+            const isIOS = /iPad|iPhone|iPod/.test(ua);
+            return isMob || isIOS || cores < 4;
+          } catch {
+            return false;
+          }
+        })();
+        if (isWeakDevice) {
+          // 弱设备：禁用 worker，主线程同步跑（性能损失但能加载）
+          pdfjsLib.GlobalWorkerOptions.workerSrc = "";
+        } else {
+          const origin = (typeof globalThis !== "undefined" && globalThis.location?.origin) || "";
+          pdfjsLib.GlobalWorkerOptions.workerSrc = origin
+            ? `${origin}/plugins/siyuan-plugin-reword/pdf.worker.mjs`
+            : "./pdf.worker.mjs";
+        }
+      } catch {
+        // ignore
+      }
+
+      const buf = new Uint8Array(await file.arrayBuffer());
+      const loadingTask = pdfjsLib.getDocument({
+        data: buf,
+        // [REword patch 2026-08-29] PDF 适配 Phase 1.5：恢复 worker 模式
+        // 配合 workerSrc = /plugins/siyuan-plugin-reword/pdf.worker.mjs
+        // Phase 1 的 disableWorker: true 已移除（详见 foliate-js/pdf.js 注释）
+        // [REword patch 2026-08-29] 移动端：workerSrc 为空时 PDF.js 自动主线程跑
+      });
+      const pdf = await loadingTask.promise;
+
+      // 1. 元数据
+      const info = await pdf.getMetadata().then((m: any) => m?.info ?? {});
+      const title = (info?.Title || "").trim() || undefined;
+      const author = (info?.Author || "").trim() || undefined;
+
+      // 2. 封面：渲染第 1 页为缩略图
+      let cover: { blob: Blob; ext: string } | undefined;
+      try {
+        const page = await pdf.getPage(1);
+        const viewport = page.getViewport({ scale: 0.3 });
+        const canvas = document.createElement("canvas");
+        canvas.width = Math.max(1, Math.ceil(viewport.width));
+        canvas.height = Math.max(1, Math.ceil(viewport.height));
+        const ctx = canvas.getContext("2d");
+        if (ctx) {
+          await page.render({ canvasContext: ctx, viewport, canvas }).promise;
+          const blob: Blob | null = await new Promise((resolve) =>
+            canvas.toBlob((b) => resolve(b), "image/jpeg", 0.8)
+          );
+          if (blob) cover = { blob, ext: "jpg" };
+        }
+      } catch {
+        // 封面渲染失败不阻断
+      }
+
+      // 释放 PDF 文档
+      try {
+        await pdf.destroy?.();
+      } catch {
+        // ignore
+      }
+
+      return { title, author, cover };
+    } catch {
+      return {};
     }
   }
 
@@ -164,7 +278,7 @@ export class BookshelfStore {
   async importBook(file: File): Promise<BookMeta | null> {
     await this.load();
     const ext = (file.name.match(/\.([a-z0-9]+)$/i)?.[1] ?? "epub").toLowerCase();
-    const nameBase = file.name.replace(/\.(epub|mobi|azw3|fb2|cbz|txt|md|markdown)$/i, "") || file.name;
+    const nameBase = file.name.replace(/\.(epub|mobi|azw3|fb2|cbz|pdf|txt|md|markdown)$/i, "") || file.name;
     // 去重：同名(去扩展名)+同大小视为重复
     const dup = this.books.find(
       (b) => b.title.toLowerCase() === nameBase.toLowerCase() && b.size === file.size
@@ -175,7 +289,7 @@ export class BookshelfStore {
     const path = `${dir}/${id}.${ext}`;
     const ok = await putFile(path, false, file);
     if (!ok) throw new Error(`书籍上传失败: ${file.name}`);
-    // EPUB：元数据 + 封面（失败静默，不阻断导入）
+    // EPUB/PDF：元数据 + 封面（失败静默，不阻断导入）
     let title: string | undefined;
     let author: string | undefined;
     let language: string | undefined;
@@ -185,6 +299,19 @@ export class BookshelfStore {
       title = meta.title;
       author = meta.author;
       language = meta.language;
+      if (meta.cover) {
+        try {
+          await putFile(`${dir}/covers`, true, null);
+        } catch (__swallowErr) { logSwallow(__swallowErr, "bookshelf-store.ts · importBook", "debug"); }
+        const coverPath = `${dir}/covers/${id}.${meta.cover.ext}`;
+        const coverOk = await putFile(coverPath, false, meta.cover.blob);
+        if (coverOk) cover = coverPath;
+      }
+    } else if (ext === "pdf") {
+      // [REword patch 2026-08-29] PDF 适配 Phase 1：元数据 + 首页封面
+      const meta = await this.extractPdfMeta(file);
+      title = meta.title;
+      author = meta.author;
       if (meta.cover) {
         try {
           await putFile(`${dir}/covers`, true, null);

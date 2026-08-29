@@ -45,7 +45,7 @@
   let removeTarget: BookMeta | null = null;
   let removeWithFile = false;
 
-  const ACCEPT = ".epub,.mobi,.azw3,.fb2,.cbz,.txt,.md,.markdown";
+  const ACCEPT = ".epub,.mobi,.azw3,.fb2,.cbz,.pdf,.txt,.md,.markdown";
   const MB = 1024 * 1024;
 
   function fmtSize(n: number): string {
@@ -265,7 +265,7 @@
       <div class="bookshelf-dropzone-inner">
         <div class="bookshelf-dropzone-icon">📥</div>
         <div>松开导入书籍</div>
-        <div class="bookshelf-dropzone-hint">支持 EPUB / MOBI / AZW3 / FB2 / CBZ / TXT / Markdown</div>
+        <div class="bookshelf-dropzone-hint">支持 EPUB / MOBI / AZW3 / FB2 / CBZ / PDF / TXT / Markdown</div>
       </div>
     </div>
   {/if}
@@ -326,7 +326,7 @@
     {:else}
       <div class="bookshelf-empty">
         <div class="bookshelf-empty-title">书架是空的</div>
-        <div class="bookshelf-empty-hint">支持 EPUB / MOBI / AZW3 / FB2 / CBZ / TXT / Markdown</div>
+        <div class="bookshelf-empty-hint">支持 EPUB / MOBI / AZW3 / FB2 / CBZ / PDF / TXT / Markdown</div>
         <div class="bookshelf-empty-hint">直接拖拽文件到这里，或点击下方按钮</div>
         <button class="bookshelf-import-btn" on:click={() => fileInput?.click()}>导入第一本书</button>
       </div>

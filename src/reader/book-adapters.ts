@@ -52,7 +52,7 @@ export function isTextBookFile(name: string): boolean {
 
 /** 是否支持的文件（含 foliate 原生格式） */
 export function isSupportedBookFile(name: string): boolean {
-  return isTextBookFile(name) || /\.(epub|mobi|azw3|fb2|cbz)$/i.test(name);
+  return isTextBookFile(name) || /\.(epub|mobi|azw3|fb2|cbz|pdf)$/i.test(name);
 }
 
 // 编码探测/解码见 ./text-encoding（此处统一 re-export，保持对外接口）

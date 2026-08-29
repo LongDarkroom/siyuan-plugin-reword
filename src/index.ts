@@ -174,24 +174,40 @@ interface DictManifest {
 }
 
 /** 朗读引擎 */
-type TtsEngine = "offline" | "auto" | "online" | "system";
+type TtsEngine = "system" | "youdao" | "edge" | "auto";
 
-/** 朗读设置（持久化在插件数据中） */
+/** 朗读设置（持久化在插件数据中；连续朗读与查词发音共用同一份配置） */
 interface TtsSettings {
-  engine: TtsEngine; // offline=系统语音优先,失败回退在线；auto=在线优先,失败回退系统；online=仅在线；system=仅系统语音
-  rate: number;      // 系统语音语速 0.5~2
-  pitch: number;     // 系统语音音高 0.5~2（仅系统语音生效）
-  accent: "uk" | "us"; // 在线真人音口音：uk=英音(type=1)，us=美音(type=2)
-  preferVoiceURI?: string; // 系统语音中优先使用的 voiceURI（offline/auto/system 模式生效）
-  interval: number;   // 列表朗读间隔（毫秒），单词之间的停顿时间，默认 800ms
+  engine: TtsEngine;       // system=仅系统语音；youdao=有道真人音；edge=Edge 云端神经音；auto=在线优先回退系统
+  rate: number;            // 语速 0.5~3（系统/Edge 生效；有道忽略）
+  pitch: number;           // 音高 0.5~2（仅系统语音生效）
+  volume: number;          // 音量 0~1
+  accent: "uk" | "us";     // 有道口音：uk=英音(type=1)，us=美音(type=2)
+  preferVoiceURI?: string; // 系统语音优先 voiceURI
+  interval: number;        // 句间停顿（毫秒）
+  granularity: "sentence" | "word";                    // 朗读粒度：整句 / 逐词
+  scope: "selection" | "section" | "book";            // 范围：选区 / 本节 / 全书
+  enableHighlight: boolean;                            // 启用句子高亮
+  highlightStyle: "background" | "underline" | "wave" | "outline";
+  highlightColor: string;                              // 高亮颜色
+  autoPage: boolean;                                   // 读完当前节自动翻页续读
+  sleepTimerMin: number;                               // 睡眠定时（分钟，0=关）
 }
 
 const DEFAULT_TTS: TtsSettings = {
-  engine: "offline",
-  rate: 0.9,
+  engine: "system",
+  rate: 1.0,
   pitch: 1.0,
+  volume: 1.0,
   accent: "us",
-  interval: 800,
+  interval: 350,
+  granularity: "sentence",
+  scope: "book",
+  enableHighlight: true,
+  highlightStyle: "background",
+  highlightColor: "#ffe082",
+  autoPage: true,
+  sleepTimerMin: 0,
 };
 
 /** 在线词典设置（2026-08-15 新增，持久化在 hiword-online.json） */
@@ -4907,15 +4923,27 @@ export default class RewordPlugin extends Plugin {
   private async loadTtsSettings(): Promise<TtsSettings> {
     try {
       const s = await this.loadData("hiword-tts.json");
-      if (s && (s.engine === "offline" || s.engine === "auto" || s.engine === "online" || s.engine === "system")) {
-        return { ...DEFAULT_TTS, ...s };
+      if (s && typeof s.engine === "string") {
+        // 兼容旧版 engine 枚举（offline/online → 新 system/youdao）
+        const norm: TtsEngine =
+          s.engine === "offline" || s.engine === "system" ? "system"
+          : s.engine === "online" ? "youdao"
+          : s.engine === "edge" ? "edge"
+          : s.engine === "auto" ? "auto"
+          : "system";
+        return { ...DEFAULT_TTS, ...s, engine: norm };
       }
     } catch (__swallowErr) { logSwallow(__swallowErr, "index.ts · loadTtsSettings", "debug"); }
     return { ...DEFAULT_TTS };
   }
 
-  /** 保存朗读设置 */
-  private async saveTtsSettings(s: TtsSettings) {
+  /** 公开读取当前朗读设置（供阅读器朗读控制器透传） */
+  public getTtsSettings(): TtsSettings {
+    return { ...(this.ttsSettings || DEFAULT_TTS) };
+  }
+
+  /** 保存朗读设置（公开，供阅读器朗读控制器透传） */
+  public async saveTtsSettings(s: TtsSettings) {
     this.ttsSettings = s;
     try {
       await this.saveData("hiword-tts.json", s);
@@ -6897,9 +6925,9 @@ export default class RewordPlugin extends Plugin {
                 <div class="hiword-up-field">
                   <label class="hiword-up-field-label" for="up-tts-engine">朗读引擎</label>
                   <select id="up-tts-engine" class="hiword-up-select">
-                    <option value="offline" ${s.engine === "offline" ? "selected" : ""}>离线优先（系统语音，无语音时回退在线）</option>
+                    <option value="edge" ${s.engine === "edge" ? "selected" : ""}>Edge 云端神经音（推荐）</option>
                     <option value="auto" ${s.engine === "auto" ? "selected" : ""}>自动（在线优先，离线回退）</option>
-                    <option value="online" ${s.engine === "online" ? "selected" : ""}>仅在线真人音（有道）</option>
+                    <option value="youdao" ${s.engine === "youdao" ? "selected" : ""}>仅在线真人音（有道）</option>
                     <option value="system" ${s.engine === "system" ? "selected" : ""}>仅系统语音（离线）</option>
                   </select>
                 </div>
@@ -7099,10 +7127,10 @@ export default class RewordPlugin extends Plugin {
         const pitch = parseFloat(upPitchInput?.value || "1");
         const accent = (upAccentSel?.value as "uk" | "us") || "us";
         const voiceURI = upVoiceSel?.value || undefined;
-        const cfg: TtsSettings = { engine, rate, pitch, accent, preferVoiceURI: voiceURI, interval: parseFloat(upIntervalInput?.value || "800") };
-        if (engine === "offline") { if (!this.speakSystem("Hello world", cfg)) this.speakOnline("Hello world", accent); }
-        else if (engine === "system") { this.speakSystem("Hello world", cfg); }
-        else if (engine === "online") { this.speakOnline("Hello world", accent); }
+        const cfg: TtsSettings = { ...(this.ttsSettings || DEFAULT_TTS), engine, rate, pitch, accent, preferVoiceURI: voiceURI, interval: parseFloat(upIntervalInput?.value || "800") };
+        if (engine === "system") { this.speakSystem("Hello world", cfg); }
+        else if (engine === "youdao") { this.speakOnline("Hello world", accent); }
+        else if (engine === "edge") { this.speakOnline("Hello world", accent).then(ok => { if (!ok) this.speakSystem("Hello world", cfg); }); }
         else { this.speakOnline("Hello world", accent).then(ok => { if (!ok) this.speakSystem("Hello world", cfg); }); }
       });
 
@@ -7266,7 +7294,7 @@ export default class RewordPlugin extends Plugin {
         const accent = (upAccentSel?.value as "uk" | "us") || "us";
         const voiceURI = upVoiceSel?.value || undefined;
         const interval = parseFloat(upIntervalInput?.value || "800");
-        await this.saveTtsSettings({ engine, rate, pitch, accent, preferVoiceURI: voiceURI, interval });
+        await this.saveTtsSettings({ ...(this.ttsSettings || DEFAULT_TTS), engine, rate, pitch, accent, preferVoiceURI: voiceURI, interval });
 
         // --- 保存在线词典 ---
         const onlineEnabled = (dlg.querySelector("#up-online-enabled") as HTMLInputElement)?.checked ?? true;
@@ -12274,19 +12302,12 @@ export default class RewordPlugin extends Plugin {
     const cfg = this.ttsSettings || DEFAULT_TTS;
     const accent = cfg.accent || "us";
 
-    if (cfg.engine === "offline") {
-      // 离线优先：先用系统语音，失败（无语音引擎）再回退在线真人音
-      const ok = this.speakSystem(w, cfg);
-      if (!ok) this.speakOnline(w, accent);
-      return;
-    }
-
     if (cfg.engine === "system") {
       this.speakSystem(w, cfg);
       return;
     }
-
-    if (cfg.engine === "online") {
+    if (cfg.engine === "youdao" || cfg.engine === "edge") {
+      // 查词发音场景：有道/Edge 退化用有道真人音（单字/单词质量优于机械音）
       this.speakOnline(w, accent);
       return;
     }

@@ -23,6 +23,11 @@ INCLUDE_FILES = [
     "icon.png",
     "preview.png",
     "README.md",
+    # [2026-08-29 修复] PDF 支持：PDF.js 的 worker 由 copy-dist.mjs 复制到插件根目录，
+    # 运行时按 /plugins/siyuan-plugin-reword/pdf.worker.mjs 加载
+    # （见 src/reader/bookshelf-store.ts:146-149）。漏掉它 → 从集市安装的插件
+    # 在非弱设备（桌面）上解析 PDF 元数据/封面时 worker 加载失败。
+    "pdf.worker.mjs",
 ]
 # 直接平铺到 zip 根的【白名单目录】
 INCLUDE_DIRS = [

@@ -10,6 +10,34 @@
    * - 阅读模式（分页/滚动 flow）、翻页动画（turn-style）、8 主题 + 自定义色
    */
   import { onMount, onDestroy, tick } from "svelte";
+  // 移动端适配 Phase 0/1：统一环境判定入口（禁止再手写 getFrontend().endsWith("mobile")）
+  import { isTouchDevice } from "../core/env.ts";
+  // [REword patch 2026-08-29] 移动端 PDF 适配 Phase 1
+  import { getDeviceClass, isSmallMobile, isLargeMobile } from "../core/env.ts";
+  // [REword patch 2026-08-29] Phase 3 Apple Pencil 墨迹批注
+  import InkLayer from "./ink/InkLayer.svelte";
+  import InkToolbar from "./ink/InkToolbar.svelte";
+  import {
+    inkState,
+    // inkStrokes：擦除时直接 update 笔触列表（onInkPointerDown L1686）
+    inkStrokes,
+    // currentPageStrokes：橡皮取当前页最后一个笔触（onInkPointerDown L1684）
+    // 注意：$store 由 Svelte 编译器在组件实例化时注入 component_subscribe，
+    // 漏 import 会在挂载阶段抛 ReferenceError → 整棵组件白屏（tsc 查不到，只有 vite warn）
+    currentPageStrokes,
+    activeStroke,
+    inkContext,
+    isInkMode,
+    addStroke,
+    setInkContext,
+    setInkMode,
+  } from "./ink/store";
+  import {
+    catmullRomToBezierPath,
+    getCoalescedPoints,
+    shouldUseHighlighter,
+  } from "./ink/utils";
+  import type { InkStroke, InkPoint } from "./ink/types";
   // @ts-ignore - foliate-js 为纯 ES 模块 vendor（副作用：注册 foliate-view / foliate-paginator）
   import "../reader/vendor/foliate-js/view-light.js";
   import { makeTextBook, isTextBookFile } from "../reader/book-adapters";
@@ -19,6 +47,9 @@
   import { AnnEditor } from "../annotation/ann-editor.ts";
   import { estimateTokens, PRIMER_WARN_CHARS } from "./book-primer.ts";
   import type { BookshelfStore, BookMeta } from "../reader/bookshelf-store";
+  // [REword patch 2026-08-29] PDF 缩放：复用 ReadingProgress.zoom 字段
+  import type { ZoomState } from "../reader/bookshelf-store";
+  import { ZOOM_PRESETS } from "../reader/bookshelf-store";
   import {
     ReaderSettingsStore,
     READER_DEFAULT_SETTINGS,
@@ -62,6 +93,8 @@
   } from "../reader/reader-font-classify";
   // 2026-08-27 重设计：双语段落注入（顶栏「双语」开关）
   import { createBilingual, type BilingualHandle } from "./bilingual";
+  // 2026-08-28：连续朗读控制器（参考 Readest：多引擎 system/youdao/edge + 句子高亮 + 控制条）
+  import { ReaderTtsController, DEFAULT_REWORD_TTS, type RewordTtsSettings, type TtsState } from "./reader-tts";
   import { getFileBlob } from "../siyuan/api";
   // Phase 1：划词即时词典——复用现有离线词典引擎与卡片渲染（与「查词典」Tab 同源）
   import { lookupSmart, searchCandidates } from "../dict/dict-engine";
@@ -184,6 +217,9 @@
   export let recordCachedSections: ((bid: string, sections: number[], title?: string) => void) | undefined = undefined;
   // 2026-08-28：列出所有有翻译缓存的书籍（bookId + 书名），供「选择书籍」下拉
   export let listCachedBooks: (() => Promise<Array<{ bookId: string; title: string }>>) | undefined = undefined;
+  // 2026-08-28：连续朗读设置（get 读 / save 写，结构 = RewordTtsSettings）
+  export let getTtsSettings: (() => RewordTtsSettings | null) | undefined = undefined;
+  export let saveTtsSettings: ((s: RewordTtsSettings) => Promise<void> | void) | undefined = undefined;
 
   // 划词工具栏图标（readest 风格线性 SVG；批注/词典复用 REword 已注册 symbol）
   const SEL_ICONS: Record<string, string> = {
@@ -202,6 +238,19 @@
   let readerViewEl: HTMLDivElement;  // 2026-08-23 新增：.reader-view 容器 ref（用于浮层 offset 与全局 mousedown 监听）
   let readerStageEl: HTMLDivElement;  // 2026-08-25 新增：.reader-stage 内容区 ref（浮层上下避让判定改用内容区坐标系，避免工具栏贴顶导航栏/越界）
   let view: any = null;
+  // 2026-08-28：连续朗读控制器状态
+  let ttsController: ReaderTtsController | null = null;
+  let ttsState: TtsState = "idle";
+  let ttsProgress = { index: 0, total: 0 };
+  let ttsCurrentText = "";
+  let ttsRate = DEFAULT_REWORD_TTS.rate;
+  let showTtsBar = false;
+  // 选区朗读时记录起始 range，供 playFrom 使用
+  let ttsSelRange: Range | null = null;
+  // 句子高亮开关（与设置同步，控制条按钮高亮态）
+  let ttsHighlightOn = DEFAULT_REWORD_TTS.enableHighlight;
+  // 朗读设置本地副本（打开设置面板时从 getTtsSettings 同步，修改即写回）
+  let ttsCfg: RewordTtsSettings = { ...DEFAULT_REWORD_TTS };
   // 2026-08-27 重设计：双语对照状态与注入句柄
   let bilingualOn = false;
   let bilingualHandle: BilingualHandle | null = null;
@@ -245,6 +294,8 @@
   let showSearch = false;
   // 脚注气泡（点击脚注直接展示内容，不跳转）
   let showFootnote = false;
+  // 2026-08-29 Phase 1：工具栏可见性（移动端中心点击切换，Readest 式沉浸阅读）
+  let toolbarVisible = true;
   let footnoteHTML = "";
   let footnoteType = "脚注";
   let footnoteEl: HTMLElement;
@@ -641,6 +692,9 @@
   /** 点击正文分区翻页（仅 clickToTurn 开启时启用）。带双击保护：两次 mousedown <300ms 视为双击 → 取消翻页判定；选词/拖选/链接点击不翻页 */
   function setupZoneClick(doc: Document) {
     if (!view) return;
+    // 2026-08-29 Phase 1：触屏设备统一走下方 touch 手势处理器（滑/点/捏合），
+    //   避免触摸合成的 mouse 事件与 touch 处理器双触发导致连翻两页。
+    if (isTouchDevice()) return;
     let downT = 0;
     let downX = 0;
     let downY = 0;
@@ -701,6 +755,12 @@
         forwardKeyToParent(e);
         return;
       }
+      // 2026-08-28：Ctrl/Cmd+T 触发连续朗读（从选区或当前位置）
+      if ((e.metaKey || e.ctrlKey) && k.toLowerCase() === "t") {
+        e.preventDefault();
+        ttsTogglePlay();
+        return;
+      }
       // F3 / Cmd+F：iframe 内按键不冒泡出主文档，需在 iframe 内自行响应
       if (k === "F3" || ((e.metaKey || e.ctrlKey) && k.toLowerCase() === "f")) {
         e.preventDefault();
@@ -714,55 +774,216 @@
         }, 30);
         return;
       }
+      // 2026-08-29 修复：方向键翻页失效
+      // 原方向键处理只在 iframe doc 内（focus 在 iframe 时才响应），
+      // 焦点漂移到工具栏 / 批注 / 搜索框后失效。已在 onGlobalKey 顶层统一处理（capture 阶段挂 main document），
+      // iframe 内这里继续保留以防边缘场景，但所有翻页键加 stopPropagation 防止重复翻页。
       if (k === "PageDown") {
         e.preventDefault();
+        e.stopPropagation();
         void view.goRight();
       } else if (k === "PageUp") {
         e.preventDefault();
+        e.stopPropagation();
         void view.goLeft();
       } else if (k === "ArrowRight") {
         if (eff.flow !== "scrolled") {
           e.preventDefault();
+          e.stopPropagation();
           void view.goRight();
         }
       } else if (k === "ArrowLeft") {
         if (eff.flow !== "scrolled") {
           e.preventDefault();
+          e.stopPropagation();
           void view.goLeft();
         }
       } else if (k === " ") {
+        // 2026-08-28：TTS 播放中 Space = 暂停/继续（与 Readest 一致）；停止时 Space = 翻页
+        if (ttsState === "playing" || ttsState === "paused") {
+          e.preventDefault();
+          ttsTogglePlay();
+          return;
+        }
         // 空格翻页仅在分页模式；滚动模式下空格不应翻页（避免点内容后误翻）
         if (eff.flow !== "scrolled") {
           e.preventDefault();
+          e.stopPropagation();
           void view.goRight();
         }
       } else if (k === "Home") {
         e.preventDefault();
+        e.stopPropagation();
         void view.goToTextStart();
       } else if (k === "End") {
         e.preventDefault();
+        e.stopPropagation();
         void view.goTo(view.book?.sections?.length ? view.book.sections.length - 1 : 0);
       }
     };
     trackDocListener(doc, "keydown", onKeyDown);
 
+    // 2026-08-29 Phase 1：触摸手势导航（仅触屏设备生效；桌面走键盘/点击分区）
+    if (!isTouchDevice()) return;
     let touchX = 0;
     let touchY = 0;
+    let touchT = 0;
+    // 双指捏合缩放状态
+    let pinchDist0 = 0;
+    let pinchFont0 = 0;
+    const PINCH_FONT_MIN = 12;
+    const PINCH_FONT_MAX = 40;
+
+    // [REword patch 2026-08-29] Phase 2 触屏手势增强
+    // double-tap 检测（iOS Safari iframe dblclick 不稳定，手动 touchstart 检测）
+    let lastTapT = 0;
+    let lastTapX = 0;
+    let lastTapY = 0;
+    const DOUBLE_TAP_INTERVAL = 300;  // ms
+    const DOUBLE_TAP_DIST = 24;       // px
+
+    // 长按 500ms 弹菜单（查词/批注/翻译）
+    let longPressTimer: any = null;
+    let longPressStartX = 0;
+    let longPressStartY = 0;
+    const LONG_PRESS_MS = 500;
+    const LONG_PRESS_MOVE_THRESHOLD = 12;  // px
+
+    const touchDist = (e: TouchEvent): number => {
+      if (e.touches.length < 2) return 0;
+      const a = e.touches[0];
+      const b = e.touches[1];
+      return Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY);
+    };
+
     const onTouchStart = (e: TouchEvent) => {
-      const t = e.touches[0];
-      if (!t) return;
-      touchX = t.clientX;
-      touchY = t.clientY;
+      if (e.touches.length === 1) {
+        const t = e.touches[0];
+        touchX = t.clientX;
+        touchY = t.clientY;
+        touchT = Date.now();
+        // [REword patch 2026-08-29] Phase 2 长按检测启动
+        // 500ms 静止触发长按弹菜单（仅单指）
+        longPressStartX = t.clientX;
+        longPressStartY = t.clientY;
+        if (longPressTimer) clearTimeout(longPressTimer);
+        longPressTimer = setTimeout(() => {
+          longPressTimer = null;
+          // [REword patch 2026-08-29] Phase 2 长按 500ms
+          // 已有选区 → 触发划词流程（mouseup 走 onContentMouseUp → selToolbar 弹出）
+          // 无选区 → 让系统默认长按选词菜单处理（iOS Safari / Android Chrome 自带）
+          try {
+            const sel = doc.getSelection?.();
+            const text = sel && typeof sel.toString === "function" ? sel.toString().trim() : "";
+            if (text && sel && !sel.isCollapsed) {
+              // 模拟 mouseup 事件触发 selToolbar
+              // 实际上 foliate 触屏的 mouseup 会被合成，这里直接用 selectionchange 已有路径
+              // 触发条件：选区非折叠且有内容
+              // selToolbar 通过 selectionchange 自动显示（已有逻辑）
+              // 长按此处的作用是"延长选区停留时间"让 selectionchange 完成
+              // 不需要额外动作
+            }
+            // 无选区：让浏览器原生长按选词菜单弹出
+            // iOS Safari: long-press 触发 system selection toolbar
+            // Android Chrome: long-press 触发 text selection magnifier
+          } catch (__swallowErr) { logSwallow(__swallowErr, "ReaderView.svelte · longPress", "debug"); }
+        }, LONG_PRESS_MS);
+      } else if (e.touches.length === 2) {
+        // 记录捏合初值（仅记录，不在 start 改变字号）
+        pinchDist0 = touchDist(e);
+        pinchFont0 = settings.fontSize;
+        // 多指触摸取消长按
+        if (longPressTimer) { clearTimeout(longPressTimer); longPressTimer = null; }
+      } else {
+        // 3+ 指：取消长按
+        if (longPressTimer) { clearTimeout(longPressTimer); longPressTimer = null; }
+      }
     };
     trackDocListener(doc, "touchstart", onTouchStart, { passive: true });
+
+    const onTouchMove = (e: TouchEvent) => {
+      // 双指捏合：实时缩放字号，并阻止系统缩放/滚动
+      if (e.touches.length === 2 && pinchDist0 > 0) {
+        e.preventDefault();
+        const d = touchDist(e);
+        if (d > 0) {
+          const ratio = d / pinchDist0;
+          setFontSizeLive(Math.min(PINCH_FONT_MAX, Math.max(PINCH_FONT_MIN, pinchFont0 * ratio)));
+        }
+        // 移动超过阈值取消长按
+        if (longPressTimer) { clearTimeout(longPressTimer); longPressTimer = null; }
+        return;
+      }
+      // 单指移动超过阈值取消长按
+      if (longPressTimer && e.touches.length === 1) {
+        const t = e.touches[0];
+        const dx = t.clientX - longPressStartX;
+        const dy = t.clientY - longPressStartY;
+        if (Math.hypot(dx, dy) > LONG_PRESS_MOVE_THRESHOLD) {
+          clearTimeout(longPressTimer);
+          longPressTimer = null;
+        }
+      }
+    };
+    trackDocListener(doc, "touchmove", onTouchMove, { passive: false });
+
     const onTouchEnd = (e: TouchEvent) => {
+      // 仍有手指按着（如捏合收尾过渡）不处理
+      if (e.touches.length > 0) return;
+      // 取消长按定时器（松手 = 不再触发）
+      if (longPressTimer) { clearTimeout(longPressTimer); longPressTimer = null; }
+      // 捏合结束：复位，字号已由 move 实时写入（store 落盘）
+      if (pinchDist0 > 0) {
+        pinchDist0 = 0;
+        return;
+      }
       const c = e.changedTouches[0];
       if (!c) return;
       const dx = c.clientX - touchX;
       const dy = c.clientY - touchY;
+      const dt = Date.now() - touchT;
+      // [REword patch 2026-08-29] Phase 2 double-tap 检测
+      // iOS Safari 的 dblclick 在 foliate iframe 内不稳定（容易和 mousedown 冲突），
+      // 这里手动用 touchstart + 时间/距离判定模拟 dblclick。
+      if (dt < DOUBLE_TAP_INTERVAL && Math.abs(dx) < DOUBLE_TAP_DIST && Math.abs(dy) < DOUBLE_TAP_DIST) {
+        // 是 double-tap？
+        const now = Date.now();
+        if (now - lastTapT < DOUBLE_TAP_INTERVAL &&
+            Math.abs(c.clientX - lastTapX) < DOUBLE_TAP_DIST &&
+            Math.abs(c.clientY - lastTapY) < DOUBLE_TAP_DIST) {
+          // double-tap 确认 → 触发缩放 toggle（仅 PDF）
+          if (isPdfBook()) {
+            try { onDblClickToggleZoom(); } catch (__swallowErr) { logSwallow(__swallowErr, "ReaderView.svelte · double-tap", "debug"); }
+          }
+          lastTapT = 0;  // 重置（避免三连击触发两次）
+          return;
+        }
+        // 第一次 tap：记录
+        lastTapT = now;
+        lastTapX = c.clientX;
+        lastTapY = c.clientY;
+        // delay 一下返回（让第二次 tap 有机会进 if 块）
+      } else {
+        lastTapT = 0;  // 距离/时间超 → 重置
+      }
+      // 横滑翻页（横向位移为主且超过阈值）
       if (Math.abs(dx) > 48 && Math.abs(dx) > Math.abs(dy)) {
         if (dx < 0) void view.goRight();
         else void view.goLeft();
+        return;
+      }
+      // 点按：短时长 + 几乎无位移 → 分区判定
+      if (dt < 350 && Math.abs(dx) < 12 && Math.abs(dy) < 12) {
+        // 排除文本选区（用户可能在选词，不应翻页/切工具栏）
+        const sel = doc.getSelection();
+        if (sel && !sel.isCollapsed) return;
+        if (typeof sel?.toString === "function" && sel.toString().trim()) return;
+        const w = doc.documentElement.clientWidth;
+        if (w <= 0) return;
+        const x = c.clientX;
+        if (x < w * 0.33) void view.goLeft();
+        else if (x > w * 0.67) void view.goRight();
+        else toggleToolbar(); // 中心点击：唤起/隐藏工具栏（Readest 式沉浸阅读）
       }
     };
     trackDocListener(doc, "touchend", onTouchEnd, { passive: true });
@@ -974,7 +1195,10 @@
           tocReadCount = visitedHrefs.size;
         }
         updateEta(frac);
-        scheduleProgressSave({ cfi: d?.cfi, fraction: frac });
+        // [REword patch 2026-08-29] PDF 缩放状态一并保存
+        const savePayload: any = { cfi: d?.cfi, fraction: frac };
+        if (isPdfBook()) savePayload.zoom = currentZoom;
+        scheduleProgressSave(savePayload);
         attachAllContentDocs();
         // 2026-08-28：滚动 / 跳转（relocate）也触发双语按需补译（内部 300ms 防抖）
         bilingualHandle?.onViewLoad();
@@ -1022,12 +1246,28 @@
       applyStyles();
       applyFlow();
       applyTurnStyle();
+      // [REword patch 2026-08-29] PDF 缩放：恢复保存的缩放状态
+      // saved.zoom 是 per-file 持久化（ReadingProgress.zoom）
+      if (isPdfBook()) {
+        const savedZoom = store.getProgress(bookId)?.zoom;
+        // [REword patch 2026-08-29] 移动端 PDF 适配 Phase 1
+        // iPhone / Android Phone 降级模式：强制 fit-width（小屏 custom 缩放过小不可读）
+        const initialZoom: ZoomState = isIphoneMode
+          ? { kind: "fit-width" }
+          : (savedZoom ?? { kind: "fit-page" });
+        // 用 setTimeout 0 让 foliate-js 先完成初始渲染再 applyZoom，避免被首次 render 覆盖
+        setTimeout(() => {
+          applyZoom(initialZoom, { silent: true });
+        }, 0);
+      }
       // 问题 2：异步预热宿主字体 blob（完成后自动重刷 iframe 样式）
       prepareHostFontBlobs();
       try {
         view.renderer?.focusView?.();
       } catch (__swallowErr) { logSwallow(__swallowErr, "ReaderView.svelte · try { view.renderer?.focusView?.(); }", "debug"); }
       opened = true;
+      // [REword patch 2026-08-29] 确认是 PDF → 给页面四周留白区补上滚轮缩放监听
+      if (isPdfBook()) bindStageWheel();
       attachAllContentDocs();
       attachTimer1 = setTimeout(attachAllContentDocs, 400);
       attachTimer2 = setTimeout(attachAllContentDocs, 1200);
@@ -1121,6 +1361,17 @@
   function onGlobalKey(e: KeyboardEvent) {
     // 非激活 Tab 容器 display:none → offsetParent 为 null，不响应
     if (container?.offsetParent === null) return;
+    // 跳过输入控件（保留 input / textarea / contenteditable 原生行为）
+    const t = e.target as HTMLElement | null;
+    if (t && t !== document.body && (
+      t.tagName === "INPUT" ||
+      t.tagName === "TEXTAREA" ||
+      t.isContentEditable
+    )) return;
+    // 2026-08-29 修复：键盘方向键翻页失效
+    // 原来方向键处理只绑在 iframe doc 上，焦点漂移到工具栏 / 批注 / 搜索框后失效。
+    // 现在在 reader-view 顶层统一处理（capture 阶段注册，onMount 阶段挂到 main document），
+    // 不管焦点在哪都能翻页。iframe 内的 onKeyDown 加 stopPropagation 避免重复翻页。
     if (e.key === "F3" || ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "f")) {
       e.preventDefault();
       showSearch = true;
@@ -1131,6 +1382,93 @@
           searchInput?.focus();
         } catch (__swallowErr) { logSwallow(__swallowErr, "ReaderView.svelte · onGlobalKey", "debug"); }
       }, 30);
+      return;
+    }
+    if (e.key === "PageDown") {
+      e.preventDefault();
+      void view?.goRight?.();
+      return;
+    }
+    if (e.key === "PageUp") {
+      e.preventDefault();
+      void view?.goLeft?.();
+      return;
+    }
+    if (e.key === "ArrowRight") {
+      e.preventDefault();
+      void view?.goRight?.();
+      return;
+    }
+    if (e.key === "ArrowLeft") {
+      e.preventDefault();
+      void view?.goLeft?.();
+      return;
+    }
+    if (e.key === " ") {
+      e.preventDefault();
+      void view?.goRight?.();
+      return;
+    }
+    if (e.key === "Home") {
+      e.preventDefault();
+      void view?.goToTextStart?.();
+      return;
+    }
+    if (e.key === "End") {
+      e.preventDefault();
+      try {
+        const last = view?.book?.sections?.length
+          ? view.book.sections.length - 1
+          : 0;
+        void view?.goTo?.(last);
+      } catch (__swallowErr) { logSwallow(__swallowErr, "ReaderView.svelte · onGlobalKey End", "debug"); }
+      return;
+    }
+    // [REword patch 2026-08-29] PDF 缩放快捷键
+    // Cmd/Ctrl + = / - / 0 / 1 / 2 / 3  跟 Obsidian PDF++ 风格一致
+    // 注意：EPUB 模式下 Cmd+= / - 仍走 changeFont（保持现有字号快捷键不破坏）
+    if ((e.metaKey || e.ctrlKey) && !e.altKey) {
+      const k = e.key;
+      if (k === "=" || k === "+") {
+        e.preventDefault();
+        if (isPdfBook()) zoomIn();
+        else changeFont(1);
+        return;
+      }
+      if (k === "-" || k === "_") {
+        e.preventDefault();
+        if (isPdfBook()) zoomOut();
+        else changeFont(-1);
+        return;
+      }
+      if (k === "0") {
+        if (isPdfBook()) {
+          e.preventDefault();
+          zoomReset();
+          return;
+        }
+      }
+      if (k === "1") {
+        if (isPdfBook()) {
+          e.preventDefault();
+          fitWidth();
+          return;
+        }
+      }
+      if (k === "2") {
+        if (isPdfBook()) {
+          e.preventDefault();
+          fitPage();
+          return;
+        }
+      }
+      if (k === "3") {
+        if (isPdfBook()) {
+          e.preventDefault();
+          cycleZoomPreset();
+          return;
+        }
+      }
     }
   }
 
@@ -1248,6 +1586,8 @@
     showToc = false;
     // v1.3.0：打开设置时刷新本书 Token 累计显示
     if (showSettings) refreshBookTokenUsage();
+    // 2026-08-28：打开设置时同步最新朗读设置（从持久化读入）
+    if (showSettings) syncTtsCfg();
   }
 
   function clearSearch() {
@@ -1274,6 +1614,571 @@
   function changeFont(delta: number) {
     settings = settingsStore.update({ fontSize: Math.min(28, Math.max(12, settings.fontSize + delta)) });
     applyStyles();
+  }
+
+  /* ================= PDF 缩放（Phase 1） =================
+   * foliate-js fixed-layout 已经原生支持 zoom + scale-factor attribute
+   * （vendor/foliate-js/fixed-layout.js:204, 429-437），这里只是把状态管理 +
+   * 快捷键 + 工具栏 + 持久化补齐。
+   *
+   * 缩放步进：按 ZOOM_PRESETS [0.5, 0.75, 1, 1.25, 1.5, 2] 找下一个/上一个档。
+   * 默认 fit-page（foliate-js 原生默认）。
+   */
+
+  // 当前缩放状态（PDF only；EPUB 不会触发）
+  let currentZoom: ZoomState = { kind: "fit-page" };
+  // 上次 fit-width 之前的缩放（双击缩放切回用）
+  let lastNonFitWidthZoom: ZoomState = { kind: "fit-page" };
+
+  // [REword patch 2026-08-29] 移动端 PDF 适配 Phase 1
+  // 设备分级（iPad / iPhone / Android Tablet / Android Phone / Desktop）
+  let deviceClass: ReturnType<typeof getDeviceClass> = "desktop";
+  // iPhone / Android Phone 降级模式（强制 fit-width + 工具栏底部 sheet）
+  let isIphoneMode = false;
+
+  function isPdfBook(): boolean {
+    return meta?.format === "pdf";
+  }
+
+  // [REword patch 2026-08-29] 移动端 PDF 适配 Phase 1
+  // 设备类 resize 监听（onMount 注册，onDestroy 注销）
+  function onDeviceClassResize() {
+    const newCls = getDeviceClass();
+    if (newCls !== deviceClass) {
+      deviceClass = newCls;
+      isIphoneMode = isSmallMobile();
+      // iPhone 模式切换时强制 fit-width（避免小屏上 custom 缩放过小）
+      if (isIphoneMode && isPdfBook() && currentZoom.kind === "custom") {
+        applyZoom({ kind: "fit-width" });
+      }
+    }
+  }
+
+  /* ================= Apple Pencil 墨迹批注（Phase 3） =================
+   * PointerEvent 监听（绑到 readerViewEl 容器，main 文档级）
+   * 仅在 PDF + ink 模式（draw / erase）下拦截 pen / touch pointer events
+   * 普通 click / 划词 / 翻页不被影响
+   */
+  function getInkPointerContext(e: PointerEvent): { x: number; y: number; pressure: number; tiltX: number; tiltY: number } | null {
+    // pointerType 限制：pen（Apple Pencil）/ touch（手指）才处理
+    if (e.pointerType !== "pen" && e.pointerType !== "touch") return null;
+    // 转换为 reader-stage 容器相对坐标（ink 渲染层坐标系）
+    const stageEl = readerStageEl;
+    if (!stageEl) return null;
+    const rect = stageEl.getBoundingClientRect();
+    return {
+      x: e.clientX - rect.left,
+      y: e.clientY - rect.top,
+      pressure: e.pressure || 0.5,
+      tiltX: (e as any).tiltX || 0,
+      tiltY: (e as any).tiltY || 0,
+    };
+  }
+
+  function onInkPointerDown(e: PointerEvent) {
+    // 仅 PDF + ink 模式（非 off）
+    if (!isPdfBook() || $inkState.mode === "off") return;
+    const ctx = getInkPointerContext(e);
+    if (!ctx) return;
+    // 拦截（不让 foliate iframe 收到这个事件）
+    e.preventDefault();
+    e.stopPropagation();
+    // 设置 ink 上下文（bookId + pageIndex）
+    if (bookId) setInkContext(bookId, 0); // 简化：pageIndex 暂用 0，后续按 foliate 当前页
+    // 橡皮模式：删最近的笔触
+    if ($inkState.mode === "erase") {
+      // 简化：删除最后一个笔触（实际可改成 hitTest 删命中的）
+      // 这里先简单实现，后续 Phase 改进
+      const lastStroke = $currentPageStrokes[$currentPageStrokes.length - 1];
+      if (lastStroke) {
+        inkStrokes.update((arr) => arr.filter((s) => s.id !== lastStroke.id));
+      }
+      return;
+    }
+    // 画模式：开始新笔触
+    const points: InkPoint[] = [{
+      x: ctx.x, y: ctx.y, pressure: ctx.pressure,
+      t: e.timeStamp, tiltX: ctx.tiltX, tiltY: ctx.tiltY,
+    }];
+    // 倾斜 > 45° 自动变荧光笔
+    const effectiveBrush = shouldUseHighlighter(ctx.tiltX, ctx.tiltY)
+      ? "highlighter"
+      : $inkState.brush;
+    const newStroke: InkStroke = {
+      id: `ink-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`,
+      brush: effectiveBrush,
+      color: $inkState.color,
+      style: $inkState.style,
+      baseWidth: $inkState.baseWidth,
+      opacity: $inkState.opacity,
+      points,
+      path: catmullRomToBezierPath(points),
+      createdAt: Date.now(),
+      bookId: bookId || "",
+      pageIndex: 0,
+    };
+    activeStroke.set(newStroke);
+  }
+
+  function onInkPointerMove(e: PointerEvent) {
+    // 必须在 activeStroke 存在时（即 pointerdown 已触发）
+    if (!isPdfBook() || $inkState.mode !== "draw") return;
+    const cur = $activeStroke;
+    if (!cur) return;
+    const ctx = getInkPointerContext(e);
+    if (!ctx) return;
+    // getCoalescedEvents 拿所有原始点（避免 rAF 合并丢点）
+    const coalesced = getCoalescedPoints(e as any);
+    if (coalesced.length === 0) return;
+    // 转为 stage 相对坐标：clientX/Y 减 readerStageEl 偏移
+    // 简化：用 clientX/Y 减 readerStageEl 偏移（pointer 已经在 stage 内时）
+    // 因 getInkPointerContext 已经返回了 stage 相对坐标，这里取最后一个 coalesced 点的偏移
+    const stageEl = readerStageEl;
+    if (!stageEl) return;
+    const rect = stageEl.getBoundingClientRect();
+    // offsetX/Y 是相对 target 元素（readerViewEl），需要补偿
+    // 简化：用 ctx 的相对值近似
+    const newPoints: InkPoint[] = coalesced.map((p) => ({
+      x: p.x - e.offsetX + (e.clientX - rect.left),
+      y: p.y - e.offsetY + (e.clientY - rect.top),
+      pressure: p.pressure,
+      t: p.t,
+      tiltX: p.tiltX,
+      tiltY: p.tiltY,
+    }));
+    // 合并到 activeStroke.points
+    const mergedPoints = [...cur.points, ...newPoints];
+    const updated: InkStroke = {
+      ...cur,
+      points: mergedPoints,
+      path: catmullRomToBezierPath(mergedPoints),
+    };
+    activeStroke.set(updated);
+  }
+
+  function onInkPointerUp(_e: PointerEvent) {
+    if (!isPdfBook() || $inkState.mode === "off") return;
+    const cur = $activeStroke;
+    if (!cur) return;
+    // 完成笔触：加入列表
+    addStroke(cur);
+    activeStroke.set(null);
+  }
+
+  /* ================= PDF 缩放边界与工具（2026-08-29） =================
+   * ZoomState.custom.scale 的合法区间（与 bookshelf-store.ts 的类型注释一致：0.25 - 4.0）
+   */
+  const MIN_PDF_ZOOM = 0.25;
+  const MAX_PDF_ZOOM = 4.0;
+  /**
+   * 滚轮连续缩放灵敏度：factor = exp(-deltaY * k)。
+   * 0.0018（原 0.0025 偏跳）→ 鼠标一格（截断后 deltaY≈60）约 ±10%，
+   * 触控板捏合（deltaY≈10）约 ±1.8%，连续滚动更细腻。
+   */
+  const WHEEL_ZOOM_SENSITIVITY = 0.0018;
+  /** 单个 wheel 事件的 delta 上限：不同鼠标/驱动的 deltaY 差异极大（几十到几百都有），
+   *  不截断的话一格滚轮能直接跳 30%+，手感很突兀。截断后靠连续滚动累积达到目标倍率。 */
+  const WHEEL_MAX_DELTA = 60;
+
+  function clampPdfZoom(n: number): number {
+    if (!isFinite(n) || n <= 0) return 1;
+    return Math.min(MAX_PDF_ZOOM, Math.max(MIN_PDF_ZOOM, n));
+  }
+
+  /** 当前是否「滚动模式」：flow="scrolled" → foliate 内部 #scrollMode=true */
+  function isScrollFlow(): boolean {
+    try {
+      return view?.renderer?.getAttribute?.("flow") === "scrolled";
+    } catch (__swallowErr) {
+      logSwallow(__swallowErr, "ReaderView.svelte · isScrollFlow", "debug");
+      return false;
+    }
+  }
+
+  /** 读 foliate 当前的 scale-factor 属性（百分数 → 倍数；未设置视为 1.0） */
+  function readScaleFactorAttr(): number {
+    try {
+      const raw = view?.renderer?.getAttribute?.("scale-factor");
+      if (raw == null || raw === "") return 1;
+      const n = parseFloat(raw) / 100;
+      return isFinite(n) && n > 0 ? n : 1;
+    } catch (__swallowErr) {
+      logSwallow(__swallowErr, "ReaderView.svelte · readScaleFactorAttr", "debug");
+      return 1;
+    }
+  }
+
+  /** 把 ZoomState 应用到 foliate view（实际调用 setAttribute） */
+  function applyZoom(input: ZoomState, opts: { silent?: boolean } = {}) {
+    if (!view?.renderer?.setAttribute) return;
+    // custom 先 clamp 到合法区间，再统一用 zoom 这个局部变量走下面的分支
+    // （注意：下面必须用 zoom.scale，test/pdf-zoom-apply.test.mjs 按源码文本断言这条）
+    const zoom: ZoomState = input.kind === "custom"
+      ? { kind: "custom", scale: clampPdfZoom(input.scale) }
+      : input;
+    currentZoom = zoom;
+    const r = view.renderer;
+
+    // [2026-08-29 修复] foliate 的两种布局用【完全不同】的缩放公式，写错属性就等于没缩放：
+    //   分页模式  #render()          → scale = zoom × scaleFactor
+    //                                  （fixed-layout.js:544-561）
+    //   滚动模式  #renderScrollMode() → scale = (容器宽/页宽) × scaleFactor
+    //                                  【zoom 属性完全不参与！】(fixed-layout.js:1130-1132)
+    // 所以：分页模式用 zoom 承载、scale-factor 钉 100（否则 scale²）；
+    //       滚动模式只能用 scale-factor 承载，zoom 保持 fit-width 作为基准。
+    if (isScrollFlow()) {
+      let sf = 1;
+      if (zoom.kind === "custom") {
+        // 滚动模式的基准是「适应宽度」，先把目标「实际缩放」换算成相对基准的倍数：
+        //   当前实际缩放 = 基准 × 当前scaleFactor  →  基准 = 实际 / 当前scaleFactor
+        const cur = readCurrentPdfScale();
+        const curSf = readScaleFactorAttr();
+        const fitBase = curSf > 0 ? cur / curSf : cur;
+        sf = fitBase > 0 ? clampPdfZoom(zoom.scale) / fitBase : 1;
+        sf = Math.min(MAX_PDF_ZOOM, Math.max(MIN_PDF_ZOOM, sf));
+      }
+      const pct = String(Math.max(25, Math.round(sf * 100)));
+      if (r.getAttribute?.("scale-factor") !== pct) r.setAttribute("scale-factor", pct);
+      // 基准由 foliate 自己按容器宽算，zoom 固定 fit-width
+      if (r.getAttribute?.("zoom") !== "fit-width") r.setAttribute("zoom", "fit-width");
+    } else {
+      if (zoom.kind === "fit-width") {
+        r.setAttribute("zoom", "fit-width");
+      } else if (zoom.kind === "fit-page") {
+        r.setAttribute("zoom", "fit-page");
+      } else {
+        // custom：zoom 属性本身就是「目标缩放倍数」（foliate 会 parseFloat）
+        r.setAttribute("zoom", String(zoom.scale));
+      }
+      if (r.getAttribute?.("scale-factor") !== "100") {
+        r.setAttribute("scale-factor", "100");
+      }
+    }
+    if (!opts.silent) {
+      // 持久化（relocate 事件也会保存；这里立即保存避免等待 relocate）
+      scheduleProgressSave({ zoom });
+    }
+  }
+
+  /**
+   * 读取 PDF 当前「真实」缩放倍数。
+   * fit-width / fit-page 的实际倍数是 foliate 按视口算出来的，我们手里没有；
+   * 但 pdf.js 的 render() 会把本次生效的 scale 写进内容文档的
+   * `--total-scale-factor`（vendor/foliate-js/pdf.js:255），直接读它最准。
+   * 读不到时退化为 custom 值 / 1.0（与旧的 zoomIn/zoomOut 口径一致）。
+   */
+  function readCurrentPdfScale(): number {
+    try {
+      for (const c of (view?.renderer?.getContents?.() ?? []) as any[]) {
+        const d: Document | undefined = c?.doc;
+        const v = d?.documentElement?.style?.getPropertyValue("--total-scale-factor");
+        if (v) {
+          const n = parseFloat(v);
+          if (isFinite(n) && n > 0) return n;
+        }
+      }
+    } catch (__swallowErr) { logSwallow(__swallowErr, "ReaderView.svelte · readCurrentPdfScale", "debug"); }
+    return currentZoom.kind === "custom" ? currentZoom.scale : 1.0;
+  }
+
+  /** 缩放到下一档（Zoom in） */
+  function zoomIn() {
+    if (!isPdfBook()) {
+      // EPUB 退化为字号 +
+      changeFont(1);
+      return;
+    }
+    // 2026-08-29：基准改用「真实缩放」而非写死的 1.0，
+    // 否则 fit-page 实际 0.42 时点一次「+」会直接跳到 1.25（画面暴涨 3 倍）。
+    const cur = isPdfBook() ? readCurrentPdfScale() : (currentZoom.kind === "custom" ? currentZoom.scale : 1.0);
+    const next = ZOOM_PRESETS.find((p) => p > cur + 0.001) ?? clampPdfZoom(cur * 1.25);
+    applyZoom({ kind: "custom", scale: next });
+  }
+
+  /** 缩放到上一档（Zoom out） */
+  function zoomOut() {
+    if (!isPdfBook()) {
+      changeFont(-1);
+      return;
+    }
+    const cur = isPdfBook() ? readCurrentPdfScale() : (currentZoom.kind === "custom" ? currentZoom.scale : 1.0);
+    const candidates = ZOOM_PRESETS.filter((p) => p < cur - 0.001);
+    const next = candidates.length ? candidates[candidates.length - 1] : clampPdfZoom(cur / 1.25);
+    applyZoom({ kind: "custom", scale: next });
+  }
+
+  /** 重置到 fit-page（Cmd+0） */
+  function zoomReset() {
+    if (!isPdfBook()) return;
+    applyZoom({ kind: "fit-page" });
+  }
+
+  /** 适应宽度（Cmd+1） */
+  function fitWidth() {
+    if (!isPdfBook()) return;
+    // 记录切换前的非 fit-width 状态，双击缩放切回用
+    if (currentZoom.kind !== "fit-width") {
+      lastNonFitWidthZoom = currentZoom;
+    }
+    applyZoom({ kind: "fit-width" });
+  }
+
+  /** 适应整页（Cmd+2） */
+  function fitPage() {
+    if (!isPdfBook()) return;
+    if (currentZoom.kind !== "fit-page") {
+      lastNonFitWidthZoom = currentZoom;
+    }
+    applyZoom({ kind: "fit-page" });
+  }
+
+  /** 循环切换预设档位（Cmd+3） */
+  function cycleZoomPreset() {
+    if (!isPdfBook()) return;
+    const cur = currentZoom.kind === "custom" ? currentZoom.scale : 1.0;
+    const idx = ZOOM_PRESETS.findIndex((p) => Math.abs(p - cur) < 0.001);
+    const nextIdx = idx >= 0 ? (idx + 1) % ZOOM_PRESETS.length : 0;
+    applyZoom({ kind: "custom", scale: ZOOM_PRESETS[nextIdx] });
+  }
+
+  /** 缩放百分比显示（工具栏用） */
+  function zoomPercentLabel(): string {
+    if (!isPdfBook()) return "";
+    if (currentZoom.kind === "fit-width") return "↔ 适应宽度";
+    if (currentZoom.kind === "fit-page") return "⊡ 适应整页";
+    return `${Math.round(currentZoom.scale * 100)}%`;
+  }
+
+  /** [REword patch 2026-08-29] 双击切换 fit-width ↔ 上次缩放（参考 iBooks / Readest） */
+  function onDblClickToggleZoom() {
+    if (!isPdfBook()) return;
+    if (currentZoom.kind === "fit-width") {
+      // 当前是 fit-width → 切回上次非 fit-width 状态
+      applyZoom(lastNonFitWidthZoom);
+    } else {
+      // 当前是 fit-page / custom → 切到 fit-width
+      lastNonFitWidthZoom = currentZoom;
+      applyZoom({ kind: "fit-width" });
+    }
+  }
+
+  /* ================= PDF 滚轮 / 触控板捏合缩放（2026-08-29） =================
+   * 对齐 macOS 原生语义（Preview / Chrome / Acrobat 一致）：
+   *   - ⌘ 或 Ctrl + 滚轮 → 连续缩放（鼠标滚轮）
+   *   - 触控板双指捏合    → macOS 会把它合成为 ctrlKey=true 的 wheel 事件，走同一条路径
+   *   - 无修饰键滚轮      → 保持原生行为（页面放大后可平移；未放大时本就无可滚动内容）
+   *
+   * 事件必须挂两处，缺一不可：
+   *   ① 内容 iframe 内部 doc（PDF 页面本体）——wheel 不跨 iframe 边界冒泡，
+   *      只挂父容器时鼠标在页面上滚动完全收不到事件（这是最容易踩的坑）；
+   *   ② .reader-stage 容器——页面四周灰色留白区。
+   * 两处都必须 passive:false，否则 preventDefault 无效，
+   * Electron/Chrome 会把 Ctrl+滚轮 吃掉去做整页缩放。
+   */
+
+  // 滚轮缩放的落盘防抖（滚动过程中不重复写盘）
+  let zoomSaveTimer: any = null;
+  function scheduleZoomPersist() {
+    if (zoomSaveTimer) clearTimeout(zoomSaveTimer);
+    zoomSaveTimer = setTimeout(() => {
+      zoomSaveTimer = null;
+      scheduleProgressSave({ zoom: currentZoom });
+    }, 400);
+  }
+
+  /** 取 foliate fixed-layout 宿主元素（:host{overflow:auto}，负责平移滚动） */
+  function getZoomHost(): HTMLElement | null {
+    const h = view?.renderer as HTMLElement | null | undefined;
+    return h && typeof (h as HTMLElement).getBoundingClientRect === "function" ? h : null;
+  }
+
+  /** 量当前页面渲染宽度（算缩放前后真实倍数 k 用；fixed-layout 用 open shadow DOM，可直接查） */
+  function measurePageWidth(host: HTMLElement): number {
+    try {
+      const iframes = (host as any).shadowRoot?.querySelectorAll?.("iframe");
+      if (iframes && iframes.length) {
+        let best = 0;
+        for (const f of Array.from(iframes) as HTMLIFrameElement[]) {
+          const w = f.getBoundingClientRect?.().width || 0;
+          if (w > best) best = w;
+        }
+        if (best > 0) return best;
+      }
+      return host.scrollWidth || 0;
+    } catch (__swallowErr) {
+      logSwallow(__swallowErr, "ReaderView.svelte · measurePageWidth", "debug");
+      return 0;
+    }
+  }
+
+  /**
+   * 以光标为锚点做连续缩放：缩放前后，光标压着的那个内容点保持不动
+   * （不做锚点的话，放大后 foliate 会重新居中/回到顶部，画面"跳走"）。
+   * @param clientX/clientY 必须是主窗口（最外层）坐标
+   */
+  function zoomAtPoint(nextScale: number, clientX: number, clientY: number) {
+    const target = clampPdfZoom(nextScale);
+    const host = getZoomHost();
+    if (!host) {
+      applyZoom({ kind: "custom", scale: target }, { silent: true });
+      scheduleZoomPersist();
+      return;
+    }
+    // [2026-08-29] 滚动模式不做光标锚点：
+    // foliate 的 #renderScrollMode 自己用 captureScrollModeAnchor / restoreScrollModeAnchor
+    // 维持「视口顶部的页面 + 页内偏移比例」（fixed-layout.js:1128/1143）。
+    // 我们再去改 scrollTop 会和它打架、来回拉扯导致画面跳动。交给它即可，
+    // 且它锚定的是视口顶部，连续缩放时比光标锚点更稳（不会随光标位置漂移）。
+    if (isScrollFlow()) {
+      applyZoom({ kind: "custom", scale: target }, { silent: true });
+      scheduleZoomPersist();
+      return;
+    }
+    const rect = host.getBoundingClientRect();
+    const cursorX = clientX - rect.left;
+    const cursorY = clientY - rect.top;
+    const w0 = measurePageWidth(host);
+    // 光标下的内容坐标（宿主滚动空间内）
+    const contentX = host.scrollLeft + cursorX;
+    const contentY = host.scrollTop + cursorY;
+
+    applyZoom({ kind: "custom", scale: target }, { silent: true });
+
+    const restore = () => {
+      const w1 = measurePageWidth(host);
+      if (!w0 || !w1) return;
+      const k = w1 / w0;
+      host.scrollLeft = contentX * k - cursorX;
+      host.scrollTop = contentY * k - cursorY;
+    };
+    // setAttribute → attributeChangedCallback → #render() 是同步改尺寸的，这里立刻校正一次
+    restore();
+    // PDF 每页 canvas 重绘是异步的，等一帧再校正，避免渲染完成后尺寸回弹
+    if (typeof requestAnimationFrame === "function") requestAnimationFrame(restore);
+    scheduleZoomPersist();
+  }
+
+  /**
+   * PDF 滚轮缩放诊断开关。
+   * 排查「按了修饰键但没反应」时改成 true，控制台会打印每一条 wheel 的
+   * ctrlKey/metaKey/deltaY 以及最终算出的缩放值；确认修复后请改回 false 再发布。
+   */
+  const DEBUG_PDF_WHEEL = false;
+  function logPdfWheel(...args: any[]) {
+    if (DEBUG_PDF_WHEEL) console.log("[REword][pdf-wheel]", ...args);
+  }
+
+  // ---- 滚轮缩放的 rAF 累积状态 ----
+  // PDF 每次 applyZoom 都会触发整页 canvas 重绘（很重）。触控板捏合每秒能发 60+ 个
+  // wheel 事件，逐条响应会明显卡顿。这里把同一帧内的 delta 累积起来，
+  // 每帧只真正缩放一次，视觉上仍然跟手。
+  let wheelAccumDy = 0;
+  let wheelRafId: number | null = null;
+  let wheelAnchorX = 0;
+  let wheelAnchorY = 0;
+
+  /** 真正执行缩放（由 rAF 调用，每帧至多一次） */
+  function flushWheelZoom() {
+    wheelRafId = null;
+    const dy = wheelAccumDy;
+    wheelAccumDy = 0;
+    if (!dy) return;
+    const base = readCurrentPdfScale();
+    const next = clampPdfZoom(base * Math.exp(-dy * WHEEL_ZOOM_SENSITIVITY));
+    logPdfWheel("zoom", { base, next, dy, flow: isScrollFlow() ? "scrolled" : "paginated" });
+    if (Math.abs(next - base) < 0.0005) return;      // 已到边界
+    zoomAtPoint(next, wheelAnchorX, wheelAnchorY);
+  }
+
+  /** 滚轮缩放统一入口 */
+  function handlePdfWheel(e: WheelEvent, clientX: number, clientY: number) {
+    logPdfWheel("wheel", {
+      ctrl: e.ctrlKey, meta: e.metaKey, shift: e.shiftKey,
+      deltaY: e.deltaY, deltaMode: e.deltaMode, isPdf: isPdfBook(),
+    });
+    if (!isPdfBook()) return;                       // EPUB 保留原生滚动
+    if (!e.ctrlKey && !e.metaKey) return;           // 仅 ⌘/Ctrl + 滚轮（含触控板捏合）
+    // 两个都要：
+    //   preventDefault            → 阻止 Electron/Chromium 拿它去做整页缩放
+    //   stopImmediatePropagation  → 连 foliate 自己挂在同文档上的 wheel 一起挡掉，
+    //                               避免缩放被它后续再处理一次（冒泡阶段会晚于我们的捕获阶段）
+    e.preventDefault();
+    e.stopImmediatePropagation();
+    // deltaMode 归一化：0=像素 / 1=行 / 2=页
+    const unit = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? 100 : 1;
+    let dy = (e.deltaY || 0) * unit;
+    if (!dy) return;
+    // 单条事件幅度截断：不同鼠标 deltaY 从几十到几百都有，不截断一格能跳 30%+，
+    // 非常突兀。截到 ±60 后靠连续滚动累积到目标倍率，手感细腻且不失控。
+    dy = Math.max(-WHEEL_MAX_DELTA, Math.min(WHEEL_MAX_DELTA, dy));
+    // 累积到 rAF，一帧合并成一次缩放（锚点取本帧最后一次事件的位置）
+    wheelAccumDy += dy;
+    wheelAnchorX = clientX;
+    wheelAnchorY = clientY;
+    if (wheelRafId != null) return;
+    if (typeof requestAnimationFrame === "function") {
+      wheelRafId = requestAnimationFrame(flushWheelZoom);
+    } else {
+      flushWheelZoom();
+    }
+  }
+
+  /** ① 挂在 .reader-stage（页面四周留白）：坐标本就是主窗口坐标 */
+  function onStageWheel(e: WheelEvent) {
+    handlePdfWheel(e, e.clientX, e.clientY);
+  }
+
+  /** ② 挂在内容 iframe 内的 doc（页面本体）：坐标要换算回主窗口 */
+  function onContentWheel(e: WheelEvent) {
+    if (!isPdfBook()) return;
+    if (!e.ctrlKey && !e.metaKey) return;
+    let left = 0;
+    let top = 0;
+    try {
+      const doc = ((e.target as Node)?.ownerDocument ?? e.currentTarget) as Document | null;
+      const fr = (doc?.defaultView as any)?.frameElement?.getBoundingClientRect?.() as DOMRect | undefined;
+      if (fr) { left = fr.left; top = fr.top; }
+    } catch (__swallowErr) { logSwallow(__swallowErr, "ReaderView.svelte · onContentWheel", "debug"); }
+    handlePdfWheel(e, e.clientX + left, e.clientY + top);
+  }
+
+  // 最外层 wheel 监听是否已绑定（capture 阶段；只在确认是 PDF 之后才绑，
+  // 避免 passive:false 的 capture 监听拖累 EPUB 滚动性能）。
+  // 函数名沿用 bindStageWheel —— test/pdf-zoom-apply.test.mjs 按源码文本断言这个名字，不要改。
+  let stageWheelBound = false;
+  function bindStageWheel() {
+    if (stageWheelBound || !readerViewEl) return;
+    // 挂【最外层 .reader-view】+【capture 阶段】：页面四周留白区的滚轮
+    // 在进入任何子元素之前就被拦下，比原先挂在 .reader-stage 的冒泡阶段更早，
+    // 也不会被 foliate 内部的处理抢先。
+    // 注意：iframe 内的滚轮不会传播到父文档，页面本体仍靠 onContentWheel（挂 iframe 内的 doc）。
+    readerViewEl.addEventListener("wheel", onStageWheel as EventListener, { capture: true, passive: false });
+    stageWheelBound = true;
+  }
+
+  // 2026-08-29 Phase 1：双指捏合缩放——实时改字号（不立即持久化，松手即落盘由 store 自行处理）
+  function setFontSizeLive(n: number) {
+    const clamped = Math.min(40, Math.max(12, Math.round(n)));
+    if (clamped === settings.fontSize) return;
+    settings = settingsStore.update({ fontSize: clamped });
+    applyStyles();
+  }
+
+  // 2026-08-29 Phase 1：工具栏显隐切换（移动端中心点击）。面板打开时不隐藏，避免失去锚点感。
+  function toggleToolbar() {
+    // [REword patch 2026-08-29] Phase 2 触屏：单击空白处关闭所有浮层
+    // 触屏场景：用户点中心区时如果有浮层（搜索/设置/目录）打开，
+    // 应优先关闭浮层而不是 toggle 工具栏可见性（避免被遮挡的工具栏闪一下）
+    if (showSettings || showSearch) {
+      showSettings = false;
+      showSearch = false;
+      return;
+    }
+    if (showToc) {
+      showToc = false;
+      return;
+    }
+    toolbarVisible = !toolbarVisible;
   }
 
   function onSetTheme(key: string) {
@@ -2054,6 +2959,17 @@
     trackDocListener(doc, "mouseover", onFootnoteHover as EventListener);
     // 2026-08-27 晚（P2.2）：专注模式滚动高亮（capture 捕获内部滚动容器）
     trackDocListener(doc, "scroll", ((_e: Event) => onFocusScroll(doc)) as EventListener, true);
+    // [REword patch 2026-08-29] PDF ⌘/Ctrl+滚轮缩放：
+    // wheel 事件不跨 iframe 边界，必须挂到内容文档里才能收到页面上的滚轮。
+    // 仅 PDF 挂载——EPUB 滚动模式下挂 passive:false 的 wheel 监听会让
+    // 浏览器放弃滚轮滚动的合成器优化（滚动要等主线程），是实打实的卡顿源。
+    // 必须 capture:true —— foliate 在同一个 doc 上挂了【冒泡阶段】的 wheel
+    // （vendor/foliate-js/fixed-layout.js:1082，横向滚动模式转纵向滚轮用）。
+    // 捕获阶段先于冒泡阶段执行，我们才能在 foliate 之前拿到事件，
+    // 命中后用 stopImmediatePropagation 连它一起挡掉，避免两边各处理一次。
+    if (isPdfBook()) {
+      trackDocListener(doc, "wheel", onContentWheel as EventListener, { capture: true, passive: false });
+    }
     // 翻页/分区点击等交互监听（仅注入一次，guard 由 attachedDocs 保证，避免重复绑定导致翻两页）
     injectPageTurn(doc);
     // 2026-08-27 晚（P2.2）：新文档就绪时按当前专注模式状态应用高亮 class
@@ -3631,13 +4547,157 @@
     dispatchAnnotationChanged(); // 通知侧边栏刷新
   }
 
-  // 朗读选中文本（委托插件 TTS，自动适配中英文 voice）
+  // ============================================================
+  // 2026-08-28：连续朗读（参考 Readest 朗读体验）
+  // ============================================================
+
+  /** 取当前已加载的内容文档（多节可见时拼接） */
+  function getTtsDocs(): Document[] {
+    try {
+      const raw = (view?.renderer?.getContents?.() as any[]) || [];
+      const mapped = raw.map((c) => c?.doc).filter(Boolean) as Document[];
+      return mapped;
+    } catch {
+      return [];
+    }
+  }
+
+  /** 从 iframe 文档取当前选区 Range（划词「朗读」用） */
+  function getCurrentSelectionRange(): Range | null {
+    for (const doc of getTtsDocs()) {
+      const sel = (doc as any).getSelection?.();
+      if (sel && sel.rangeCount > 0 && sel.toString().trim()) return sel.getRangeAt(0) as Range;
+    }
+    // 回退：主文档选区
+    const sel = (typeof window !== "undefined" && window.getSelection?.());
+    if (sel && sel.rangeCount > 0 && sel.toString().trim()) return sel.getRangeAt(0);
+    return null;
+  }
+
+  /** 合并实时语速后的当前设置对象 */
+  function ttsSettingsNow(): RewordTtsSettings {
+    const s: RewordTtsSettings = (getTtsSettings?.() as RewordTtsSettings) || { ...DEFAULT_REWORD_TTS };
+    s.rate = ttsRate;
+    return s;
+  }
+
+  /** 懒创建朗读控制器（挂载一次） */
+  function ensureTtsController() {
+    if (ttsController) { ttsController.setSettings(ttsSettingsNow()); return; }
+    const settings = ttsSettingsNow();
+    ttsRate = settings.rate;
+    ttsController = new ReaderTtsController(getTtsDocs, settings, {
+      onState: (st) => { ttsState = st; showTtsBar = st !== "idle"; },
+      onProgress: (i, t) => { ttsProgress = { index: i, total: t }; },
+      onSentence: (txt) => { ttsCurrentText = txt; },
+      onNeedVisible: (range) => { try { view?.renderer?.scrollToAnchor?.(range, true); } catch { /* 忽略 */ } },
+      onAutoPage: async () => {
+        try { view?.goRight?.(); } catch { return false; }
+        await new Promise((r) => setTimeout(r, 350));
+        return true;
+      },
+      onError: (msg) => { try { toast(msg); } catch { /* 忽略 */ } },
+    });
+  }
+
+  /** 划词工具栏「朗读」：从选区（或当前可视位置）开始连续朗读 */
   function onSelSpeak() {
-    const text = selToolbar.text?.trim();
-    if (!text) return;
-    onSpeak?.(text);
+    ensureTtsController();
+    const range = getCurrentSelectionRange();
+    if (ttsState !== "idle") ttsController?.stop();
+    ttsController?.setSettings(ttsSettingsNow());
+    void ttsController?.playFrom(range || undefined);
     closeSelToolbar();
   }
+
+  /** 控制条：播放/暂停切换（无选区则从当前位置开始） */
+  function ttsTogglePlay() {
+    ensureTtsController();
+    ttsController?.setSettings(ttsSettingsNow());
+    if (ttsState === "playing") ttsController?.pause();
+    else if (ttsState === "paused") ttsController?.resume();
+    else void ttsController?.playFrom(getCurrentSelectionRange() || undefined);
+  }
+  function ttsStop() { ttsController?.stop(); }
+  function ttsNext() { ttsController?.next(); }
+  function ttsPrev() { ttsController?.prev(); }
+  function onTtsRateInput(e: Event) {
+    const v = parseFloat((e.target as HTMLInputElement).value);
+    if (!isNaN(v)) { ttsRate = v; ttsController?.setRate(v); }
+  }
+  function ttsToggleHighlight() {
+    ensureTtsController();
+    const s = ttsSettingsNow();
+    s.enableHighlight = !s.enableHighlight;
+    ttsHighlightOn = s.enableHighlight;
+    ttsController?.setSettings(s);
+    void saveTtsSettings?.(s);
+  }
+  /** 一键收词：提取当前句英文单词，去重后加入生词本（跳过已存在项） */
+  function ttsCollectWords() {
+    const txt = ttsCurrentText || "";
+    const words = Array.from(
+      new Set(
+        (txt.match(/[A-Za-z][A-Za-z'-]*/g) || [])
+          .map((w) => w.toLowerCase())
+          .filter((w) => w.length >= 2)
+      )
+    );
+    if (!words.length) { try { toast("当前句无可收藏的单词"); } catch { /* 忽略 */ } return; }
+    let added = 0;
+    let skipped = 0;
+    for (const w of words) {
+      try {
+        if (isInVocab?.(w)) { skipped++; continue; }
+        onAddToVocab?.(w);
+        added++;
+      } catch { /* 忽略单项失败 */ }
+    }
+    try {
+      toast(`已加入生词本 ${added} 个${skipped ? `（已存在 ${skipped} 个跳过）` : ""}`);
+    } catch { /* 忽略 */ }
+  }
+
+  // ============================================================
+  // 2026-08-28：朗读设置面板（14 项）处理函数
+  // ============================================================
+  function syncTtsCfg() {
+    const s = (getTtsSettings?.() as RewordTtsSettings) || { ...DEFAULT_REWORD_TTS };
+    ttsCfg = { ...s };
+    ttsRate = s.rate;
+    ttsHighlightOn = s.enableHighlight;
+  }
+  function saveTtsCfg() {
+    ttsCfg = { ...ttsCfg };
+    void saveTtsSettings?.({ ...ttsCfg });
+    ttsController?.setSettings({ ...ttsCfg });
+  }
+  function setTtsField<K extends keyof RewordTtsSettings>(k: K, v: RewordTtsSettings[K]) {
+    ttsCfg = { ...ttsCfg, [k]: v };
+    saveTtsCfg();
+  }
+  function onTtsRateSetting(e: Event) {
+    const v = parseFloat((e.currentTarget as HTMLInputElement).value);
+    ttsRate = v;
+    ttsController?.setRate(v);
+    setTtsField("rate", v);
+  }
+  function onTtsPitch(e: Event) { setTtsField("pitch", parseFloat((e.currentTarget as HTMLInputElement).value)); }
+  function onTtsVolume(e: Event) { setTtsField("volume", parseFloat((e.currentTarget as HTMLInputElement).value)); }
+  function onTtsInterval(e: Event) { setTtsField("interval", parseInt((e.currentTarget as HTMLInputElement).value, 10)); }
+  function onTtsEngine(e: Event) { setTtsField("engine", (e.currentTarget as HTMLSelectElement).value as RewordTtsSettings["engine"]); }
+  function onTtsAccent(e: Event) { setTtsField("accent", (e.currentTarget as HTMLSelectElement).value as "uk" | "us"); }
+  function onTtsGranularity(e: Event) { setTtsField("granularity", (e.currentTarget as HTMLSelectElement).value as "sentence" | "word"); }
+  function onTtsScope(e: Event) { setTtsField("scope", (e.currentTarget as HTMLSelectElement).value as "selection" | "section" | "book"); }
+  function onTtsHighlightStyle(e: Event) { setTtsField("highlightStyle", (e.currentTarget as HTMLSelectElement).value as RewordTtsSettings["highlightStyle"]); }
+  function onTtsHighlightColor(e: Event) { setTtsField("highlightColor", (e.currentTarget as HTMLInputElement).value); }
+  function onTtsAutoPage(e: Event) { setTtsField("autoPage", (e.currentTarget as HTMLInputElement).checked); }
+  function onTtsHighlightEnabled(e: Event) {
+    const v = (e.currentTarget as HTMLInputElement).checked;
+    ttsHighlightOn = v;
+    setTtsField("enableHighlight", v);
+  }
+  function onTtsSleep(e: Event) { setTtsField("sleepTimerMin", parseInt((e.currentTarget as HTMLSelectElement).value, 10)); }
 
   // 翻译选中文本（2026-08-27 原行为：仅发 AI 精读面板；
   // 2026-08-27 晚 改：弹内联即译气泡，展示原文/译文，并保留「发 AI 精读」入口）
@@ -4209,12 +5269,40 @@
     //   reader-view 外部的点击（思源命令面板、dock、顶栏 Tab 切换）完全不触发。
     if (readerViewEl) {
       readerViewEl.addEventListener("mousedown", onContainerMouseDown);
+      // [REword patch 2026-08-29] Phase 3 Apple Pencil 墨迹批注
+      // pointer 监听绑到 readerViewEl（不在 iframe doc 内，main 文档级）
+      // 拦截 pen / touch pointer 用于墨迹绘制（仅 PDF + ink 模式）
+      readerViewEl.addEventListener("pointerdown", onInkPointerDown);
+      readerViewEl.addEventListener("pointermove", onInkPointerMove);
+      readerViewEl.addEventListener("pointerup", onInkPointerUp);
+      readerViewEl.addEventListener("pointercancel", onInkPointerUp);
+    }
+    // [REword patch 2026-08-29] PDF ⌘/Ctrl+滚轮缩放（页面四周留白区）延迟到 openBook 里、
+    // 确认是 PDF 之后再绑（bindStageWheel）：非 PDF 不挂 passive:false 的 wheel，
+    // 避免拖累 EPUB 的滚轮滚动性能。页面本体的监听在 attachContentDoc。
+    // [REword patch 2026-08-29] 移动端 PDF 适配 Phase 1
+    // 设备分级检测 + resize 监听（横竖屏切换时更新设备类）
+    deviceClass = getDeviceClass();
+    isIphoneMode = isSmallMobile();
+    if (typeof window !== "undefined") {
+      window.addEventListener("resize", onDeviceClassResize);
+      window.addEventListener("orientationchange", onDeviceClassResize);
     }
     if (typeof document !== "undefined") {
       document.addEventListener("selectionchange", onMainSelectionChange);
+      // 2026-08-29 修复：方向键翻页失效
+      // 在 main document 上 capture 阶段注册 keydown，
+      // 不管焦点在 reader-view / iframe / 工具栏 / 批注 / 搜索框，方向键都能稳定翻页。
+      // onGlobalKey 内部跳过 input/textarea/contenteditable 保留原生行为。
+      document.addEventListener("keydown", onGlobalKey, true);
+      // 2026-08-29 双击缩放：PDF 上双击切换 fit-width ↔ 上次缩放
+      // 也注册到 main document capture 阶段（iframe 内的 dblclick 也会冒泡）
+      document.addEventListener("dblclick", onDblClickToggleZoom, true);
     }
     // 跟随思源主题（2026-08-25 新增）
     startThemeObserver();
+    // 2026-08-28：初始化连续朗读控制器
+    ensureTtsController();
   });
 
   onDestroy(() => {
@@ -4241,10 +5329,37 @@
     // 2026-08-23 修复：listener 绑在 readerViewEl（不是 document）
     if (readerViewEl) {
       readerViewEl.removeEventListener("mousedown", onContainerMouseDown);
+      // [REword patch 2026-08-29] Phase 3 注销 ink pointer 监听
+      readerViewEl.removeEventListener("pointerdown", onInkPointerDown);
+      readerViewEl.removeEventListener("pointermove", onInkPointerMove);
+      readerViewEl.removeEventListener("pointerup", onInkPointerUp);
+      readerViewEl.removeEventListener("pointercancel", onInkPointerUp);
+    }
+    // [REword patch 2026-08-29] 移动端 PDF 适配 Phase 1
+    if (typeof window !== "undefined") {
+      window.removeEventListener("resize", onDeviceClassResize);
+      window.removeEventListener("orientationchange", onDeviceClassResize);
     }
     if (typeof document !== "undefined") {
       document.removeEventListener("selectionchange", onMainSelectionChange);
+      // 2026-08-29 修复：注销 main document capture 阶段 keydown 监听
+      document.removeEventListener("keydown", onGlobalKey, true);
+      // 注销双击缩放
+      document.removeEventListener("dblclick", onDblClickToggleZoom, true);
     }
+    // [REword patch 2026-08-29] 注销 PDF 滚轮缩放（页面四周留白）+ 清掉落盘防抖定时器
+    if (stageWheelBound && readerViewEl) {
+      // 第三个参数必须传 capture:true 才能移除捕获阶段的监听（与 bindStageWheel 对称）
+      readerViewEl.removeEventListener("wheel", onStageWheel as EventListener, true);
+      stageWheelBound = false;
+    }
+    if (zoomSaveTimer) { clearTimeout(zoomSaveTimer); zoomSaveTimer = null; }
+    // 注销 PDF 滚轮缩放累积的 rAF（组件销毁后回调不该再跑）
+    if (wheelRafId != null) {
+      if (typeof cancelAnimationFrame === "function") cancelAnimationFrame(wheelRafId);
+      wheelRafId = null;
+    }
+    wheelAccumDy = 0;
     // 停止思源主题跟随观察器（2026-08-25 新增）
     stopThemeObserver();
     // 2026-08-24 修复：卸载 foliate view 事件 + 内容文档监听 + 清除搜索高亮，
@@ -4255,12 +5370,15 @@
     try {
       view?.close?.();
     } catch (__swallowErr) { logSwallow(__swallowErr, "ReaderView.svelte · try { view?.close?.(); }", "debug"); }
+    // 2026-08-28：朗读控制器清理（停止朗读 + 移除临时高亮，零残留）
+    try { ttsController?.dispose(); } catch (__swallowErr) { logSwallow(__swallowErr, "ReaderView.svelte · ttsController.dispose", "debug"); }
+    ttsController = null;
     view = null;
   });
 </script>
 
-<div class="reader-view" bind:this={readerViewEl} on:keydown={onGlobalKey}>
-  <div class="reader-toolbar">
+<div class="reader-view" bind:this={readerViewEl}>
+  <div class="reader-toolbar" class:reader-toolbar-hidden={!toolbarVisible} class:reader-toolbar-iphone={isIphoneMode}>
     <button
       class="reader-btn"
       title={onCloseTab ? "关闭阅读（书架在侧边栏）" : "返回书架"}
@@ -4272,27 +5390,56 @@
     {/if}
     <span class="reader-spacer"></span>
     <span class="reader-progress">{progressText}</span>
-    <button
-      class="reader-btn reader-bilingual-btn"
-      class:reader-btn-active={bilingualOn}
-      class:reader-btn-busy={bilingualProgress.active}
-      title={bilingualTokenUsage
-        ? `双语对照 · AI Token: ${bilingualTokenUsage.totalTokens}（输入 ${bilingualTokenUsage.promptTokens} + 输出 ${bilingualTokenUsage.completionTokens}）`
-        : "双语对照：在每段正文后注入译文（AI 翻译）"}
-      on:click={toggleBilingual}
-    >双语{bilingualProgress.active ? ` ${bilingualProgress.done}/${bilingualProgress.total}` : ""}{bilingualTokenUsage && !bilingualProgress.active ? ` · ${bilingualTokenUsage.totalTokens}T` : ""}</button>
-    <button
-      class="reader-btn reader-settings-btn"
-      title="设置"
-      class:reader-btn-active={showSettings}
-      on:click={toggleSettings}
-    >⚙</button>
-    <button
-      class="reader-btn"
-      title="搜索全书（F3 / ⌘F）"
-      class:reader-btn-active={showSearch}
-      on:click={toggleSearch}
-    >🔍</button>
+    {#if !isIphoneMode}
+      <!-- [REword patch 2026-08-29] 桌面 / iPad 完整模式：双语 + 设置 + 搜索按钮 -->
+      <button
+        class="reader-btn reader-bilingual-btn"
+        class:reader-btn-active={bilingualOn}
+        class:reader-btn-busy={bilingualProgress.active}
+        title={bilingualTokenUsage
+          ? `双语对照 · AI Token: ${bilingualTokenUsage.totalTokens}（输入 ${bilingualTokenUsage.promptTokens} + 输出 ${bilingualTokenUsage.completionTokens}）`
+          : "双语对照：在每段正文后注入译文（AI 翻译）"}
+        on:click={toggleBilingual}
+      >双语{bilingualProgress.active ? ` ${bilingualProgress.done}/${bilingualProgress.total}` : ""}{bilingualTokenUsage && !bilingualProgress.active ? ` · ${bilingualTokenUsage.totalTokens}T` : ""}</button>
+      <button
+        class="reader-btn reader-settings-btn"
+        title="设置"
+        class:reader-btn-active={showSettings}
+        on:click={toggleSettings}
+      >⚙</button>
+      <button
+        class="reader-btn"
+        title="搜索全书（F3 / ⌘F）"
+        class:reader-btn-active={showSearch}
+        on:click={toggleSearch}
+      >🔍</button>
+    {/if}
+    {#if isPdfBook()}
+      <!-- [REword patch 2026-08-29] PDF 缩放工具栏（仅 PDF 显示） -->
+      <span class="reader-zoom-group" title="PDF 缩放：⌘/Ctrl + 滚轮（或触控板捏合）连续缩放；⌘/Ctrl + = / - / 0 / 1 / 2 快捷档位；页面内双击切换适应宽度">
+        <button
+          class="reader-btn reader-zoom-btn"
+          title="缩小（⌘/Ctrl + -）"
+          on:click={zoomOut}
+        >−</button>
+        <span class="reader-zoom-label">{zoomPercentLabel()}</span>
+        <button
+          class="reader-btn reader-zoom-btn"
+          title="放大（⌘/Ctrl + =）"
+          on:click={zoomIn}
+        >+</button>
+        <button
+          class="reader-btn reader-zoom-btn"
+          title="适应宽度（⌘/Ctrl + 1）"
+          on:click={fitWidth}
+        >↔</button>
+        <button
+          class="reader-btn reader-zoom-btn"
+          title="适应整页（⌘/Ctrl + 2）"
+          on:click={fitPage}
+        >⊡</button>
+      </span>
+    {/if}
   </div>
 
   {#if showToc}
@@ -4444,6 +5591,121 @@
             />
             <span class="reader-setting-value">{settings.paragraph.textIndent}em</span>
           </div>
+        </div>
+      </details>
+
+      <!-- 2026-08-28：4. 朗读设置（参考 Readest） -->
+      <details class="reader-setting-section" open>
+        <summary class="reader-setting-section-title">🔊 朗读设置</summary>
+
+        <div class="reader-setting-row">
+          <span class="reader-setting-label">语音引擎</span>
+          <select class="reader-select" value={ttsCfg.engine} on:change={onTtsEngine}>
+            <option value="system">系统语音</option>
+            <option value="youdao">有道真人音</option>
+            <option value="edge">Edge 神经音</option>
+            <option value="auto">自动（在线优先）</option>
+          </select>
+        </div>
+
+        <div class="reader-setting-row">
+          <span class="reader-setting-label">语速</span>
+          <div class="reader-setting-control">
+            <input type="range" min="0.5" max="3" step="0.1" value={ttsCfg.rate} on:input={onTtsRateSetting} class="reader-slider" />
+            <span class="reader-setting-value">{ttsCfg.rate.toFixed(1)}×</span>
+          </div>
+        </div>
+
+        <div class="reader-setting-row">
+          <span class="reader-setting-label">音高</span>
+          <div class="reader-setting-control">
+            <input type="range" min="0.5" max="2" step="0.1" value={ttsCfg.pitch} on:input={onTtsPitch} class="reader-slider" />
+            <span class="reader-setting-value">{ttsCfg.pitch.toFixed(1)}</span>
+          </div>
+        </div>
+
+        <div class="reader-setting-row">
+          <span class="reader-setting-label">音量</span>
+          <div class="reader-setting-control">
+            <input type="range" min="0" max="1" step="0.05" value={ttsCfg.volume} on:input={onTtsVolume} class="reader-slider" />
+            <span class="reader-setting-value">{Math.round(ttsCfg.volume * 100)}%</span>
+          </div>
+        </div>
+
+        <div class="reader-setting-row">
+          <span class="reader-setting-label">口音</span>
+          <select class="reader-select" value={ttsCfg.accent} on:change={onTtsAccent}>
+            <option value="us">美音</option>
+            <option value="uk">英音</option>
+          </select>
+        </div>
+
+        <div class="reader-setting-row">
+          <span class="reader-setting-label">朗读粒度</span>
+          <select class="reader-select" value={ttsCfg.granularity} on:change={onTtsGranularity}>
+            <option value="sentence">整句</option>
+            <option value="word">逐词</option>
+          </select>
+        </div>
+
+        <div class="reader-setting-row">
+          <span class="reader-setting-label">朗读范围</span>
+          <select class="reader-select" value={ttsCfg.scope} on:change={onTtsScope}>
+            <option value="selection">仅选区</option>
+            <option value="section">本节</option>
+            <option value="book">全书</option>
+          </select>
+        </div>
+
+        <div class="reader-setting-row">
+          <span class="reader-setting-label">句间停顿</span>
+          <div class="reader-setting-control">
+            <input type="range" min="0" max="2000" step="50" value={ttsCfg.interval} on:input={onTtsInterval} class="reader-slider" />
+            <span class="reader-setting-value">{ttsCfg.interval}ms</span>
+          </div>
+        </div>
+
+        <div class="reader-setting-row reader-setting-toggle-row">
+          <span class="reader-setting-label">句子高亮</span>
+          <label class="reader-switch" title="朗读时高亮当前句（临时，停止即清除，不污染标注）">
+            <input type="checkbox" checked={ttsCfg.enableHighlight} on:change={onTtsHighlightEnabled} />
+            <span class="reader-switch-track"></span>
+          </label>
+        </div>
+
+        <div class="reader-setting-row">
+          <span class="reader-setting-label">高亮样式</span>
+          <select class="reader-select" value={ttsCfg.highlightStyle} on:change={onTtsHighlightStyle}>
+            <option value="background">底色</option>
+            <option value="underline">下划线</option>
+            <option value="wave">波浪线</option>
+            <option value="outline">描边</option>
+          </select>
+        </div>
+
+        <div class="reader-setting-row">
+          <span class="reader-setting-label">高亮颜色</span>
+          <input type="color" value={ttsCfg.highlightColor} on:input={onTtsHighlightColor} class="reader-color" />
+        </div>
+
+        <div class="reader-setting-row reader-setting-toggle-row">
+          <span class="reader-setting-label">自动翻页</span>
+          <label class="reader-switch" title="读完当前节自动翻到下一节续读">
+            <input type="checkbox" checked={ttsCfg.autoPage} on:change={onTtsAutoPage} />
+            <span class="reader-switch-track"></span>
+          </label>
+        </div>
+
+        <div class="reader-setting-row">
+          <span class="reader-setting-label">睡眠定时</span>
+          <select class="reader-select" value={ttsCfg.sleepTimerMin} on:change={onTtsSleep}>
+            <option value="0">关闭</option>
+            <option value="15">15 分钟</option>
+            <option value="30">30 分钟</option>
+            <option value="45">45 分钟</option>
+            <option value="60">60 分钟</option>
+            <option value="90">90 分钟</option>
+          </select>
         </div>
       </details>
 
@@ -4911,6 +6173,14 @@
 
   <div class="reader-stage" bind:this={readerStageEl}>
     <div class="reader-container" bind:this={container}></div>
+    <!-- [REword patch 2026-08-29] Phase 3 Apple Pencil 墨迹批注 SVG 渲染层 -->
+    {#if opened && isPdfBook()}
+      <InkLayer pageWidth={800} pageHeight={1200} />
+    {/if}
+    <!-- [REword patch 2026-08-29] Phase 3 墨迹工具栏（浮动在 PDF 上） -->
+    {#if opened && isPdfBook()}
+      <InkToolbar />
+    {/if}
     {#if opened && !errorMsg}
       <div class="reader-side-tap" aria-hidden="false">
         <button
@@ -4974,6 +6244,29 @@
     {/if}
     <button class="reader-btn" title="下一页" on:click={turnNext}>▶</button>
   </div>
+
+  <!-- 2026-08-28：连续朗读控制条（参考 Readest 朗读体验） -->
+  {#if showTtsBar}
+  <div class="reader-tts-bar">
+    <button class="reader-btn reader-tts-btn" title="上一句" on:click={ttsPrev}>⏮</button>
+    <button class="reader-btn reader-tts-btn reader-tts-play" title="播放/暂停（Space）" on:click={ttsTogglePlay}>
+      {ttsState === "playing" ? "⏸" : "▶"}
+    </button>
+    <button class="reader-btn reader-tts-btn" title="下一句" on:click={ttsNext}>⏭</button>
+    <button class="reader-btn reader-tts-btn" title="停止" on:click={ttsStop}>⏹</button>
+    <div class="reader-tts-meta">
+      <span class="reader-tts-progress">{ttsProgress.total ? ttsProgress.index + 1 : 0}/{ttsProgress.total}</span>
+      <span class="reader-tts-current" title={ttsCurrentText}>{ttsCurrentText}</span>
+    </div>
+    <div class="reader-tts-rate">
+      <span class="reader-tts-rate-label">语速</span>
+      <input type="range" min="0.5" max="3" step="0.1" value={ttsRate} on:input={onTtsRateInput} />
+      <span class="reader-tts-rate-val">{ttsRate.toFixed(1)}×</span>
+    </div>
+    <button class="reader-btn reader-tts-btn" class:reader-btn-active={ttsHighlightOn} title="句子高亮跟随" on:click={ttsToggleHighlight}>高亮</button>
+    <button class="reader-btn reader-tts-btn" title="收藏本句生词到生词本" on:click={ttsCollectWords}>收词</button>
+  </div>
+  {/if}
 
   {#if errorMsg}
     <div class="reader-error">打开失败：{errorMsg}</div>
@@ -5267,6 +6560,9 @@
     position: relative;
     flex: 1;
     min-height: 0;
+    /* [REword patch 2026-08-29] Phase 2 触屏优化
+     * touch-action: manipulation 避免 iOS Safari 350ms 双击延迟 */
+    touch-action: manipulation;
     /* 2026-08-25 修复：原 overflow:hidden 用于裁剪浮层，但会连带裁掉划词工具栏
        （工具栏按 reader-view 相对坐标定位，选区靠顶部时会被算到负 Y 区、被裁掉点不到）。
        正文裁剪已由 .reader-container 的 overflow:hidden 负责，故此处改回 visible；
@@ -5287,6 +6583,10 @@
     align-items: center;
     gap: 6px;
     padding: 6px 8px;
+    /* 2026-08-29 Phase 1：顶部安全区（刘海 / 灵动岛） */
+    padding-top: calc(6px + env(safe-area-inset-top, 0px));
+    padding-left: calc(8px + env(safe-area-inset-left, 0px));
+    padding-right: calc(8px + env(safe-area-inset-right, 0px));
     /* 2026-08-28 B2：柔和底 + 细边 + 轻投影，提升原生感（仍低于思源原生 UI） */
     background: var(--b3-theme-surface, var(--b3-theme-background, #fff));
     border-bottom: 1px solid var(--b3-border-color, rgba(0, 0, 0, 0.08));
@@ -5297,6 +6597,14 @@
        （顶栏"管理"菜单等），否则会把菜单压在下层（边框穿过菜单、无法点击）。 */
     position: relative;
     z-index: 1;
+  }
+  .reader-toolbar-hidden {
+    display: none;
+  }
+  /* 2026-08-29 Phase 1：触屏设备放大点按目标，避免误触（仅 coarse 指针生效） */
+  @media (pointer: coarse) {
+    .reader-btn { min-height: 36px; padding: 8px 10px; }
+    .reader-mini-btn { min-height: 32px; min-width: 32px; }
   }
   .reader-btn {
     background: none;
@@ -5334,6 +6642,61 @@
     color: var(--b3-theme-on-background, #333);
     user-select: auto;
     cursor: text;
+  }
+  /* [REword patch 2026-08-29] PDF 缩放工具栏（仅 PDF 显示） */
+  .reader-zoom-group {
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+    padding: 0 4px;
+    border-left: 1px solid var(--b3-border-color, rgba(0, 0, 0, 0.1));
+    margin-left: 4px;
+  }
+  .reader-zoom-btn {
+    min-width: 28px;
+    padding: 4px 8px;
+    font-size: 14px;
+    font-weight: 500;
+  }
+  .reader-zoom-label {
+    min-width: 64px;
+    text-align: center;
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--b3-theme-on-background, #333);
+    padding: 0 4px;
+    user-select: none;
+  }
+  /* [REword patch 2026-08-29] 移动端 PDF 适配 Phase 1 · iPhone / Android Phone 降级模式
+   * 工具栏改底部 sheet + 触摸区 ≥44px */
+  .reader-toolbar-iphone {
+    top: auto;
+    bottom: 0;
+    border-top: 1px solid var(--b3-border-color, rgba(0, 0, 0, 0.1));
+    border-bottom: none;
+    box-shadow: 0 -2px 12px rgba(0, 0, 0, 0.06);
+    padding: 6px 8px;
+    gap: 4px;
+    justify-content: space-between;
+  }
+  .reader-toolbar-iphone .reader-btn {
+    min-width: 44px;
+    min-height: 44px;
+    padding: 10px 12px;
+    font-size: 16px;
+  }
+  .reader-toolbar-iphone .reader-zoom-btn {
+    min-width: 44px;
+    min-height: 44px;
+    font-size: 18px;
+  }
+  .reader-toolbar-iphone .reader-zoom-label {
+    min-width: 56px;
+    font-size: 13px;
+  }
+  /* iPhone 模式：标题简化（只保留标题，省略章节） */
+  .reader-toolbar-iphone .reader-title {
+    max-width: 40%;
   }
   .reader-chapter {
     font-size: 12px;
@@ -6668,6 +8031,8 @@
     align-items: center;
     gap: 4px;
     padding: 5px 8px;
+    /* 2026-08-29 Phase 1：底部安全区（Home Indicator） */
+    padding-bottom: calc(5px + env(safe-area-inset-bottom, 0px));
     /* 2026-08-28 B2：悬浮药丸条质感——思源 surface 底 + 圆角 + 柔和投影，
        替代原 border-top 直条，更贴合思源原生工具栏观感。 */
     margin: 5px 6px 2px;
@@ -6679,6 +8044,72 @@
     position: relative;
     /* 2026-08-24 修复：z-index 从 30 降到 1，避免压住思源原生 UI */
     z-index: 1;
+  }
+  /* 2026-08-28：连续朗读控制条（参考 Readest 朗读体验） */
+  .reader-tts-bar {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 10px;
+    /* 2026-08-29 Phase 1：底部安全区（Home Indicator） */
+    padding-bottom: calc(6px + env(safe-area-inset-bottom, 0px));
+    margin: 0 6px 6px;
+    border-radius: var(--b3-border-radius, 8px);
+    background: var(--b3-theme-surface, var(--b3-theme-background, #fff));
+    box-shadow: var(--b3-point-shadow, 0 2px 10px rgba(0, 0, 0, 0.12));
+    flex-shrink: 0;
+    position: relative;
+    z-index: 1;
+    font-size: 13px;
+  }
+  .reader-tts-btn {
+    min-width: 30px;
+    height: 30px;
+    padding: 0 8px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 15px;
+  }
+  .reader-tts-play {
+    font-size: 17px;
+    color: var(--b3-theme-primary, #378add);
+  }
+  .reader-tts-meta {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    overflow: hidden;
+  }
+  .reader-tts-progress {
+    flex-shrink: 0;
+    color: var(--b3-theme-on-surface, #666);
+    font-variant-numeric: tabular-nums;
+  }
+  .reader-tts-current {
+    flex: 1;
+    min-width: 0;
+    color: var(--b3-theme-on-surface, #333);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .reader-tts-rate {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-shrink: 0;
+  }
+  .reader-tts-rate-label,
+  .reader-tts-rate-val {
+    color: var(--b3-theme-on-surface, #666);
+    font-size: 12px;
+    white-space: nowrap;
+  }
+  .reader-tts-rate input[type="range"] {
+    width: 84px;
   }
   .reader-progress-wrap {
     flex: 1;

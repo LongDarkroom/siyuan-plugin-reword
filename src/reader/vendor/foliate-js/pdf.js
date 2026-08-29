@@ -1,8 +1,45 @@
-const pdfjsPath = path => `/vendor/pdfjs/${path}`
+// [REword patch 2026-08-29] PDF 适配 Phase 1.5：本地 vendor 加载 PDF.js + 独立 worker
+//
+// 原 foliate-js 用 npm 包 '@pdfjs/pdf.min.mjs'（依赖 node_modules），
+// REword 改用本地 vendor 拷贝（vendor/pdfjs/pdf.mjs），避免 12MB npm 依赖。
+//
+// Worker 策略（2026-08-29 Phase 1.5 方案 + Phase 1 移动端）：
+// - 桌面（强设备）：vite 单 bundle 模式下手动复制 pdf.worker.mjs 到插件根目录，
+//   思源 webview 通过 /plugins/siyuan-plugin-reword/pdf.worker.mjs 访问。
+// - 移动端/弱设备（iOS / Android / 弱 CPU）：workerSrc = '' 走 fake worker（主线程跑），
+//   避免 iOS WKWebView 的 worker CORS 失败导致白屏。
+//
+// 性能：桌面恢复多线程 worker；移动端牺牲性能换可用性。
+const pdfjsPath = path => `./vendor/pdfjs/${path}`
 
-import '@pdfjs/pdf.min.mjs'
+import './vendor/pdfjs/pdf.mjs'
 const pdfjsLib = globalThis.pdfjsLib
-pdfjsLib.GlobalWorkerOptions.workerSrc = pdfjsPath('pdf.worker.min.mjs')
+
+// 构造 worker 路径（同 bookshelf-store.ts 弱设备判断）
+const _rewordOrigin = (() => {
+    try {
+        if (typeof globalThis !== 'undefined' && globalThis.location && globalThis.location.origin) {
+            return globalThis.location.origin
+        }
+    } catch { /* ignore */ }
+    return ''
+})()
+const _rewordPluginName = 'siyuan-plugin-reword'
+const _rewordIsWeakDevice = (() => {
+    try {
+        if (typeof navigator === 'undefined') return false
+        const ua = navigator.userAgent
+        const cores = navigator.hardwareConcurrency ?? 4
+        const isMob = /Mobi|Android|iPhone|iPad|iPod/.test(ua)
+        const isIOS = /iPad|iPhone|iPod/.test(ua)
+        return isMob || isIOS || cores < 4
+    } catch { return false }
+})()
+pdfjsLib.GlobalWorkerOptions.workerSrc = _rewordIsWeakDevice
+    ? ''  // 弱设备：fake worker（主线程跑）
+    : (_rewordOrigin
+        ? `${_rewordOrigin}/plugins/${_rewordPluginName}/pdf.worker.mjs`
+        : './pdf.worker.mjs')
 
 const fetchText = async url => await (await fetch(url)).text()
 
@@ -470,9 +507,12 @@ export const makePDF = async file => {
     }
     const loadingTask = pdfjsLib.getDocument({
         range: transport,
-        wasmUrl: pdfjsPath(''),
-        cMapUrl: pdfjsPath('cmaps/'),
-        standardFontDataUrl: pdfjsPath('standard_fonts/'),
+        // [REword patch 2026-08-29] PDF 适配 Phase 1.5：cMap / standard_fonts 暂不加载
+        // 思源 webview 相对路径 fetch 失败，90% PDF 走内置字体足够。
+        // 如某个 PDF 用了 CMap 字体（中文/日文/特殊字符），需在 copy-dist.mjs 把
+        // vendor/cmaps/ 和 vendor/standard_fonts/ 也复制到根目录，并恢复下面两行。
+        // cMapUrl: pdfjsPath('cmaps/'),
+        // standardFontDataUrl: pdfjsPath('standard_fonts/'),
         isEvalSupported: false,
     })
     const pdf = await loadingTask.promise

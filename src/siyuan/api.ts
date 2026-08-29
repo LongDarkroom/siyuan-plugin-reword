@@ -17,8 +17,9 @@
  * API 文档见 [API_zh_CN.md](https://github.com/siyuan-note/siyuan/blob/master/API_zh_CN.md)
  */
 
-import { fetchPost, fetchSyncPost, IWebSocketData, openTab, Constants, platformUtils, getFrontend, openMobileFileById } from "siyuan";
+import { fetchPost, fetchSyncPost, IWebSocketData, openTab, Constants, platformUtils, openMobileFileById } from "siyuan";
 import { getLogger } from "../core/logger.ts";
+import { isMobile } from "../core/env.ts";
 
 /** 通用请求：返回 data；业务错误（code != 0）时仍返回 data（宽松取值，保持旧行为） */
 export async function request(url: string, data: any, returnType: 'data' | 'response' = 'data') {
@@ -474,9 +475,8 @@ export async function openBlock(blockId: string) {
     if (!block) {
         throw new Error('块不存在');
     }
-    // 判断是否是移动端
-    const isMobile = getFrontend().endsWith('mobile');
-    if (isMobile) {
+    // 判断是否是移动端（统一走 core/env 工具）
+    if (isMobile()) {
         // 如果是mobile，直接打开块
         openMobileFileById(window.siyuan.ws.app, blockId);
         return;

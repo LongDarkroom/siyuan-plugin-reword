@@ -82,6 +82,9 @@ export class ReaderTabController {
               },
               // 阅读器划词工具栏委托插件能力：朗读 / 发送笔记本 / 翻译
               onSpeak: (t: string) => { try { self.plugin?.speakText?.(t); } catch (__swallowErr) { logSwallow(__swallowErr, "reader-tab.ts · onSpeak", "debug"); } },
+              // 2026-08-28：连续朗读控制器设置透传（get 读 / save 写，结构 = reader-tts 的 RewordTtsSettings）
+              getTtsSettings: () => (self.plugin as any)?.getTtsSettings?.() ?? null,
+              saveTtsSettings: (s: any) => (self.plugin as any)?.saveTtsSettings?.(s) ?? Promise.resolve(),
               onSendToNote: (opts: { markdown: string; title: string }) =>
                 self.plugin?.sendReaderSelection?.(opts) ?? undefined,
               onInsertToCurrentDoc: (markdown: string) =>
