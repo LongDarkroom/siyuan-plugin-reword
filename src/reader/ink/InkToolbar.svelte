@@ -95,10 +95,14 @@
     flex-direction: column;
     gap: 8px;
     padding: 8px;
-    background: var(--b3-theme-surface, #fff);
-    border: 1px solid var(--b3-border-color, rgba(0, 0, 0, 0.1));
-    border-radius: 10px;
-    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.08);
+    background: var(--reword-glass-light-bg);
+    -webkit-backdrop-filter: blur(var(--reword-glass-blur))
+      saturate(var(--reword-glass-saturate));
+    backdrop-filter: blur(var(--reword-glass-blur))
+      saturate(var(--reword-glass-saturate));
+    border: 1px solid var(--reword-glass-light-border);
+    border-radius: var(--reword-radius-lg);
+    box-shadow: var(--reword-glass-light-shadow);
     user-select: none;
   }
   .ink-group {

@@ -12,6 +12,81 @@
      - 主题：自动跟随思源暗色（依赖 --b3-* 变量，无白闪）
    -------------------------------------------------------------------- */
 
+/* ====================================================================
+   REword 设计令牌（Design Tokens）
+   --------------------------------------------------------------------
+   所有 reader UI 组件统一引用以下变量，禁止硬编码颜色 / 圆角 / 间距 / 时长。
+   命名约定：--reword-{类别}-{语义}
+   主题跟随：明暗由 --b3-* 自动驱动；玻璃浮层用固定半透明 + blur（与主题无关）
+   ==================================================================== */
+:root {
+  /* 圆角 */
+  --reword-radius-xs: 4px;
+  --reword-radius-sm: 6px;
+  --reword-radius-md: 8px;
+  --reword-radius-lg: 12px;
+  --reword-radius-xl: 16px;
+  --reword-radius-pill: 999px;
+
+  /* 间距 */
+  --reword-space-1: 4px;
+  --reword-space-2: 8px;
+  --reword-space-3: 12px;
+  --reword-space-4: 16px;
+  --reword-space-5: 20px;
+
+  /* 动效 */
+  --reword-dur-fast: 150ms;
+  --reword-dur-base: 200ms;
+  --reword-dur-slow: 250ms;
+  --reword-ease: cubic-bezier(0.22, 1, 0.36, 1);
+
+  /* 毛玻璃 · 深色浮层（划词工具栏 / 批注弹窗 / 脚注气泡） */
+  --reword-glass-bg: rgba(38, 38, 40, 0.72);
+  --reword-glass-bg-fallback: rgba(32, 32, 34, 0.94);
+  --reword-glass-border: rgba(255, 255, 255, 0.14);
+  --reword-glass-border-strong: rgba(255, 255, 255, 0.24);
+  --reword-glass-shadow: 0 8px 28px rgba(0, 0, 0, 0.34);
+  --reword-glass-blur: 18px;
+  --reword-glass-saturate: 180%;
+
+  /* 毛玻璃 · 浅色浮层（墨水工具条，跟随思源主题） */
+  --reword-glass-light-bg: rgba(255, 255, 255, 0.74);
+  --reword-glass-light-bg-fallback: rgba(255, 255, 255, 0.96);
+  --reword-glass-light-border: rgba(0, 0, 0, 0.1);
+  --reword-glass-light-shadow: 0 6px 20px rgba(0, 0, 0, 0.1);
+
+  /* 浮层内部文本与填充 */
+  --reword-glass-fg: rgba(255, 255, 255, 0.92);
+  --reword-glass-fg-muted: rgba(255, 255, 255, 0.6);
+  --reword-glass-fill: rgba(255, 255, 255, 0.1);
+  --reword-glass-fill-hover: rgba(255, 255, 255, 0.18);
+}
+
+/* 毛玻璃基类：所有浮层共用，保证质感一致 */
+.reword-glass {
+  background: var(--reword-glass-bg);
+  -webkit-backdrop-filter: blur(var(--reword-glass-blur)) saturate(var(--reword-glass-saturate));
+  backdrop-filter: blur(var(--reword-glass-blur)) saturate(var(--reword-glass-saturate));
+  border: 1px solid var(--reword-glass-border);
+  box-shadow: var(--reword-glass-shadow);
+  color: var(--reword-glass-fg);
+}
+
+/* 浅色毛玻璃基类 */
+.reword-glass--light {
+  background: var(--reword-glass-light-bg);
+  border: 1px solid var(--reword-glass-light-border);
+  box-shadow: var(--reword-glass-light-shadow);
+  color: var(--b3-theme-on-surface, #333);
+}
+
+/* 不支持 backdrop-filter 的环境降级：加深底色保证可读性（不留透明窟窿） */
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  .reword-glass { background: var(--reword-glass-bg-fallback); }
+  .reword-glass--light { background: var(--reword-glass-light-bg-fallback); }
+}
+
 /* 通用动效：抽屉 200ms / 浮窗 150ms / 模态 250ms */
 .reader-ui-transition {
   transition-property: background, color, border-color, opacity, transform;

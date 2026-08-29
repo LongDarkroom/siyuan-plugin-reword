@@ -46,7 +46,7 @@
   // v1.3.0：本书前提上下文编辑器（思源原生 lite Protyle）+ token 估算
   import { AnnEditor } from "../annotation/ann-editor.ts";
   import { estimateTokens, PRIMER_WARN_CHARS } from "./book-primer.ts";
-  import type { BookshelfStore, BookMeta } from "../reader/bookshelf-store";
+  import type { BookshelfStore, BookMeta, BookMark } from "../reader/bookshelf-store";
   // [REword patch 2026-08-29] PDF 缩放：复用 ReadingProgress.zoom 字段
   import type { ZoomState } from "../reader/bookshelf-store";
   import { ZOOM_PRESETS } from "../reader/bookshelf-store";
@@ -66,7 +66,10 @@
     NOTE_INSERT_POSITION_PRESETS,
     NOTE_TEMPLATE_PRESETS,
     PROGRESS_STYLE_PRESETS,
+    LAYOUT_PRESETS,
+    detectLayoutPreset,
     type ReaderSettings,
+    type ReaderLayoutPreset,
     type ReaderTheme,
     type ReaderFontMode,
     type NoteInsertPosition,
@@ -339,6 +342,94 @@
   let activeHref = "";
   let visitedHrefs = new Set<string>();
   let tocReadCount = 0;
+  /* 2026-08-29 UI 全面优化 · 读者外框：底栏自动淡出 + 进度条章节标记 */
+  let chromeHidden = false; // 鼠标静止后底栏淡出（Foliate 风格沉浸阅读）
+  let chromeIdleTimer: ReturnType<typeof setTimeout> | null = null;
+  const CHROME_IDLE_MS = 2600;
+  let chapterMarks: { left: number; title: string }[] = []; // 章节起始位置（0–100）
+  /* ---- 2026-08-29 新增：书签 + 摘录汇总抽屉（对齐 Obsidian weave 的摘录沉淀链） ---- */
+  let showBookmarks = false; // 书签抽屉
+  let bookmarks: BookMark[] = [];
+  let showAnnots = false; // 摘录汇总抽屉
+  let annotsList: any[] = [];
+
+  /** 鼠标移动 → 唤回底栏并重置静止计时；有浮层/抽屉时保持常显，避免交互中被抽走 */
+  function wakeChrome() {
+    chromeHidden = false;
+    if (chromeIdleTimer) clearTimeout(chromeIdleTimer);
+    chromeIdleTimer = setTimeout(() => {
+      if (selToolbar.visible || noteEditor.visible || dictPopup.visible) return;
+      if (showToc || showTtsBar) return;
+      chromeHidden = true;
+    }, CHROME_IDLE_MS);
+  }
+
+  /** 鼠标离开阅读区 → 立即淡出底栏 */
+  function hideChromeNow() {
+    if (chromeIdleTimer) clearTimeout(chromeIdleTimer);
+    chromeIdleTimer = null;
+    chromeHidden = true;
+  }
+
+  /**
+   * 由 foliate 的 sections 体积累加推算每章起始进度（0–100）。
+   * toc href 与 section.id 可能带 #fragment，统一去片段后匹配；匹配不到则跳过该章。
+   * 全本都匹配不到时 marks 为空 → 不渲染刻度（安全降级，不改变现有外观）。
+   */
+  function computeChapterMarks() {
+    try {
+      const sections = view?.book?.sections;
+      if (!Array.isArray(sections) || sections.length < 2 || !tocItems.length) {
+        chapterMarks = [];
+        return;
+      }
+      const total = sections.reduce(
+        (s: number, x: any) => s + (Number(x?.size) || 0),
+        0
+      );
+      if (!total) {
+        chapterMarks = [];
+        return;
+      }
+      const cum: number[] = [];
+      let acc = 0;
+      for (const sec of sections) {
+        cum.push(acc);
+        acc += Number(sec?.size) || 0;
+      }
+      const seen = new Set<number>();
+      const marks: { left: number; title: string }[] = [];
+      for (const item of tocItems) {
+        const path = String(item?.href || "").split("#")[0];
+        if (!path) continue;
+        const idx = sections.findIndex(
+          (s: any) => s?.id === path || String(s?.id || "").split("#")[0] === path
+        );
+        if (idx <= 0) continue; // 第 0 章起点就是 0%，无需刻度
+        const left = Math.round((cum[idx] / total) * 1000) / 10;
+        if (left <= 0.2 || left >= 99.8) continue;
+        if (seen.has(left)) continue;
+        seen.add(left);
+        marks.push({ left, title: item?.title || "" });
+      }
+      // 章节过多时抽稀，避免刻度糊成一片
+      const MAX_MARKS = 60;
+      chapterMarks =
+        marks.length > MAX_MARKS
+          ? marks.filter(
+              (_, i) => i % Math.ceil(marks.length / MAX_MARKS) === 0
+            )
+          : marks;
+    } catch {
+      chapterMarks = [];
+    }
+  }
+
+  onDestroy(() => {
+    if (chromeIdleTimer) clearTimeout(chromeIdleTimer);
+    chromeIdleTimer = null;
+  });
+
   let settings: ReaderSettings = { ...READER_DEFAULT_SETTINGS };
 
   // 阅读统计（时长 / 剩余时间估算）
@@ -384,8 +475,23 @@
   // 搜索状态
   let searchQuery = "";
   let searching = false;
-  let searchResults: { cfi: string; excerpt?: string }[] = [];
+  /** 单条搜索结果（含章节标签与进度，用于结果列表展示与跳转） */
+  interface SearchHit {
+    cfi: string;
+    cfis: string[];
+    excerpt: string;
+    chapterLabel: string;
+    progressPercent: number;
+  }
+  let searchResults: SearchHit[] = [];
   let searchIndex = -1;
+  /** 搜索范围：全书 / 当前章（2026-08-29） */
+  let searchScope: "book" | "chapter" = "book";
+  let searchCaseSensitive = false;
+  let searchWholeWord = false;
+  /** 当前章节索引（relocate 事件驱动，用于「当前章」范围搜索） */
+  let currentSectionIndex = -1;
+  let searchDebounce: any = null;
 
   // 进度条拖动
   let dragging = false;
@@ -583,6 +689,8 @@
   }
 
   function applyStyles() {
+    // 跟随思源文档边距：开时把宿主 .protyle-wysiwyg 的水平 padding 同步为阅读器左右边距
+    applySiyuanDocMargin();
     if (view?.renderer?.setStyles) {
       try {
         view.renderer.setStyles(buildStyles());
@@ -1250,6 +1358,7 @@
         if (!dragging) progressText = fmtPct(frac);
         totalSections = view.book?.sections?.length ?? 0;
         chapterLabel = d?.tocItem?.label ?? (totalSections ? `第 ${(d?.index ?? 0) + 1}/${totalSections} 节` : "");
+        currentSectionIndex = typeof d?.index === "number" ? d.index : currentSectionIndex;
         // 独立 Tab 模式：标题联动「书名 · 章节」
         if (onTitleChange) {
           onTitleChange(chapterLabel ? `${title} · ${chapterLabel}` : title);
@@ -1308,8 +1417,10 @@
         totalChars = Array.isArray(view.book?.sections)
           ? view.book.sections.reduce((s: number, x: any) => s + (x.size || 0), 0)
           : 0;
+        computeChapterMarks();
       } catch {
         tocItems = [];
+        chapterMarks = [];
       }
       settings = settingsStore.get();
       applyStyles();
@@ -1542,6 +1653,26 @@
           return;
         }
       }
+      // ---- 2026-08-29：把 reader-shortcuts.ts 注册表里宣传、却从未接线的键位补上 ----
+      // 注册表此前只用于「显示提示面板 + 冲突检测」，下面这些键在阅读器里没有任何处理。
+      // 只接无歧义、不与思源全局快捷键抢的：⌘/Ctrl+B 书签（思源未占用）。
+      // ⌘S/⌘T/⌘⇧L 仍留空 —— 与思源保存 / 浏览器新页签冲突，抢了会伤到用户既有习惯。
+      if (k.toLowerCase() === "b") {
+        e.preventDefault();
+        void toggleCurrentBookmark();
+        return;
+      }
+    }
+    // F11 全屏（无修饰键，不在这个分支里判断 isPdfBook）
+    if (e.key === "F11") {
+      e.preventDefault();
+      toggleFullscreen();
+      return;
+    }
+    // Esc 关闭全部浮层（此前完全没有处理：开了目录/搜索只能再点一次按钮才能关）
+    if (e.key === "Escape") {
+      closeAllPopovers();
+      return;
     }
   }
 
@@ -1571,19 +1702,74 @@
 
   /* ================= 搜索 ================= */
 
+  /** 把书摘片段里命中词高亮成 <mark>（先转义再包裹，防 XSS） */
+  function escapeHtml(s: string): string {
+    return (s || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  }
+  function highlightExcerpt(text: string, q: string, caseSensitive: boolean): string {
+    const safe = escapeHtml(text || "");
+    const q2 = (q || "").trim();
+    if (!q2) return safe;
+    const esc = q2.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const re = new RegExp(esc, caseSensitive ? "g" : "gi");
+    return safe.replace(re, (m) => `<mark>${m}</mark>`);
+  }
+
+  /** 章节起始百分比（用于结果列表展示位置） */
+  function sectionPercent(sectionIndex: number): number {
+    const total = view?.book?.sections?.length ?? 0;
+    if (!total) return 0;
+    return Math.round((sectionIndex / total) * 100);
+  }
+
   async function doSearch() {
     if (!view || !searchQuery.trim()) return;
     searching = true;
     searchResults = [];
     searchIndex = -1;
     try {
-      const iter = view.search({ query: searchQuery.trim() });
+      const opts: any = {
+        query: searchQuery.trim(),
+        matchCase: searchCaseSensitive,
+        matchWholeWords: searchWholeWord,
+      };
+      // 「当前章」范围：foliate 的 view.search({ index }) 只搜该 section
+      if (searchScope === "chapter" && currentSectionIndex >= 0) {
+        opts.index = currentSectionIndex;
+      }
+      const iter = view.search(opts);
+      const flat: SearchHit[] = [];
       for await (const r of iter) {
         if (r === "done") break;
         if (r?.cfi) {
-          searchResults = [...searchResults, { cfi: r.cfi, excerpt: r.excerpt }];
+          // 单章搜索：结果直接是顶层 {cfi, excerpt}
+          flat.push({
+            cfi: r.cfi,
+            cfis: r.cfis ?? [r.cfi],
+            excerpt: r.excerpt ?? "",
+            chapterLabel: chapterLabel,
+            progressPercent: sectionPercent(currentSectionIndex),
+          });
+        } else if (r?.subitems) {
+          // 全书搜索：结果嵌套在 subitems，且携带章节 label
+          const label = r.label ?? "";
+          const idx = typeof r.index === "number" ? r.index : -1;
+          const pct = sectionPercent(idx);
+          for (const sub of r.subitems) {
+            if (!sub?.cfi) continue;
+            flat.push({
+              cfi: sub.cfi,
+              cfis: sub.cfis ?? [sub.cfi],
+              excerpt: sub.excerpt ?? "",
+              chapterLabel: label,
+              progressPercent: pct,
+            });
+          }
         }
       }
+      searchResults = flat;
+      searchIndex = flat.length ? 0 : -1;
+      if (flat.length) await goSearchResultAt(0);
     } catch (e) {
       console.warn("[REword] 搜索失败:", e);
     } finally {
@@ -1591,20 +1777,57 @@
     }
   }
 
+  async function goSearchResultAt(i: number) {
+    if (!searchResults.length) return;
+    const idx = Math.max(0, Math.min(i, searchResults.length - 1));
+    searchIndex = idx;
+    try {
+      await view.goTo(searchResults[idx].cfi);
+    } catch (__swallowErr) { logSwallow(__swallowErr, "ReaderView.svelte · goSearchResultAt", "debug"); }
+  }
+
   async function goSearchResult(delta: number) {
     if (!searchResults.length) return;
-    searchIndex = (searchIndex + delta + searchResults.length) % searchResults.length;
-    try {
-      await view.goTo(searchResults[searchIndex].cfi);
-    } catch (__swallowErr) { logSwallow(__swallowErr, "ReaderView.svelte · goSearchResult", "debug"); }
+    const i = ((searchIndex + delta) % searchResults.length + searchResults.length) % searchResults.length;
+    await goSearchResultAt(i);
+  }
+
+  /** 输入即搜（防抖 300ms），空查询清空结果 */
+  function onSearchInput() {
+    if (!searchQuery.trim()) {
+      searchResults = [];
+      searchIndex = -1;
+      if (searchDebounce) clearTimeout(searchDebounce);
+      return;
+    }
+    if (searchDebounce) clearTimeout(searchDebounce);
+    searchDebounce = setTimeout(() => void doSearch(), 300);
   }
 
   function onSearchKeydown(e: KeyboardEvent) {
-    if (e.key === "Enter") void doSearch();
+    if (e.key === "Enter") {
+      e.preventDefault();
+      if (searchDebounce) clearTimeout(searchDebounce);
+      void doSearch();
+    } else if (e.key === "ArrowDown") {
+      e.preventDefault();
+      void goSearchResult(1);
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      void goSearchResult(-1);
+    } else if (e.key === "Escape") {
+      e.preventDefault();
+      closeSearch();
+    }
   }
 
   function startSearch() {
     void doSearch();
+  }
+
+  function closeSearch() {
+    showSearch = false;
+    clearSearch();
   }
 
   // 左右翻页箭头「按住连翻」状态
@@ -1695,6 +1918,118 @@
       showToc = false;
     } else {
       clearSearch();
+    }
+  }
+
+  /* ================= 书签 / 摘录汇总（2026-08-29 新增） =================
+   * 对齐 Obsidian weave 的「书签 + 摘录笔记汇总」沉淀链，补上 REword 缺的中间一段：
+   *  - 书签：按当前页 CFI 记录位置，可跳转 / 删除，存进书架索引随书持久化
+   *  - 摘录：把 annStore 里本书的高亮 / 批注汇总成列表，可跳转原文 / 删除 / 批量导出 Markdown
+   */
+
+  /** 当前位置 CFI：foliate 每次 relocate 都会把 cfi 写进 view.lastLocation */
+  function currentCfi(): string {
+    return String(view?.lastLocation?.cfi ?? "");
+  }
+
+  function refreshBookmarks() {
+    bookmarks = store?.getBookmarks?.(bookId) ?? [];
+  }
+
+  /** 从 annStore 重读本书摘录（按创建时间倒序；已软删的过滤掉） */
+  function refreshAnnotsList() {
+    if (!annStore) { try { annStore = getAnnotationStore(); } catch { annStore = null; } }
+    if (!annStore || !bookId) { annotsList = []; return; }
+    const list = (annStore.getByBook(bookId) || []).filter((it: any) => !it.deletedAt && it.cfi);
+    list.sort((a: any, b: any) => String(b.createdAt ?? "").localeCompare(String(a.createdAt ?? "")));
+    annotsList = list;
+  }
+
+  function closeOtherPanels(except: string) {
+    if (except !== "bm") showBookmarks = false;
+    if (except !== "ann") showAnnots = false;
+    if (except !== "toc") showToc = false;
+    if (except !== "search") showSearch = false;
+    if (except !== "settings") showSettings = false;
+  }
+
+  function toggleBookmarkDrawer() {
+    showBookmarks = !showBookmarks;
+    if (showBookmarks) {
+      closeOtherPanels("bm");
+      refreshBookmarks();
+    }
+  }
+
+  function toggleAnnots() {
+    showAnnots = !showAnnots;
+    if (showAnnots) {
+      closeOtherPanels("ann");
+      refreshAnnotsList();
+    }
+  }
+
+  /** 在当前页加/删书签（同位置再点一次即移除） */
+  async function toggleCurrentBookmark() {
+    const cfi = currentCfi();
+    if (!cfi) {
+      toast("还拿不到当前位置，翻一页再试");
+      return;
+    }
+    const res = await store.toggleBookmark(bookId, {
+      cfi,
+      label: chapterLabel || "",
+      excerpt: (progressText || "").trim(),
+    });
+    bookmarks = res.list;
+    toast(res.added ? "已添加书签" : "已移除书签");
+  }
+
+  async function jumpBookmark(bm: BookMark) {
+    showBookmarks = false;
+    try {
+      await (view as any)?.goTo(bm.cfi);
+    } catch (__swallowErr) { logSwallow(__swallowErr, "ReaderView.svelte · jumpBookmark", "warn"); }
+  }
+
+  async function removeBookmark(bm: BookMark) {
+    bookmarks = await store.removeBookmark(bookId, bm.id);
+  }
+
+  async function jumpAnnot(it: any) {
+    if (!it?.cfi) return;
+    showAnnots = false;
+    try {
+      await (view as any)?.goTo(it.cfi);
+    } catch (__swallowErr) { logSwallow(__swallowErr, "ReaderView.svelte · jumpAnnot", "warn"); }
+  }
+
+  async function removeAnnot(it: any) {
+    await removeAnnotationById(it?.id ?? null, it?.cfi ?? "");
+    refreshAnnotsList();
+    toast("已删除");
+  }
+
+  /** 导出本书全部摘录为 Markdown（写入剪贴板，可直接粘贴进思源文档） */
+  function exportAnnots() {
+    if (!annotsList.length) {
+      toast("本书还没有摘录");
+      return;
+    }
+    const body = annotsList
+      .map((it: any) => {
+        const text = String(it.selectedText || it.sentence || "").trim();
+        const note = String(it.note || "").trim();
+        return [text ? `> ${text}` : "", note].filter(Boolean).join("\n\n");
+      })
+      .join("\n\n");
+    const md = `# 《${title || "阅读"}》摘录\n\n${body}\n`;
+    try {
+      navigator.clipboard?.writeText(md);
+      toast(`已导出 ${annotsList.length} 条摘录到剪贴板`);
+    } catch (__swallowErr) {
+      logSwallow(__swallowErr, "ReaderView.svelte · exportAnnots", "warn");
+      toast("导出失败，请检查剪贴板权限");
     }
   }
 
@@ -2338,8 +2673,41 @@
     applyStyles();
   }
 
-  function onSetLineWidth(key: string) {
-    settings = settingsStore.update({ lineWidth: key as ReaderSettings["lineWidth"] });
+  // [2026-08-29] 页面边距三档预设：铺满 / 正常 / 宽松（替代失效的行宽 padding 控制）
+  function onSetLayoutPreset(p: string) {
+    const m = LAYOUT_PRESETS[p as ReaderLayoutPreset].margins;
+    settings = settingsStore.update({
+      layout: { ...settings.layout, marginTopPx: m.top, marginRightPx: m.right, marginBottomPx: m.bottom, marginLeftPx: m.left },
+    });
+    applyStyles();
+  }
+  /** 跟随思源文档边距：读取宿主 .protyle-wysiwyg 的水平 padding，作为阅读器左右边距 */
+  function applySiyuanDocMargin() {
+    if (!settings.layout.followSiyuanMargin) return;
+    try {
+      const doc = (typeof window !== "undefined" && (window.top?.document ?? window.document)) || null;
+      if (!doc) return;
+      const host: Element | null =
+        doc.querySelector(".protyle-wysiwyg") || doc.querySelector(".protyle-content");
+      if (!host) return;
+      const cs = getComputedStyle(host);
+      const pl = Math.round(parseFloat(cs.paddingLeft) || 0);
+      const pr = Math.round(parseFloat(cs.paddingRight) || 0);
+      if (pl || pr) {
+        settings = settingsStore.update({
+          layout: {
+            ...settings.layout,
+            marginLeftPx: pl || settings.layout.marginLeftPx,
+            marginRightPx: pr || settings.layout.marginRightPx,
+          },
+        });
+      }
+    } catch (__e) { logSwallow(__e, "ReaderView.svelte · applySiyuanDocMargin", "debug"); }
+  }
+  function setFollowSiyuanMargin(e: Event) {
+    settings = settingsStore.update({
+      layout: { ...settings.layout, followSiyuanMargin: (e.target as HTMLInputElement).checked },
+    });
     applyStyles();
   }
 
@@ -3125,6 +3493,8 @@
     trackDocListener(doc, "selectionchange", onContentSelectionChange, true);
     // 2026-08-27 晚（P2.1）：脚注悬停预览——mouseover 委托，命中脚注引用防抖弹气泡
     trackDocListener(doc, "mouseover", onFootnoteHover as EventListener);
+    // 2026-08-29：点击脚注气泡外部（内容区）关闭；捕获阶段先于 onBookLink 的 link 事件
+    trackDocListener(doc, "pointerdown", onFootnoteOutsidePointerDown as EventListener, true);
     // 2026-08-27 晚（P2.2）：专注模式滚动高亮（capture 捕获内部滚动容器）
     trackDocListener(doc, "scroll", ((_e: Event) => onFocusScroll(doc)) as EventListener, true);
     // [REword patch 2026-08-29] PDF ⌘/Ctrl+滚轮缩放：
@@ -4140,6 +4510,21 @@
     if (footnoteHoverTimer) clearTimeout(footnoteHoverTimer);
   }
 
+  /** 点击脚注气泡外部关闭：注册在 main document + 每个内容文档 capture 阶段。
+   *  命中脚注引用锚点时忽略（让 onBookLink 打开新脚注，避免先关后闪）；
+   *  命中气泡内部忽略。 */
+  function onFootnoteOutsidePointerDown(e: PointerEvent) {
+    if (!showFootnote) return;
+    const target = e.target as Element | null;
+    if (!target) return;
+    // 点击气泡内部：不关闭
+    if (footnoteEl && footnoteEl.contains(target)) return;
+    // 点击脚注引用锚点：不关闭（让 onBookLink / onFootnoteHover 处理）
+    const a = target.closest?.("a");
+    if (a && isFootnoteRef(a)) return;
+    closeFootnote();
+  }
+
   /** 把单条批注绘制进 foliate（异步；用返回 index 回填 cfi→章节缓存） */
   async function addReaderAnnotation(it: any): Promise<void> {
     dbgHud.addAnnotationTries++;
@@ -5114,6 +5499,41 @@
 
 
   /**
+   * F11 全屏：整块阅读区进入浏览器全屏（Esc 由浏览器原生退出）。
+   * reader-shortcuts.ts 的注册表里早就有 toggleFullscreen 这一项，
+   * 但此前没有任何地方接它，键位等于空头支票。
+   */
+  function toggleFullscreen() {
+    try {
+      if (document.fullscreenElement) {
+        void document.exitFullscreen?.();
+      } else {
+        void (readerViewEl as any)?.requestFullscreen?.();
+      }
+    } catch (__swallowErr) { logSwallow(__swallowErr, "ReaderView.svelte · toggleFullscreen", "warn"); }
+  }
+
+  /**
+   * 构造「回跳原书」深链（2026-08-29 新增，对齐 Obsidian weave 的双向溯源）。
+   * 形如 siyuan://plugins/siyuan-plugin-rewordreader?data={"bookId":"…","cfi":"…"}
+   *  - 思源点击该链接 → 派发 open-siyuan-url-plugin 事件（见 index.ts onOpenBookUrl）
+   *    → 打开 / 聚焦该书阅读 Tab → goTo 到 CFI，精确定位回原文。
+   *  - 同时符合思源自定义协议约定（<插件名><Tab 类型>），即使思源内核先按内置逻辑
+   *    开了一次 Tab，也能带上 bookId 命中同一本书，不会产生空白页签。
+   * @returns Markdown 链接；cfi/bookId 缺失时返回空串（模板里自然留空，不留死链）
+   */
+  function buildBookDeepLink(cfi: string): string {
+    if (!cfi || !bookId) return "";
+    try {
+      const data = encodeURIComponent(JSON.stringify({ bookId, cfi }));
+      return `[回原文](siyuan://plugins/siyuan-plugin-rewordreader?data=${data})`;
+    } catch (__swallowErr) {
+      logSwallow(__swallowErr, "ReaderView.svelte · buildBookDeepLink", "warn");
+      return "";
+    }
+  }
+
+  /**
    * 笔记模板渲染（纯函数，2026-08-24 新增）
    * 把 linkFormat 模板里的 {{var}} 变量替换为实际值。
    * 未知变量保留原样（不抛错），便于模板编辑时即时预览。
@@ -5154,7 +5574,8 @@
       author: bookAuthor || "",
       chapter: chapterLabel || "",
       cfi: selInfo?.cfi || "",
-      link: "",
+      // 2026-08-29：回跳原书的深链（此前恒为空串，模板里 {{link}} 永远渲染不出东西）
+      link: buildBookDeepLink(selInfo?.cfi || ""),
       text,
       note: "",
       image: "",
@@ -5559,6 +5980,8 @@
       // 2026-08-29 双击缩放：PDF 上双击切换 fit-width ↔ 上次缩放
       // 也注册到 main document capture 阶段（iframe 内的 dblclick 也会冒泡）
       document.addEventListener("dblclick", onDblClickToggleZoom, true);
+      // 2026-08-29：点击脚注气泡外部（reader UI 空白区）关闭
+      document.addEventListener("pointerdown", onFootnoteOutsidePointerDown as EventListener, true);
     }
     // 跟随思源主题（2026-08-25 新增）
     startThemeObserver();
@@ -5607,6 +6030,8 @@
       document.removeEventListener("keydown", onGlobalKey, true);
       // 注销双击缩放
       document.removeEventListener("dblclick", onDblClickToggleZoom, true);
+      // 注销脚注气泡外部点击关闭
+      document.removeEventListener("pointerdown", onFootnoteOutsidePointerDown as EventListener, true);
     }
     // [REword patch 2026-08-29] 注销 PDF 滚轮缩放（页面四周留白）+ 清掉落盘防抖定时器
     if (stageWheelBound && readerViewEl) {
@@ -5650,7 +6075,12 @@
   });
 </script>
 
-<div class="reader-view" bind:this={readerViewEl}>
+<div
+  class="reader-view"
+  bind:this={readerViewEl}
+  on:mousemove={wakeChrome}
+  on:mouseleave={hideChromeNow}
+>
   <div class="reader-toolbar" class:reader-toolbar-hidden={!toolbarVisible} class:reader-toolbar-iphone={isIphoneMode}>
     <button
       class="reader-btn"
@@ -5749,23 +6179,110 @@
         <input
           class="reader-search-input"
           type="text"
-          placeholder="搜索全书…（F3 / ⌘F）"
+          placeholder="搜索…（↑/↓ 切换，Enter 搜，Esc 关）"
           bind:value={searchQuery}
           bind:this={searchInput}
+          on:input={onSearchInput}
           on:keydown={onSearchKeydown}
         />
         <button class="reader-mini-btn" on:click={startSearch}>搜</button>
+        <button class="reader-mini-btn" on:click={closeSearch} title="关闭">✕</button>
       </div>
+
+      <div class="reader-search-options">
+        <div class="reader-search-scope">
+          <button class="reader-seg reader-seg-sm" class:reader-seg-active={searchScope === "book"} on:click={() => (searchScope = "book")}>全书</button>
+          <button class="reader-seg reader-seg-sm" class:reader-seg-active={searchScope === "chapter"} on:click={() => (searchScope = "chapter")}>当前章</button>
+        </div>
+        <label class="reader-search-opt"><input type="checkbox" bind:checked={searchCaseSensitive} on:change={startSearch} />大小写</label>
+        <label class="reader-search-opt"><input type="checkbox" bind:checked={searchWholeWord} on:change={startSearch} />全字</label>
+      </div>
+
       {#if searching}
         <div class="reader-search-status">搜索中…</div>
       {:else if searchResults.length}
         <div class="reader-search-status">
           <span class="reader-search-count">{searchIndex + 1} / {searchResults.length}</span>
-          <button class="reader-mini-btn" on:click={() => void goSearchResult(-1)}>↑</button>
-          <button class="reader-mini-btn" on:click={() => void goSearchResult(1)}>↓</button>
-          <button class="reader-mini-btn" on:click={clearSearch}>✕</button>
+          <span class="reader-search-nav">
+            <button class="reader-mini-btn" on:click={() => void goSearchResult(-1)}>↑</button>
+            <button class="reader-mini-btn" on:click={() => void goSearchResult(1)}>↓</button>
+          </span>
         </div>
+        <div class="reader-search-list">
+          {#each searchResults as hit, i (hit.cfi + "-" + i)}
+            <button
+              class="reader-search-item"
+              class:reader-search-item-active={i === searchIndex}
+              on:click={() => void goSearchResultAt(i)}
+            >
+              <div class="reader-search-item-head">
+                <span class="reader-search-item-chapter">{hit.chapterLabel || "正文"}</span>
+                <span class="reader-search-item-pct">{hit.progressPercent}%</span>
+              </div>
+              <div class="reader-search-item-excerpt">{@html highlightExcerpt(hit.excerpt, searchQuery, searchCaseSensitive)}</div>
+            </button>
+          {/each}
+        </div>
+      {:else if searchQuery.trim()}
+        <div class="reader-search-status">未找到「{searchQuery.trim()}」</div>
       {/if}
+    </div>
+  {/if}
+
+  {#if showBookmarks}
+    <div class="reader-popover reader-bookmarks" on:wheel|stopPropagation>
+      <div class="reader-popover-title">
+        书签
+        {#if bookmarks.length}
+          <span class="reader-toc-count">{bookmarks.length} 条</span>
+        {/if}
+      </div>
+      <div class="reader-bm-list">
+        <button class="reader-bm-add" on:click={toggleCurrentBookmark}>＋ 在当前页加书签</button>
+        {#each bookmarks as bm (bm.id)}
+          <div class="reader-bm-item">
+            <button class="reader-bm-main" title="跳转到书签" on:click={() => jumpBookmark(bm)}>
+              <span class="reader-bm-label">{bm.label || "书签"}</span>
+              {#if bm.excerpt}
+                <span class="reader-bm-excerpt">{bm.excerpt}</span>
+              {/if}
+            </button>
+            <button class="reader-mini-btn" title="删除书签" on:click={() => removeBookmark(bm)}>✕</button>
+          </div>
+        {:else}
+          <div class="reader-toc-empty">还没有书签，点上面按钮在当前页加一个</div>
+        {/each}
+      </div>
+    </div>
+  {/if}
+
+  {#if showAnnots}
+    <div class="reader-popover reader-annots" on:wheel|stopPropagation>
+      <div class="reader-popover-title">
+        本书摘录
+        {#if annotsList.length}
+          <span class="reader-toc-count">{annotsList.length} 条</span>
+          <button class="reader-mini-btn" title="导出全部为 Markdown 到剪贴板" on:click={exportAnnots}>导出</button>
+        {/if}
+      </div>
+      <div class="reader-annots-list">
+        {#each annotsList as it (it.id)}
+          <div class="reader-annot-item">
+            <span class="reader-annot-dot" style="background:{it.color || '#06b6d4'}"></span>
+            <button class="reader-annot-main" title="跳转到原文" on:click={() => jumpAnnot(it)}>
+              <span class="reader-annot-text">
+                {String(it.selectedText || it.sentence || "").trim() || "（无文本）"}
+              </span>
+              {#if String(it.note || "").trim()}
+                <span class="reader-annot-note">{String(it.note || "").trim()}</span>
+              {/if}
+            </button>
+            <button class="reader-mini-btn" title="删除这条摘录" on:click={() => removeAnnot(it)}>✕</button>
+          </div>
+        {:else}
+          <div class="reader-toc-empty">本书还没有摘录，划选文本后点「标注」或「批注」</div>
+        {/each}
+      </div>
     </div>
   {/if}
 
@@ -6086,6 +6603,10 @@
           </div>
         </div>
         <div class="reader-setting-row reader-setting-toggle-row">
+          <span class="reader-setting-label">跟随思源文档边距</span>
+          <label class="reader-switch"><input type="checkbox" checked={settings.layout.followSiyuanMargin} on:change={setFollowSiyuanMargin} /><span class="reader-switch-track"></span></label>
+        </div>
+        <div class="reader-setting-row reader-setting-toggle-row">
           <span class="reader-setting-label">显示页眉</span>
           <label class="reader-switch"><input type="checkbox" checked={settings.layout.showHeader} on:change={setShowHeader} /><span class="reader-switch-track"></span></label>
         </div>
@@ -6315,15 +6836,15 @@
           </div>
         {/if}
 
-        <!-- 行宽 -->
+        <!-- 页面边距三档预设（铺满 / 正常 / 宽松）+ 自定义 -->
         <div class="reader-setting-row">
-          <span class="reader-setting-label">行宽</span>
+          <span class="reader-setting-label">页面边距</span>
           <div class="reader-setting-control">
-            {#each Object.entries(LINE_WIDTH_PRESETS) as [key, preset]}
+            {#each Object.entries(LAYOUT_PRESETS) as [key, preset]}
               <button
                 class="reader-seg"
-                class:reader-seg-active={settings.lineWidth === key}
-                on:click={() => onSetLineWidth(key)}
+                class:reader-seg-active={detectLayoutPreset(settings.layout) === key}
+                on:click={() => onSetLayoutPreset(key)}
               >{preset.label}</button>
             {/each}
           </div>
@@ -6602,11 +7123,20 @@
 
   <!-- 底部控制栏：目录/翻页/进度条/搜索。独立在 .reader-stage 之外（2026-08-25 修复：
        此前误置于 stage 内，被 position:absolute 的 .reader-container 遮挡 + overflow:hidden 裁切导致不可见）。 -->
-  <div class="reader-bottom-bar">
+  <div class="reader-bottom-bar" class:chrome-hidden={chromeHidden}>
     <button class="reader-btn" title="目录" class:reader-btn-active={showToc} on:click={toggleToc}>☰</button>
     <button class="reader-btn" title="第一页（Home）" on:click={goFirstPage}>⏮</button>
     <button class="reader-btn" title="上一页" on:click={turnPrev}>◀</button>
     <div class="reader-progress-wrap">
+      {#if chapterMarks.length}
+        {#each chapterMarks as m (m.left)}
+          <span
+            class="reader-chapter-tick"
+            style="left:{m.left}%"
+            title={m.title}
+          ></span>
+        {/each}
+      {/if}
       <input
         class="reader-progress-bar"
         type="range"
@@ -6624,6 +7154,19 @@
     {/if}
     <button class="reader-btn" title="下一页" on:click={turnNext}>▶</button>
     <button class="reader-btn" title="最后一页（End）" on:click={goLastPage}>⏭</button>
+    <!-- 2026-08-29 新增：书签 / 摘录汇总（对齐 Obsidian weave 的沉淀链） -->
+    <button
+      class="reader-btn"
+      title={bookmarks.length ? `书签（${bookmarks.length}）` : "书签"}
+      class:reader-btn-active={showBookmarks}
+      on:click={toggleBookmarkDrawer}
+    >🔖</button>
+    <button
+      class="reader-btn"
+      title="本书摘录汇总"
+      class:reader-btn-active={showAnnots}
+      on:click={toggleAnnots}
+    >📑</button>
   </div>
 
   <!-- 2026-08-28：连续朗读控制条（参考 Readest 朗读体验） -->
@@ -7166,7 +7709,7 @@
     transform: translateY(-50%);
     border-top: 7px solid transparent;
     border-bottom: 7px solid transparent;
-    border-left: 7px solid #2b2b2b;
+    border-left: 7px solid var(--reword-glass-bg);
     border-right: none;
   }
   /* 右置：小三角在左边缘、朝左指向选区 */
@@ -7175,19 +7718,26 @@
     transform: translateY(-50%);
     border-top: 7px solid transparent;
     border-bottom: 7px solid transparent;
-    border-right: 7px solid #2b2b2b;
+    border-right: 7px solid var(--reword-glass-bg);
     border-left: none;
   }
 
-  /* 主工具栏：深色圆角胶囊，图标在上、文字在下 */
+  /* 主工具栏：毛玻璃圆角胶囊（2026-08-29 UI 全面优化），图标在上、文字在下 */
   .reader-sel-main {
     display: flex;
     align-items: flex-start;
     gap: 2px;
     padding: 8px 8px 6px;
-    background: #2b2b2b;
-    border-radius: 14px;
-    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.4);
+    box-sizing: border-box;
+    background: var(--reword-glass-bg);
+    -webkit-backdrop-filter: blur(var(--reword-glass-blur))
+      saturate(var(--reword-glass-saturate));
+    backdrop-filter: blur(var(--reword-glass-blur))
+      saturate(var(--reword-glass-saturate));
+    border: 1px solid var(--reword-glass-border);
+    border-radius: var(--reword-radius-xl);
+    box-shadow: var(--reword-glass-shadow);
+    color: var(--reword-glass-fg);
     transform-origin: center bottom;
     animation: readerToolbarIn 0.22s cubic-bezier(0.22, 1, 0.36, 1) both;
     /* 小啾啾三角：默认在底部朝下指向选区文本 */
@@ -7201,7 +7751,7 @@
     width: 0; height: 0;
     border-left: 7px solid transparent;
     border-right: 7px solid transparent;
-    border-top-color: #2b2b2b;
+    border-top-color: var(--reword-glass-bg);
     border-top-style: solid;
     border-top-width: 7px;
     bottom: -7px;
@@ -7214,7 +7764,7 @@
   .reader-sel-toolbar.place-below .reader-sel-main::after {
     top: -7px; bottom: auto;
     border-top: none;
-    border-bottom-color: #2b2b2b;
+    border-bottom-color: var(--reword-glass-bg);
     border-bottom-style: solid;
     border-bottom-width: 7px;
   }
@@ -7225,7 +7775,7 @@
   .reader-sel-item {
     border: none;
     background: transparent;
-    color: #e8e8e8;
+    color: var(--reword-glass-fg);
     padding: 4px 9px 2px;
     border-radius: 8px;
     cursor: pointer;
@@ -7237,7 +7787,7 @@
     transition: background 0.15s ease;
   }
   .reader-sel-item:hover {
-    background: rgba(255, 255, 255, 0.14);
+    background: var(--reword-glass-fill-hover);
   }
   .reader-sel-item :global(svg) {
     width: 20px;
@@ -7253,10 +7803,28 @@
     color: #c9c9c9;
     white-space: nowrap;
   }
+  /* 主操作（标注/批注）：玻璃底上的浅填充，激活时转主题色实心（方向 A） */
   .reader-sel-item-accent {
     color: #fff;
+    background: var(--reword-glass-fill);
   }
-  .reader-sel-item-accent .reader-sel-txt { color: #fff; }
+  .reader-sel-item-accent:hover {
+    background: var(--reword-glass-fill-hover);
+  }
+  .reader-sel-item-accent .reader-sel-txt {
+    color: #fff;
+  }
+  .reader-sel-item-accent.active {
+    background: var(--b3-theme-primary, #378add);
+    color: #fff;
+  }
+  .reader-sel-item-accent.active:hover {
+    background: var(--b3-theme-primary, #378add);
+    filter: brightness(1.08);
+  }
+  .reader-sel-item-accent.active .reader-sel-txt {
+    color: #fff;
+  }
   .reader-sel-item-danger .reader-sel-ico :global(svg),
   .reader-sel-item-danger .reader-sel-txt { color: #ff6b6b; }
   .reader-sel-item-danger:hover { background: rgba(255, 107, 107, 0.18); }
@@ -7269,9 +7837,15 @@
     align-items: center;
     gap: 12px;
     padding: 7px 12px;
-    background: rgba(43, 43, 43, 0.98);
-    border-radius: 12px;
-    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.4);
+    background: var(--reword-glass-bg);
+    -webkit-backdrop-filter: blur(var(--reword-glass-blur))
+      saturate(var(--reword-glass-saturate));
+    backdrop-filter: blur(var(--reword-glass-blur))
+      saturate(var(--reword-glass-saturate));
+    border: 1px solid var(--reword-glass-border);
+    border-radius: var(--reword-radius-lg);
+    box-shadow: var(--reword-glass-shadow);
+    color: var(--reword-glass-fg);
     white-space: nowrap;
     animation: readerToolbarIn 0.22s cubic-bezier(0.22, 1, 0.36, 1) both;
   }
@@ -7347,10 +7921,15 @@
     display: flex;
     flex-direction: column;
     gap: 8px;
-    background: #2b2b2b;
-    border-radius: 12px;
-    box-shadow: 0 8px 26px rgba(0, 0, 0, 0.45);
-    color: #e8e8e8;
+    background: var(--reword-glass-bg);
+    -webkit-backdrop-filter: blur(var(--reword-glass-blur))
+      saturate(var(--reword-glass-saturate));
+    backdrop-filter: blur(var(--reword-glass-blur))
+      saturate(var(--reword-glass-saturate));
+    border: 1px solid var(--reword-glass-border);
+    border-radius: var(--reword-radius-lg);
+    box-shadow: var(--reword-glass-shadow);
+    color: var(--reword-glass-fg);
     pointer-events: auto;
   }
   /* 2026-08-25 底部空间不足时翻转到选区上方：transform 翻转 Y 轴 + 间距改到底部 */
@@ -7382,20 +7961,28 @@
     pointer-events: none;
   }
   .reader-note-editor.place-above::after {
-    left: 50%; bottom: -13px; transform: translateX(-50%);
-    border-top-color: #2b2b2b;
+    left: 50%;
+    bottom: -13px;
+    transform: translateX(-50%);
+    border-top-color: var(--reword-glass-bg);
   }
   .reader-note-editor.place-below::after {
-    left: 50%; top: -13px; transform: translateX(-50%);
-    border-bottom-color: #2b2b2b;
+    left: 50%;
+    top: -13px;
+    transform: translateX(-50%);
+    border-bottom-color: var(--reword-glass-bg);
   }
   .reader-note-editor.place-left::after {
-    right: -13px; top: 50%; transform: translateY(-50%);
-    border-left-color: #2b2b2b;
+    right: -13px;
+    top: 50%;
+    transform: translateY(-50%);
+    border-left-color: var(--reword-glass-bg);
   }
   .reader-note-editor.place-right::after {
-    left: -13px; top: 50%; transform: translateY(-50%);
-    border-right-color: #2b2b2b;
+    left: -13px;
+    top: 50%;
+    transform: translateY(-50%);
+    border-right-color: var(--reword-glass-bg);
   }
   .reader-note-preview {
     font-size: 12px;
@@ -7986,6 +8573,95 @@
     color: var(--b3-theme-on-surface-light, #888);
     padding: 10px 4px;
   }
+  /* 2026-08-29 新增：书签 / 摘录汇总抽屉 */
+  .reader-bookmarks,
+  .reader-annots {
+    min-width: 260px;
+    max-width: 340px;
+  }
+  .reader-bm-list,
+  .reader-annots-list {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    margin-top: 6px;
+  }
+  .reader-bm-add {
+    background: none;
+    border: 1px dashed var(--b3-border-color, rgba(0, 0, 0, 0.2));
+    border-radius: var(--reword-radius-sm, 6px);
+    color: var(--b3-theme-primary, #378add);
+    font-size: 12px;
+    padding: 7px 10px;
+    cursor: pointer;
+    text-align: left;
+  }
+  .reader-bm-add:hover {
+    background: var(--b3-theme-primary-light, rgba(55, 138, 221, 0.1));
+  }
+  .reader-bm-item,
+  .reader-annot-item {
+    display: flex;
+    align-items: flex-start;
+    gap: 6px;
+    border-radius: var(--reword-radius-sm, 6px);
+    padding: 2px 4px;
+  }
+  .reader-bm-item:hover,
+  .reader-annot-item:hover {
+    background: var(--b3-theme-background-light, rgba(0, 0, 0, 0.05));
+  }
+  .reader-bm-main,
+  .reader-annot-main {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    background: none;
+    border: none;
+    cursor: pointer;
+    text-align: left;
+    padding: 6px 4px;
+    color: var(--b3-theme-on-background, #333);
+  }
+  .reader-bm-label {
+    font-size: 13px;
+    line-height: 1.5;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .reader-bm-excerpt {
+    font-size: 11px;
+    color: var(--b3-theme-on-surface-light, #888);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .reader-annot-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    margin-top: 10px;
+    flex-shrink: 0;
+  }
+  .reader-annot-text {
+    font-size: 13px;
+    line-height: 1.5;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+  .reader-annot-note {
+    font-size: 11px;
+    color: var(--b3-theme-on-surface-light, #888);
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
   .reader-eta {
     font-size: 11px;
     color: var(--b3-theme-on-surface-light, #888);
@@ -7995,7 +8671,8 @@
   .reader-search {
     bottom: 44px;
     left: 8px;
-    width: 240px;
+    width: 300px;
+    max-height: 62vh;
     padding: 8px;
     display: flex;
     flex-direction: column;
@@ -8015,12 +8692,85 @@
     color: var(--b3-theme-on-background, #333);
     min-width: 0;
   }
+  .reader-search-options {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px;
+    font-size: 11px;
+    color: var(--b3-theme-on-surface-light, #888);
+  }
+  .reader-search-scope { display: inline-flex; gap: 2px; }
+  .reader-seg-sm {
+    padding: 2px 8px;
+    font-size: 11px;
+    border-radius: 6px;
+  }
+  .reader-search-opt {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    cursor: pointer;
+    user-select: none;
+  }
   .reader-search-status {
     display: flex;
     align-items: center;
+    justify-content: space-between;
     gap: 4px;
     font-size: 12px;
     color: var(--b3-theme-on-surface-light, #888);
+  }
+  .reader-search-nav { display: inline-flex; gap: 2px; }
+  .reader-search-list {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    overflow-y: auto;
+    max-height: 40vh;
+    margin: 0 -2px;
+    padding: 2px;
+  }
+  .reader-search-item {
+    text-align: left;
+    border: 1px solid var(--b3-border-color, rgba(0, 0, 0, 0.12));
+    border-radius: 8px;
+    background: var(--b3-theme-background, #fff);
+    padding: 6px 8px;
+    cursor: pointer;
+    transition: background 0.15s ease, border-color 0.15s ease;
+  }
+  .reader-search-item:hover { background: var(--b3-theme-surface, #f3f3f3); }
+  .reader-search-item-active {
+    border-color: var(--b3-theme-primary, #4a7bd0);
+    background: color-mix(in srgb, var(--b3-theme-primary, #4a7bd0) 12%, var(--b3-theme-background, #fff));
+  }
+  .reader-search-item-head {
+    display: flex;
+    justify-content: space-between;
+    gap: 6px;
+    font-size: 11px;
+    color: var(--b3-theme-on-surface-light, #888);
+    margin-bottom: 2px;
+  }
+  .reader-search-item-pct { flex-shrink: 0; opacity: 0.8; }
+  .reader-search-item-excerpt {
+    font-size: 12px;
+    line-height: 1.5;
+    color: var(--b3-theme-on-background, #333);
+    display: -webkit-box;
+    -webkit-line-clamp: 3;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+  .reader-search-item-excerpt mark {
+    background: #ffe08a;
+    color: inherit;
+    border-radius: 2px;
+    padding: 0 1px;
+  }
+  .reader-search-item-active .reader-search-item-excerpt mark {
+    background: #ffb020;
   }
 
   /* ===== 脚注气泡（2026-08-25 新增，对齐截图设计） ===== */
@@ -8084,7 +8834,9 @@
     /* 样式隔离：强制显示隐藏脚注块 */
   }
   .reader-footnote-body :global(aside),
-  .reader-footnote-body :global([style*="display:none"]) {
+  .reader-footnote-body :global([style*="display:none"]),
+  .reader-footnote-body :global([style*="display: none"]),
+  .reader-footnote-body :global([hidden]) {
     display: block !important;
   }
   .reader-footnote-body :global(img) {
@@ -8537,6 +9289,19 @@
     position: relative;
     /* 2026-08-24 修复：z-index 从 30 降到 1，避免压住思源原生 UI */
     z-index: 1;
+    /* 2026-08-29 UI 全面优化：鼠标静止后自动淡出（Foliate 风格沉浸阅读） */
+    transition: opacity var(--reword-dur-base) var(--reword-ease),
+      transform var(--reword-dur-base) var(--reword-ease);
+  }
+  .reader-bottom-bar.chrome-hidden {
+    opacity: 0;
+    pointer-events: none;
+    transform: translateY(6px);
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .reader-bottom-bar {
+      transition: none;
+    }
   }
   /* 2026-08-28：连续朗读控制条（参考 Readest 朗读体验） */
   .reader-tts-bar {
@@ -8609,6 +9374,20 @@
     display: flex;
     align-items: center;
     padding: 0 4px;
+    position: relative; /* 章节刻度定位基准 */
+  }
+  /* 章节起始刻度（Foliate 风格）：位置由 JS 按 section 体积累加算出 */
+  .reader-chapter-tick {
+    position: absolute;
+    top: 50%;
+    width: 2px;
+    height: 9px;
+    margin-left: -1px;
+    background: var(--b3-theme-on-surface-light, rgba(128, 128, 128, 0.6));
+    border-radius: 1px;
+    transform: translateY(-50%);
+    pointer-events: none;
+    opacity: 0.7;
   }
   .reader-progress-bar {
     -webkit-appearance: none;

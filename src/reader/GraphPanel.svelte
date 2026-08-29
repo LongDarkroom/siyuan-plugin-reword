@@ -21,6 +21,50 @@
   let toast = "";
   let hasEdges = false;
 
+  // —— 动画派生数据（路线 A：纯 CSS/SVG 动画，不改物理布局）——
+  interface RenderEdge {
+    a: GraphNode;
+    b: GraphNode;
+    len: number;   // 边长，用于 stroke-dash 绘制动画
+    idx: number;   // 原 edges 下标，用于选中高亮匹配
+    weight: number;
+  }
+  let renderEdges: RenderEdge[] = [];
+  let connectedNodes: Set<string> | null = null;
+  let connectedEdges: Set<number> | null = null;
+
+  // 预计算每条边的几何长度（供「从无到有」绘制动画使用）
+  $: if (graph) {
+    renderEdges = graph.edges
+      .map((e, idx) => {
+        const a = graph!.nodes.find((n) => n.id === e.source);
+        const b = graph!.nodes.find((n) => n.id === e.target);
+        if (!a || !b) return null;
+        return { a, b, len: Math.hypot(a.x - b.x, a.y - b.y), idx, weight: e.weight };
+      })
+      .filter((r): r is RenderEdge => !!r);
+  } else {
+    renderEdges = [];
+  }
+
+  // 选中节点时，计算其邻居节点与边（用于高亮 + 非关联淡出）
+  $: if (selected && graph) {
+    const nb = new Set<string>();
+    const ed = new Set<number>();
+    graph.edges.forEach((e, i) => {
+      if (e.source === selected!.id || e.target === selected!.id) {
+        nb.add(e.source);
+        nb.add(e.target);
+        ed.add(i);
+      }
+    });
+    connectedNodes = nb;
+    connectedEdges = ed;
+  } else {
+    connectedNodes = null;
+    connectedEdges = null;
+  }
+
   const STATUS_FILL: Record<string, string> = {
     unread: "#9aa0a6",
     reading: "#378add",
@@ -129,47 +173,52 @@
           </defs>
 
           <g class="graph-edges">
-            {#each graph.edges as e}
-              {@const a = graph.nodes.find((n) => n.id === e.source)}
-              {@const b = graph.nodes.find((n) => n.id === e.target)}
-              {#if a && b}
-                <line
-                  x1={a.x}
-                  y1={a.y}
-                  x2={b.x}
-                  y2={b.y}
-                  stroke="var(--b3-border-color, rgba(0,0,0,0.15))"
-                  stroke-width={Math.min(3, 0.7 + e.weight * 0.7)}
-                  opacity={selected && selected.id !== a.id && selected.id !== b.id ? 0.25 : 0.95}
-                />
-              {/if}
+            {#each renderEdges as e (e.idx)}
+              <line
+                class="graph-edge"
+                class:edge-highlight={connectedEdges?.has(e.idx)}
+                class:edge-dim={connectedEdges && !connectedEdges.has(e.idx)}
+                x1={e.a.x}
+                y1={e.a.y}
+                x2={e.b.x}
+                y2={e.b.y}
+                stroke={connectedEdges?.has(e.idx) ? "var(--b3-theme-primary, #378add)" : "var(--b3-border-color, rgba(0,0,0,0.15))"}
+                stroke-width={(Math.min(3, 0.7 + e.weight * 0.7)) * (connectedEdges?.has(e.idx) ? 1.6 : 1)}
+                opacity={connectedEdges ? (connectedEdges.has(e.idx) ? 0.95 : 0.12) : (selected ? 0.25 : 0.95)}
+                style="--len:{e.len}px; --ei:{e.idx}"
+              />
             {/each}
           </g>
 
           <g class="graph-nodes">
-            {#each graph.nodes as node}
+            {#each graph.nodes as node, i (node.id)}
               <g
                 class="graph-node"
                 class:selected={selected?.id === node.id}
+                class:dim={connectedNodes != null && !connectedNodes.has(node.id) && selected?.id !== node.id}
                 role="button"
                 tabindex="0"
                 aria-label={node.title}
+                style="--cx:{node.x}px; --cy:{node.y}px; --i:{i}"
                 on:click={() => selectNode(node)}
                 on:keydown={(ev) => (ev.key === "Enter" || ev.key === " ") && selectNode(node)}
               >
+                {#if selected?.id === node.id}
+                  <circle class="pulse-ring" cx={node.x} cy={node.y} r={node.r} />
+                {/if}
                 <circle
                   cx={node.x}
                   cy={node.y}
                   r={node.r}
                   fill={STATUS_FILL[node.status] || "#9aa0a6"}
-                  fill-opacity={selected && selected.id !== node.id ? 0.45 : 0.95}
+                  fill-opacity={selected && selected.id !== node.id ? (connectedNodes ? (connectedNodes.has(node.id) ? 0.95 : 0.3) : 0.45) : 0.95}
                   stroke={selected?.id === node.id ? "var(--b3-theme-primary, #378add)" : "#fff"}
                   stroke-width={selected?.id === node.id ? 3.5 : 2}
                   filter="url(#node-shadow)"
                 />
                 <text
                   x={node.x}
-                  y={node.y + node.r + 12}
+                  y={node.y + node.r + 10}
                   text-anchor="middle"
                   class="graph-label"
                 >{truncate(node.title)}</text>
@@ -292,9 +341,86 @@
   }
   .graph-node {
     cursor: pointer;
+    /* 入场弹入：绕节点中心缩放，按 --i 错峰；transform-box:view-box 使 --cx/--cy 落在 viewBox 坐标系 */
+    transform-box: view-box;
+    transform-origin: var(--cx) var(--cy);
+    animation: node-pop 0.55s cubic-bezier(0.34, 1.56, 0.64, 1) both;
+    animation-delay: calc(var(--i) * 55ms);
+    transition: opacity 0.25s ease;
   }
   .graph-node:focus {
     outline: none;
+  }
+  /* 圆点本体：hover 放大 + 发光，与入场动画（作用在 g 上）互不冲突 */
+  .graph-node circle:not(.pulse-ring) {
+    transform-box: fill-box;
+    transform-origin: center;
+    transition: transform 0.2s ease, filter 0.2s ease;
+  }
+  .graph-node:hover circle:not(.pulse-ring) {
+    transform: scale(1.28);
+    filter: drop-shadow(0 0 6px var(--b3-theme-primary, #378add));
+  }
+  /* 悬停某节点时，其余节点淡出 */
+  .graph-nodes:hover .graph-node:not(:hover) {
+    opacity: 0.38;
+  }
+  /* 选中态：非邻居节点淡出（class:dim 由脚本控制，优先级高于纯 hover） */
+  .graph-node.dim {
+    opacity: 0.3;
+  }
+
+  /* 边：从无到有绘制 + 错峰；选中时高亮/淡出 */
+  .graph-edge {
+    stroke-dasharray: var(--len, 0);
+    stroke-dashoffset: var(--len, 0);
+    animation: edge-draw 0.7s ease forwards;
+    animation-delay: calc(220ms + var(--ei) * 28ms);
+    transition: opacity 0.25s ease, stroke 0.25s ease, stroke-width 0.25s ease;
+  }
+  .graph-edge.edge-dim {
+    opacity: 0.12 !important;
+  }
+  .graph-edge.edge-highlight {
+    filter: drop-shadow(0 0 3px var(--b3-theme-primary, #378add));
+  }
+
+  /* 选中节点呼吸扩散光环 */
+  .pulse-ring {
+    fill: none;
+    stroke: var(--b3-theme-primary, #378add);
+    stroke-width: 2;
+    transform-box: fill-box;
+    transform-origin: center;
+    animation: pulse-ring 1.8s ease-out infinite;
+    pointer-events: none;
+  }
+
+  @keyframes node-pop {
+    0% { transform: scale(0); }
+    60% { transform: scale(1.12); }
+    100% { transform: scale(1); }
+  }
+  @keyframes edge-draw {
+    from { stroke-dashoffset: var(--len, 0); }
+    to { stroke-dashoffset: 0; }
+  }
+  @keyframes pulse-ring {
+    0% { transform: scale(1); opacity: 0.7; }
+    70% { transform: scale(2.2); opacity: 0; }
+    100% { transform: scale(2.2); opacity: 0; }
+  }
+  /* 尊重用户的「减少动态效果」偏好 */
+  @media (prefers-reduced-motion: reduce) {
+    .graph-node,
+    .graph-edge,
+    .pulse-ring {
+      animation: none !important;
+      transition: none !important;
+    }
+    .graph-edge {
+      stroke-dashoffset: 0 !important;
+    }
   }
   .graph-label {
     font-size: 10px;

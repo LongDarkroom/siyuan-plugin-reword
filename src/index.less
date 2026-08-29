@@ -12644,3 +12644,111 @@ body.hiword-resizing {
   opacity: 0.45;
   cursor: not-allowed;
 }
+
+/* ============================================================================
+ * 2026-08-29 移动端适配 Phase 5：响应式布局
+ * ----------------------------------------------------------------------------
+ * 之前 0 个 @media 查询 → 移动端 dock / 设置 / 弹窗都按桌面尺寸硬塞。
+ * 修整后按 device class 分级：
+ *  - phone（≤480px）：紧凑、隐藏次要信息、dock 几乎占满
+ *  - large phone / small tablet（≤768px）：侧栏加宽、按钮更大
+ *  - desktop（>768px）：原样
+ * ============================================================================ */
+
+/* ---- 通用 ---- */
+.hiword-dock-panel,
+.hiword-dock-content {
+  /* 默认桌面：保持原样；@media 覆盖 */
+  box-sizing: border-box;
+}
+
+/* ---- 小屏（phone ≤480px） ---- */
+@media (max-width: 480px) {
+  /* 紧凑内边距：12px → 8px，腾出空间给内容 */
+  .hiword-dock-content {
+    padding: 8px;
+  }
+  /* 词库行：左右 padding 收紧，词卡字号保持 */
+  .hiword-vb-card,
+  .hiword-vb-detail {
+    padding: 6px 8px;
+  }
+  /* 设置 / 词典 dialog：思源 Dialog 在小屏上宽度已被 responsiveDialogSize
+     折算为 calc(100vw - 16px)，这里只处理内部 padding */
+  .b3-dialog__container .hiword-unified-panel,
+  .b3-dialog__container .hiword-up-panel,
+  .b3-dialog__container .hiword-dict-mgr,
+  .b3-dialog__container .hiword-ai-vocab-picker {
+    padding: 12px;
+  }
+  /* 设置 dialog 左侧导航：在 phone 上默认横向排，避免被压成竖条 */
+  .hiword-up-nav {
+    flex-direction: row;
+    flex-wrap: wrap;
+    overflow-x: auto;
+    border-right: none;
+    border-bottom: 1px solid var(--b3-theme-divider, rgba(0, 0, 0, 0.08));
+  }
+  .hiword-up-nav-item {
+    flex: 0 0 auto;
+    padding: 6px 10px;
+    font-size: 12.5px;
+  }
+  /* 划词浮窗：减小宽度，避免超出小屏视口 */
+  .hiword-float-popup {
+    max-width: calc(100vw - 24px) !important;
+  }
+  /* AI 选字工具栏：按钮更大（触屏点击区域） */
+  .hiword-ai-sel-btn {
+    padding: 8px 12px;
+    font-size: 13px;
+  }
+  /* 鲸鱼批注弹窗：内嵌编辑器的 toolbar 按钮触屏友好 */
+  .protyle-toolbar__item {
+    min-width: 28px;
+    min-height: 28px;
+  }
+}
+
+/* ---- 极小屏（≤360px，老 iPhone SE / Galaxy Fold 外屏） ---- */
+@media (max-width: 360px) {
+  /* 词卡头：去掉副标题（次要信息在小屏藏起来） */
+  .hiword-vb-card-sub {
+    display: none;
+  }
+  /* 工具栏按钮更紧凑 */
+  .hiword-vb-toolbar {
+    gap: 4px;
+  }
+  .hiword-vb-toolbar .b3-button {
+    padding: 2px 6px;
+    font-size: 11.5px;
+  }
+  /* AI 选字工具栏：进一步收小（按钮文字 12px） */
+  .hiword-ai-sel-btn {
+    padding: 6px 9px;
+    font-size: 12px;
+  }
+}
+
+/* ---- 中屏（481-768px，大手机/小平板） ---- */
+@media (min-width: 481px) and (max-width: 768px) {
+  .hiword-dock-content {
+    padding: 10px;
+  }
+  .hiword-up-nav-item {
+    padding: 6px 10px;
+  }
+}
+
+/* ---- iOS 软键盘弹起时：浮动工具栏避开键盘 ---- */
+@supports (-webkit-touch-callout: none) {
+  /* iOS Safari 专属：键盘弹起时 visualViewport.height 收缩 */
+  /* 我们的 core/floating-position 已经处理 viewport 边界，
+     这里再确保内容区不超出键盘顶部（防止输入框被挡） */
+  .hiword-float-popup,
+  .hiword-ai-sel-toolbar {
+    /* 软键盘弹起时由 JS 同步重定位（见 watchViewport 接入） */
+    transition: none;
+  }
+}

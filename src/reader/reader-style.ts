@@ -373,7 +373,6 @@ body {
   background-attachment: fixed !important;
   color: ${o.fg} !important;
   line-height: ${settings.lineHeight} !important;
-  padding: ${o.padding} !important;
 }`.trim();
   }
   return `
@@ -381,7 +380,6 @@ body {
   background: ${o.bg} !important;
   color: ${o.fg} !important;
   line-height: ${settings.lineHeight} !important;
-  padding: ${o.padding} !important;
 }`.trim();
 }
 
@@ -561,10 +559,13 @@ export function paragraphLayoutStyles(input?: { paragraphSpacing: number; textIn
 }
 
 /**
- * 页面布局：4 边距（margin，不与 lineWidth.padding 冲突）+ 分栏间距
- * 缺省时用 16 / 16 / 16 / 16 / 16
- * 注：foliate 的 foliate-view 已通过 padding 控制内容区与边框距离；本处用 margin
- * 控制 body 在 foliate-view 内部的可视化边距（影响正文与容器边缘的距离感）。
+ * 页面布局：4 边距（统一映射为 body padding，控制正文与视口边缘的距离）+ 分栏间距。
+ * 缺省时用 16 / 16 / 16 / 16 / 16。
+ *
+ * ⚠️ 2026-08-29 修正：此前输出 `body { margin }`，但 foliate 分页/滚动视图里 body 的
+ * margin 基本不生效（被渲染层裁掉/折叠），导致「边距滑块调了没反应、左右间距过大」的
+ * 体感。真正撑开内容的是 body padding（即旧 lineWidth 行宽预设杠杆）。故改为输出
+ * `body { padding: T R B L }`，由 4 个边距滑块 / 三档预设统一驱动。
  */
 export function layoutMarginStyles(input?: {
   marginTopPx: number;
@@ -578,7 +579,7 @@ export function layoutMarginStyles(input?: {
   const ml = input?.marginLeftPx ?? 16;
   const mr = input?.marginRightPx ?? 16;
   const gap = input?.columnGapPx ?? 16;
-  return `body { margin: ${mt}px ${mr}px ${mb}px ${ml}px !important; column-gap: ${gap}px; }`;
+  return `body { padding: ${mt}px ${mr}px ${mb}px ${ml}px !important; column-gap: ${gap}px; }`;
 }
 
 /**

@@ -27,13 +27,18 @@ export interface TopBook {
   ms: number;
 }
 
+/** 统计时间范围（控制热力图跨度） */
+export type StatsRange = "7d" | "30d" | "year" | "12m";
+
 export interface ReadingStats {
   totalMs: number;
   bookCount: number;
   statusCounts: Record<BookStatus, number>;
   /** 连续阅读天数（自今天/昨天往前数，含今天） */
   streak: number;
-  /** 过去 365 天（含今天）逐日，缺天补 0，按时间升序 */
+  /** 历史最长连续阅读天数 */
+  longestStreak: number;
+  /** 时间范围内的逐日（缺天补 0，按时间升序） */
   calendar: DayStat[];
   /** 过去 12 个自然月（含当月）逐月 */
   monthly: MonthStat[];
@@ -94,6 +99,35 @@ function computeStreak(dayMap: Map<string, number>): number {
   return streak;
 }
 
+/** 历史最长连续阅读天数（扫描所有有记录的天） */
+function computeLongestStreak(dayMap: Map<string, number>): number {
+  const days = [...dayMap.keys()].filter((d) => dayMap.get(d)).sort();
+  if (days.length === 0) return 0;
+  let best = 1;
+  let cur = 1;
+  for (let i = 1; i < days.length; i++) {
+    const prev = new Date(days[i - 1] + "T00:00:00");
+    const curD = new Date(days[i] + "T00:00:00");
+    const diff = Math.round((curD.getTime() - prev.getTime()) / 86400000);
+    if (diff === 1) cur++;
+    else cur = 1;
+    if (cur > best) best = cur;
+  }
+  return best;
+}
+
+/** 范围 → 天数 */
+function rangeDays(range: StatsRange): number {
+  if (range === "7d") return 7;
+  if (range === "30d") return 30;
+  if (range === "year") {
+    const now = new Date();
+    const start = new Date(now.getFullYear(), 0, 1);
+    return Math.round((now.getTime() - start.getTime()) / 86400000) + 1;
+  }
+  return 365;
+}
+
 /** 生成 [start, end] 闭区间内所有日期键（升序） */
 function dateRange(days: number): string[] {
   const out: string[] = [];
@@ -106,11 +140,11 @@ function dateRange(days: number): string[] {
   return out;
 }
 
-export function computeReadingStats(books: BookMeta[]): ReadingStats {
+export function computeReadingStats(books: BookMeta[], range: StatsRange = "12m"): ReadingStats {
   const dayMap = mergeDayMap(books);
 
-  // 日历：过去 365 天
-  const calKeys = dateRange(365);
+  // 日历：按范围
+  const calKeys = dateRange(rangeDays(range));
   const calendar: DayStat[] = calKeys.map((date) => ({ date, ms: dayMap.get(date) || 0 }));
 
   // 月度：过去 12 个自然月
@@ -155,6 +189,7 @@ export function computeReadingStats(books: BookMeta[]): ReadingStats {
     bookCount: books.length,
     statusCounts,
     streak: computeStreak(dayMap),
+    longestStreak: computeLongestStreak(dayMap),
     calendar,
     monthly,
     topBooks,

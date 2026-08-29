@@ -19,7 +19,10 @@ import {
 } from "./ai-orchestrator.ts";
 import type { AiMessage } from "../copilot/ai/ai-client.ts";
 import { requestAIGenerate, estimateTokens } from "../copilot/ai/ai-client.ts";
-import { renderDeepReadHtml, renderWithLute } from "./ai-render.ts";
+import { renderDeepReadHtml, renderWithLute, createIncrementalRenderer, type IncrementalRenderer } from "./ai-render.ts";
+import { computeFloatingPosition, viewportToOffsetParent } from "../core/floating-position.ts";
+import { isMobile } from "../core/env.ts";
+import { watchViewport } from "../core/responsive.ts";
 import { enhanceSiYuanRender } from "./ai-enhance.ts";
 import { createStreamThrottle } from "./stream-throttle.ts";
 import { trimChatHistory, type ChatTurn } from "./chat-trim.ts";
@@ -2727,14 +2730,53 @@ export class AiPanel {
     `;
     contentEl.appendChild(selToolbar);
 
-    /** 显示/隐藏选字工具栏 */
-    const showSelToolbar = (x: number, y: number) => {
-      selToolbar.style.left = `${Math.min(x, (contentEl.clientWidth || 400) - 220)}px`;
-      selToolbar.style.top = `${y - 40}px`; // 选区上方显示
+    // 2026-08-29 移动端适配 Phase 6：选字工具栏改用 flip+shift 算法
+    //  - 选区靠近滚动区顶部时自动翻到下方（旧版 y-40 硬编码会被裁）
+    //  - 横向基于选区中心居中
+    //  - 监听 visualViewport（iOS 软键盘 / Android 输入法弹起）时重定位
+    //  - 监听滚动事件（用户在消息区上翻阅读）时重定位
+    let lastSelRect: DOMRect | null = null;
+    const positionSelToolbar = () => {
+      if (!lastSelRect) return;
+      const sel = window.getSelection();
+      if (!sel || sel.rangeCount === 0 || sel.isCollapsed) {
+        hideSelToolbar();
+        return;
+      }
+      const range = sel.getRangeAt(0);
+      if (!messagesEl.contains(range.commonAncestorContainer)) {
+        hideSelToolbar();
+        return;
+      }
+      // 重新拿一次选区矩形（选区可能已变化）
+      const rect = range.getBoundingClientRect();
+      lastSelRect = rect;
+      // 选区彻底离开 body 视口 → 隐藏
+      const containerRect = bodyEl.getBoundingClientRect();
+      if (rect.bottom < containerRect.top || rect.top > containerRect.bottom) {
+        hideSelToolbar();
+        return;
+      }
+      // 工具栏真实尺寸
+      const tbW = selToolbar.offsetWidth;
+      const tbH = selToolbar.offsetHeight;
+      if (tbW === 0 || tbH === 0) return;
+      const pos = computeFloatingPosition(rect, containerRect, { width: tbW, height: tbH }, {
+        gap: 8,
+        edgeMargin: 6,
+        preferredSide: "top",
+        align: "center",
+      });
+      const local = viewportToOffsetParent(pos.left, pos.top, selToolbar.offsetParent);
+      selToolbar.style.left = `${local.left}px`;
+      selToolbar.style.top = `${local.top}px`;
+      selToolbar.dataset.placement = pos.placement;
       selToolbar.classList.add("hiword-ai-sel-toolbar--visible");
     };
+    const showSelToolbar = () => positionSelToolbar();
     const hideSelToolbar = () => {
       selToolbar.classList.remove("hiword-ai-sel-toolbar--visible");
+      lastSelRect = null;
     };
 
     // 监听 AI 消息区的 mouseup（选字检测）
@@ -2751,20 +2793,77 @@ export class AiPanel {
           hideSelToolbar(); return;
         }
 
-        const rect = range.getBoundingClientRect();
-        const bodyRect = bodyEl.getBoundingClientRect();
-        showSelToolbar(
-          rect.left - bodyRect.left + rect.width / 2,
-          rect.top - bodyRect.top
-        );
+        lastSelRect = range.getBoundingClientRect();
+        positionSelToolbar();
       });
     });
+
+    // 触屏 / 移动端：长按选词后，原生 contextmenu 也会触发。
+    // 这里用 selectionchange 兜底（mobile 上 mouseup 经常被合成/选择句柄吃掉）
+    if (isMobile()) {
+      let selChangeRaf = 0;
+      // 触觉反馈：仅在「刚出现有效选区」那一次触发，避免每次 selectionchange 都抖
+      let lastSelText = "";
+      const onSelChange = () => {
+        if (selChangeRaf) return;
+        selChangeRaf = requestAnimationFrame(() => {
+          selChangeRaf = 0;
+          const sel = window.getSelection();
+          if (!sel || sel.rangeCount === 0 || sel.isCollapsed) return;
+          const range = sel.getRangeAt(0);
+          if (!range || !messagesEl.contains(range.commonAncestorContainer)) return;
+          const text = sel.toString().trim();
+          if (text.length < 2) return;
+          // 选区从空到非空 → 短促震动反馈（navigator.vibrate，Android Chrome / 部分 iOS Safari）
+          if (lastSelText === "" && text.length > 0) {
+            try {
+              if (typeof navigator !== "undefined" && typeof (navigator as any).vibrate === "function") {
+                (navigator as any).vibrate(8);
+              }
+            } catch { /* ignore — vibrate 可能在 iframe 内被禁用 */ }
+          }
+          lastSelText = text;
+          lastSelRect = range.getBoundingClientRect();
+          positionSelToolbar();
+        });
+      };
+      // 只走 disposables 回收（document 全局监听，destroy 时一起清）
+      this.disposables.addEventListener(document, "selectionchange", onSelChange);
+    }
 
     // 点击其他区域隐藏工具栏
     contentEl.addEventListener("mousedown", (e: MouseEvent) => {
       if (!(e.target as HTMLElement)?.closest?.("#hiword-ai-sel-toolbar")) {
         hideSelToolbar();
       }
+    });
+
+    // 滚动 / 视口变化时重定位（rAF 节流）
+    let selScrollRaf = 0;
+    const onSelContainerChange = () => {
+      if (selScrollRaf) return;
+      if (!selToolbar.classList.contains("hiword-ai-sel-toolbar--visible")) return;
+      selScrollRaf = requestAnimationFrame(() => {
+        selScrollRaf = 0;
+        positionSelToolbar();
+      });
+    };
+    // 走 disposables 回收：面板 destroy 时一起清掉（避免 re-render 累积监听）
+    if (bodyEl) {
+      this.disposables.addEventListener(bodyEl, "scroll", onSelContainerChange, { passive: true } as AddEventListenerOptions);
+    }
+    // 软键盘弹起 / 视口旋转 / 浏览器地址栏收起：visualViewport 触发重定位
+    // watchViewport 内部 rAF 去重，不会与 onSelContainerChange 撞车
+    const unwatchVp = watchViewport({
+      onResize: () => {
+        if (selToolbar.classList.contains("hiword-ai-sel-toolbar--visible")) {
+          positionSelToolbar();
+        }
+      },
+    });
+    this.disposables.add(unwatchVp);
+    this.disposables.addEventListener(document, "visibilitychange", () => {
+      if (document.visibilityState === "visible") positionSelToolbar();
     });
 
     // 复制按钮
@@ -3192,12 +3291,16 @@ export class AiPanel {
           }
         };
         // ── 流式正文渲染（chat 模式）：首 token 即把 loading 升级为结果气泡，节流增量渲染 ──
+        // 2026-08-29 性能改造（AGENTS.md 4.1）：用 createIncrementalRenderer 替换
+        // 旧的"全文每 tick 重渲"模式。增量渲染器只对"进行中块"调 Lute，
+        // 已稳定块一次性沉淀到 cache，整文档不再每 100ms 全量重渲。
         let liveRaw = "";            // 已累积的正文（markdown）
         let liveStarted = false;     // 是否已从 loading 升级为结果气泡
         let liveMdEl: HTMLElement | null = null; // 结果气泡内的 md 增量容器
+        const liveRenderer: IncrementalRenderer = createIncrementalRenderer();
         const renderLive = () => {
           if (!liveMdEl || !liveRaw.trim()) return;
-          liveMdEl.innerHTML = renderWithLute(liveRaw);
+          liveMdEl.innerHTML = liveRenderer.push(liveRaw);
           // 滚动跟随：仅当用户已贴近底部时自动滚，避免打断上翻阅读
           if (bodyEl.scrollHeight - bodyEl.scrollTop - bodyEl.clientHeight < 120) {
             bodyEl.scrollTop = bodyEl.scrollHeight;
@@ -3300,7 +3403,16 @@ export class AiPanel {
         // 流式（chat 模式）已把 loading 原位升级为结果气泡：复用该元素；
         // 非流式（learning 结构化 / 缓冲一次性 / 无 token 回调）：移除 loading，新建完整结果气泡
         if (liveStarted && liveMdEl) {
-          liveThrottle.flush(); // 确保最后一段增量已渲染
+          // 用增量渲染器的 flush 代替旧的 renderWithLute(liveRaw)：
+          // - 输出与旧版一致（cache 内的稳定块 + 当前 tail）
+          // - 省一次对 Lute 的全量调用（tail 已经在最后一次 push 时渲染过）
+          // liveMdEl 在 if 里被 narrow 成 never（跨闭包赋值），强制断言
+          const el: HTMLElement = liveMdEl;
+          el.innerHTML = liveRenderer.flush();
+          // 滚动跟随：保持原行为（仅当用户已贴近底部时自动滚，避免打断上翻）
+          if (bodyEl.scrollHeight - bodyEl.scrollTop - bodyEl.clientHeight < 120) {
+            bodyEl.scrollTop = bodyEl.scrollHeight;
+          }
         }
         this.liveThinkingEl = null;
         if (result.aborted) {

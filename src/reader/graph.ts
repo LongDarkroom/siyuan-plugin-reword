@@ -51,7 +51,7 @@ export function buildLibraryGraph(
       x: GRAPH_W / 2 + Math.cos(ang) * 200,
       y: GRAPH_H / 2 + Math.sin(ang) * 150,
       annCount: ann,
-      r: 8 + Math.min(14, ann * 1.2),
+      r: 5 + Math.min(10, ann * 0.8),
     };
   });
 

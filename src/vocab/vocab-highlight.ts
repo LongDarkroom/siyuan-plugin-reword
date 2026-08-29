@@ -483,6 +483,14 @@ export class VocabHighlighter {
         ? (cb: () => void) => (window as any).requestIdleCallback(cb, { timeout: 800 })
         : (cb: () => void) => setTimeout(cb, 0));
     scheduleWork(() => {
+      // 2026-08-29 修复：idle 回调执行前用户可能已关闭开关，必须重新检查 enabled，
+      // 否则会把刚刚清掉的高亮重新包回去。
+      if (!this.enabled) {
+        for (const block of blocks) {
+          if (document.contains(block)) clearVocabMarks(block);
+        }
+        return;
+      }
       for (const block of blocks) {
         if (!document.contains(block)) continue;
         applyVocabMarksToBlock(block, words, regex);
@@ -492,7 +500,7 @@ export class VocabHighlighter {
 
   /** 状态变更 → 整文档重扫 */
   private onStoreChange(_word: string): void {
-    if (!this.currentProtyleEl) return;
+    if (!this.enabled || !this.currentProtyleEl) return;
     this.pendingBlocks.clear();
     this.scanBlocks(this.currentProtyleEl).forEach((b) =>
       this.pendingBlocks.add(b)
@@ -522,6 +530,7 @@ export class VocabHighlighter {
           if (document.contains(b)) clearVocabMarks(b);
         });
       }
+      this.pendingBlocks.clear();
     } else {
       this.refreshAll();
     }

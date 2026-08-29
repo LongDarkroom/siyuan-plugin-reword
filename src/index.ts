@@ -102,6 +102,8 @@ import type { CopilotHost, ChatSendResult } from "./copilot/copilot/copilot-host
 // [已移除] import { initCopilotSidebar } —— Copilot 对话入口已禁用（2026-08-17）
 // 共享基建（生命周期 / 持久化 / 安全渲染）
 import { Disposables } from "./core/disposable.ts";
+import { isMobile, isSmallMobile, isLargeMobile } from "./core/env.ts";
+import { responsiveDialogSize, isPhoneSize } from "./core/responsive.ts";
 import { ConversationStore, type ConversationData } from "./copilot/store/conversation-store.ts";
 import {
   normalizeAiSettings as normalizeCopilotSettings,
@@ -745,6 +747,13 @@ export default class RewordPlugin extends Plugin {
       () => this.eventBus.off("open-menu-content", this.onOpenContentMenu)
     );
 
+    // 2026-08-29：阅读器深链（siyuan://plugins/siyuan-plugin-rewordreader?data={…}）
+    // 摘录插入思源文档后，点「回原文」即回到书里对应位置
+    this.disposables.addEventBus(
+      () => this.eventBus.on("open-siyuan-url-plugin", this.onOpenBookUrl as any),
+      () => this.eventBus.off("open-siyuan-url-plugin", this.onOpenBookUrl as any)
+    );
+
     // 初始文档兜底：onload 收尾后建立观察器并刷新一次（此时数据层通常已就绪）
     const initTimer = setTimeout(() => {
       this.ensureAnnotationObserver();
@@ -834,7 +843,7 @@ export default class RewordPlugin extends Plugin {
     ].join("\n");
     new Dialog({
       title: "复习算法校准结果",
-      width: "440px",
+      width: responsiveDialogSize(440, "width"),
       content: `<div class="hiword-review-cfg">
         <pre class="hiword-review-cfg__pre">${this.escapeHtml(summary)}</pre>
         <div class="hiword-review-cfg__hint">已写入 hiword-review-config.json 并立即生效。重置入口：RE word: 重置复习算法配置</div>
@@ -865,7 +874,7 @@ export default class RewordPlugin extends Plugin {
 
     const dialog = new Dialog({
       title: `恢复单词（${list.length} 个）`,
-      width: "420px",
+      width: responsiveDialogSize(420, "width"),
       height: "440px",
       content: `<div class="hiword-restore" id="hiword-restore">
         <div class="hiword-restore-list">${rows}</div>
@@ -1756,7 +1765,7 @@ export default class RewordPlugin extends Plugin {
     const dialog = new Dialog({
       title: "Copilot · AI 设置",
       content,
-      width: "480px",
+      width: responsiveDialogSize(480, "width"),
       height: "520px",
     });
 
@@ -2713,13 +2722,20 @@ export default class RewordPlugin extends Plugin {
    * 布局由 this.dockManager 决定，持久化于 hiword-dock-layout.json。
    */
   private initDockPanels() {
+    // 2026-08-29 移动端适配 Phase 5：dock 初始宽度按屏幕尺寸折算
+    // - 桌面 320（沿用旧默认）
+    // - 平板（iPad/Android Tablet）360（更宽一点方便触屏点击）
+    // - 手机（iPhone/Android Phone）取视口宽度的 92%
+    const dockWidth = isSmallMobile()
+      ? Math.round((typeof window !== "undefined" ? window.innerWidth : 320) * 0.92)
+      : isLargeMobile() ? 360 : 320;
     // ===== 组合 Dock（始终注册，承载 combined 功能的 Tab；保证 this.dockElement 有效）=====
     try {
       const combinedIds = this.dockManager.getCombinedFeatureIds();
       const dockResult: any = this.addDock({
         config: {
           position: "RightBottom" as const,
-          size: { width: 320, height: 0 },
+          size: { width: dockWidth, height: 0 },
           icon: ICON_REWORD,
           title: "RE word",
         },
@@ -2740,7 +2756,7 @@ export default class RewordPlugin extends Plugin {
     // ===== 独立 Dock（仅注册非 combined/非 hidden 的功能；按 slot 停靠到对应侧栏）=====
     for (const { feature, slot } of this.dockManager.getStandaloneFeatures()) {
       try {
-        this.registerStandaloneDock(feature, slot);
+        this.registerStandaloneDock(feature, slot, dockWidth);
       } catch (e) {
         getLogger().error(`[REword] 独立 Dock 注册失败 (${feature.id}):`, { operation: "初始化-侧边栏", error: e });
       }
@@ -2750,13 +2766,14 @@ export default class RewordPlugin extends Plugin {
   }
 
   /** 注册一个功能的独立 Dock（幂等：已注册则跳过）。用于初始化与「拖出到角落」运行时扩展 */
-  private registerStandaloneDock(f: DockableFeature, slot: DockSlot): void {
+  private registerStandaloneDock(f: DockableFeature, slot: DockSlot, dockWidth = 320): void {
     if (this.standaloneElements.has(f.id)) return;
     if (slot === "combined" || slot === "hidden") return;
     const dockResult: any = this.addDock({
       config: {
         position: slot as any,
-        size: { width: 320, height: 0 },
+        // 独立 dock 沿用组合 dock 同样的响应式宽度（避免侧栏左右宽度不一致）
+        size: { width: dockWidth, height: 0 },
         icon: f.icon,
         title: f.title,
         show: true,
@@ -3111,7 +3128,7 @@ export default class RewordPlugin extends Plugin {
           <button class="b3-button b3-button--outline hiword-dm-close" id="hiword-dm-close">关闭</button>
         </div>
       </div>`,
-      width: "460px",
+      width: responsiveDialogSize(460, "width"),
     });
     const content = dialog.element.querySelector(".hiword-dm") as HTMLElement;
 
@@ -3851,7 +3868,7 @@ export default class RewordPlugin extends Plugin {
 
     const dialog = new Dialog({
       title: `批量分类（共 ${words.length} 词）`,
-      width: "560px",
+      width: responsiveDialogSize(560, "width"),
       height: "72vh",
       content: this.renderBatchClassifyDialogHtml(words, realBooks, initialBookId, initialThemeId),
     });
@@ -6499,7 +6516,7 @@ export default class RewordPlugin extends Plugin {
 
     const dialog = new Dialog({
       title: "复习算法设置（调试参数）",
-      width: "760px",
+      width: responsiveDialogSize(760, "width"),
       height: "620px",
       content: `<div class="hiword-rs">
         <div class="hiword-rs-body">${buildBody(getReviewConfig())}</div>
@@ -6589,7 +6606,7 @@ export default class RewordPlugin extends Plugin {
 
     const dialog = new Dialog({
       title: `RE word 复习（${queue.length}${dailyLimit > 0 ? " / 每日 " + dailyLimit : ""} 个候选）`,
-      width: "480px",
+      width: responsiveDialogSize(480, "width"),
       height: "520px",
       content: `<div class="hiword-review" id="hiword-review"></div>`,
     });
@@ -6761,7 +6778,7 @@ export default class RewordPlugin extends Plugin {
     const preferredDefinitions = rec?.preferredDefinitions;
     const dialog = new Dialog({
       title: `词典: ${word}`,
-      width: "600px",
+      width: responsiveDialogSize(600, "width"),
       height: "500px",
       content: entry
         ? dictRenderer.renderDictCard(dictRenderer.parseDictEntry(entry), {
@@ -6827,7 +6844,7 @@ export default class RewordPlugin extends Plugin {
   private openDictManager() {
     const dialog = new Dialog({
       title: "RE word 词典管理",
-      width: "640px",
+      width: responsiveDialogSize(640, "width"),
       height: "480px",
       content: `<div class="hiword-dict-manager" id="hiword-dict-manager"></div>`,
     });
@@ -6847,7 +6864,7 @@ export default class RewordPlugin extends Plugin {
 
     const dialog = new Dialog({
       title: "RE word 设置",
-      width: "720px",
+      width: responsiveDialogSize(720, "width"),
       height: "580px",
       content: `
         <div class="hiword-unified-panel">
@@ -8516,7 +8533,7 @@ export default class RewordPlugin extends Plugin {
   public openAiSettings() {
     const dialog = new Dialog({
       title: "AI 精读设置",
-      width: "720px",
+      width: responsiveDialogSize(720, "width"),
       height: "520px",
       content: `<div class="hw-ai-settings-host"></div>`,
     });
@@ -9350,7 +9367,7 @@ export default class RewordPlugin extends Plugin {
       const dialog = new Dialog({
         title: `📖 选择释义偏好 — ${this.escapeHtml(word)}`,
         content: html,
-        width: "560px",
+        width: responsiveDialogSize(560, "width"),
         height: "auto",
       });
 
@@ -9932,7 +9949,7 @@ export default class RewordPlugin extends Plugin {
 
     const dialog = new Dialog({
       title: "提取单词到词库",
-      width: "580px",
+      width: responsiveDialogSize(580, "width"),
       height: "72vh",
       content: `
         <div class="hiword-ex-dialog">
@@ -10144,7 +10161,7 @@ export default class RewordPlugin extends Plugin {
     }
     const dialog = new Dialog({
       title: "导入单词到词库",
-      width: "520px",
+      width: responsiveDialogSize(520, "width"),
       height: "60vh",
       content: `
         <div class="hiword-imp-dialog">
@@ -10239,7 +10256,7 @@ export default class RewordPlugin extends Plugin {
 
     const dialog = new Dialog({
       title: "导入单词表到词库",
-      width: "560px",
+      width: responsiveDialogSize(560, "width"),
       height: "72vh",
       content: `
         <div class="hiword-wl-dialog">
@@ -10354,7 +10371,7 @@ export default class RewordPlugin extends Plugin {
 
     const dialog = new Dialog({
       title: "从单词库加入复习",
-      width: "480px",
+      width: responsiveDialogSize(480, "width"),
       height: "74vh",
       content: `
         <div class="hiword-av-dialog">
@@ -11521,7 +11538,7 @@ export default class RewordPlugin extends Plugin {
     new Dialog({
       title: "批注内容",
       content: `<div class="whale-table-expand b3-typography" style="max-height:70vh;overflow:auto;">${renderAnnotationHTML(ann.note)}</div>`,
-      width: "680px",
+      width: responsiveDialogSize(680, "width"),
     });
   }
 
@@ -11792,6 +11809,39 @@ export default class RewordPlugin extends Plugin {
       setTimeout(() => span.classList.remove("hiword-ann-inline--active"), 2000);
     });
   }
+
+  /**
+   * 2026-08-29：阅读器深链（摘录回跳原书）。
+   * 思源点击 `siyuan://plugins/siyuan-plugin-rewordreader?data={"bookId":"…","cfi":"…"}`
+   * 时会把 open-siyuan-url-plugin 事件派发给同名插件（官方事件总线，见 siyuan CHANGELOG 0.8.0）。
+   * 这里解析出 bookId + cfi → 打开/聚焦该书阅读 Tab → goTo 定位到摘录处，
+   * 与 weave 的「双向溯源」等价。非本书链接（缺 bookId）直接忽略，不打扰其它插件逻辑。
+   */
+  private onOpenBookUrl = (e: { url?: string }): void => {
+    const url = String(e?.url ?? "");
+    if (!url) return;
+    let bookId = "";
+    let cfi = "";
+    try {
+      const qIdx = url.indexOf("?");
+      const params = new URLSearchParams(qIdx >= 0 ? url.slice(qIdx + 1) : "");
+      const raw = params.get("data");
+      if (raw) {
+        // data 可能是 JSON 字符串，也可能是思源内核已解析后的对象字符串
+        const parsed = typeof raw === "string" ? JSON.parse(raw) : raw;
+        bookId = String(parsed?.bookId ?? "");
+        cfi = String(parsed?.cfi ?? "");
+      }
+      // 兼容手写 / 未来格式：?bookId=…&cfi=…
+      if (!bookId) bookId = String(params.get("bookId") ?? "");
+      if (!cfi) cfi = String(params.get("cfi") ?? "");
+    } catch (err) {
+      logSwallow(err, "index.ts · onOpenBookUrl", "warn");
+      return;
+    }
+    if (!bookId) return;
+    void this.jumpToReading(bookId, cfi);
+  };
 
   /** C 跳转定位：侧边栏阅读批注 → 打开/聚焦阅读 Tab 并跳转到对应 cfi 弹查看气泡 */
   private async jumpToReading(bookId: string, cfi: string): Promise<void> {
@@ -12081,7 +12131,7 @@ export default class RewordPlugin extends Plugin {
 
     const dialog = new Dialog({
       title: `RE word 词库（共 ${words.length} 词）`,
-      width: "760px",
+      width: responsiveDialogSize(760, "width"),
       height: "560px",
       content: `
         <div class="hiword-vocab-dialog">

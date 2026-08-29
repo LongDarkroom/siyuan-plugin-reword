@@ -56,14 +56,15 @@
     margin-bottom: 1em;
   }
   .reader-empty__action {
-    padding: 6px 16px;
+    padding: var(--reword-space-2) var(--reword-space-4);
     border: 1px solid var(--b3-border-color);
-    border-radius: 4px;
+    border-radius: var(--reword-radius-sm);
     background: var(--b3-theme-primary, #4285f4);
     color: var(--b3-theme-on-primary, #fff);
     font-size: 13px;
     cursor: pointer;
-    transition: all 200ms ease-out;
+    transition: opacity var(--reword-dur-base) var(--reword-ease),
+      transform var(--reword-dur-base) var(--reword-ease);
   }
   .reader-empty__action:hover {
     opacity: 0.9;

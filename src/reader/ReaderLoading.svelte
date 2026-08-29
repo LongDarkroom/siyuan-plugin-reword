@@ -76,13 +76,13 @@
     width: 240px;
     height: 4px;
     background: var(--b3-border-color);
-    border-radius: 2px;
+    border-radius: var(--reword-radius-pill);
     overflow: hidden;
   }
   .reader-loading__bar-fill {
     height: 100%;
     background: var(--b3-theme-primary, #4285f4);
-    transition: width 200ms ease-out;
+    transition: width var(--reword-dur-base) var(--reword-ease);
   }
   .reader-loading__percent {
     font-size: 12px;
@@ -96,9 +96,9 @@
     font-size: 13px;
   }
   .reader-loading__btn {
-    padding: 4px 12px;
+    padding: var(--reword-space-1) var(--reword-space-3);
     border: 1px solid var(--b3-border-color);
-    border-radius: 4px;
+    border-radius: var(--reword-radius-sm);
     background: var(--b3-theme-surface, #fff);
     color: var(--b3-theme-on-surface);
     font-size: 12px;

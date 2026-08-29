@@ -12,6 +12,7 @@
     heatColor,
     type ReadingStats,
     type DayStat,
+    type StatsRange,
   } from "./stats";
 
   export let store: BookshelfStore;
@@ -22,18 +23,31 @@
   let maxMonthMs = 1;
   let leadOffset = 0;
   let monthTicks: { label: string; col: number }[] = [];
+  /** 热力图时间范围（切换重算） */
+  let range: StatsRange = "12m";
+  let weeks = 53;
 
   const WEEKDAYS = ["日", "一", "二", "三", "四", "五", "六"];
   const CELL = 13;
   const GAP = 3;
-  const WEEKS = 53;
+  const RANGE_OPTIONS: { key: StatsRange; label: string }[] = [
+    { key: "7d", label: "近 7 天" },
+    { key: "30d", label: "近 30 天" },
+    { key: "year", label: "今年" },
+    { key: "12m", label: "近一年" },
+  ];
 
-  onMount(() => {
-    stats = computeReadingStats(store.list);
+  function recompute() {
+    stats = computeReadingStats(store.list, range);
+    weeks = Math.ceil(stats.calendar.length / 7);
     maxMonthMs = Math.max(1, ...stats.monthly.map((m) => m.ms));
     const first = stats.calendar[0]?.date;
     leadOffset = first ? new Date(first + "T00:00:00").getDay() : 0;
     monthTicks = buildMonthTicks(stats.calendar, leadOffset);
+  }
+
+  onMount(() => {
+    recompute();
   });
 
   function buildMonthTicks(calendar: DayStat[], offset: number) {
@@ -69,6 +83,18 @@
 
     {#if stats}
       <div class="stats-body">
+        <div class="range-switch">
+          {#each RANGE_OPTIONS as opt}
+            <button
+              class="range-btn"
+              class:active={range === opt.key}
+              on:click={() => {
+                range = opt.key;
+                recompute();
+              }}>{opt.label}</button>
+          {/each}
+        </div>
+
         <!-- 概览 -->
         <section class="stats-overview">
           <div class="metric-card">
@@ -93,6 +119,10 @@
             </div>
             <div class="metric-label">平均评分</div>
           </div>
+          <div class="metric-card">
+            <div class="metric-value">{stats.longestStreak}<span class="metric-unit">天</span></div>
+            <div class="metric-label">最长连续</div>
+          </div>
         </section>
 
         <!-- 日历热力图 -->
@@ -103,7 +133,7 @@
           </div>
           <div class="chart-card calendar-card">
             <div class="calendar-scroll">
-              <div class="calendar-inner" style="width:{WEEKS * (CELL + GAP)}px">
+              <div class="calendar-inner" style="width:{weeks * (CELL + GAP)}px">
                 <div class="month-labels" aria-hidden="true">
                   {#each monthTicks as t}
                     <span class="month-tick" style="left:{t.col * (CELL + GAP)}px">{t.label}</span>
@@ -234,9 +264,33 @@
     gap: 18px;
     padding-right: 2px;
   }
+  .range-switch {
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+  }
+  .range-btn {
+    border: 1px solid var(--b3-border-color, rgba(0, 0, 0, 0.15));
+    background: var(--b3-theme-background, #fff);
+    border-radius: 8px;
+    padding: 5px 12px;
+    font-size: 12px;
+    cursor: pointer;
+    color: var(--b3-theme-on-background, #333);
+    transition: background 0.15s, color 0.15s;
+  }
+  .range-btn:hover {
+    background: var(--b3-theme-background-light, rgba(0, 0, 0, 0.04));
+  }
+  .range-btn.active {
+    background: var(--b3-theme-primary-light, rgba(55, 138, 221, 0.12));
+    border-color: transparent;
+    color: var(--b3-theme-primary, #378add);
+    font-weight: 500;
+  }
   .stats-overview {
     display: grid;
-    grid-template-columns: repeat(5, 1fr);
+    grid-template-columns: repeat(auto-fit, minmax(94px, 1fr));
     gap: 10px;
   }
   .metric-card {

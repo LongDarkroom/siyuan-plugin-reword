@@ -55,8 +55,8 @@
     margin-bottom: 0.5em;
   }
   .reader-error__title {
-    font-size: 18px;
-    font-weight: 600;
+    font-size: 16px;
+    font-weight: 500;
     margin-bottom: 0.4em;
     color: var(--b3-theme-error, #d32f2f);
   }
@@ -71,14 +71,14 @@
     margin-bottom: 1em;
   }
   .reader-error__btn {
-    padding: 6px 16px;
+    padding: var(--reword-space-2) var(--reword-space-4);
     border: 1px solid var(--b3-border-color);
-    border-radius: 4px;
+    border-radius: var(--reword-radius-sm);
     background: var(--b3-theme-surface, #fff);
     color: var(--b3-theme-on-surface);
     font-size: 13px;
     cursor: pointer;
-    transition: all 200ms ease-out;
+    transition: opacity var(--reword-dur-base) var(--reword-ease);
   }
   .reader-error__btn--primary {
     background: var(--b3-theme-primary, #4285f4);
@@ -100,8 +100,8 @@
   }
   .reader-error__details pre {
     background: var(--b3-theme-background, #fafafa);
-    padding: 8px;
-    border-radius: 4px;
+    padding: var(--reword-space-2);
+    border-radius: var(--reword-radius-sm);
     overflow: auto;
     max-height: 200px;
     margin: 0;

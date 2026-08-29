@@ -131,10 +131,130 @@ export interface FootnoteResult {
   type: string // 中文徽标：脚注/尾注/注释/参考文献/释义
 }
 
+function findFootnoteElement(doc: Document, hash: string): Element | null {
+  if (!hash) return null
+  return doc.getElementById(hash)
+    || doc.querySelector(`[name="${cssEscape(hash)}"]`)
+    || doc.querySelector(`[id$="${cssEscape(hash)}"]`)
+    || null
+}
+
+function parseXhtml(xhtml: string): Document {
+  // EPUB 章节本质 XHTML，优先用 text/html（容错强），若找不到目标再回退 XML 解析
+  let doc = new DOMParser().parseFromString(xhtml, 'text/html')
+  return doc
+}
+
+function textLength(el: Element | null): number {
+  return (el?.textContent || '').trim().length
+}
+
+function looksEmpty(el: Element | null): boolean {
+  return textLength(el) === 0
+}
+
+function escapeHtml(s: string): string {
+  return s.replace(/[&<>"']/g, (c) => {
+    const map: Record<string, string> = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }
+    return map[c] ?? c
+  })
+}
+
+function isBacklinkAnchor(el: Element): boolean {
+  if (el.tagName.toLowerCase() !== 'a') return false
+  const href = el.getAttribute('href') || ''
+  if (!href.startsWith('#')) return false
+  const t = (el.textContent || '').trim()
+  // backlink 文本常见：↩ ← ↑ ▲ 返回 return 空 或 纯数字序号
+  return /^[↩←↑▲⇧返回return]*$/i.test(t) || /^\d+$/.test(t) || t === ''
+}
+
+/** 从解析后的文档中挑选「真正承载脚注文本」的元素。
+ *  很多中文 EPUB 的 id 直接打在脚注号 <a> 上，而正文在该 <a> 的父 <p>/<li> 里；
+ *  若只取 <a>.outerHTML，气泡会显示为空。 */
+function pickFootnoteContainer(el: Element | null): Element | null {
+  if (!el) return null
+  const tag = el.tagName.toLowerCase()
+
+  // 情况 A：目标是个 <a>，但父块级元素包含更多文字 → 用父元素
+  if (tag === 'a') {
+    const parent = el.parentElement
+    if (parent) {
+      const parentText = (parent.textContent || '').trim()
+      const anchorText = (el.textContent || '').trim()
+      if (parentText.length > anchorText.length + 2) {
+        return parent
+      }
+    }
+  }
+
+  // 情况 B：元素本身为空 → 文本可能在下一个兄弟
+  if (looksEmpty(el)) {
+    let sib = el.nextElementSibling
+    while (sib && looksEmpty(sib)) sib = sib.nextElementSibling
+    if (sib) return sib
+  }
+
+  // 情况 C：元素只有返回锚点 → 用父元素
+  if (el.children.length === 1 && isBacklinkAnchor(el.children[0])) {
+    const parent = el.parentElement
+    if (parent && textLength(parent) > textLength(el) + 2) return parent
+  }
+
+  return el
+}
+
+function cleanHiddenStyle(style: string): string {
+  const cleaned = style
+    .replace(/display\s*:\s*[^;]+;?/gi, '')
+    .replace(/visibility\s*:\s*[^;]+;?/gi, '')
+    .replace(/opacity\s*:\s*[^;]+;?/gi, '')
+    .replace(/height\s*:\s*0[^;]*;?/gi, '')
+    .replace(/width\s*:\s*0[^;]*;?/gi, '')
+  return `${cleaned}; display:block; visibility:visible; opacity:1;`.replace(/;+/g, ';')
+}
+
+/** 清理克隆后的脚注 DOM：去返回锚点、去空隐藏占位、强制可见 */
+function sanitizeFootnoteElement(root: Element): void {
+  // 1. 移除返回正文锚点
+  for (const a of Array.from(root.querySelectorAll('a[href^="#"]'))) {
+    if (isBacklinkAnchor(a)) a.remove()
+  }
+  // 2. 移除空 hidden / aria-hidden 占位
+  for (const e of Array.from(root.querySelectorAll('[hidden], [aria-hidden="true"]'))) {
+    if (looksEmpty(e)) e.remove()
+  }
+  // 3. 递归清除内联隐藏样式
+  const walker = (node: Element) => {
+    const style = node.getAttribute('style') || ''
+    if (/display\s*:\s*none|visibility\s*:\s*hidden|opacity\s*:\s*0|height\s*:\s*0|width\s*:\s*0/i.test(style)) {
+      node.setAttribute('style', cleanHiddenStyle(style))
+    }
+    node.removeAttribute('hidden')
+    for (const child of Array.from(node.children)) walker(child)
+  }
+  walker(root)
+}
+
+function prepareFootnoteHtml(el: Element): string {
+  const container = pickFootnoteContainer(el)
+  if (!container) return ''
+  const clone = container.cloneNode(true) as Element
+  sanitizeFootnoteElement(clone)
+  // 清理后仍无文字：兜底用纯文本
+  if (looksEmpty(clone)) {
+    const text = (container.textContent || '').trim()
+    if (text) return `<p>${escapeHtml(text)}</p>`
+    return ''
+  }
+  return clone.outerHTML
+}
+
 /** 抽取脚注内容 HTML。
  *  通过 book.sections[index].loadContent() 取章节 XHTML 源，DOMParser 解析后
  *  getElementById(hash) 定位脚注元素；相对图片 best-effort 解析为 blob URL。
- *  不依赖嵌套 foliate-view，气泡样式完全由 REword 控制（轻量、可控）。 */
+ *  不依赖嵌套 foliate-view，气泡样式完全由 REword 控制（轻量、可控）。
+ *  2026-08-29 增强：处理中文 EPUB 常见脚注结构（id 打在锚点上、返回锚点、隐藏块）。 */
 export async function extractFootnote(book: any, href: string): Promise<FootnoteResult> {
   try {
     const cacheKey = footnoteCacheKey(book, href);
@@ -148,15 +268,22 @@ export async function extractFootnote(book: any, href: string): Promise<Footnote
     if (!section) return { html: null, type: '脚注' }
     const xhtml = await section.loadContent?.()
     if (!xhtml) return { html: null, type: '脚注' }
-    const doc = new DOMParser().parseFromString(xhtml, 'text/html')
-    const el: any = doc.getElementById(hash)
+    const doc = parseXhtml(xhtml)
+    let el = findFootnoteElement(doc, hash)
+    // XML 解析回退（text/html 偶有 xmlns 前缀导致 id 定位失败）
+    if (!el) {
+      const xmlDoc = new DOMParser().parseFromString(xhtml, 'application/xhtml+xml')
+      el = findFootnoteElement(xmlDoc, hash)
+    }
     if (!el) return { html: null, type: '脚注' }
-    // 清除内联 display:none（隐藏脚注块在弹窗里应可见）
-    if (el.style) el.style.display = ''
-    // 相对图片解析为 blob URL（best-effort）
-    await resolveImages(el, book, target.index)
     const type = classifyType(el)
-    const result: FootnoteResult = { html: el.outerHTML, type }
+    const html = prepareFootnoteHtml(el)
+    if (!html) return { html: null, type }
+    // 相对图片解析为 blob URL（best-effort）：在临时容器上操作，避免污染缓存的原始 DOM
+    const tmp = doc.createElement('div')
+    tmp.innerHTML = html
+    await resolveImages(tmp, book, target.index)
+    const result: FootnoteResult = { html: tmp.innerHTML, type }
     footnoteCache.set(cacheKey, result)
     return result
   } catch {

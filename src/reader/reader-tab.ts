@@ -47,7 +47,16 @@ export class ReaderTabController {
       type: READER_TAB_TYPE,
       init: function (this: any) {
         const custom = this;
-        const bookId = custom.data?.bookId;
+        // 2026-08-29：思源自定义协议（siyuan://plugins/…?data=…）开页签时，
+        // data 可能是已解析的对象，也可能是原始 JSON 字符串（内核版本差异）。
+        // 统一兜底解析一次，保证深链场景下 bookId 一定能取到，不会开出空白页签。
+        let rawData: any = custom.data;
+        if (typeof rawData === "string") {
+          try {
+            rawData = JSON.parse(rawData);
+          } catch (__swallowErr) { logSwallow(__swallowErr, "reader-tab.ts · parse custom.data", "debug"); }
+        }
+        const bookId = rawData?.bookId;
         if (!bookId) return;
         // 2026-08-24 修复（方案 B）：custom.element 用 flex 撑满，
         // holder 改为相对 flex 子项，不再使用 absolute inset:0。

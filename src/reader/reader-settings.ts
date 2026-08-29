@@ -84,6 +84,8 @@ export interface ReaderLayoutSettings {
   showCurrentTime: boolean;
   /** 24 小时制（默认 false） */
   use24Hour: boolean;
+  /** 跟随思源文档边距：用宿主 .protyle-wysiwyg 的水平 padding 作为阅读器左右边距（默认 false，2026-08-29） */
+  followSiyuanMargin?: boolean;
 }
 
 /** 笔记模板支持的变量（用于 linkFormat 模板） */
@@ -231,14 +233,17 @@ export const READER_DEFAULT_SETTINGS: ReaderSettings = {
     referencePageCount: 0,
     showCurrentTime: false,
     use24Hour: false,
+    followSiyuanMargin: false,
   },
   note: {
     syncOnAdd: false,
     syncOnDelete: false,
     insertPosition: "clipboard",
     templatePreset: "simple",
+    // 2026-08-29：末行 {{link}} = 回跳原书的深链（siyuan://plugins/…），在思源文档里
+    // 点击即打开该书并定位到摘录处。此前该变量恒为空串，模板里等于没有这个功能。
     linkFormat:
-      "> {{text}}\n>\n> ——《{{bookTitle}}》{{author}} · {{chapter}}\n\n{{note}}",
+      "> {{text}}\n>\n> ——《{{bookTitle}}》{{author}} · {{chapter}}\n\n{{note}}\n\n{{link}}",
     excludeRegex: "",
     tagPresets: "未分组\n生词\n句法\n文化\n逻辑",
     quickSendDocs: [],
@@ -384,6 +389,42 @@ export const LINE_WIDTH_PRESETS: Record<ReaderLineWidth, { label: string; paddin
   normal: { label: "标准", padding: "2em 1.5em" },
   wide: { label: "宽", padding: "2em 0.6em" },
 };
+
+/* ================= 2026-08-29 页面边距三档预设（替代失效的行宽 padding 控制） =================
+ * 旧 lineWidth 预设只控制 body padding 的左右，且无法让 4 边距滑块生效；现统一改由
+ * 4 个边距滑块 / 三档预设驱动 body padding（见 reader-style.ts layoutMarginStyles）。
+ * 三档数值（px，对应 T R B L）：
+ *   - 铺满：内容几乎贴边，适合小屏 / 资料密集型阅读
+ *   - 正常：日常默认
+ *   - 宽松：大屏沉浸式，左右留白更多
+ * custom 仅作 UI 态，不携带固定数值（滑块拖动即进入该态）。
+ */
+export type ReaderLayoutPreset = "fill" | "normal" | "loose" | "custom";
+export const LAYOUT_PRESETS: Record<
+  ReaderLayoutPreset,
+  { label: string; margins: { top: number; right: number; bottom: number; left: number } }
+> = {
+  fill: { label: "铺满", margins: { top: 4, right: 16, bottom: 8, left: 12 } },
+  normal: { label: "正常", margins: { top: 16, right: 24, bottom: 20, left: 20 } },
+  loose: { label: "宽松", margins: { top: 32, right: 56, bottom: 48, left: 48 } },
+  custom: { label: "自定义", margins: { top: 0, right: 0, bottom: 0, left: 0 } },
+};
+
+/** 根据 4 边距反推当前落在哪个预设（都不匹配则「自定义」） */
+export function detectLayoutPreset(layout: ReaderLayoutSettings): ReaderLayoutPreset {
+  for (const key of ["fill", "normal", "loose"] as ReaderLayoutPreset[]) {
+    const m = LAYOUT_PRESETS[key].margins;
+    if (
+      layout.marginTopPx === m.top &&
+      layout.marginRightPx === m.right &&
+      layout.marginBottomPx === m.bottom &&
+      layout.marginLeftPx === m.left
+    ) {
+      return key;
+    }
+  }
+  return "custom";
+}
 
 export const FLOW_PRESETS: Record<ReaderFlow, { label: string }> = {
   paginated: { label: "分页" },

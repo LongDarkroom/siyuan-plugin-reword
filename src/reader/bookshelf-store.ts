@@ -75,6 +75,18 @@ export interface BookFilter {
   minRating?: number;
 }
 
+/** 阅读书签（2026-08-29 新增：对齐 Obsidian weave 的「书签 / 参考阅读点」） */
+export interface BookMark {
+  id: string;
+  /** foliate CFI 锚点（PDF 时为 foliate 自派发的锚点串） */
+  cfi: string;
+  /** 用户可改的书签名；缺省时 UI 回退显示章节名 */
+  label?: string;
+  /** 书签处的正文摘录（前若干字，便于列表里辨认位置） */
+  excerpt?: string;
+  createdAt: number;
+}
+
 export interface BookMeta {
   id: string;
   title: string;
@@ -108,6 +120,8 @@ export interface BookMeta {
   series?: string;
   /** 所属用户分组 id；缺省 = 未分组 */
   groupId?: string;
+  /** 2026-08-29 新增：本书书签（按 createdAt 升序；老数据无此字段，缺省空数组） */
+  bookmarks?: BookMark[];
 }
 
 const INDEX_KEY = "hiword-bookshelf.json";
@@ -427,7 +441,10 @@ export class BookshelfStore {
   async updateMeta(
     id: string,
     patch: Partial<
-      Pick<BookMeta, "title" | "author" | "series" | "status" | "rating" | "favorite" | "tags" | "groupId">
+      Pick<
+        BookMeta,
+        "title" | "author" | "series" | "status" | "rating" | "favorite" | "tags" | "groupId" | "bookmarks"
+      >
     >
   ): Promise<boolean> {
     await this.load();
@@ -447,6 +464,19 @@ export class BookshelfStore {
       meta.tags = clean.length ? clean : undefined;
     }
     if (patch.groupId !== undefined) meta.groupId = patch.groupId || undefined;
+    if (patch.bookmarks !== undefined) {
+      const clean = patch.bookmarks
+        .filter((b) => b && typeof b.cfi === "string" && b.cfi)
+        .map((b) => ({
+          id: b.id || `bm-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+          cfi: b.cfi,
+          label: b.label?.trim() || undefined,
+          excerpt: b.excerpt?.trim() || undefined,
+          createdAt: typeof b.createdAt === "number" ? b.createdAt : Date.now(),
+        }))
+        .sort((a, b) => a.createdAt - b.createdAt);
+      meta.bookmarks = clean.length ? clean : undefined;
+    }
     await this.save();
     this._store.set([...this.books]);
     return true;
@@ -632,6 +662,75 @@ export class BookshelfStore {
     if (!meta) return false;
     const next = (meta.tags ?? []).filter((t) => t !== tag);
     return this.updateMeta(id, { tags: next });
+  }
+
+  /* ===================== 书签（2026-08-29 新增） ===================== */
+
+  /** 取本书书签（按创建时间升序）；书不存在 / 无书签 → 空数组 */
+  getBookmarks(id: string): BookMark[] {
+    const meta = this.get(id);
+    if (!meta?.bookmarks?.length) return [];
+    return [...meta.bookmarks].sort((a, b) => a.createdAt - b.createdAt);
+  }
+
+  /**
+   * 新增书签。同一 cfi 已存在则直接返回现有列表（幂等，不重复添加）。
+   * @returns 操作后的书签列表（升序）
+   */
+  async addBookmark(id: string, bm: { cfi: string; label?: string; excerpt?: string }): Promise<BookMark[]> {
+    await this.load();
+    const cfi = bm?.cfi?.trim();
+    if (!cfi) return this.getBookmarks(id);
+    const list = this.getBookmarks(id);
+    if (list.some((b) => b.cfi === cfi)) return list;
+    const next = [
+      ...list,
+      {
+        id: `bm-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        cfi,
+        label: bm.label?.trim() || undefined,
+        excerpt: bm.excerpt?.trim() || undefined,
+        createdAt: Date.now(),
+      },
+    ];
+    await this.updateMeta(id, { bookmarks: next });
+    return this.getBookmarks(id);
+  }
+
+  /** 按书签 id 删除；返回操作后的列表 */
+  async removeBookmark(id: string, bookmarkId: string): Promise<BookMark[]> {
+    await this.load();
+    const next = this.getBookmarks(id).filter((b) => b.id !== bookmarkId);
+    await this.updateMeta(id, { bookmarks: next });
+    return this.getBookmarks(id);
+  }
+
+  /** 重命名书签；返回操作后的列表 */
+  async renameBookmark(id: string, bookmarkId: string, label: string): Promise<BookMark[]> {
+    await this.load();
+    const next = this.getBookmarks(id).map((b) =>
+      b.id === bookmarkId ? { ...b, label: label.trim() || undefined } : b
+    );
+    await this.updateMeta(id, { bookmarks: next });
+    return this.getBookmarks(id);
+  }
+
+  /**
+   * 按 cfi 切换书签：已存在 → 删除；不存在 → 新增。
+   * 供阅读器工具栏「🔖」一键加/删当前位置使用。
+   * @returns { list, added } —— 操作后的列表与本次是新增还是删除
+   */
+  async toggleBookmark(
+    id: string,
+    bm: { cfi: string; label?: string; excerpt?: string }
+  ): Promise<{ list: BookMark[]; added: boolean }> {
+    await this.load();
+    const cfi = bm?.cfi?.trim();
+    if (!cfi) return { list: this.getBookmarks(id), added: false };
+    const list = this.getBookmarks(id);
+    const hit = list.find((b) => b.cfi === cfi);
+    if (hit) return { list: await this.removeBookmark(id, hit.id), added: false };
+    return { list: await this.addBookmark(id, bm), added: true };
   }
 
   /** 全部标签 + 用量计数（计数降序，同数按名升序）——智能分组用 */
