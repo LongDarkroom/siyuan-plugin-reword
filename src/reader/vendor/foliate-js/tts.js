@@ -85,7 +85,7 @@ const fragmentToSSML = (fragment, nodeFilter, inherited) => {
 
         let el
         const nodeName = node.nodeName.toLowerCase()
-        if (nodeName === 'foliate-mark') {
+        if (nodeName === 'reword-foliate-mark') {
             el = ssml.createElementNS(NS.SSML, 'mark')
             el.setAttribute('name', node.dataset.name)
         }
@@ -138,7 +138,7 @@ const getFragmentWithMarks = (range, textWalker, nodeFilter, granularity) => {
     const fragmentEntries = [...textWalker(fragment, segmenter, nodeFilter)]
 
     for (const [name, range] of fragmentEntries) {
-        const mark = document.createElement('foliate-mark')
+        const mark = document.createElement('reword-foliate-mark')
         mark.dataset.name = name
         range.insertNode(mark)
     }

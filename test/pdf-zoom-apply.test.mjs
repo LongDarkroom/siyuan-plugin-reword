@@ -221,3 +221,58 @@ test("[关键] lastNonFitWidthZoom 用于双击切回", () => {
   // fitWidth / fitPage 切换时记录 lastNonFitWidthZoom
   assert.ok(/lastNonFitWidthZoom\s*=\s*currentZoom/.test(src), "fitWidth 应记录 lastNonFitWidthZoom");
 });
+
+test("[性能 2026-08-29] 滚动模式走 foliate pinch 预览，连续缩放期间零重绘", () => {
+  // 滚动模式最多 12 页 loaded，逐帧提交 = 每帧重绘 12 页 canvas（每页约 400ms）→ 必然卡顿。
+  // 正确做法：预览期只改 scrollContainer 的 CSS transform，停手才提交一次真实渲染。
+  const flushIdx = src.indexOf("function flushWheelZoom(");
+  assert.ok(flushIdx > -1, "flushWheelZoom 应存在");
+  // 精确提取函数体（切到下一个顶层 function 为止，避免定长切片被撑爆）
+  const nextFn = src.indexOf("\n  function ", flushIdx + 10);
+  const body = src.slice(flushIdx, nextFn > -1 ? nextFn : flushIdx + 3000);
+
+  assert.ok(/isScrollFlow\(\)/.test(body), "flushWheelZoom 应区分滚动模式");
+  assert.ok(
+    /r\.pinchZoom\(wheelPinchRatio\)/.test(body),
+    "滚动模式应调 renderer.pinchZoom() 做 CSS transform 预览（不重绘 canvas）"
+  );
+  // 预览期间绝不能调 applyZoom，否则又变回逐帧重绘 12 页
+  assert.ok(
+    !/applyZoom\(/.test(body),
+    "滚动模式预览期间不得调 applyZoom（否则每帧触发 12 页重绘）"
+  );
+  assert.ok(
+    /setTimeout\(commitScrollWheelZoom/.test(body),
+    "应延迟提交真实渲染（停手后才画）"
+  );
+  // 提交时先 pinchEnd（清 transform + 快照锚点）再 applyZoom
+  const commitIdx = src.indexOf("function commitScrollWheelZoom(");
+  assert.ok(commitIdx > -1, "commitScrollWheelZoom 应存在");
+  const commitNext = src.indexOf("\n  function ", commitIdx + 10);
+  const commitBody = src.slice(commitIdx, commitNext > -1 ? commitNext : commitIdx + 2000);
+  assert.ok(
+    /r\.pinchEnd\(\)/.test(commitBody),
+    "提交前应调 pinchEnd() 清 transform 并快照锚点"
+  );
+  assert.ok(
+    /applyZoom\(\s*\{\s*kind:\s*"custom"/.test(commitBody),
+    "pinchEnd 后应 applyZoom 提交一次真实渲染"
+  );
+});
+
+test("[清理 2026-08-29] 预览态必须在 onDestroy 复位 #pinching", () => {
+  // foliate 的 #pinching 只有 pinchEnd 会复位；若组件销毁时停在预览态，
+  // #scheduleScrollPages 会永久 return，页面加载/回收全部停摆。
+  const destroyIdx = src.indexOf("onDestroy(");
+  assert.ok(destroyIdx > -1, "onDestroy 应存在");
+  const body = src.slice(destroyIdx, destroyIdx + 6000);
+  assert.ok(/wheelPinchActive\)\s*\{/.test(body), "onDestroy 应检查 wheelPinchActive");
+  assert.ok(
+    /pinchEnd\?\.\(\)/.test(body),
+    "onDestroy 应调 pinchEnd() 复位 foliate 的 #pinching"
+  );
+  assert.ok(
+    /clearTimeout\(wheelCommitTimer\)/.test(body),
+    "onDestroy 应清除提交定时器"
+  );
+});

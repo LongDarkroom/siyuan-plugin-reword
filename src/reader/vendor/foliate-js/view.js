@@ -263,10 +263,10 @@ export class View extends HTMLElement {
         this.isFixedLayout = this.book.rendition?.layout === 'pre-paginated'
         if (this.isFixedLayout) {
             await import('./fixed-layout.js')
-            this.renderer = document.createElement('foliate-fxl')
+            this.renderer = document.createElement('reword-foliate-fxl')
         } else {
             await import('./paginator.js')
-            this.renderer = document.createElement('foliate-paginator')
+            this.renderer = document.createElement('reword-foliate-paginator')
         }
         this.renderer.setAttribute('exportparts', 'head,foot,filter,container')
         this.renderer.addEventListener('load', e => this.#onLoad(e.detail))
@@ -701,4 +701,4 @@ export class View extends HTMLElement {
     }
 }
 
-customElements.define('foliate-view', View)
+customElements.define('reword-foliate-view', View)

@@ -1817,4 +1817,4 @@ export class FixedLayout extends HTMLElement {
     }
 }
 
-customElements.define('foliate-fxl', FixedLayout)
+customElements.define('reword-foliate-fxl', FixedLayout)

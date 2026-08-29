@@ -3888,4 +3888,4 @@ export class Paginator extends HTMLElement {
     }
 }
 
-customElements.define('foliate-paginator', Paginator)
+customElements.define('reword-foliate-paginator', Paginator)

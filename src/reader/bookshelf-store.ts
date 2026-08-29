@@ -29,6 +29,52 @@ export type ZoomState =
 /** 缩放预设档位（Zoom in/out 步进用，参考 Obsidian PDF++） */
 export const ZOOM_PRESETS: readonly number[] = [0.5, 0.75, 1.0, 1.25, 1.5, 2.0] as const;
 
+/* ================================================================
+ * 2026-08-29 书架 P0/P1：阅读状态 / 分组 / 标签 / 排序 / 筛选
+ * ================================================================ */
+
+/** 阅读状态：想读（未开始）/ 在读 / 读完 */
+export type BookStatus = "unread" | "reading" | "finished";
+
+/** 用户自建分组（书架「文件夹」），独立索引文件持久化 */
+export interface BookGroup {
+  id: string;
+  name: string;
+  createdAt: number;
+}
+
+/** 排序键 */
+export type BookSortKey =
+  | "lastRead"
+  | "addedAt"
+  | "title"
+  | "author"
+  | "progress"
+  | "readingTime"
+  | "rating"
+  | "size";
+
+/** 排序方向 */
+export type SortDir = "asc" | "desc";
+
+/** 书架筛选条件（全部 optional，缺省 = 不限） */
+export interface BookFilter {
+  /** 关键词：匹配书名 / 作者 / 标签 / 丛书 */
+  keyword?: string;
+  /** 阅读状态；"all" 或缺省 = 不限 */
+  status?: BookStatus | "all";
+  /** 格式（小写，如 epub/pdf）；"all" 或缺省 = 不限 */
+  format?: string;
+  /** 单标签精确匹配 */
+  tag?: string;
+  /** 分组：具体 id / "ungrouped" 未分组 / "all" 不限 */
+  groupId?: string;
+  /** 仅看收藏 */
+  favoriteOnly?: boolean;
+  /** 最低评分（1-5） */
+  minRating?: number;
+}
+
 export interface BookMeta {
   id: string;
   title: string;
@@ -46,15 +92,42 @@ export interface BookMeta {
   lastReadAt?: number;
   /** 累计阅读时长（毫秒） */
   readingTimeMs?: number;
+  /** 按本地日期分桶的阅读时长（毫秒），键为 YYYY-MM-DD，用于日历热力图 */
+  readingLog?: Record<string, number>;
   progress?: ReadingProgress;
+  /* ---- 2026-08-29 书架 P0/P1 新增字段（全 optional，老数据兼容） ---- */
+  /** 阅读状态；缺省视为 unread */
+  status?: BookStatus;
+  /** 评分 0-5；0/缺省 = 未评分 */
+  rating?: number;
+  /** 收藏星标 */
+  favorite?: boolean;
+  /** 标签 */
+  tags?: string[];
+  /** 丛书 / 系列名 */
+  series?: string;
+  /** 所属用户分组 id；缺省 = 未分组 */
+  groupId?: string;
 }
 
 const INDEX_KEY = "hiword-bookshelf.json";
+/** 用户分组索引（独立文件：书架索引保持纯数组，向后兼容） */
+const GROUPS_KEY = "hiword-bookshelf-groups.json";
 const BOOKS_DIR = (pluginName: string) =>
   `/data/plugins/${pluginName}/books`;
 
+/** 本地日期键 YYYY-MM-DD（按用户时区，非 UTC） */
+function localDateKey(d: Date = new Date()): string {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+
 export class BookshelfStore {
   private books: BookMeta[] = [];
+  /** 用户自建分组（独立持久化，见 GROUPS_KEY） */
+  private _groups: BookGroup[] = [];
   private loaded = false;
   /** 内部 Svelte store：让消费者可订阅书架变化（导入/删除/进度更新后自动刷新） */
   private _store = writable<BookMeta[]>([]);
@@ -84,6 +157,13 @@ export class BookshelfStore {
       if (Array.isArray(data)) this.books = data;
     } catch {
       this.books = [];
+    }
+    // 分组索引：独立文件，不存在即空数组（老数据无此文件）
+    try {
+      const g = await this.plugin.loadData(GROUPS_KEY);
+      if (Array.isArray(g)) this._groups = g;
+    } catch {
+      this._groups = [];
     }
     this.loaded = true;
     this._store.set([...this.books]);
@@ -339,13 +419,34 @@ export class BookshelfStore {
     return book;
   }
 
-  /** 更新书籍元信息（书名/作者等），返回是否成功 */
-  async updateMeta(id: string, patch: Partial<Pick<BookMeta, "title" | "author">>): Promise<boolean> {
+  /**
+   * 更新书籍元信息，返回是否成功
+   * [2026-08-29] 从「书名/作者」扩展到丛书 / 状态 / 评分 / 收藏 / 标签 / 分组
+   * 空串语义：author / series 传 "" = 清空该字段（转 undefined）
+   */
+  async updateMeta(
+    id: string,
+    patch: Partial<
+      Pick<BookMeta, "title" | "author" | "series" | "status" | "rating" | "favorite" | "tags" | "groupId">
+    >
+  ): Promise<boolean> {
     await this.load();
     const meta = this.get(id);
     if (!meta) return false;
     if (typeof patch.title === "string" && patch.title.trim()) meta.title = patch.title.trim();
     if (patch.author !== undefined) meta.author = patch.author.trim() || undefined;
+    if (patch.series !== undefined) meta.series = patch.series.trim() || undefined;
+    if (patch.status !== undefined) meta.status = patch.status;
+    if (patch.rating !== undefined) {
+      const r = Math.max(0, Math.min(5, Math.round(patch.rating)));
+      meta.rating = r > 0 ? r : undefined;
+    }
+    if (patch.favorite !== undefined) meta.favorite = patch.favorite || undefined;
+    if (patch.tags !== undefined) {
+      const clean = Array.from(new Set(patch.tags.map((t) => t.trim()).filter(Boolean)));
+      meta.tags = clean.length ? clean : undefined;
+    }
+    if (patch.groupId !== undefined) meta.groupId = patch.groupId || undefined;
     await this.save();
     this._store.set([...this.books]);
     return true;
@@ -392,12 +493,16 @@ export class BookshelfStore {
     }
   }
 
-  /** 累加阅读时长（毫秒） */
+  /** 累加阅读时长（毫秒）；同时按本地日期写入 readingLog 分桶（用于日历热力图） */
   async addReadingTime(id: string, ms: number): Promise<void> {
     await this.load();
     const meta = this.get(id);
     if (!meta || ms <= 0) return;
-    meta.readingTimeMs = (meta.readingTimeMs || 0) + Math.round(ms);
+    const delta = Math.round(ms);
+    meta.readingTimeMs = (meta.readingTimeMs || 0) + delta;
+    const day = localDateKey();
+    meta.readingLog = meta.readingLog || {};
+    meta.readingLog[day] = (meta.readingLog[day] || 0) + delta;
     await this.save();
     this._store.set([...this.books]);
   }
@@ -409,11 +514,351 @@ export class BookshelfStore {
     if (!meta) return;
     meta.progress = progress;
     meta.lastReadAt = Date.now();
+    // [2026-08-29] 阅读状态自动流转：读到 99.5%+ 记「读完」；
+    // 只在 unread/未设置时自动置「在读」，避免覆盖用户手动标记的 finished
+    const frac = typeof progress.fraction === "number" ? progress.fraction : undefined;
+    if (typeof frac === "number" && frac >= 0.995) meta.status = "finished";
+    else if (!meta.status || meta.status === "unread") meta.status = "reading";
     await this.save();
     this._store.set([...this.books]);
   }
 
   getProgress(id: string): ReadingProgress | undefined {
     return this.get(id)?.progress;
+  }
+
+  /* ================================================================
+   * 2026-08-29 书架 P0/P1 API：搜索 / 排序 / 筛选 / 分组 / 标签 / 批量
+   * ================================================================ */
+
+  /** 当前所有用户分组（按创建时间升序） */
+  get groups(): BookGroup[] {
+    return [...this._groups].sort((a, b) => a.createdAt - b.createdAt);
+  }
+
+  private async saveGroups(): Promise<void> {
+    try {
+      await this.plugin.saveData(GROUPS_KEY, this._groups);
+    } catch (e) {
+      console.warn("[REword] 书架分组持久化失败:", e);
+    }
+  }
+
+  /** 新建分组；同名直接复用已有，返回分组对象 */
+  async createGroup(name: string): Promise<BookGroup | null> {
+    await this.load();
+    const n = name.trim();
+    if (!n) return null;
+    const exist = this._groups.find((g) => g.name === n);
+    if (exist) return exist;
+    const g: BookGroup = {
+      id: `g${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`,
+      name: n,
+      createdAt: Date.now(),
+    };
+    this._groups.push(g);
+    await this.saveGroups();
+    this._store.set([...this.books]);
+    return g;
+  }
+
+  /** 重命名分组 */
+  async renameGroup(id: string, name: string): Promise<boolean> {
+    await this.load();
+    const g = this._groups.find((x) => x.id === id);
+    const n = name.trim();
+    if (!g || !n) return false;
+    g.name = n;
+    await this.saveGroups();
+    this._store.set([...this.books]);
+    return true;
+  }
+
+  /** 删除分组：组内书籍回到「未分组」，书本身不删 */
+  async deleteGroup(id: string): Promise<void> {
+    await this.load();
+    this._groups = this._groups.filter((g) => g.id !== id);
+    let touched = false;
+    for (const b of this.books) {
+      if (b.groupId === id) {
+        b.groupId = undefined;
+        touched = true;
+      }
+    }
+    await this.saveGroups();
+    if (touched) await this.save();
+    this._store.set([...this.books]);
+  }
+
+  /** 单本设置阅读状态 */
+  async setStatus(id: string, status: BookStatus): Promise<boolean> {
+    return this.updateMeta(id, { status });
+  }
+
+  /** 单本设置评分（0 = 清空） */
+  async setRating(id: string, rating: number): Promise<boolean> {
+    return this.updateMeta(id, { rating });
+  }
+
+  /** 切换收藏星标，返回切换后的状态 */
+  async toggleFavorite(id: string): Promise<boolean> {
+    await this.load();
+    const meta = this.get(id);
+    if (!meta) return false;
+    const next = !meta.favorite;
+    await this.updateMeta(id, { favorite: next });
+    return next;
+  }
+
+  /** 单本移入/移出分组（groupId 省略 = 移出） */
+  async setGroup(id: string, groupId?: string): Promise<boolean> {
+    return this.updateMeta(id, { groupId: groupId ?? "" });
+  }
+
+  /** 给单本加标签（已存在则忽略） */
+  async addTag(id: string, tag: string): Promise<boolean> {
+    await this.load();
+    const meta = this.get(id);
+    const t = tag.trim();
+    if (!meta || !t) return false;
+    const next = Array.from(new Set([...(meta.tags ?? []), t]));
+    return this.updateMeta(id, { tags: next });
+  }
+
+  /** 移除单本的某个标签 */
+  async removeTag(id: string, tag: string): Promise<boolean> {
+    await this.load();
+    const meta = this.get(id);
+    if (!meta) return false;
+    const next = (meta.tags ?? []).filter((t) => t !== tag);
+    return this.updateMeta(id, { tags: next });
+  }
+
+  /** 全部标签 + 用量计数（计数降序，同数按名升序）——智能分组用 */
+  tagCounts(): { tag: string; count: number }[] {
+    const map = new Map<string, number>();
+    for (const b of this.books) {
+      for (const t of b.tags ?? []) map.set(t, (map.get(t) ?? 0) + 1);
+    }
+    return Array.from(map, ([tag, count]) => ({ tag, count })).sort(
+      (a, b) => b.count - a.count || a.tag.localeCompare(b.tag, "zh-Hans-CN")
+    );
+  }
+
+  /** 全部已用格式 + 计数（升序）——智能分组用 */
+  formatCounts(): { format: string; count: number }[] {
+    const map = new Map<string, number>();
+    for (const b of this.books) {
+      const f = (b.format || "").toLowerCase();
+      if (f) map.set(f, (map.get(f) ?? 0) + 1);
+    }
+    return Array.from(map, ([format, count]) => ({ format, count })).sort((a, b) =>
+      a.format.localeCompare(b.format)
+    );
+  }
+
+  /** 各阅读状态计数（缺省状态归入 unread）——智能分组用 */
+  statusCounts(): Record<BookStatus, number> {
+    const out: Record<BookStatus, number> = { unread: 0, reading: 0, finished: 0 };
+    for (const b of this.books) out[b.status ?? "unread"]++;
+    return out;
+  }
+
+  /** 收藏数量 */
+  favoriteCount(): number {
+    return this.books.filter((b) => b.favorite).length;
+  }
+
+  /** 未分组书籍数量 */
+  ungroupedCount(): number {
+    return this.books.filter((b) => !b.groupId).length;
+  }
+
+  /** 某分组内书籍数量 */
+  groupCount(groupId: string): number {
+    return this.books.filter((b) => b.groupId === groupId).length;
+  }
+
+  /**
+   * 搜索 + 筛选 + 排序一次出结果（UI 的唯一数据入口）
+   * 排序稳定性：数值键相等时用书名做次级键，避免列表抖动
+   */
+  query(
+    filter: BookFilter = {},
+    sortKey: BookSortKey = "lastRead",
+    dir: SortDir = "desc"
+  ): BookMeta[] {
+    const kw = (filter.keyword ?? "").trim().toLowerCase();
+    const out = this.books.filter((b) => {
+      if (filter.status && filter.status !== "all" && (b.status ?? "unread") !== filter.status) return false;
+      if (
+        filter.format &&
+        filter.format !== "all" &&
+        (b.format || "").toLowerCase() !== filter.format.toLowerCase()
+      )
+        return false;
+      if (filter.tag && !(b.tags ?? []).includes(filter.tag)) return false;
+      if (filter.groupId === "ungrouped") {
+        if (b.groupId) return false;
+      } else if (filter.groupId && filter.groupId !== "all" && b.groupId !== filter.groupId) {
+        return false;
+      }
+      if (filter.favoriteOnly && !b.favorite) return false;
+      if (typeof filter.minRating === "number" && filter.minRating > 0 && (b.rating ?? 0) < filter.minRating)
+        return false;
+      if (kw) {
+        const hay = [b.title, b.author ?? "", b.series ?? "", ...(b.tags ?? [])].join(" ").toLowerCase();
+        if (!hay.includes(kw)) return false;
+      }
+      return true;
+    });
+    const sign = dir === "asc" ? 1 : -1;
+    const num = (b: BookMeta): number => {
+      switch (sortKey) {
+        case "addedAt":
+          return b.addedAt ?? 0;
+        case "progress":
+          return b.progress?.fraction ?? 0;
+        case "readingTime":
+          return b.readingTimeMs ?? 0;
+        case "rating":
+          return b.rating ?? 0;
+        case "size":
+          return b.size ?? 0;
+        case "lastRead":
+        default:
+          return b.lastReadAt ?? b.addedAt ?? 0;
+      }
+    };
+    out.sort((a, b) => {
+      if (sortKey === "title" || sortKey === "author") {
+        const av = (sortKey === "title" ? a.title : a.author ?? "") || "";
+        const bv = (sortKey === "title" ? b.title : b.author ?? "") || "";
+        // 中文按拼音序（localeCompare zh-Hans-CN）
+        return av.localeCompare(bv, "zh-Hans-CN") * sign;
+      }
+      const r = num(a) - num(b);
+      if (r !== 0) return r * sign;
+      return a.title.localeCompare(b.title, "zh-Hans-CN");
+    });
+    return out;
+  }
+
+  /** 批量设置阅读状态，返回实际生效数量 */
+  async batchSetStatus(ids: string[], status: BookStatus): Promise<number> {
+    await this.load();
+    let n = 0;
+    for (const b of this.books) {
+      if (ids.includes(b.id)) {
+        b.status = status;
+        n++;
+      }
+    }
+    if (n) {
+      await this.save();
+      this._store.set([...this.books]);
+    }
+    return n;
+  }
+
+  /** 批量加标签，返回实际生效数量 */
+  async batchAddTag(ids: string[], tag: string): Promise<number> {
+    await this.load();
+    const t = tag.trim();
+    if (!t) return 0;
+    let n = 0;
+    for (const b of this.books) {
+      if (!ids.includes(b.id)) continue;
+      const next = Array.from(new Set([...(b.tags ?? []), t]));
+      if (next.length !== (b.tags ?? []).length) {
+        b.tags = next;
+        n++;
+      }
+    }
+    if (n) {
+      await this.save();
+      this._store.set([...this.books]);
+    }
+    return n;
+  }
+
+  /** 批量移除标签，返回实际生效数量 */
+  async batchRemoveTag(ids: string[], tag: string): Promise<number> {
+    await this.load();
+    let n = 0;
+    for (const b of this.books) {
+      if (!ids.includes(b.id)) continue;
+      const next = (b.tags ?? []).filter((x) => x !== tag);
+      if (next.length !== (b.tags ?? []).length) {
+        b.tags = next.length ? next : undefined;
+        n++;
+      }
+    }
+    if (n) {
+      await this.save();
+      this._store.set([...this.books]);
+    }
+    return n;
+  }
+
+  /** 批量设置分组（groupId 省略 = 移出分组），返回实际生效数量 */
+  async batchSetGroup(ids: string[], groupId?: string): Promise<number> {
+    await this.load();
+    let n = 0;
+    for (const b of this.books) {
+      if (!ids.includes(b.id)) continue;
+      b.groupId = groupId || undefined;
+      n++;
+    }
+    if (n) {
+      await this.save();
+      this._store.set([...this.books]);
+    }
+    return n;
+  }
+
+  /** 批量移除（复用 removeBook 保证源文件/封面清理逻辑一致），返回实际删除数量 */
+  async batchRemove(ids: string[], opts: { deleteFile?: boolean } = {}): Promise<number> {
+    await this.load();
+    let n = 0;
+    for (const id of [...ids]) {
+      if (!this.get(id)) continue;
+      await this.removeBook(id, opts);
+      n++;
+    }
+    return n;
+  }
+
+  /**
+   * 替换封面（用户自选图片）
+   * - 新文件名带时间戳，避开 webview 对旧封面的缓存
+   * - 写成功后才删旧封面，避免中途失败丢图
+   */
+  async replaceCover(id: string, file: File | Blob, ext = "jpg"): Promise<string | null> {
+    await this.load();
+    const meta = this.get(id);
+    if (!meta) return null;
+    const dir = BOOKS_DIR(this.plugin.name);
+    try {
+      await putFile(`${dir}/covers`, true, null);
+    } catch (__swallowErr) {
+      logSwallow(__swallowErr, "bookshelf-store.ts · replaceCover mkdir", "debug");
+    }
+    const safeExt = (ext.match(/^[a-z0-9]+$/i)?.[0] ?? "jpg").toLowerCase();
+    const path = `${dir}/covers/${id}-${Date.now().toString(36)}.${safeExt}`;
+    const ok = await putFile(path, false, file);
+    if (!ok) return null;
+    const old = meta.cover;
+    meta.cover = path;
+    await this.save();
+    if (old && old !== path) {
+      try {
+        await removeFile(old);
+      } catch (__swallowErr) {
+        logSwallow(__swallowErr, "bookshelf-store.ts · replaceCover rmOld", "debug");
+      }
+    }
+    this._store.set([...this.books]);
+    return path;
   }
 }

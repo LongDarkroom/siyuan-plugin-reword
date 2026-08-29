@@ -2,7 +2,7 @@
   "name": "siyuan-plugin-reword",
   "author": "LongDarkroom",
   "url": "https://github.com/LongDarkroom/siyuan-plugin-reword",
-  "version": "1.4.0",
+  "version": "1.4.1",
   "minAppVersion": "3.7.0",
   "backends": ["all"],
   "frontends": ["desktop", "browser-desktop", "mobile", "browser-mobile"],
@@ -19,6 +19,5 @@
     "default": "README.md",
     "zh-CN": "README.md"
   },
-  "keywords": ["vocabulary", "english", "dictionary", "单词", "词汇", "词典", "英语", "复习"],
-  "fundingUrl": "https://ifdian.net/a/3435d"
+  "keywords": ["vocabulary", "english", "dictionary", "单词", "词汇", "词典", "英语", "复习"]
 }

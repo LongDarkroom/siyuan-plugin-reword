@@ -3,7 +3,7 @@ import { logSwallow } from "../core/safe.ts";
  * foliate-js customElement 注册保护
  * ---------------------------------------------------------------
  * 思源插件热重载会重新执行入口模块，触发 foliate-js 内部的
- * `customElements.define('foliate-view' / 'foliate-paginator', ...)`
+ * `customElements.define('reword-foliate-view' / 'reword-foliate-paginator' / 'reword-foliate-fxl' / 'reword-foliate-quoteimage', ...)`
  * 重复注册，抛 `NotSupportedError: ... has already been used with this registry`，
  * 阻断整个 plugin onload（addDock 不执行 → 图标消失）。
  *

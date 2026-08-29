@@ -167,6 +167,13 @@ export interface ReaderSettings {
   bilingualPrefetchPages?: number;
   /** 段落悬停高亮：鼠标悬停段落时轻微底色（默认开，2026-08-28 增强项） */
   paragraphHover?: boolean;
+  /* ---- 2026-08-29 PDF 显示设置（仅 PDF 书生效，对齐 Obsidian PDF++ 阅读菜单） ---- */
+  /** PDF 视图模式：单页 / 双页 / 书籍（映射 foliate spread: none/both/portrait） */
+  pdfViewMode?: "single" | "double" | "book";
+  /** PDF 滚动方向：垂直 / 水平（仅「滚动」模式生效；映射 foliate scroll-direction） */
+  pdfScrollDir?: "vertical" | "horizontal";
+  /** PDF 反色 / 暗色：canvas 级 pageColors 反色，独立于阅读器通用主题 */
+  pdfInvert?: boolean;
   /** 文本设置（2026-08-24 新增） */
   text: ReaderTextSettings;
   /** 段落设置（2026-08-24 新增） */
@@ -200,6 +207,9 @@ export const READER_DEFAULT_SETTINGS: ReaderSettings = {
   translationFontSize: 0.62,
   bilingualPrefetchPages: 2,
   paragraphHover: true,
+  pdfViewMode: "single",
+  pdfScrollDir: "vertical",
+  pdfInvert: false,
   text: {
     fontWeight: 400,
     letterSpacing: 0,

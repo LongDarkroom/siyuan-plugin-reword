@@ -6925,10 +6925,10 @@ export default class RewordPlugin extends Plugin {
                 <div class="hiword-up-field">
                   <label class="hiword-up-field-label" for="up-tts-engine">朗读引擎</label>
                   <select id="up-tts-engine" class="hiword-up-select">
-                    <option value="edge" ${s.engine === "edge" ? "selected" : ""}>Edge 云端神经音（推荐）</option>
-                    <option value="auto" ${s.engine === "auto" ? "selected" : ""}>自动（在线优先，离线回退）</option>
+                    <option value="auto" ${(!s.engine || s.engine === "auto") ? "selected" : ""}>自动（在线优先，离线回退，推荐）</option>
+                    <option value="system" ${s.engine === "system" ? "selected" : ""}>仅系统语音（离线，最稳）</option>
                     <option value="youdao" ${s.engine === "youdao" ? "selected" : ""}>仅在线真人音（有道）</option>
-                    <option value="system" ${s.engine === "system" ? "selected" : ""}>仅系统语音（离线）</option>
+                    <option value="edge" ${s.engine === "edge" ? "selected" : ""}>Edge 云端神经音（2024 起公开端点已下线，慎选）</option>
                   </select>
                 </div>
                 <div class="hiword-up-field">

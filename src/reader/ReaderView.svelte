@@ -38,7 +38,7 @@
     shouldUseHighlighter,
   } from "./ink/utils";
   import type { InkStroke, InkPoint } from "./ink/types";
-  // @ts-ignore - foliate-js 为纯 ES 模块 vendor（副作用：注册 foliate-view / foliate-paginator）
+  // @ts-ignore - foliate-js 为纯 ES 模块 vendor（副作用：注册 reword-foliate-view / reword-foliate-paginator / reword-foliate-fxl / reword-foliate-quoteimage）
   import "../reader/vendor/foliate-js/view-light.js";
   import { makeTextBook, isTextBookFile } from "../reader/book-adapters";
   // 脚注检测 + 抽取（scoped 模块，不依赖 foliate vendor 内核）
@@ -251,6 +251,31 @@
   let ttsHighlightOn = DEFAULT_REWORD_TTS.enableHighlight;
   // 朗读设置本地副本（打开设置面板时从 getTtsSettings 同步，修改即写回）
   let ttsCfg: RewordTtsSettings = { ...DEFAULT_REWORD_TTS };
+  // 本机可用嗓音列表（供「中文/英文嗓音」下拉选择）；打开设置面板时刷新
+  let ttsVoices: { uri: string; name: string; lang: string }[] = [];
+  let ttsVoiceListenerBound = false;
+  // 控制条语速滑块防抖持久化定时器（拖动时实时生效，停止后落盘）
+  let rateSaveTimer: ReturnType<typeof setTimeout> | null = null;
+  function loadTtsVoices() {
+    try {
+      const synth =
+        typeof window !== "undefined" && "speechSynthesis" in window
+          ? window.speechSynthesis
+          : null;
+      if (!synth) return;
+      const map = () => {
+        ttsVoices = (synth.getVoices?.() || []).map((v: SpeechSynthesisVoice) => ({
+          uri: v.voiceURI, name: v.name, lang: v.lang,
+        }));
+      };
+      map();
+      // 用 addEventListener 而非 onvoiceschanged，避免覆盖 SystemBackend 的预热监听
+      if (!ttsVoiceListenerBound) {
+        ttsVoiceListenerBound = true;
+        try { synth.addEventListener("voiceschanged", map); } catch { /* 忽略 */ }
+      }
+    } catch { /* 忽略 */ }
+  }
   // 2026-08-27 重设计：双语对照状态与注入句柄
   let bilingualOn = false;
   let bilingualHandle: BilingualHandle | null = null;
@@ -303,6 +328,8 @@
   let footnoteHoverTimer: any = null;
   let footnoteHoverAnchor: any = null; // 当前 hover 触发锚点（<a>），用于去重/收起判定
   let footnotePinned = false;          // 点击锁定的气泡（hover 移开不自动收起，点空白才关）
+  let footnoteLoading = false;         // 抽取中占位（点击/悬停后给即时反馈，避免以为无反应）
+  let footnoteReqToken = 0;            // 异步竞态守卫：快速划过多个脚注时丢弃过期请求
   // 思源主题跟随（auto 模式）
   let siyuanThemeMode: "light" | "dark" = "light";
   let themeObserver: MutationObserver | null = null;
@@ -679,6 +706,48 @@
         view.renderer.setAttribute("turn-style", settings.turnStyle === "default" ? "" : settings.turnStyle);
       } catch (__swallowErr) { logSwallow(__swallowErr, "ReaderView.svelte · applyTurnStyle", "debug"); }
     }
+  }
+
+  // [REword patch 2026-08-29] PDF 显示设置（spread / scroll-direction / 反色）
+  // 仅 PDF 生效；对比「渲染器当前属性」判断是否需应用，避免无关设置变更时重建展开 / 重渲染。
+  function applyPdfViewMode() {
+    if (!isPdfBook() || !view?.renderer?.setAttribute) return
+    const mode = settings.pdfViewMode ?? "single"
+    const spread = mode === "double" ? "both" : mode === "book" ? "portrait" : "none"
+    if (view.renderer.getAttribute("spread") === spread) return
+    try { view.renderer.setAttribute("spread", spread) } catch (__e) { logSwallow(__e, "applyPdfViewMode", "debug") }
+  }
+
+  function applyPdfScrollDir() {
+    if (!isPdfBook() || !view?.renderer?.setAttribute) return
+    if (settings.flow !== "scrolled") return
+    const dir = settings.pdfScrollDir ?? "vertical"
+    if (view.renderer.getAttribute("scroll-direction") === dir) return
+    try { view.renderer.setAttribute("scroll-direction", dir) } catch (__e) { logSwallow(__e, "applyPdfScrollDir", "debug") }
+  }
+
+  // 触发 foliate 重渲染当前页：pageColors 在 onZoom 时读取，setter 本身不重渲染。
+  // 重设 zoom 属性可触发 attributeChangedCallback 无条件 #render()（见 fixed-layout.js:429）。
+  function rerenderPdfPages() {
+    if (!isPdfBook() || !view?.renderer) return
+    try {
+      const r = view.renderer as any
+      const cur = r.getAttribute("zoom")
+      if (cur != null) r.setAttribute("zoom", cur)
+    } catch (__e) { logSwallow(__e, "rerenderPdfPages", "debug") }
+  }
+
+  function applyPdfInvert() {
+    if (!isPdfBook() || !view?.renderer) return
+    const want = !!settings.pdfInvert
+    const r = view.renderer as any
+    const prev = r._rewordPdfInvert ?? false
+    if (prev === want) return
+    r._rewordPdfInvert = want
+    try {
+      r.pageColors = want ? { background: "#000000", foreground: "#ffffff" } : {}
+    } catch (__e) { logSwallow(__e, "applyPdfInvert set", "debug") }
+    rerenderPdfPages()
   }
 
   function fmtPct(frac: number): string {
@@ -1164,11 +1233,11 @@
         type: /epub$/i.test(name) ? "application/epub+zip" : "",
       });
       container.innerHTML = "";
-      const el = document.createElement("foliate-view") as any;
+      const el = document.createElement("reword-foliate-view") as any;
       container.append(el);
       view = el;
       setupAnnotationLayer();
-      console.log("[REword] openBook foliate-view 已挂载", {
+      console.log("[REword] openBook reword-foliate-view 已挂载", {
         containerH: container.clientHeight,
         containerW: container.clientWidth,
         viewTag: el.tagName,
@@ -1246,6 +1315,10 @@
       applyStyles();
       applyFlow();
       applyTurnStyle();
+      // [REword patch 2026-08-29] PDF 显示设置（spread / scroll-direction / 反色）
+      applyPdfViewMode();
+      applyPdfScrollDir();
+      applyPdfInvert();
       // [REword patch 2026-08-29] PDF 缩放：恢复保存的缩放状态
       // saved.zoom 是 per-file 持久化（ReadingProgress.zoom）
       if (isPdfBook()) {
@@ -1547,6 +1620,22 @@
     void view?.goRight?.();
   }
 
+  // [REword patch 2026-08-29] 首尾页直达（对齐 PDF++ 「转到第一页 / 最后」）
+  function goFirstPage() {
+    if (!view) return
+    try { view.goTo(0) } catch (__e) { logSwallow(__e, "goFirstPage", "debug") }
+  }
+
+  function goLastPage() {
+    if (!view) return
+    try {
+      const last = view.book?.sections?.length
+        ? view.book.sections.length - 1
+        : 0
+      view.goTo(last)
+    } catch (__e) { logSwallow(__e, "goLastPage", "debug") }
+  }
+
   /** 箭头按下：立即翻一页 + 长按 450ms 后每 260ms 连翻 */
   function arrowDown(dir: "prev" | "next") {
     if (turnPressed && turnPressed !== dir) {
@@ -1779,6 +1868,9 @@
   /** 单个 wheel 事件的 delta 上限：不同鼠标/驱动的 deltaY 差异极大（几十到几百都有），
    *  不截断的话一格滚轮能直接跳 30%+，手感很突兀。截断后靠连续滚动累积达到目标倍率。 */
   const WHEEL_MAX_DELTA = 60;
+  /** 滚动模式：滚轮停止多久后才提交真实渲染（ms）。
+   *  连续缩放期间靠 CSS transform 预览，停手才真正重绘页面 canvas。 */
+  const SCROLL_ZOOM_COMMIT_DELAY = 180;
 
   function clampPdfZoom(n: number): number {
     if (!isFinite(n) || n <= 0) return 1;
@@ -2077,15 +2169,75 @@
   let wheelAnchorX = 0;
   let wheelAnchorY = 0;
 
+  // 滚动模式专用：pinch 预览状态（机制见 commitScrollWheelZoom 注释）
+  let wheelPinchBase = 1;        // 本轮连续缩放开始时的缩放基准
+  let wheelPinchRatio = 1;       // 累积预览倍数（相对基准）
+  let wheelPinchActive = false;  // 是否处于「已预览、未提交」状态
+  let wheelCommitTimer: any = null;
+
+  /**
+   * 滚动模式：把本轮缩放预览提交为真实渲染 —— 每轮连续缩放只重绘【一次】。
+   * 这是滚动模式流畅度的关键：连续缩放期间不改任何页面，停手才画。
+   */
+  function commitScrollWheelZoom() {
+    wheelCommitTimer = null;
+    const r = view?.renderer as any;
+    if (!wheelPinchActive) return;
+    wheelPinchActive = false;
+    const finalScale = clampPdfZoom(wheelPinchBase * wheelPinchRatio);
+    wheelPinchRatio = 1;
+    if (r) {
+      try {
+        // pinchEnd 快照视口中心页的矩形存进 #pinchAnchor 并清掉 transform；
+        // 紧接着的 applyZoom 触发 #render → #renderScrollMode 用该锚点把页面滚回原位，不跳。
+        if (typeof r.pinchEnd === "function") r.pinchEnd();
+      } catch (__swallowErr) {
+        logSwallow(__swallowErr, "ReaderView.svelte · pinchEnd", "debug");
+      }
+    }
+    applyZoom({ kind: "custom", scale: finalScale }, { silent: true });
+    scheduleZoomPersist();
+  }
+
   /** 真正执行缩放（由 rAF 调用，每帧至多一次） */
   function flushWheelZoom() {
     wheelRafId = null;
     const dy = wheelAccumDy;
     wheelAccumDy = 0;
     if (!dy) return;
+
+    // 滚动模式走 foliate 的 pinch 预览：连续缩放期间【零重绘】。
+    // 滚动模式最多保持 12 页 loaded（#scrollMaxLoaded=12），逐帧提交意味着每帧重绘
+    // 12 页 canvas（每页约 400ms）→ 必然卡顿。预览只改 scrollContainer 的 CSS transform，
+    // 交给 GPU 合成；停手后才由 commitScrollWheelZoom 提交一次真实渲染。
+    if (isScrollFlow()) {
+      const r = view?.renderer as any;
+      if (r && typeof r.pinchZoom === "function") {
+        if (!wheelPinchActive) {
+          wheelPinchBase = readCurrentPdfScale();
+          wheelPinchRatio = 1;
+          wheelPinchActive = true;
+        }
+        const target = clampPdfZoom(
+          wheelPinchBase * wheelPinchRatio * Math.exp(-dy * WHEEL_ZOOM_SENSITIVITY)
+        );
+        wheelPinchRatio = wheelPinchBase > 0 ? target / wheelPinchBase : 1;
+        if (Math.abs(wheelPinchRatio - 1) < 0.0005) return;   // 已到边界
+        try {
+          r.pinchZoom(wheelPinchRatio);
+        } catch (__swallowErr) {
+          logSwallow(__swallowErr, "ReaderView.svelte · pinchZoom", "debug");
+        }
+        if (wheelCommitTimer) clearTimeout(wheelCommitTimer);
+        wheelCommitTimer = setTimeout(commitScrollWheelZoom, SCROLL_ZOOM_COMMIT_DELAY);
+        return;
+      }
+    }
+
+    // 分页模式：只渲染当前 1-2 页，逐帧提交即可，且需要光标锚点
     const base = readCurrentPdfScale();
     const next = clampPdfZoom(base * Math.exp(-dy * WHEEL_ZOOM_SENSITIVITY));
-    logPdfWheel("zoom", { base, next, dy, flow: isScrollFlow() ? "scrolled" : "paginated" });
+    logPdfWheel("zoom", { base, next, dy, flow: "paginated" });
     if (Math.abs(next - base) < 0.0005) return;      // 已到边界
     zoomAtPoint(next, wheelAnchorX, wheelAnchorY);
   }
@@ -2199,6 +2351,19 @@
   function onSetTurnStyle(key: string) {
     settings = settingsStore.update({ turnStyle: key as ReaderSettings["turnStyle"] });
     applyTurnStyle();
+  }
+
+  // [REword patch 2026-08-29] PDF 显示设置：更新后由 settingsStore 订阅回调统一 apply（见上方 subscription）
+  function onSetPdfViewMode(key: string) {
+    settings = settingsStore.update({ pdfViewMode: key as ReaderSettings["pdfViewMode"] });
+  }
+
+  function onSetPdfScrollDir(key: string) {
+    settings = settingsStore.update({ pdfScrollDir: key as ReaderSettings["pdfScrollDir"] });
+  }
+
+  function setPdfInvert(e: Event) {
+    settings = settingsStore.update({ pdfInvert: (e.target as HTMLInputElement).checked });
   }
 
   function setLineHeight(lh: number) {
@@ -2769,7 +2934,7 @@
     //   此前 bug：A/B 都走 RAF 延迟，但 B 路径的 RAF 可能被后续事件链意外取消或竞态吞掉，
     //   导致用户感知"点空白不关闭"。现在 B 路径走同步 closeSelToolbar，可靠即时响应。
     const isFoliateArea = !!(
-      t.closest?.("foliate-view") || (t as any).tagName === "foliate-view"
+      t.closest?.("reword-foliate-view") || (t as any).tagName === "reword-foliate-view"
     );
     const isAnnotationTarget = !!(
       t.closest?.("foliate-highlight") || (t as any).closest?.("[data-annotation]") ||
@@ -2812,6 +2977,9 @@
   // （每项含 { index, doc }），并对 iframe 偏移做坐标换算。
   interface SelRect { left: number; top: number; right: number; bottom: number; }
   interface ReaderSel { text: string; rect: SelRect; index: number; cfi: string | null; range: Range | null; }
+  // 2026-08-29 四向避让：工具栏可置于选区的 上/下/左/右 四个方向，
+  // 优先上下（视线不跳变），上下均无空间时退到右/左（垂直居中于选区），彻底避开选中文本。
+  type ToolbarPlace = "above" | "below" | "left" | "right";
   interface SelToolbarState {
     visible: boolean;
     x: number;
@@ -2819,8 +2987,8 @@
     text: string;
     mode: "create" | "edit";
     editingId: string | null;
-    // 工具栏朝向：true=选区上方（默认），false=选区下方（顶部空间不足时翻下）
-    placeAbove: boolean;
+    // 工具栏朝向：四向避让结果。'above'/ 'below' 视线不跳变优先；'left'/'right' 上下无空间时退避。
+    place: ToolbarPlace;
     // 2026-08-25 readest 风格：第二层样式条（3 样式 + 5 色）是否展开。
     // create 态点「高亮」按钮 toggle 展开；edit 态（点已有高亮）常显。
     stripVisible: boolean;
@@ -2835,7 +3003,7 @@
     ghostCfi?: string | null;
   }
 
-  let selToolbar: SelToolbarState = { visible: false, x: 0, y: 0, text: "", mode: "create", editingId: null, placeAbove: true, stripVisible: false, annId: null, annCfi: null, annStyle: null, annColor: null };
+  let selToolbar: SelToolbarState = { visible: false, x: 0, y: 0, text: "", mode: "create", editingId: null, place: "above", stripVisible: false, annId: null, annCfi: null, annStyle: null, annColor: null };
   // 工具栏 DOM 引用（用于实测高度，替代写死的 44px）+ 实测高度缓存。
   // 首帧用默认 44 兜底，渲染后实测并缓存，后续翻面判断用真实高度，避免高处选区被裁切。
   let selToolbarEl: HTMLElement | null = null;
@@ -2900,13 +3068,13 @@
     labels: { id: string; name: string; color: string }[]; // view 态展示
     styleLabel: string; // 样式中文名（如「直线」）
     styleGlyph: string; // 样式字形（如 ━）
-    placeAbove: boolean; // 2026-08-25：底部空间不足时翻转到选区上方
+    place: ToolbarPlace; // 2026-08-29 四向避让（above|below|left|right），绝不压住选中文本
   } = {
     visible: false, x: 0, y: 0, mode: "create",
     id: null, cfi: "", text: "",
     style: getDefaultAnnotationStyle(), color: getDefaultAnnotationColor(), note: "", group: "未分组",
     time: "", labels: [], styleLabel: "直线", styleGlyph: "━",
-    placeAbove: false,
+    place: "below",
   };
   let noteEditorEl: HTMLElement | null = null;
 
@@ -2925,7 +3093,7 @@
    */
   function closeSelToolbar() {
     cancelPendingClose(); // 关闭时顺带取消延迟关闭（防重复）
-    selToolbar = { visible: false, x: 0, y: 0, text: "", mode: "create", editingId: null, placeAbove: true, stripVisible: false, annId: null, annCfi: null, annStyle: null, annColor: null };
+    selToolbar = { visible: false, x: 0, y: 0, text: "", mode: "create", editingId: null, place: "above", stripVisible: false, annId: null, annCfi: null, annStyle: null, annColor: null };
     selInfo = null;
     activeAnnId = null;
     activeAnnCfi = null;
@@ -3057,13 +3225,65 @@
    *    故锚点 y 直接取选区上沿-gap（上方）或下沿+gap（下方），无需手算整体高度。
    *  - 2026-08-25 优化：动态获取导航栏/底栏实际高度，确保工具栏不与两者重叠；
    *    上方空间不足时自动翻到下方，反之亦然。 */
+  /**
+   * 2026-08-29 四向避让核心：给定选区矩形与工具栏尺寸，返回最佳放置方向与锚点（视口坐标）。
+   * 避让目标 = 选中文本自身（绝不压住选区），并受导航栏/底栏/视口约束。
+   *   优先级：优先上下（视线不跳变，按选区在可读区中部上下偏好），
+   *           上下均无空间 → 退到右/左（垂直居中于选区，仅当整条工具栏能容纳于视口内）。
+   *   四方向皆无空间（极端小窗口）→ 选溢出最小者，交由 refineToolbarPlacement 兜底夹紧。
+   * 返回的 anchor 即 selToolbar.(x,y) 对应的视口锚点：
+   *   above → 选区上沿 - gap（工具栏底部贴此，CSS translate(-50%,-100%)）
+   *   below → 选区下沿 + gap（工具栏顶部贴此，CSS translate(-50%,0)）
+   *   left  → 选区左沿 - gap、垂直居中（CSS translate(-100%,-50%)）
+   *   right → 选区右沿 + gap、垂直居中（CSS translate(0,-50%)）
+   */
+  function toolbarPlacement(
+    rect: SelRect, h: number, w: number,
+    navBottom: number, bottomTop: number, viewW: number, gap: number
+  ): { place: ToolbarPlace; anchorX: number; anchorY: number } {
+    const midX = (rect.left + rect.right) / 2;
+    const selCenterY = (rect.top + rect.bottom) / 2;
+    const PAD = 8;
+    // 侧放时整条工具栏需垂直居中于选区且不越导航/底栏
+    const vFit = (selCenterY - h / 2) >= navBottom && (selCenterY + h / 2) <= bottomTop;
+    const roomAbove = (rect.top - gap - h) >= navBottom;
+    const roomBelow = (rect.bottom + gap + h) <= bottomTop;
+    const roomLeft = vFit && (rect.left - gap - w) >= PAD;
+    const roomRight = vFit && (rect.right + gap + w) <= (viewW - PAD);
+    const readableCenter = (navBottom + bottomTop) / 2;
+    const preferBelow = selCenterY < readableCenter; // 选区在上半部 → 优先下方
+
+    let place: ToolbarPlace;
+    if (preferBelow && roomBelow) place = "below";
+    else if (!preferBelow && roomAbove) place = "above";
+    else if (roomAbove) place = "above";
+    else if (roomBelow) place = "below";
+    else if (roomRight) place = "right";
+    else if (roomLeft) place = "left";
+    else {
+      // 四向皆无足够空间：选溢出最小者（best-effort），refine 再做最终夹紧
+      const oA = Math.max(0, navBottom - (rect.top - gap - h));
+      const oB = Math.max(0, (rect.bottom + gap + h) - bottomTop);
+      const oL = Math.max(0, PAD - (rect.left - gap - w));
+      const oR = Math.max(0, (rect.right + gap + w) - (viewW - PAD));
+      const cand: [ToolbarPlace, number][] = [["above", oA], ["below", oB], ["right", oR], ["left", oL]];
+      cand.sort((a, b) => a[1] - b[1]);
+      place = cand[0][0];
+    }
+
+    let anchorX = midX, anchorY = selCenterY;
+    if (place === "above") anchorY = rect.top - gap;
+    else if (place === "below") anchorY = rect.bottom + gap;
+    else if (place === "left") anchorX = rect.left - gap;
+    else anchorX = rect.right + gap; // right
+    return { place, anchorX, anchorY };
+  }
+
   function positionToolbarAbove(rect: SelRect, text: string, mode: "create" | "edit", editingId: string | null) {
     cancelPendingClose(); // 选区触发 → 取消延迟关闭
     lastSelRect = rect; // 保存选区矩形，供批注编辑器定位使用
-    const viewW = readerViewEl?.clientWidth ?? window.innerWidth;
-    const midX = (rect.left + rect.right) / 2;
-    // gap：工具栏与选区之间的最小间距。下方模式时 CSS 小三角(::after) 从工具栏顶部往上延伸 7px 指向选区。
     const gap = 12;
+    const viewW = readerViewEl?.clientWidth ?? window.innerWidth;
     // 导航栏/底栏取其在视口中的真实下沿/上沿，与 rect（视口坐标）同基准比较。
     const navBarEl = readerViewEl?.querySelector<HTMLElement>(".reader-toolbar");
     const bottomBarEl = readerViewEl?.querySelector<HTMLElement>(".reader-bottom-bar");
@@ -3072,49 +3292,24 @@
     // 预估有效高度：edit 态或样式条展开时含整条浮层（主栏+样式条+颜色条），否则仅主栏。
     const stripShown = mode === "edit" || selToolbar.stripVisible;
     const effH = stripShown ? TOOLBAR_WITH_STRIP_H : TOOLBAR_BAR_ONLY_H;
-    // ★ 2026-08-26 优化：根据选区在视口中的垂直位置智能选择上下方向，
-    //   避免工具栏遮挡选区文字。此前固定偏好上方 → 选区在上半部时工具栏仍压住上方文字。
-    const readableCenter = (navBottom + bottomTop) / 2;
-    const selCenterY = (rect.top + rect.bottom) / 2;
-    const preferBelow = selCenterY < readableCenter; // 选区在上半部 → 优先放下方
-    const roomAbove = (rect.top - gap - effH) >= navBottom;
-    const roomBelow = (rect.bottom + gap + effH) <= bottomTop;
-    // 决策优先级：偏好方向有空间 → 用偏好；否则用另一个方向有空间 → 翻转；都没有 → 用偏好（让 fixToolbarPlacement 兜底强推）。
-    let above: boolean;
-    if (preferBelow && roomBelow) above = false;
-    else if (!preferBelow && roomAbove) above = true;
-    else if (roomAbove) above = true;
-    else if (roomBelow) above = false;
-    else above = !preferBelow; // 都没空间，反向尝试（fixToolbarPlacement 会做最终校正）
-    // 计算锚点 Y（视口坐标），再转容器坐标
-    // CSS transform: 上方模式 translate(-50%, -100%) 让底部对齐锚点；
-    //   下方模式 .place-below 的 translate(-50%, 0) 让顶部对齐锚点。
-    let top = above ? rect.top - gap : rect.bottom + gap;
-    const c = toContainerCoords(midX, top);
-    // 边界校正：上方模式且工具栏会压导航栏 → 强制翻到下方
-    // ★ 坐标系修正：c.y 是容器坐标，navBottom 是视口坐标，必须先转容器坐标再比。
-    //   原代码直接用 c.y < navBottom 比较（基准不一致）→ 可能误判/漏判导致翻面失败，工具栏压导航栏。
-    const navBottomC = navBottom - (readerViewEl?.getBoundingClientRect().top ?? 0);
-    if (above && c.y < navBottomC && rect) {
-      const cBelow = toContainerCoords(midX, rect.bottom + gap);
-      selToolbar = { visible: true, x: cBelow.x, y: cBelow.y, text, mode, editingId, placeAbove: false, stripVisible: selToolbar.stripVisible };
-    } else {
-      selToolbar = { visible: true, x: c.x, y: c.y, text, mode, editingId, placeAbove: above, stripVisible: selToolbar.stripVisible };
-    }
-    // 渲染后实测真实几何：用实测盒模型与选区矩形做重叠检测，彻底消除「压住文字」问题。
+    // 工具栏宽度首帧无实测值 → 用上次实测/兜底估计，refine 会用真实宽度校正。
+    const effW = selToolbarEl?.getBoundingClientRect().width || (stripShown ? 420 : 380);
+    // ★ 2026-08-29 四向避让：算最佳方向 + 锚点，绝不压住选中文本。
+    const { place, anchorX, anchorY } = toolbarPlacement(rect, effH, effW, navBottom, bottomTop, viewW, gap);
+    const c = toContainerCoords(anchorX, anchorY);
+    selToolbar = { visible: true, x: c.x, y: c.y, text, mode, editingId, place, stripVisible: selToolbar.stripVisible };
     if (DEBUG_READER) {
       console.log("[REword][pos] positionToolbarAbove", {
         mode, editingId,
         rect: { top: Math.round(rect.top), bottom: Math.round(rect.bottom), left: Math.round(rect.left), right: Math.round(rect.right) },
-        gap, effH, selCenterY: Math.round(selCenterY), readableCenter: Math.round(readableCenter),
-        preferBelow, roomAbove, roomBelow, above,
-        calcTop: Math.round(top),
+        gap, effH, effW, place,
+        anchor: { x: Math.round(anchorX), y: Math.round(anchorY) },
         navBottom: Math.round(navBottom), bottomTop: Math.round(bottomTop),
         toContainer: { x: Math.round(c.x), y: Math.round(c.y) },
-        final: { x: Math.round(selToolbar.x), y: Math.round(selToolbar.y), placeAbove: selToolbar.placeAbove, stripVisible: selToolbar.stripVisible },
+        final: { x: Math.round(selToolbar.x), y: Math.round(selToolbar.y), place: selToolbar.place, stripVisible: selToolbar.stripVisible },
       });
     }
-    void fixToolbarPlacement(rect, midX, gap, selToolbar.placeAbove);
+    void fixToolbarPlacement(rect, gap);
   }
 
   /**
@@ -3128,7 +3323,7 @@
    *   - 上方模式：锚点 = 工具栏底部应在的视口 Y（CSS -100% 后底部恰好在此）
    *   - 下方模式：锚点 = 工具栏顶部应在的视口 Y（CSS 0% 后顶部恰好在此）
    */
-  async function fixToolbarPlacement(rect: SelRect, midX: number, gap: number, above: boolean) {
+  async function fixToolbarPlacement(rect: SelRect, gap: number) {
     try {
       await tick();
       const el = selToolbarEl;
@@ -3139,10 +3334,9 @@
       if (h > 0) toolbarH = h;
       if (DEBUG_READER) {
         console.log("[REword][fix] 实测", {
-          above,
-          box: { t: Math.round(box.top), b: Math.round(box.bottom), h: Math.round(h), w: Math.round(w) },
-          rect: { t: Math.round(rect.top), b: Math.round(rect.bottom) },
-          spacing: above ? Math.round(rect.top - box.bottom) : Math.round(box.top - rect.bottom),
+          place: selToolbar.place,
+          box: { t: Math.round(box.top), b: Math.round(box.bottom), l: Math.round(box.left), r: Math.round(box.right), h: Math.round(h), w: Math.round(w) },
+          rect: { t: Math.round(rect.top), b: Math.round(rect.bottom), l: Math.round(rect.left), r: Math.round(rect.right) },
         });
       }
       const viewW = readerViewEl?.clientWidth ?? window.innerWidth;
@@ -3150,47 +3344,69 @@
       const bottomBarEl = readerViewEl?.querySelector<HTMLElement>(".reader-bottom-bar");
       const navBottom = navBarEl ? navBarEl.getBoundingClientRect().bottom : 40;
       const bottomTop = bottomBarEl ? bottomBarEl.getBoundingClientRect().top : (window.innerHeight - 36);
-      // 水平夹紧
-      if (w > 0) {
-        const half = w / 2 + 4;
-        const clampedX = Math.min(Math.max(selToolbar.x, half), Math.max(half, viewW - half));
-        if (clampedX !== selToolbar.x) selToolbar = { ...selToolbar, x: clampedX };
-      }
+      const midX = (rect.left + rect.right) / 2;
+      const selCenterY = (rect.top + rect.bottom) / 2;
       const MIN_GAP = 10;
-      let anchorY: number; // 视口坐标的锚点
-      let newAbove = above;
-      if (above) {
-        const spacing = rect.top - box.bottom; // 正=有间距
-        if (spacing >= MIN_GAP && box.top >= navBottom) return; // 位置正确
-        const roomBelow = (bottomTop - rect.bottom) >= (h + MIN_GAP);
-        if (roomBelow && spacing < MIN_GAP) {
-          anchorY = rect.bottom + gap; newAbove = false; // 翻到下方
-        } else if (box.top < navBottom) {
-          anchorY = navBottom; newAbove = true; // 贴导航栏
+      const PAD = 8;
+      const place = selToolbar.place;
+      // 依据当前方向重算锚点（视口坐标）
+      let anchorX = midX, anchorY = selCenterY;
+      if (place === "above") anchorY = rect.top - gap;
+      else if (place === "below") anchorY = rect.bottom + gap;
+      else if (place === "left") anchorX = rect.left - gap;
+      else anchorX = rect.right + gap; // right
+
+      let newPlace = place;
+      if (place === "above" || place === "below") {
+        // 水平夹紧（按中心）
+        if (w > 0) {
+          const half = w / 2 + PAD;
+          const clampedX = Math.min(Math.max(anchorX, half), Math.max(half, viewW - half));
+          if (clampedX !== anchorX) anchorX = clampedX;
+        }
+        const spacing = place === "above" ? (rect.top - box.bottom) : (box.top - rect.bottom);
+        const withinBars = place === "above" ? (box.top >= navBottom) : (box.bottom <= bottomTop);
+        if (spacing >= MIN_GAP && withinBars) {
+          // 位置正确，无需校正
         } else {
-          anchorY = rect.top - MIN_GAP; newAbove = true; // 强推：底部=选区顶-MIN_GAP
+          const other = place === "above" ? "below" : "above";
+          const roomOther = other === "above"
+            ? (rect.top - gap - h) >= navBottom
+            : (rect.bottom + gap + h) <= bottomTop;
+          if (roomOther) {
+            newPlace = other;
+            anchorY = other === "above" ? (rect.top - gap) : (rect.bottom + gap);
+          } else if (place === "above" && box.top < navBottom) {
+            anchorY = navBottom + h; newPlace = "above"; // 贴导航栏下沿
+          } else if (place === "below" && box.bottom > bottomTop) {
+            anchorY = bottomTop - h; newPlace = "below"; // 贴底栏上沿
+          } else {
+            anchorY = place === "above" ? (rect.top - MIN_GAP) : (rect.bottom + MIN_GAP);
+            newPlace = place;
+          }
         }
       } else {
-        const spacing = box.top - rect.bottom;
-        if (spacing >= MIN_GAP && box.bottom <= bottomTop) return;
-        const roomAbove = (rect.top - navBottom) >= (h + MIN_GAP);
-        if (roomAbove && spacing < MIN_GAP) {
-          anchorY = rect.top - gap; newAbove = true; // 翻到上方
-        } else if (box.bottom > bottomTop) {
-          anchorY = bottomTop; newAbove = false; // 贴底栏
+        // 左/右：垂直居中并夹在导航栏/底栏之间；水平夹在视口内
+        const halfH = h / 2 + PAD;
+        if (anchorY - halfH < navBottom) anchorY = navBottom + halfH;
+        else if (anchorY + halfH > bottomTop) anchorY = bottomTop - halfH;
+        if (place === "left") {
+          const minAnchorX = PAD + w; // 工具栏右沿(=anchorX)须 >= PAD+w，整条在视口内
+          if (anchorX < minAnchorX) anchorX = minAnchorX;
         } else {
-          anchorY = rect.bottom + MIN_GAP; newAbove = false; // 强推：顶部=选区底+MIN_GAP
+          const maxAnchorX = viewW - PAD; // 工具栏左沿(=anchorX)须 <= viewW-PAD
+          if (anchorX > maxAnchorX) anchorX = maxAnchorX;
         }
+        newPlace = place;
       }
-      const c = toContainerCoords(midX, anchorY);
-      selToolbar = { ...selToolbar, y: c.y, placeAbove: newAbove };
+      const c = toContainerCoords(anchorX, anchorY);
+      selToolbar = { ...selToolbar, x: c.x, y: c.y, place: newPlace };
       if (DEBUG_READER) {
         void tick().then(() => {
           const a = el?.getBoundingClientRect();
           console.log("[REword][fix] 校正后", {
-            newAbove, anchorY: Math.round(anchorY), cy: Math.round(c.y),
-            actual: a ? { t: Math.round(a.top), b: Math.round(a.bottom) } : null,
-            gap: newAbove ? Math.round(rect.top - (a?.bottom ?? 0)) : Math.round((a?.top ?? 0) - rect.bottom),
+            newPlace, anchorX: Math.round(anchorX), anchorY: Math.round(anchorY), cx: Math.round(c.x), cy: Math.round(c.y),
+            actual: a ? { t: Math.round(a.top), b: Math.round(a.bottom), l: Math.round(a.left), r: Math.round(a.right) } : null,
           });
         });
       }
@@ -3218,41 +3434,49 @@
   }
 
   /**
-   * 统一浮层（批注编辑器 / 查看卡）定位：锚定选区 + 四向避让 + 水平夹紧。
+   * 统一浮层（批注编辑器 / 查看卡）定位：锚定选区 + 四向避让 + 边界夹紧。
    * 替代此前分散在 editorPosition / openNoteEditor / showViewerForRec 的三套重复逻辑。
    * 机制（参考 readest / Weave 的 popover 思路）：
-   *   - 锚点 X：传入矩形水平中心。create 态 rect 来自选区末端 clientRect（readReaderSelection
-   *     已用末端，跟手）；view 态 rect 来自点击高亮的 bbox（用中心，符合「点哪亮哪」）。
-   *   - 默认下方（readest 风格，视线不跳变）；底部空间 < 预估高度 → 翻到上方。
-   *   - 水平方向始终夹紧在 reader-view 容器内（预留 padding），避免弹窗一半溢出视口
-   *     或被侧栏/右边界遮挡（这是此前批注窗「位置不佳」的主因——缺水平夹紧）。
+   *   - 复用工具栏同款 toolbarPlacement 纯函数决策 上/下/左/右 四向，绝不压住选中文本，
+   *     同时避让导航栏 / 底栏 / 视口边界。
+   *   - 锚点：above=选区上沿-gap（CSS translate(-50%,-100%)）、below=下沿+gap、
+   *     left=左沿-gap 垂直居中（translate(-100%,-50%)）、right=右沿+gap 垂直居中（translate(0,-50%)）。
+   *   - 上下两向额外做水平夹紧；左右两向额外做垂直夹紧，确保弹窗完整可见。
    * @param rect 选区/高亮矩形（视口坐标，已含 iframe 帧偏移）
    * @param popupW 弹窗宽度 px（必须与 CSS .reader-note-editor width 一致，含 padding）
-   * @param popupH 弹窗预估高度 px（用于上下空间判定）
+   * @param popupH 弹窗预估高度 px（用于左右空间判定）
    */
-  function positionPopupNear(rect: SelRect | null | undefined, popupW: number, popupH: number): { x: number; y: number; placeAbove: boolean } {
+  function positionPopupNear(rect: SelRect | null | undefined, popupW: number, popupH: number): { x: number; y: number; place: ToolbarPlace } {
     if (!rect) {
       // 无矩形（C 跳转后）：顶部居中（下方展开，不被顶栏遮挡）
-      return { x: (readerViewEl?.clientWidth ?? window.innerWidth) / 2, y: 80, placeAbove: false };
+      return { x: (readerViewEl?.clientWidth ?? window.innerWidth) / 2, y: 80, place: "below" };
     }
     const gap = 8;
     const padding = 8;
     const viewW = readerViewEl?.clientWidth ?? window.innerWidth;
-    const viewH = readerStageEl?.clientHeight ?? readerViewEl?.clientHeight;
-    const rel = rectToViewRel(rect); // 内容区相对坐标，用于上下空间判定（避开导航栏/底栏）
-    const anchorX = (rect.left + rect.right) / 2; // 水平中心
-    // 上下空间判定：底部剩余空间不足以容纳弹窗高度 → 翻到上方
-    const roomBelow = (rel.bottom + gap + popupH) <= viewH;
-    const placeAbove = !roomBelow;
-    const anchorY = placeAbove ? (rect.top - gap) : (rect.bottom + gap);
-    const c = toContainerCoords(anchorX, anchorY);
-    // 水平夹紧：弹窗以 x 为中心（CSS translate(-50%,...)），需保证
-    // [x - popupW/2, x + popupW/2] ⊆ [padding, viewW - padding]，不溢出/不压侧栏
-    const half = popupW / 2 + padding;
-    const minX = half;
-    const maxX = Math.max(half, viewW - half);
-    const clampedX = Math.min(Math.max(c.x, minX), maxX);
-    return { x: clampedX, y: c.y, placeAbove };
+    // 导航栏/底栏取其在视口中的真实下沿/上沿，与 rect（视口坐标）同基准比较。
+    const navBarEl = readerViewEl?.querySelector<HTMLElement>(".reader-toolbar");
+    const bottomBarEl = readerViewEl?.querySelector<HTMLElement>(".reader-bottom-bar");
+    const navBottom = navBarEl ? navBarEl.getBoundingClientRect().bottom : 40;
+    const bottomTop = bottomBarEl ? bottomBarEl.getBoundingClientRect().top : (window.innerHeight - 36);
+    // 2026-08-29 四向避让：复用工具栏同款决策（绝不压住选中文本 + 避让导航/底栏）。
+    const { place, anchorX, anchorY } = toolbarPlacement(rect, popupH, popupW, navBottom, bottomTop, viewW, gap);
+    let c = toContainerCoords(anchorX, anchorY);
+    if (place === "above" || place === "below") {
+      // 水平夹紧：弹窗以 x 为中心（CSS translate(-50%,...)），保证不溢出/不压侧栏
+      const half = popupW / 2 + padding;
+      const minX = half;
+      const maxX = Math.max(half, viewW - half);
+      c.x = Math.min(Math.max(c.x, minX), maxX);
+    } else {
+      // 左右：垂直居中于选区，夹紧 y 使弹窗不越导航/底栏
+      const half = popupH / 2 + padding;
+      const minY = navBottom + half;                 // 视口坐标
+      const maxY = Math.max(minY, bottomTop - half); // 视口坐标
+      const clampedAnchorY = Math.min(Math.max(anchorY, minY), maxY);
+      c = toContainerCoords(anchorX, clampedAnchorY);
+    }
+    return { x: c.x, y: c.y, place };
   }
 
   /** 根据标注记录填充并弹「简易预览卡」（preview 态）。
@@ -3271,18 +3495,17 @@
     const group = stored?.group ?? "未分组";
     const time = fmtTime(stored?.updatedAt || stored?.createdAt);
     const labels = resolveLabels(stored?.labels);
-    // 统一用 positionPopupNear（锚定 + 四向避让 + 水平夹紧）。preview 态预估高度 160。
+    // 统一用 positionPopupNear（锚定 + 四向避让 + 水平/垂直夹紧）。preview 态预估高度 160。
     const pos = rect
       ? positionPopupNear(rect, 268, 160)
-      : { x: (readerViewEl?.clientWidth ?? window.innerWidth) / 2, y: 80, placeAbove: false };
-    const placeAbove = pos.placeAbove;
+      : { x: (readerViewEl?.clientWidth ?? window.innerWidth) / 2, y: 80, place: "below" as ToolbarPlace };
     const annStyle = ANNOTATION_STYLES[style] || { label: "直线", icon: "━" };
     noteEditor = {
       visible: true, x: pos.x, y: pos.y, mode: "preview",
       id: rec.id, cfi: rec.cfi,
       text, note, style, color, group, time, labels,
       styleLabel: annStyle.label, styleGlyph: annStyle.icon,
-      placeAbove,
+      place: pos.place,
     };
   }
 
@@ -3311,26 +3534,22 @@
     const bottomBarEl = readerViewEl?.querySelector<HTMLElement>(".reader-bottom-bar");
     const navBottom = navBarEl ? navBarEl.getBoundingClientRect().bottom : 40;
     const bottomTop = bottomBarEl ? bottomBarEl.getBoundingClientRect().top : (window.innerHeight - 36);
-    // 2026-08-26 修复：不再减 effH！CSS transform: translateY(-100%) 已把工具栏向上偏移自身高度，
-    // JS 只需传「锚点 Y」（上方=选区顶-gap，下方=选区底+gap）。此前减 effH 导致双重偏移，
-    // 样式条被推到 .reader-floating-layer 的 inset:0 边界外而不可见。
+    // 2026-08-29 四向避让：edit 态含样式条+颜色条（更高更宽），用 toolbarPlacement 统一决策上/下/左/右。
     const gap = 12;
-    const TOOLBAR_H_EST = TOOLBAR_WITH_STRIP_H; // 仅用于判断上下空间是否足够
-    const roomAbove = rect ? (rect.top - gap - TOOLBAR_H_EST) >= navBottom : true;
-    const above = rect ? (roomAbove ? true : (rect.bottom + gap + TOOLBAR_H_EST) <= bottomTop ? false : true) : true;
-    // 锚点 Y：上方模式→选区顶部上方 gap 处（CSS -100% 后工具栏底部恰好在此）
-    //        下方模式→选区底部下方 gap 处（CSS place-below 的 translate(0) 后工具栏顶部恰好在此）
-    const anchorY = above ? (rect ? rect.top - gap : 80) : (rect ? rect.bottom + gap : 80);
-    const c = toContainerCoords(midX, anchorY);
+    const effH = TOOLBAR_WITH_STRIP_H;
+    const effW = selToolbarEl?.getBoundingClientRect().width || 420;
+    const fallbackRect: SelRect = rect ?? { left: midX, top: 80, right: midX, bottom: 80 };
+    const { place, anchorX, anchorY } = toolbarPlacement(fallbackRect, effH, effW, navBottom, bottomTop, viewW, gap);
+    const c = toContainerCoords(anchorX, anchorY);
     selToolbar = {
       visible: true, x: c.x, y: c.y,
       text: stored?.selectedText ?? "", mode: "edit",
-      editingId: rec.id, placeAbove: above,
+      editingId: rec.id, place,
       stripVisible: true,   // 样式条展开
       annId: rec.id, annCfi: rec.cfi, annStyle: style, annColor: color,
     };
     // 渲染后实测校正，确保不压选区
-    void fixToolbarPlacement(rect ?? { left: midX, top: anchorY, right: midX, bottom: (rect?.bottom ?? anchorY) } as SelRect, midX, gap, above);
+    void fixToolbarPlacement(fallbackRect, gap);
   }
 
   /**
@@ -3347,15 +3566,14 @@
     lastStyle = style; lastColor = color; // 同步偏好，供「高亮」复用
     const pos = rect
       ? positionPopupNear(rect, 268, 120)
-      : { x: (readerViewEl?.clientWidth ?? window.innerWidth) / 2, y: 80, placeAbove: false };
-    const placeAbove = pos.placeAbove;
+      : { x: (readerViewEl?.clientWidth ?? window.innerWidth) / 2, y: 80, place: "below" as ToolbarPlace };
     const annStyle = ANNOTATION_STYLES[style] || { label: "直线", icon: "━" };
     noteEditor = {
       visible: true, x: pos.x, y: pos.y, mode: "highlight",
       id: rec.id, cfi: rec.cfi,
       text: "", note: "", style, color, group: stored?.group ?? "未分组", time: "",
       labels: [], styleLabel: annStyle.label, styleGlyph: annStyle.icon,
-      placeAbove,
+      place: pos.place,
     };
   }
 
@@ -3379,7 +3597,7 @@
 
   /** 关闭统一批注浮层 */
   function closeNoteEditor() {
-    noteEditor = { ...noteEditor, visible: false, mode: "create", id: null, placeAbove: false };
+    noteEditor = { ...noteEditor, visible: false, mode: "create", id: null, place: "below" };
   }
 
   /** 通知侧边栏：阅读器内标注数据已变更（新增/更新/删除），需重新渲染 */
@@ -3696,7 +3914,7 @@
   function onRelocate() {
     dbgHud.relocateCalls++;
     if (selToolbar.visible) closeSelToolbar();
-    if (noteEditor.visible) noteEditor = { ...noteEditor, visible: false, mode: "create", id: null, placeAbove: false };
+    if (noteEditor.visible) noteEditor = { ...noteEditor, visible: false, mode: "create", id: null, place: "below" };
     if (showFootnote) closeFootnote();
     if (dictPopup.visible) dictPopup = { ...dictPopup, visible: false };
     // 2026-08-26 退回 foliate 原生：高亮归 foliate 的 overlayer 管理，随 iframe 持久存在，
@@ -3719,50 +3937,63 @@
     if (!isFootnoteRef(a)) return; // 非脚注：不拦截，foliate 默认 goTo
     // 是脚注：阻止跳转
     e.preventDefault();
-    // 点击锁定：hover 移开也不自动收起，点空白（onContainerMouseDown）才关
-    footnotePinned = true;
     clearTimeout(footnoteHoverTimer);
     footnoteHoverAnchor = a;
-    await showFootnoteFor(a, href);
+    await showFootnoteFor(a, href, { pin: true });
   }
 
-  /** 抽取脚注内容并弹气泡（点击 / 悬停共用）。坐标转换对齐工具栏已验证管线。 */
-  async function showFootnoteFor(a: any, href: string) {
+  /** 抽取脚注内容并弹气泡（点击 / 悬停共用）。
+   *  - opts.pin：点击触发时锁定气泡（hover 移开不自动收起，点空白才关）；
+   *  - 已显示同一锚点时仅更新锁定态、不重抽（避免抖动与重复 IO）；
+   *  - footnoteReqToken 防竞态：快速划过多个脚注时，过期请求的异步结果被丢弃。 */
+  async function showFootnoteFor(a: any, href: string, opts?: { pin?: boolean }) {
     if (!a || !href) return;
     if (!isFootnoteRef(a)) return; // 非脚注：不拦截，foliate 默认 goTo
+    // 点击已显示的同一脚注：仅更新锁定态，不重抽（避免抖动/重复 IO）
+    if (showFootnote && footnoteHoverAnchor === a) {
+      footnotePinned = opts?.pin ?? footnotePinned;
+      return;
+    }
+    const myToken = ++footnoteReqToken; // 作废任何在途旧请求
+    footnoteHoverAnchor = a;
+    footnotePinned = opts?.pin ?? false;
+    footnoteLoading = true;
+    showFootnote = true; // 立即显示 loading 占位气泡（抽取可能异步），给即时反馈
+    await tick();
+    // ===== 坐标转换（完全对齐工具栏已验证管线）=====
+    // a 在 iframe 内容文档内，getBoundingClientRect() 返回 iframe 视口坐标
+    // 需加 frameElement 偏移 → 主文档视口坐标 → toContainerCoords → 容器绝对定位坐标
+    const r = a.getBoundingClientRect();
+    let vx = r.left, vy = r.top, vr = r.right, vb = r.bottom;
+    const win = a.ownerDocument?.defaultView;
+    if (win) {
+      const frame = (win as any).frameElement as HTMLElement | null;
+      if (frame) {
+        const fr = frame.getBoundingClientRect();
+        vx += fr.left; vy += fr.top; vr += fr.left; vb += fr.top;
+      }
+    }
+    // 用脚注号**水平中心**作为锚点（比左上角更自然）
+    const anchorX = (vx + vr) / 2;
+    const anchorY = vy; // 气泡默认在脚注号下方弹出
+    positionFootnoteBubble(anchorX, anchorY, r.width, r.height); // 估算高度先定位（loading 占位较小）
     try {
       const result = await extractFootnote(view?.book, href);
+      if (myToken !== footnoteReqToken) return; // 已有更新的请求，丢弃本条过期结果
       if (!result.html) {
         // 抽取失败：降级放行（回退为普通跳转）
         toast("脚注内容获取失败，将跳转到原位置");
+        closeFootnote();
         return;
       }
       footnoteHTML = result.html;
       footnoteType = result.type;
-      // ===== 坐标转换（完全对齐工具栏已验证管线）=====
-      // a 在 iframe 内容文档内，getBoundingClientRect() 返回 iframe 视口坐标
-      // 需加 frameElement 偏移 → 主文档视口坐标 → toContainerCoords → 容器绝对定位坐标
-      const r = a.getBoundingClientRect();
-      let vx = r.left, vy = r.top, vr = r.right, vb = r.bottom;
-      const win = a.ownerDocument?.defaultView;
-      if (win) {
-        const frame = (win as any).frameElement as HTMLElement | null;
-        if (frame) {
-          const fr = frame.getBoundingClientRect();
-          vx += fr.left; vy += fr.top; vr += fr.left; vb += fr.top;
-        }
-      }
-      // 用脚注号**水平中心**作为锚点（比左上角更自然）
-      const anchorX = (vx + vr) / 2;
-      const anchorY = vy; // 气泡默认在脚注号下方弹出
-
-      // ★ 关键：先让 Svelte 创建 DOM 元素，再定位（否则 querySelector 返回 null）
-      showFootnote = true;
-      await tick(); // 等 .reader-footnote 挂载到 DOM
-      positionFootnoteBubble(anchorX, anchorY, r.width, r.height);
-      // 二次校正：实测真实高度后避免溢出
+      footnoteLoading = false;
+      // 内容到达后校正定位（按真实高度避免溢出）
       requestAnimationFrame(() => refineFootnotePosition(anchorX, anchorY, r.height));
     } catch (err) {
+      if (myToken !== footnoteReqToken) return;
+      footnoteLoading = false;
       console.warn("[REword] 脚注展示失败:", err);
       toast("脚注展示异常");
     }
@@ -3869,9 +4100,7 @@
     const gap = 6;
     const actualH = el.offsetHeight;
     const stageOff = getStageOffset();
-    // 当前 style.top 是容器绝对定位坐标，转回内容区相对坐标做判定
-    const relTop = parseFloat(el.style.top) - stageOff.top + (readerViewEl?.getBoundingClientRect().top ?? 0);
-    // 简化：直接用容器的 getBoundingClientRect 反算内容区相对坐标
+    // 直接用容器的 getBoundingClientRect 反算内容区相对坐标做判定
     const elRect = el.getBoundingClientRect();
     const relY = elRect.top - stageOff.top;
     const placeAbove = el.dataset.placeAbove === "true";
@@ -3901,9 +4130,11 @@
   }
 
   function closeFootnote() {
+    footnoteReqToken++; // 作废在途抽取请求，避免关闭后旧结果回填气泡
     showFootnote = false;
     footnoteHTML = "";
     footnoteType = "脚注";
+    footnoteLoading = false;
     footnoteHoverAnchor = null;
     footnotePinned = false;
     if (footnoteHoverTimer) clearTimeout(footnoteHoverTimer);
@@ -4078,7 +4309,7 @@
       const cx = (readerViewEl?.clientWidth ?? window.innerWidth) / 2;
       // 2026-08-25 修复：ghost 分支也必须带上 cfi，否则 applyEditStyle/Color 拿不到定位键 → 样式改不了。
       // foliate 以 CFI 标识标注，无需数据库 id 即可重绘。
-      selToolbar = { visible: true, x: cx, y: 80, text: "", mode: "edit", editingId: null, placeAbove: true, ghostCfi: value, annCfi: value };
+      selToolbar = { visible: true, x: cx, y: 80, text: "", mode: "edit", editingId: null, place: "above", ghostCfi: value, annCfi: value };
       selInfo = { index: -1, cfi: value, range: null };
       // 2026-08-24 根治：残留高亮只有视觉、无数据记录，缓存 cfi 供 onClearGhostHighlight 使用
       activeAnnId = null;
@@ -4226,7 +4457,7 @@
     selToolbar = { ...selToolbar, stripVisible: !selToolbar.stripVisible };
     // 2026-08-25 修复：样式条展开/收起会改变浮层总高（约 +68px），必须重算位置，
     // 否则工具栏仍以旧高度定位、溢出压住选区文字。用实测几何做重叠校正。
-    if (lastSelRect) void fixToolbarPlacement(lastSelRect, (lastSelRect.left + lastSelRect.right) / 2, 8, selToolbar.placeAbove);
+    if (lastSelRect) void fixToolbarPlacement(lastSelRect, 8);
   }
 
   // 样式条中点击「样式/颜色」→ 用该组合一步创建高亮（create 态）。
@@ -4264,13 +4495,13 @@
     const text = selToolbar.text?.trim();
     const cfi = selInfo?.cfi;
     if (!text || !cfi) { toast("请先选中文本"); return }
-    // 定位：统一用 positionPopupNear（锚定选区末端 + 四向避让 + 水平夹紧）。
+    // 定位：统一用 positionPopupNear（锚定选区末端 + 四向避让 + 边界夹紧）。
     // 优先用已保存的选区矩形（lastSelRect 已是选区末端 clientRect，跟手）；
     // 极端情况无 rect 时兜底用工具栏当前位置，保证弹窗一定出现。
-    let ex = selToolbar.x, ey = selToolbar.y, placeAbove = false;
+    let ex = selToolbar.x, ey = selToolbar.y, place: ToolbarPlace = "below";
     if (lastSelRect) {
       const pos = positionPopupNear(lastSelRect, 268, 220);
-      ex = pos.x; ey = pos.y; placeAbove = pos.placeAbove;
+      ex = pos.x; ey = pos.y; place = pos.place;
     }
     noteEditor = {
       visible: true,
@@ -4288,7 +4519,7 @@
       labels: [],
       styleLabel: "直线",
       styleGlyph: "━",
-      placeAbove,
+      place,
     };
   }
 
@@ -4576,7 +4807,12 @@
 
   /** 合并实时语速后的当前设置对象 */
   function ttsSettingsNow(): RewordTtsSettings {
-    const s: RewordTtsSettings = (getTtsSettings?.() as RewordTtsSettings) || { ...DEFAULT_REWORD_TTS };
+    // Plugin 端的 TtsSettings 只是 RewordTtsSettings 的子集（缺 volume/granularity/scope/
+    // enableHighlight/highlightStyle/highlightColor/autoPage/sleepTimerMin）。
+    // 用 DEFAULT_REWORD_TTS 兜底合并，保证 Controller 拿到完整字段，
+    // 否则 enableHighlight / autoPage / 睡眠定时等会全部失效。
+    const raw = (getTtsSettings?.() as Partial<RewordTtsSettings> | null) || null;
+    const s: RewordTtsSettings = { ...DEFAULT_REWORD_TTS, ...(raw || {}) };
     s.rate = ttsRate;
     return s;
   }
@@ -4623,7 +4859,16 @@
   function ttsPrev() { ttsController?.prev(); }
   function onTtsRateInput(e: Event) {
     const v = parseFloat((e.target as HTMLInputElement).value);
-    if (!isNaN(v)) { ttsRate = v; ttsController?.setRate(v); }
+    if (isNaN(v)) return;
+    ttsRate = v;
+    ttsController?.setRate(v); // 即时生效，不打断当前朗读
+    // 防抖持久化：直接写回设置（不调用 setSettings，避免重启朗读进度）
+    ttsCfg = { ...ttsCfg, rate: v };
+    if (rateSaveTimer) clearTimeout(rateSaveTimer);
+    rateSaveTimer = setTimeout(() => {
+      rateSaveTimer = null;
+      void saveTtsSettings?.({ ...ttsCfg });
+    }, 400);
   }
   function ttsToggleHighlight() {
     ensureTtsController();
@@ -4662,10 +4907,13 @@
   // 2026-08-28：朗读设置面板（14 项）处理函数
   // ============================================================
   function syncTtsCfg() {
-    const s = (getTtsSettings?.() as RewordTtsSettings) || { ...DEFAULT_REWORD_TTS };
+    // 与 ttsSettingsNow 保持同样的缺字段合并策略（Plugin 端只存子集）
+    const raw = (getTtsSettings?.() as Partial<RewordTtsSettings> | null) || null;
+    const s: RewordTtsSettings = { ...DEFAULT_REWORD_TTS, ...(raw || {}) };
     ttsCfg = { ...s };
     ttsRate = s.rate;
     ttsHighlightOn = s.enableHighlight;
+    loadTtsVoices(); // 打开设置面板时刷新本机可用嗓音列表
   }
   function saveTtsCfg() {
     ttsCfg = { ...ttsCfg };
@@ -4678,15 +4926,28 @@
   }
   function onTtsRateSetting(e: Event) {
     const v = parseFloat((e.currentTarget as HTMLInputElement).value);
+    if (isNaN(v)) return;
     ttsRate = v;
-    ttsController?.setRate(v);
-    setTtsField("rate", v);
+    ttsController?.setRate(v); // 即时生效
+    // 持久化（独立落盘，不经由 setTtsField 的 setSettings，避免打断朗读）
+    ttsCfg = { ...ttsCfg, rate: v };
+    if (rateSaveTimer) clearTimeout(rateSaveTimer);
+    rateSaveTimer = setTimeout(() => {
+      rateSaveTimer = null;
+      void saveTtsSettings?.({ ...ttsCfg });
+    }, 400);
   }
   function onTtsPitch(e: Event) { setTtsField("pitch", parseFloat((e.currentTarget as HTMLInputElement).value)); }
   function onTtsVolume(e: Event) { setTtsField("volume", parseFloat((e.currentTarget as HTMLInputElement).value)); }
   function onTtsInterval(e: Event) { setTtsField("interval", parseInt((e.currentTarget as HTMLInputElement).value, 10)); }
   function onTtsEngine(e: Event) { setTtsField("engine", (e.currentTarget as HTMLSelectElement).value as RewordTtsSettings["engine"]); }
   function onTtsAccent(e: Event) { setTtsField("accent", (e.currentTarget as HTMLSelectElement).value as "uk" | "us"); }
+  function onTtsVoiceZh(e: Event) { setTtsField("preferVoiceURIZh", (e.currentTarget as HTMLSelectElement).value || undefined); }
+  function onTtsVoiceEn(e: Event) { setTtsField("preferVoiceURIEn", (e.currentTarget as HTMLSelectElement).value || undefined); }
+  function onTtsIflytekAppId(e: Event) { setTtsField("iflytekAppId", (e.currentTarget as HTMLInputElement).value.trim() || undefined); }
+  function onTtsIflytekApiKey(e: Event) { setTtsField("iflytekApiKey", (e.currentTarget as HTMLInputElement).value.trim() || undefined); }
+  function onTtsIflytekApiSecret(e: Event) { setTtsField("iflytekApiSecret", (e.currentTarget as HTMLInputElement).value.trim() || undefined); }
+  function onTtsIflytekVoice(e: Event) { setTtsField("iflytekVoice", (e.currentTarget as HTMLSelectElement).value || "xiaoyan"); }
   function onTtsGranularity(e: Event) { setTtsField("granularity", (e.currentTarget as HTMLSelectElement).value as "sentence" | "word"); }
   function onTtsScope(e: Event) { setTtsField("scope", (e.currentTarget as HTMLSelectElement).value as "selection" | "section" | "book"); }
   function onTtsHighlightStyle(e: Event) { setTtsField("highlightStyle", (e.currentTarget as HTMLSelectElement).value as RewordTtsSettings["highlightStyle"]); }
@@ -5360,6 +5621,18 @@
       wheelRafId = null;
     }
     wheelAccumDy = 0;
+    // 滚动模式缩放预览：清提交定时器；若仍停在预览态，必须复位 foliate 的 #pinching，
+    // 否则 #scheduleScrollPages 会永久 return，页面加载/回收全部停摆。
+    if (wheelCommitTimer) { clearTimeout(wheelCommitTimer); wheelCommitTimer = null; }
+    if (wheelPinchActive) {
+      wheelPinchActive = false;
+      wheelPinchRatio = 1;
+      try {
+        (view?.renderer as any)?.pinchEnd?.();
+      } catch (__swallowErr) {
+        logSwallow(__swallowErr, "ReaderView.svelte · pinchEnd cleanup", "debug");
+      }
+    }
     // 停止思源主题跟随观察器（2026-08-25 新增）
     stopThemeObserver();
     // 2026-08-24 修复：卸载 foliate view 事件 + 内容文档监听 + 清除搜索高亮，
@@ -5502,7 +5775,7 @@
 
       <!-- 2026-08-25：3 大分类（文本/段落/页面布局），折叠式分组 -->
       <!-- 1. 文本设置：字号（已有）+ 字重 + 字距 -->
-      <details class="reader-setting-section" open>
+      <details class="reader-setting-section">
         <summary class="reader-setting-section-title">📖 文本设置</summary>
         <div class="reader-setting-row">
           <span class="reader-setting-label">字号</span>
@@ -5552,7 +5825,7 @@
       </details>
 
       <!-- 2. 段落设置：行距（已有）+ 段距 + 首行缩进 -->
-      <details class="reader-setting-section" open>
+      <details class="reader-setting-section">
         <summary class="reader-setting-section-title">📐 段落设置</summary>
         <div class="reader-setting-row">
           <span class="reader-setting-label">行距</span>
@@ -5595,18 +5868,54 @@
       </details>
 
       <!-- 2026-08-28：4. 朗读设置（参考 Readest） -->
-      <details class="reader-setting-section" open>
+      <details class="reader-setting-section">
         <summary class="reader-setting-section-title">🔊 朗读设置</summary>
 
         <div class="reader-setting-row">
           <span class="reader-setting-label">语音引擎</span>
           <select class="reader-select" value={ttsCfg.engine} on:change={onTtsEngine}>
-            <option value="system">系统语音</option>
+            <option value="system">系统语音（推荐·离线）</option>
             <option value="youdao">有道真人音</option>
-            <option value="edge">Edge 神经音</option>
-            <option value="auto">自动（在线优先）</option>
+            <option value="edge">Edge 神经音（云端·受限）</option>
+            <option value="iflytek">讯飞语记（云端·中文更自然）</option>
+            <option value="auto">自动（系统优先）</option>
           </select>
         </div>
+        <p class="reader-setting-hint">
+          中文朗读质量取决于本机嗓音：系统设置 → 辅助功能 → 语音 → 下载「中文（普通话）」等增强嗓音后，
+          「中文嗓音」下拉即可选用，引擎会自动优选 Neural 类嗓音。Edge 云端神经音需微软服务器认证头，
+          浏览器环境通常无法连通，会回退系统语音；讯飞语记改用 URL 鉴权可直连，中文质量更自然（需配置密钥）。
+        </p>
+
+        {#if ttsCfg.engine === "iflytek"}
+        <div class="reader-setting-subblock">
+          <div class="reader-setting-subtitle">讯飞语记配置（开放平台免费领取 AppID / APIKey / APISecret）</div>
+          <div class="reader-setting-row">
+            <span class="reader-setting-label">AppID</span>
+            <input class="reader-input" type="text" placeholder="如 12345678" value={ttsCfg.iflytekAppId || ""} on:input={onTtsIflytekAppId} />
+          </div>
+          <div class="reader-setting-row">
+            <span class="reader-setting-label">APIKey</span>
+            <input class="reader-input" type="text" placeholder="APIKey" value={ttsCfg.iflytekApiKey || ""} on:input={onTtsIflytekApiKey} />
+          </div>
+          <div class="reader-setting-row">
+            <span class="reader-setting-label">APISecret</span>
+            <input class="reader-input" type="password" placeholder="APISecret" value={ttsCfg.iflytekApiSecret || ""} on:input={onTtsIflytekApiSecret} />
+          </div>
+          <div class="reader-setting-row">
+            <span class="reader-setting-label">中文发音人</span>
+            <select class="reader-select" value={ttsCfg.iflytekVoice || "xiaoyan"} on:change={onTtsIflytekVoice}>
+              <option value="xiaoyan">讯飞小燕（默认）</option>
+              <option value="x4_lingfeizhe_assist">灵泽（中文·增强）</option>
+              <option value="x4_lingfeichen_assist">灵辰（中文·增强）</option>
+              <option value="x4_lingxiaoqi_assist">小琪（中文·增强）</option>
+              <option value="xiaoyu">讯飞小鱼（女声）</option>
+              <option value="aisjiuxu">讯飞许久（男声）</option>
+            </select>
+          </div>
+          <p class="reader-setting-hint">英文句自动使用讯飞英文神经音（Gavin）。密钥保存在本插件本地配置，仅用于调用讯飞服务。</p>
+        </div>
+        {/if}
 
         <div class="reader-setting-row">
           <span class="reader-setting-label">语速</span>
@@ -5637,6 +5946,26 @@
           <select class="reader-select" value={ttsCfg.accent} on:change={onTtsAccent}>
             <option value="us">美音</option>
             <option value="uk">英音</option>
+          </select>
+        </div>
+
+        <div class="reader-setting-row">
+          <span class="reader-setting-label">中文嗓音</span>
+          <select class="reader-select" value={ttsCfg.preferVoiceURIZh || ""} on:change={onTtsVoiceZh}>
+            <option value="">自动（系统中文嗓音）</option>
+            {#each ttsVoices.filter((v) => v.lang.toLowerCase().startsWith("zh")) as v (v.uri)}
+              <option value={v.uri}>{v.name} ({v.lang})</option>
+            {/each}
+          </select>
+        </div>
+
+        <div class="reader-setting-row">
+          <span class="reader-setting-label">英文嗓音</span>
+          <select class="reader-select" value={ttsCfg.preferVoiceURIEn || ""} on:change={onTtsVoiceEn}>
+            <option value="">自动（系统英文嗓音）</option>
+            {#each ttsVoices.filter((v) => v.lang.toLowerCase().startsWith("en")) as v (v.uri)}
+              <option value={v.uri}>{v.name} ({v.lang})</option>
+            {/each}
           </select>
         </div>
 
@@ -6055,6 +6384,56 @@
         </div>
       </details>
 
+      <!-- 2026-08-29：PDF 显示设置（视图模式 / 滚动方向 / 反色），仅 PDF 书显示 -->
+      {#if isPdfBook()}
+      <details class="reader-setting-section">
+        <summary class="reader-setting-section-title">📄 PDF 显示</summary>
+
+        <!-- 视图模式：单页 / 双页 / 书籍（映射 foliate spread） -->
+        <div class="reader-setting-row">
+          <span class="reader-setting-label">视图模式</span>
+          <div class="reader-setting-control">
+            {#each [["single", "单页"], ["double", "双页"], ["book", "书籍"]] as [key, label]}
+              <button
+                class="reader-seg"
+                class:reader-seg-active={(settings.pdfViewMode ?? "single") === key}
+                on:click={() => onSetPdfViewMode(key)}
+              >{label}</button>
+            {/each}
+          </div>
+        </div>
+
+        <!-- 滚动方向：仅「滚动」模式生效（映射 foliate scroll-direction） -->
+        {#if settings.flow === "scrolled"}
+        <div class="reader-setting-row">
+          <span class="reader-setting-label">滚动方向</span>
+          <div class="reader-setting-control">
+            {#each [["vertical", "垂直"], ["horizontal", "水平"]] as [key, label]}
+              <button
+                class="reader-seg"
+                class:reader-seg-active={(settings.pdfScrollDir ?? "vertical") === key}
+                on:click={() => onSetPdfScrollDir(key)}
+              >{label}</button>
+            {/each}
+          </div>
+        </div>
+        {/if}
+
+        <!-- 反色 / 暗色：PDF 画布级 pageColors 反色，独立于阅读器通用主题 -->
+        <div class="reader-setting-row reader-setting-toggle-row">
+          <span class="reader-setting-label">反色 / 暗色</span>
+          <label class="reader-switch" title="PDF 画布级反色（黑底白字），独立于阅读器主题">
+            <input
+              type="checkbox"
+              checked={!!settings.pdfInvert}
+              on:change={setPdfInvert}
+            />
+            <span class="reader-switch-track"></span>
+          </label>
+        </div>
+      </details>
+      {/if}
+
       <!-- 2026-08-28：双语对照增强（译文字号独立调节 + 段落悬停高亮） -->
       <details class="reader-setting-section">
         <summary class="reader-setting-section-title">🌐 双语对照</summary>
@@ -6225,6 +6604,7 @@
        此前误置于 stage 内，被 position:absolute 的 .reader-container 遮挡 + overflow:hidden 裁切导致不可见）。 -->
   <div class="reader-bottom-bar">
     <button class="reader-btn" title="目录" class:reader-btn-active={showToc} on:click={toggleToc}>☰</button>
+    <button class="reader-btn" title="第一页（Home）" on:click={goFirstPage}>⏮</button>
     <button class="reader-btn" title="上一页" on:click={turnPrev}>◀</button>
     <div class="reader-progress-wrap">
       <input
@@ -6243,6 +6623,7 @@
       <span class="reader-eta" title="按当前阅读速度估算">{etaText}</span>
     {/if}
     <button class="reader-btn" title="下一页" on:click={turnNext}>▶</button>
+    <button class="reader-btn" title="最后一页（End）" on:click={goLastPage}>⏭</button>
   </div>
 
   <!-- 2026-08-28：连续朗读控制条（参考 Readest 朗读体验） -->
@@ -6284,7 +6665,7 @@
        create 态：选中正文 → 主工具栏（复制/高亮/批注/词典/翻译/朗读/发送）；点「高亮」→ 上方展开样式条（3 样式 + 5 色）→ 选样式即一步高亮。
        edit 态（点已有高亮）：主工具栏第 2 按钮变「删除」，下方常显样式条，点样式/颜色即时改该标注。 -->
   {#if selToolbar.visible}
-    <div class="reader-sel-toolbar" bind:this={selToolbarEl} class:place-below={!selToolbar.placeAbove} style="left:{selToolbar.x}px;top:{selToolbar.y}px">
+    <div class="reader-sel-toolbar" bind:this={selToolbarEl} class:place-below={selToolbar.place==='below'} class:place-left={selToolbar.place==='left'} class:place-right={selToolbar.place==='right'} style="left:{selToolbar.x}px;top:{selToolbar.y}px">
       <!-- 第二层样式条：始终浮在工具栏上方（readest 风格）。
            create 态需点「高亮」才展开(stripVisible)；edit 态常显（点击已有高亮即出现，无需再点任何按钮）。 -->
       {#if selToolbar.mode === "edit" || selToolbar.stripVisible}
@@ -6380,7 +6761,7 @@
 
   <!-- 统一批注浮层：preview（只读预览）/ view（兼容）/ highlight（纯标注）/ create·edit（编辑） -->
   {#if noteEditor.visible}
-    <div class="reader-note-editor" class:place-above={noteEditor.placeAbove} bind:this={noteEditorEl} style="left:{noteEditor.x}px;top:{noteEditor.y}px">
+    <div class="reader-note-editor" class:place-above={noteEditor.place==='above'} class:place-below={noteEditor.place==='below'} class:place-left={noteEditor.place==='left'} class:place-right={noteEditor.place==='right'} bind:this={noteEditorEl} style="left:{noteEditor.x}px;top:{noteEditor.y}px">
       {#if noteEditor.mode === "preview"}
         <!-- 2026-08-26 简易预览卡：只读笔记 + 图标操作（复制/导出/删除）+ 编辑入口 -->
         <div class="reader-preview-head">
@@ -6512,7 +6893,11 @@
         <button class="reader-footnote-close" on:click={closeFootnote} title="关闭">✕</button>
       </div>
       <div class="reader-footnote-body">
-        {@html footnoteHTML}
+        {#if footnoteLoading && !footnoteHTML}
+          <div class="reader-footnote-loading">⌛ 脚注加载中…</div>
+        {:else}
+          {@html footnoteHTML}
+        {/if}
       </div>
     </div>
   {/if}
@@ -6768,6 +7153,31 @@
   .reader-sel-toolbar > * { pointer-events: auto; }
   /* 顶部空间不足翻到选区下方时：锚点改取选区下沿，工具栏向下延伸（而非向上覆盖选区） */
   .reader-sel-toolbar.place-below { transform: translate(-50%, 0); }
+  /* 2026-08-29 四向避让：上下均无空间时退到选区左/右（垂直居中于选区），彻底避开选中文本 */
+  .reader-sel-toolbar.place-left { transform: translate(-100%, -50%); }
+  .reader-sel-toolbar.place-right { transform: translate(0, -50%); }
+  .reader-sel-toolbar.place-left .reader-sel-main,
+  .reader-sel-toolbar.place-right .reader-sel-main {
+    transform-origin: center center;
+  }
+  /* 左置：小三角在右边缘、朝右指向选区 */
+  .reader-sel-toolbar.place-left .reader-sel-main::after {
+    left: auto; right: -7px; top: 50%; bottom: auto;
+    transform: translateY(-50%);
+    border-top: 7px solid transparent;
+    border-bottom: 7px solid transparent;
+    border-left: 7px solid #2b2b2b;
+    border-right: none;
+  }
+  /* 右置：小三角在左边缘、朝左指向选区 */
+  .reader-sel-toolbar.place-right .reader-sel-main::after {
+    left: -7px; right: auto; top: 50%; bottom: auto;
+    transform: translateY(-50%);
+    border-top: 7px solid transparent;
+    border-bottom: 7px solid transparent;
+    border-right: 7px solid #2b2b2b;
+    border-left: none;
+  }
 
   /* 主工具栏：深色圆角胶囊，图标在上、文字在下 */
   .reader-sel-main {
@@ -6948,6 +7358,44 @@
     transform: translate(-50%, -100%);
     margin-top: 0;
     margin-bottom: 10px;
+  }
+  /* 2026-08-29 四向避让：below=默认（translate(-50%,0)）；left/right=垂直居中于选区 */
+  .reader-note-editor.place-below {
+    transform: translate(-50%, 0);
+    margin-top: 10px;
+  }
+  .reader-note-editor.place-left {
+    transform: translate(-100%, -50%);
+    margin-top: 0;
+  }
+  .reader-note-editor.place-right {
+    transform: translate(0, -50%);
+    margin-top: 0;
+  }
+  /* 小三角指向选中文本（与背景同色） */
+  .reader-note-editor::after {
+    content: "";
+    position: absolute;
+    width: 0;
+    height: 0;
+    border: 7px solid transparent;
+    pointer-events: none;
+  }
+  .reader-note-editor.place-above::after {
+    left: 50%; bottom: -13px; transform: translateX(-50%);
+    border-top-color: #2b2b2b;
+  }
+  .reader-note-editor.place-below::after {
+    left: 50%; top: -13px; transform: translateX(-50%);
+    border-bottom-color: #2b2b2b;
+  }
+  .reader-note-editor.place-left::after {
+    right: -13px; top: 50%; transform: translateY(-50%);
+    border-left-color: #2b2b2b;
+  }
+  .reader-note-editor.place-right::after {
+    left: -13px; top: 50%; transform: translateY(-50%);
+    border-right-color: #2b2b2b;
   }
   .reader-note-preview {
     font-size: 12px;
@@ -7334,11 +7782,11 @@
        实际主题色由 applyContainerBg() 通过 JS 动态覆盖到该元素 background。 */
     background: #ffffff;
   }
-  .reader-container foliate-view {
+  .reader-container reword-foliate-view {
     display: block;
     width: 100%;
     height: 100%;
-    /* 兜底：foliate-view 高度依赖容器，给最小可视高度 */
+    /* 兜底：reword-foliate-view 高度依赖容器，给最小可视高度 */
     min-height: 240px;
   }
   /* 批注指示器小圆点（onDrawAnnotation 中有笔记时绘制） */
@@ -7579,7 +8027,7 @@
   .reader-footnote {
     position: absolute;
     width: min(360px, 80%);
-    max-height: 400px;
+    max-height: 60vh;
     background: var(--b3-theme-background, #fff);
     border-radius: 10px;
     border-left: 3px solid #e5484d; /* 红色左边框（截图特征） */
@@ -7648,9 +8096,21 @@
   .reader-footnote-body :global(a) {
     color: var(--b3-theme-primary, #0f6bff);
     text-decoration: none;
+    /* 气泡内链接（如脚注里的「返回正文 ↩」锚点）在容器层无目标上下文，点击会触发
+       思源页面异常导航；气泡仅为展示，禁用其点击（文字仍可读/可复制）。 */
+    pointer-events: none;
+    cursor: default;
   }
   .reader-footnote-body :global(a:hover) {
     text-decoration: underline;
+  }
+  .reader-footnote-loading {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 2px;
+    color: var(--b3-theme-on-surface-light, #999);
+    font-size: 12px;
   }
 
   .reader-settings {
@@ -7672,6 +8132,13 @@
     justify-content: space-between;
     gap: 8px;
     font-size: 12px;
+  }
+  .reader-setting-hint {
+    margin: -6px 0 8px;
+    font-size: 11px;
+    line-height: 1.5;
+    color: var(--b3-theme-on-background, #555);
+    opacity: 0.72;
   }
   /* 2026-08-24：4 大分组（details/summary 折叠） */
   .reader-setting-section {
@@ -7721,6 +8188,32 @@
     min-width: 0;
     accent-color: var(--b3-theme-primary, #3573f0);
     height: 4px;
+  }
+  .reader-setting-subblock {
+    margin: 4px 0 6px;
+    padding: 10px 10px 4px;
+    border: 1px dashed var(--b3-border-color, rgba(0, 0, 0, 0.15));
+    border-radius: 8px;
+    background: var(--b3-theme-background-light, rgba(0, 0, 0, 0.03));
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .reader-setting-subtitle {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--b3-theme-primary, #3573f0);
+  }
+  .reader-input {
+    flex: 1;
+    min-width: 0;
+    padding: 5px 8px;
+    font-size: 12px;
+    border: 1px solid var(--b3-border-color, rgba(0, 0, 0, 0.12));
+    border-radius: 5px;
+    background: var(--b3-theme-background, #fff);
+    color: var(--b3-theme-on-background, #333);
+    box-sizing: border-box;
   }
   /* textarea */
   .reader-setting-textarea {

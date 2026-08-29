@@ -104,7 +104,7 @@ class Reader {
         menu.groups.layout.select('paginated')
     }
     async open(file) {
-        this.view = document.createElement('foliate-view')
+        this.view = document.createElement('reword-foliate-view')
         document.body.append(this.view)
         await this.view.open(file)
         this.view.addEventListener('load', this.#onLoad.bind(this))

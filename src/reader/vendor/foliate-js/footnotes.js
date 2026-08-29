@@ -101,7 +101,7 @@ export const getExtractMapping = range => {
 export class FootnoteHandler extends EventTarget {
     detectFootnotes = true
     #showFragment(book, { index, anchor, check }, href) {
-        const view = document.createElement('foliate-view')
+        const view = document.createElement('reword-foliate-view')
         return new Promise((resolve, reject) => {
             view.addEventListener('load', e => {
                 try {

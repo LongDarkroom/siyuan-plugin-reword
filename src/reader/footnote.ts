@@ -1,4 +1,13 @@
 import { logSwallow } from "../core/safe.ts";
+
+// 脚注内容缓存：避免同一脚注高频触发（hover 防抖后仍可能反复、或连续点击多个脚注）
+// 时重复 loadContent + DOMParser（整章 XHTML 重解析，开销大）。
+// key = 书籍标识 + href，换书自动隔离；仅缓存成功结果（含已转 blob 的图片 url）。
+const footnoteCache = new Map<string, FootnoteResult>();
+function footnoteCacheKey(book: any, href: string): string {
+  const bid = book?.metadata?.identifier ?? book?.metadata?.title ?? "book";
+  return `${bid}::${href}`;
+}
 // src/reader/footnote.ts
 // 脚注检测 + 内容抽取 + 类型分类。
 // 设计：scoped 复制 foliate-js/footnotes.js 的检测思路，并额外加「不规范书籍」兜底
@@ -128,6 +137,9 @@ export interface FootnoteResult {
  *  不依赖嵌套 foliate-view，气泡样式完全由 REword 控制（轻量、可控）。 */
 export async function extractFootnote(book: any, href: string): Promise<FootnoteResult> {
   try {
+    const cacheKey = footnoteCacheKey(book, href);
+    const cached = footnoteCache.get(cacheKey);
+    if (cached) return cached;
     const target = await book?.resolveHref?.(href)
     if (!target || target.index == null) return { html: null, type: '脚注' }
     const hash = href.split('#')[1]
@@ -144,7 +156,9 @@ export async function extractFootnote(book: any, href: string): Promise<Footnote
     // 相对图片解析为 blob URL（best-effort）
     await resolveImages(el, book, target.index)
     const type = classifyType(el)
-    return { html: el.outerHTML, type }
+    const result: FootnoteResult = { html: el.outerHTML, type }
+    footnoteCache.set(cacheKey, result)
+    return result
   } catch {
     return { html: null, type: '脚注' }
   }
