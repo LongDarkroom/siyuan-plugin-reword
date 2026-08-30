@@ -93,3 +93,9 @@
 ## 九、许可
 
 GPL-3.0
+
+## 十、赞赏
+
+如果这个插件对你的英语学习有所帮助，欢迎请我喝杯咖啡 ☕
+
+![支付宝赞赏码](https://cdn.jsdelivr.net/gh/LongDarkroom/siyuan-plugin-reword@v1.4.3/appreciate.jpg)

@@ -28,6 +28,7 @@ INCLUDE_FILES = [
     # （见 src/reader/bookshelf-store.ts:146-149）。漏掉它 → 从集市安装的插件
     # 在非弱设备（桌面）上解析 PDF 元数据/封面时 worker 加载失败。
     "pdf.worker.mjs",
+    "appreciate.jpg",  # 集市 README 赞赏码图片（jsdelivr 源，也随包分发以支持本地渲染）
 ]
 # 直接平铺到 zip 根的【白名单目录】
 INCLUDE_DIRS = [
