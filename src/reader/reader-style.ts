@@ -125,6 +125,76 @@ export function deriveStyleOutput(
   };
 }
 
+/* ================= 思源调色板桥接（iframe 内 --b3-* 不可达，必须在父文档抓取后注入） ================= */
+
+/**
+ * 思源主题调色板（阅读器需要、且应跟随思源外观的变量子集）。
+ * 不在此列的项（如各主题预设的纯色背景）仍由阅读器自带主题控制，不跟随思源。
+ */
+export interface SiyuanThemeVars {
+  bg: string;
+  onBackground: string;
+  onSurface: string;
+  onSurfaceLight: string;
+  primary: string;
+  surface: string;
+  border: string;
+  link: string;
+  codeBg: string;
+  bqBg: string;
+  markBg: string;
+}
+
+/**
+ * 在「父文档」（思源主窗口）抓取思源调色板。
+ *
+ * 关键约束：阅读器运行在 foliate 的 <iframe> 内，CSS 自定义属性**不会跨 iframe 继承**，
+ * 所以无法在阅读器 CSS 里直接写 `var(--b3-theme-primary)` 并期望它取到思源的值。
+ * 必须在父文档用 `getComputedStyle(document.documentElement)` 读取后，
+ * 经 {@link siyuanVarBridgeStyles} 把值重新声明进 iframe 的 `:root`，下游样式才能用 `var(--b3-*)`。
+ *
+ * 本函数刻意不直接访问 `document`，而是接收 `get(name, fallback)` 读取器，
+ * 由调用方（ReaderView.svelte 的 getSiyuanVar）注入父文档上下文，保持本模块纯函数、可单测。
+ */
+export function captureSiyuanThemeVars(
+  get: (name: string, fallback: string) => string
+): SiyuanThemeVars {
+  return {
+    bg: get("--b3-theme-background", "#ffffff"),
+    onBackground: get("--b3-theme-on-background", "#222222"),
+    onSurface: get("--b3-theme-on-surface", "#888888"),
+    onSurfaceLight: get("--b3-theme-on-surface-light", "#9aa0a6"),
+    primary: get("--b3-theme-primary", "#0f6bff"),
+    surface: get("--b3-theme-surface", "#f7f8f9"),
+    border: get("--b3-border-color", "#e0e0e0"),
+    link: get("--b3-protyle-inline-link-color", "#185FA5"),
+    codeBg: get("--b3-protyle-code-background", "rgba(128,128,128,0.08)"),
+    bqBg: get("--b3-bq-background", "rgba(128,128,128,0.06)"),
+    markBg: get("--b3-protyle-inline-mark-background", "#ffe9a8"),
+  };
+}
+
+/**
+ * 把思源调色板作为 `:root` 变量注入阅读器 iframe。
+ * 必须前置在 buildReaderStyles 输出的最前面，下游 linkStyles/codeStyles/quoteStyles/bilingualStyles
+ * 才能用 `var(--b3-*)` 解析到思源真实色值（带 fallback，思源变量缺失时回退到中性色）。
+ */
+export function siyuanVarBridgeStyles(v: SiyuanThemeVars): string {
+  return `:root {
+  --b3-theme-background: ${v.bg};
+  --b3-theme-on-background: ${v.onBackground};
+  --b3-theme-on-surface: ${v.onSurface};
+  --b3-theme-on-surface-light: ${v.onSurfaceLight};
+  --b3-theme-primary: ${v.primary};
+  --b3-theme-surface: ${v.surface};
+  --b3-border-color: ${v.border};
+  --b3-protyle-inline-link-color: ${v.link};
+  --b3-protyle-code-background: ${v.codeBg};
+  --b3-bq-background: ${v.bqBg};
+  --b3-protyle-inline-mark-background: ${v.markBg};
+}`.trim();
+}
+
 /**
  * 跨平台 CJK 字体栈（macOS / Windows / Linux 都有像样的中文字体）
  * 顺序：macOS 优先 → Windows → Linux 通用 → Noto 系列 → 兜底 sans-serif
@@ -266,7 +336,8 @@ export function buildReaderStyles(
   preset: { bg: string; fg: string; fg2: string },
   lineWidthPreset: { padding: string },
   fontCss: string,
-  fontFamilyStack: string
+  fontFamilyStack: string,
+  siyuanVars?: SiyuanThemeVars
 ): string {
   const o = deriveStyleOutput(settings, preset, lineWidthPreset);
 
@@ -293,7 +364,7 @@ export function buildReaderStyles(
       : lists.serif
     : fontFamilyStack;
 
-  return [
+  const parts = [
     fontCss,
     paragraphStyles(o),
     colorSchemeStyles(o),
@@ -304,7 +375,7 @@ export function buildReaderStyles(
     paragraphHoverStyles(settings.paragraphHover === true),
     bilingualStyles(translationStack, o.fg, settings.translationFontSize ?? 0.62),
     headingStyles(),
-    quoteStyles(o),
+    quoteStyles(),
     listStyles(),
     figureStyles(o),
     bodyStyles(o, settings),
@@ -312,11 +383,14 @@ export function buildReaderStyles(
     paragraphLayoutStyles(settings.paragraph),
     layoutMarginStyles(settings.layout),
     ...fontSegments,
-    linkStyles(o),
-    codeStyles(o),
+    linkStyles(),
+    codeStyles(),
     colorSchemeStyles(o),
     wordWrapStyles(),
-  ].join("\n");
+  ];
+  // 思源调色板桥接块须在所有 var() 使用之前声明；仅当传入 siyuanVars 才前置，避免空字符串留下多余换行
+  const bridge = siyuanVars ? siyuanVarBridgeStyles(siyuanVars) + "\n" : "";
+  return bridge + parts.join("\n");
 }
 
 /* ================= 各段 CSS（可独立测试） ================= */
@@ -456,34 +530,38 @@ blockquote span, blockquote div, blockquote b, blockquote i {
 }`.trim();
 }
 
-/** 标题层级（h1-h6）（2026-08-28 加字距精修） */
+/** 标题层级（h1-h6）（2026-08-30 排版精修：更紧凑的层级 + 防长标题溢出） */
 export function headingStyles(): string {
   return `
 h1, h2, h3, h4, h5, h6 {
   font-family: inherit !important;
   font-weight: 600 !important;
-  line-height: 1.3 !important;
+  line-height: 1.28 !important;
   letter-spacing: 0.02em !important;
-  margin: 1em 0 0.5em !important;
+  margin: 1.1em 0 0.55em !important;
   page-break-after: avoid;
   break-after: avoid;
+  /* 长标题/艺术字标题换行，避免溢出阅读区（绘本封面标题常见） */
+  overflow-wrap: break-word !important;
+  word-break: break-word !important;
 }
-h1 { font-size: 1.6em !important; }
-h2 { font-size: 1.4em !important; }
-h3 { font-size: 1.2em !important; }
-h4 { font-size: 1.1em !important; }
-h5 { font-size: 1.05em !important; }
-h6 { font-size: 1em !important; }`.trim();
+h1 { font-size: 1.5em !important; }
+h2 { font-size: 1.32em !important; }
+h3 { font-size: 1.18em !important; }
+h4 { font-size: 1.08em !important; }
+h5 { font-size: 1.02em !important; }
+h6 { font-size: 0.95em !important; }`.trim();
 }
 
-/** 引用块 blockquote（2026-08-28 柔和化：左边线 + 微底色 + 圆角，不再整块压暗） */
-export function quoteStyles(o: ReaderStyleOutput): string {
+/** 引用块 blockquote（2026-08-28 柔和化：左边线 + 微底色 + 圆角，不再整块压暗）
+ *  2026-08-30 思源化：左边线/底色改用思源变量（--b3-border-color / --b3-bq-background），跟随思源外观 */
+export function quoteStyles(): string {
   return `
 blockquote {
   margin: 0.8em 1.5em !important;
   padding: 0.4em 1em !important;
-  border-left: 3px solid currentColor !important;
-  background: rgba(128, 128, 128, 0.06) !important;
+  border-left: 3px solid var(--b3-border-color, currentColor) !important;
+  background: var(--b3-bq-background, rgba(128, 128, 128, 0.06)) !important;
   border-radius: 0 4px 4px 0 !important;
   font-style: italic !important;
 }`.trim();
@@ -501,34 +579,48 @@ li {
 }`.trim();
 }
 
-/** 图片 figure/figcaption（2026-08-28 加 img 约束：自适应宽度、不溢出、圆角） */
+/** 图片 figure/figcaption（2026-08-30 排版精修：分页不切图、浮动图转块居中、轻阴影） */
 export function figureStyles(o: ReaderStyleOutput): string {
   return `
+img {
+  max-width: 100% !important;
+  height: auto !important;
+}
 figure {
-  margin: 1em 0 !important;
+  margin: 1.2em 0 !important;
   text-align: center !important;
+  /* 分页模式下避免图片被栏边界切成两半 */
+  break-inside: avoid;
+  page-break-inside: avoid;
 }
 figure img {
   max-width: 100% !important;
   height: auto !important;
-  border-radius: 4px !important;
+  border-radius: 6px !important;
+  box-shadow: 0 1px 6px rgba(0, 0, 0, 0.12);
 }
 figcaption {
-  font-size: 0.85em !important;
-  opacity: 0.7;
-  margin-top: 0.4em !important;
+  font-size: 0.82em !important;
+  opacity: 0.65;
+  margin-top: 0.5em !important;
   text-align: center !important;
+}
+/* 书籍内 float 图片强制转为块级居中，避免与正文挤在一起或被分页切断 */
+img[style*="float"] {
+  float: none !important;
+  display: block !important;
+  margin: 1em auto !important;
 }`.trim();
 }
 
-/** 链接 a */
-export function linkStyles(o: ReaderStyleOutput): string {
-  return `a { color: ${o.isDark ? "#85B7EB" : "#185FA5"} !important; }`;
+/** 链接 a（2026-08-30 思源化：跟随思源行内链接色 --b3-protyle-inline-link-color） */
+export function linkStyles(): string {
+  return `a { color: var(--b3-protyle-inline-link-color, #185FA5) !important; }`;
 }
 
-/** 代码块 pre / code */
-export function codeStyles(o: ReaderStyleOutput): string {
-  return `pre { background: ${o.isDark ? "rgba(255,255,255,.08)" : "rgba(0,0,0,.06)"} !important; }`;
+/** 代码块 pre / code（2026-08-30 思源化：跟随思源行内代码底色 --b3-protyle-code-background） */
+export function codeStyles(): string {
+  return `pre { background: var(--b3-protyle-code-background, rgba(128,128,128,0.08)) !important; }`;
 }
 
 /** word-wrap（避免超长 URL / 英文单词撑出右边界） */
@@ -604,18 +696,17 @@ export function focusModeStyles(enabled: boolean): string {
 }
 
 /**
- * 双语对照译文样式（2026-08-28 v2「思源字体 + Readest 极简」）：
+ * 双语对照译文样式（2026-08-30 v3「段落块 + 淡色左边线」）：
  * 顶栏「双语」开启后，每段正文内注入 `.reword-bilingual` 译文块（appendChild 子节点）。
  * 该节点位于 foliate 内容 iframe 内，必须由 user CSS 注入（Svelte 组件 scoped 样式够不到）。
  *
- * 设计原则（结合思源笔记 + Readest 实践）：
- * 1. 译文用「思源阅读字体栈」(fontFamilyStack !important) + 思源正文色(具体 hex fg)：
- *    iframe 内**读不到**思源父文档的 --b3-* CSS 变量，故必须传具体值；用思源字体栈
- *    保证译文与思源笔记视觉一致（而非继承书籍 serif 英文字体发虚）。
- * 2. 字号由 translationFontSize（默认 0.78em，设置可调）控制，相对正文独立、不抢焦点。
- * 3. 仅轻微透明（opacity 0.9）—— 译文是辅助信息但不被强压暗。
- * 4. 无边框 / 无底色 / 无圆角 —— 与 Readest 一致，译文自然融入正文作为「内容的一部分」。
- * 5. user-select:none 防误选；data-translation-mark 保护划词 CFI。
+ * 2026-08-30 排版升级（针对绘本/短句书的碎片化问题）：
+ * 旧版译文 `margin:0.15em 0 0 0` 紧贴原文，每句话裂成「原文一行/译文一行」的小块，
+ * 绘本短句书尤为碎。新版把译文做成**独立译文块**——
+ *   - 与下一段原文拉开 0.7em 段距（形成「原文段 + 译文块」的呼吸单元）；
+ *   - 淡色左边线 + 轻微左内边距，视觉上把译文从原文中分层，便于扫读；
+ *   - 字号略小、透明度略低，明确译文是辅助信息、不抢焦点；
+ *   - 悬停恢复不透明，方便细看。
  *
  * @param fontFamilyStack 思源阅读字体栈（含用户字体 + CJK 兜底）
  * @param fg 思源正文色（具体 hex，来自 deriveStyleOutput）
@@ -623,40 +714,45 @@ export function focusModeStyles(enabled: boolean): string {
  */
 export function bilingualStyles(fontFamilyStack: string, fg: string, translationFontSize: number): string {
   const fs = Number.isFinite(translationFontSize) && translationFontSize > 0 ? translationFontSize : 0.62;
+  // 按钮 hover/active 颜色：主题色取自传入 fg。背景用半透明灰，避免亮色/暗色主题下按钮浮起来。
+  // 2026-08-30 段级"简洁版"按钮：右上角悬浮，hover 译文块时显形（避免干扰阅读）。
   return `
-/* ---- 双语译文块（段落内子节点注入，紧贴书籍排版） ---- */
+/* ---- 双语译文块（段落内子节点注入，独立成块的温和对照样式） ---- */
 .reword-bilingual {
   display: block !important;
-  /* 紧贴原文，极简间距 */
-  margin: 0.15em 0 0 0;
-  padding: 0;
+  /* 段落块化：与上一段（原文）留 0.25em、与下一段原文留 0.7em，形成呼吸单元 */
+  margin: 0.25em 0 0.7em 0;
+  /* 淡色左边线 + 轻微左内边距：把译文从原文中视觉分层（不抢眼、不破坏极简） */
+  padding: 0.1em 0 0.1em 0.7em;
+  /* 左边线：跟随思源边框色 --b3-border-color（fallback 中性灰） */
+  border-left: 2px solid var(--b3-border-color, rgba(128, 128, 128, 0.22)) !important;
 
-  /* 字号：默认 0.62em —— CJK 字体（霞鹜文楷/苹方）的 x-height 远大于英文 serif，
+  /* 字号：默认 0.62em —— CJK 字体的 x-height 远大于英文 serif，
      0.62em 渲染后视觉尺寸 ≈ 英文正文的 0.88~0.92 倍，略小一号、不抢焦点 */
   font-size: ${fs}em;
   /* 行高比正文紧凑一点（正文通常 1.6~1.8），避免译文撑开过多空间 */
-  line-height: 1.45;
+  line-height: 1.5;
   font-weight: 400;
 
   /* 字体：思源阅读字体栈（!important 压过 publisherFontOverride 的 inherit） */
   font-family: ${fontFamilyStack} !important;
-  /* 色彩：思源正文色（具体 hex，iframe 内 --b3-* 不可达） */
-  color: ${fg};
+  /* 色彩：跟随思源正文色 --b3-theme-on-background（fallback 注入时的具体 hex） */
+  color: var(--b3-theme-on-background, ${fg});
   /* 轻微透明：译文是辅助信息，淡于原文但不至于看不清 */
-  opacity: 0.82;
+  opacity: 0.8;
 
-  /* 与原文对齐：继承父段落的 text-indent（书籍段落常首行缩进 1~2em） */
-  text-indent: inherit;
+  /* 译文块不再继承正文首行缩进（原文已是 1~2em 缩进，译文再缩就太靠里） */
+  text-indent: 0;
   /* CJK 字间距微调，让中文更紧凑自然 */
   letter-spacing: 0.02em;
-
-  /* 无边框 / 无底色 / 无圆角 —— Readest 极简哲学 */
 
   /* 行为 */
   word-break: break-word;
   overflow-wrap: break-word;
   user-select: none;
   transition: opacity 0.2s ease;
+  /* 2026-08-30 简洁版按钮定位锚点（bilingual.ts 也 inline 了 style.position 兜底） */
+  position: relative;
 }
 
 /* 悬停时恢复完全不透明 */
@@ -664,9 +760,131 @@ export function bilingualStyles(fontFamilyStack: string, fg: string, translation
   opacity: 1;
 }
 
-/* 列表项内的译文：随原文缩进，避免与项目符号视觉冲突 */
+/* 列表项内的译文：随项目符号缩进，去掉大段左边距避免与符号重叠 */
 li > .reword-bilingual {
-  margin: 0.12em 0 0 1em;
+  margin: 0.2em 0 0.5em 0.5em;
+  padding-left: 0.5em;
+  border-left: 2px solid rgba(128, 128, 128, 0.18);
+}
+
+/* 2026-08-30 段落级操作按钮组（重译/修正/简洁版/隐藏）：右上角悬浮，hover 译文块时显形 */
+.reword-bilingual-actions {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  display: flex;
+  gap: 4px;
+  opacity: 0;
+  transition: opacity 0.18s ease;
+  pointer-events: auto;
+  z-index: 2;
+}
+.reword-bilingual:hover .reword-bilingual-actions {
+  opacity: 0.94;
+}
+/* 单按钮：容器内横向排列（不再各自绝对定位） */
+.reword-bilingual-action {
+  font-size: ${fs * 0.82}em;
+  font-family: -apple-system, "PingFang SC", "Microsoft YaHei", system-ui, sans-serif !important;
+  line-height: 1.2;
+  padding: 1px 6px;
+  margin: 0;
+  border: 1px solid var(--b3-border-color, rgba(128, 128, 128, 0.32));
+  border-radius: 4px;
+  background: var(--b3-theme-surface, rgba(255, 255, 255, 0.88));
+  color: var(--b3-theme-on-background, ${fg});
+  cursor: pointer;
+  /* 不让它被划词 / text-walker 命中 */
+  user-select: none;
+  -webkit-user-select: none;
+  white-space: nowrap;
+}
+.reword-bilingual-action:hover,
+.reword-bilingual-action:focus-visible {
+  background: rgba(220, 220, 220, 0.98);
+  outline: none;
+  opacity: 1;
+}
+@media (prefers-color-scheme: dark) {
+  .reword-bilingual-action {
+    background: var(--b3-theme-surface, rgba(40, 40, 40, 0.88));
+    border-color: var(--b3-border-color, rgba(200, 200, 200, 0.28));
+  }
+  .reword-bilingual-action:hover,
+  .reword-bilingual-action:focus-visible { background: rgba(80, 80, 80, 0.98); }
+}
+
+/* 来源徽标：跟在译文文字后（inline），按 data-provider 着色区分来源 */
+.reword-bilingual-badge {
+  display: inline-block;
+  margin-left: 0.5em;
+  vertical-align: middle;
+  font-size: ${fs * 0.72}em;
+  font-family: -apple-system, "PingFang SC", "Microsoft YaHei", system-ui, sans-serif !important;
+  padding: 0 6px;
+  border-radius: 999px;
+  border: 1px solid transparent;
+  opacity: 0.9;
+  user-select: none;
+  pointer-events: none;
+  background: rgba(128, 128, 128, 0.14);
+  color: #6b7280;
+}
+.reword-bilingual-badge[data-provider="cache"] { background: rgba(59, 130, 246, 0.14); color: #2563eb; }
+.reword-bilingual-badge[data-provider="fixed"] { background: rgba(34, 197, 94, 0.16); color: #16a34a; border-color: rgba(34, 197, 94, 0.3); }
+.reword-bilingual-badge[data-provider="microsoft"] { background: rgba(168, 85, 247, 0.14); color: #9333ea; }
+.reword-bilingual-badge[data-provider="libretranslate"] { background: rgba(249, 115, 22, 0.14); color: #ea580c; }
+@media (prefers-color-scheme: dark) {
+  .reword-bilingual-badge { background: rgba(160, 160, 160, 0.16); color: #cbd5e1; }
+  .reword-bilingual-badge[data-provider="cache"] { background: rgba(59, 130, 246, 0.22); color: #93c5fd; }
+  .reword-bilingual-badge[data-provider="fixed"] { background: rgba(34, 197, 94, 0.24); color: #86efac; }
+  .reword-bilingual-badge[data-provider="microsoft"] { background: rgba(168, 85, 247, 0.22); color: #d8b4fe; }
+  .reword-bilingual-badge[data-provider="libretranslate"] { background: rgba(249, 115, 22, 0.22); color: #fdba74; }
+}
+
+/* 翻译失败块：明显红色提示，重试按钮常显 */
+.reword-bilingual-failed {
+  border-left-color: #ef4444 !important;
+  color: #b91c1c;
+  opacity: 1;
+  background: rgba(239, 68, 68, 0.06);
+}
+.reword-bilingual-failed-text { font-style: italic; }
+.reword-bilingual-failed .reword-bilingual-action {
+  position: static;
+  opacity: 1 !important;
+  margin-left: 6px;
+  border-color: #ef4444;
+  color: #b91c1c;
+}
+@media (prefers-color-scheme: dark) {
+  .reword-bilingual-failed { color: #fca5a5; background: rgba(239, 68, 68, 0.12); }
+}
+
+/* 修正编辑态（contenteditable 正在编辑） */
+.reword-bilingual-text.reword-bilingual-editing {
+  outline: 1px dashed var(--b3-theme-primary, #0f6bff);
+  outline-offset: 1px;
+  background: rgba(255, 255, 255, 0.6);
+  cursor: text;
+  border-radius: 3px;
+}
+@media (prefers-color-scheme: dark) {
+  .reword-bilingual-text.reword-bilingual-editing { background: rgba(255, 255, 255, 0.12); }
+}
+
+/* 当前已切到 concise 模式：按钮轻微高亮区分 */
+.reword-bilingual[data-mode="concise"] .reword-bilingual-action.reword-bilingual-mode-concise {
+  background: rgba(255, 220, 120, 0.78);
+  color: #4a3500;
+  border-color: rgba(200, 150, 0, 0.42);
+}
+@media (prefers-color-scheme: dark) {
+  .reword-bilingual[data-mode="concise"] .reword-bilingual-action.reword-bilingual-mode-concise {
+    background: rgba(200, 150, 50, 0.42);
+    color: #ffe7a8;
+    border-color: rgba(255, 220, 120, 0.5);
+  }
 }`.trim();
 }
 

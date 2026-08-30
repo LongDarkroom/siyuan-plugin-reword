@@ -44,6 +44,11 @@ export type NoteInsertPosition = "clipboard" | "currentDoc" | "notebook";
 export type NoteTemplatePreset = "simple" | "heading" | "quote" | "custom";
 /** 进度样式：分数（如 5/100）/ 页码（如 12）/ 百分比（如 5%） */
 export type ReaderProgressStyle = "fraction" | "page" | "percent";
+/** 底部进度条「程序坞」唤出方式（2026-08-30）：小圆点常驻 / 悬浮热区 / 两者 */
+export type ReaderBottomBarMode = "dot" | "hover" | "both";
+
+/** 排版预设（2026-08-30）：一键套用边距 / 行距 / 段距 / 字距组合（与边距预设 LAYOUT_PRESETS 并存，维度更全） */
+export type ReaderTypographyPreset = "compact" | "comfort" | "spacious" | "picture";
 
 /** 文本设置（2026-08-24 新增） */
 export interface ReaderTextSettings {
@@ -78,6 +83,8 @@ export interface ReaderLayoutSettings {
   showProgress: boolean;
   /** 进度样式（默认 fraction） */
   progressStyle: ReaderProgressStyle;
+  /** 底部进度条「程序坞」唤出方式（默认 both：小圆点常驻 + 悬浮热区） */
+  bottomBarMode: ReaderBottomBarMode;
   /** 参考页数 0-2000（默认 0，0=不显示） */
   referencePageCount: number;
   /** 显示当前时间（默认 false） */
@@ -86,6 +93,8 @@ export interface ReaderLayoutSettings {
   use24Hour: boolean;
   /** 跟随思源文档边距：用宿主 .protyle-wysiwyg 的水平 padding 作为阅读器左右边距（默认 false，2026-08-29） */
   followSiyuanMargin?: boolean;
+  /** 重启思源后自动恢复上次打开的阅读 Tab（默认 true；思源不会自动恢复自定义插件 Tab） */
+  restoreTabsOnLaunch?: boolean;
 }
 
 /** 笔记模板支持的变量（用于 linkFormat 模板） */
@@ -167,6 +176,10 @@ export interface ReaderSettings {
   translationFontSize?: number;
   /** 双语预取页数：当前屏之后额外预译并缓存的「面」数（默认 2；值越大越省翻页等待但越费 token；2026-08-28 新增可调） */
   bilingualPrefetchPages?: number;
+  /** 双语译文显示来源徽标（缓存/AI/微软/Libre/已修正），默认开，解决「翻译不透明」痛点（2026-08-30） */
+  bilingualShowProvider?: boolean;
+  /** 双语调试信息：译文块显示引擎与 Token 明细（默认关，替代原写死的 DEBUG_BILINGUAL 常量；2026-08-30） */
+  bilingualDebug?: boolean;
   /** 段落悬停高亮：鼠标悬停段落时轻微底色（默认开，2026-08-28 增强项） */
   paragraphHover?: boolean;
   /* ---- 2026-08-29 PDF 显示设置（仅 PDF 书生效，对齐 Obsidian PDF++ 阅读菜单） ---- */
@@ -208,6 +221,8 @@ export const READER_DEFAULT_SETTINGS: ReaderSettings = {
   bilingualTarget: "zh",
   translationFontSize: 0.62,
   bilingualPrefetchPages: 2,
+  bilingualShowProvider: true,
+  bilingualDebug: false,
   paragraphHover: true,
   pdfViewMode: "single",
   pdfScrollDir: "vertical",
@@ -230,10 +245,12 @@ export const READER_DEFAULT_SETTINGS: ReaderSettings = {
     showFooter: true,
     showProgress: true,
     progressStyle: "fraction",
+    bottomBarMode: "both",
     referencePageCount: 0,
     showCurrentTime: false,
     use24Hour: false,
     followSiyuanMargin: false,
+    restoreTabsOnLaunch: true,
   },
   note: {
     syncOnAdd: false,
@@ -370,6 +387,42 @@ export const PROGRESS_STYLE_PRESETS: Record<ReaderProgressStyle, { label: string
   percent: { label: "百分比", hint: "如 5%" },
 };
 
+/** 底部进度条「程序坞」唤出方式（2026-08-30） */
+export const BOTTOM_BAR_MODE_PRESETS: Record<ReaderBottomBarMode, { label: string; hint: string }> = {
+  dot: { label: "小圆点", hint: "底部中央常驻小圆点，点击展开进度条" },
+  hover: { label: "悬浮", hint: "平时收起，鼠标移至阅读器底部边框才平滑显现" },
+  both: { label: "两者", hint: "小圆点常驻 + 悬浮热区都能唤出" },
+};
+
+/**
+ * 排版预设（2026-08-30）：一行选「紧凑 / 舒适 / 宽松 / 绘本」，一键套用
+ * 边距（上下/左右）+ 行距 + 段距 + 字距的组合，免去逐个拖滑块。
+ * - compact  紧凑：小边距、小行距，适合手机小屏或想多装字。
+ * - comfort  舒适（默认基线）：适中边距行距，通读最舒服。
+ * - spacious 宽松：大边距、大行距，适合大屏 / 长时间阅读。
+ * - picture  绘本：图文书（儿童绘本 / 画册）友好——边距适中、行距略紧、
+ *   段距偏小，让文图更紧凑成块（避免短句被拉太散）。
+ */
+export const READER_TYPO_PRESETS: Record<
+  ReaderTypographyPreset,
+  {
+    label: string;
+    hint: string;
+    lineHeight: number;
+    letterSpacing: number;
+    marginTopPx: number;
+    marginBottomPx: number;
+    marginLeftPx: number;
+    marginRightPx: number;
+    paragraphSpacing: number;
+  }
+> = {
+  compact: { label: "紧凑", hint: "小边距小行距，适合手机小屏", lineHeight: 1.5, letterSpacing: 0, marginTopPx: 8, marginBottomPx: 8, marginLeftPx: 12, marginRightPx: 12, paragraphSpacing: 0.5 },
+  comfort: { label: "舒适", hint: "适中边距行距，通读最舒服", lineHeight: 1.7, letterSpacing: 0.2, marginTopPx: 16, marginBottomPx: 16, marginLeftPx: 18, marginRightPx: 18, paragraphSpacing: 0.8 },
+  spacious: { label: "舒展", hint: "大边距大行距，适合大屏长读", lineHeight: 1.9, letterSpacing: 0.4, marginTopPx: 28, marginBottomPx: 28, marginLeftPx: 30, marginRightPx: 30, paragraphSpacing: 1.2 },
+  picture: { label: "绘本", hint: "图文书友好，文图紧凑成块", lineHeight: 1.55, letterSpacing: 0, marginTopPx: 12, marginBottomPx: 12, marginLeftPx: 14, marginRightPx: 14, paragraphSpacing: 0.6 },
+};
+
 /** 8 款预设主题 + 自定义（参考 sireader 色板） */
 export const THEME_PRESETS: Record<ReaderTheme, { label: string; bg: string; fg: string; fg2: string }> = {
   auto: { label: "跟随思源", bg: "#ffffff", fg: "#222222", fg2: "#888888" }, // 运行时由 resolveAutoTheme 覆盖
@@ -470,9 +523,15 @@ export class ReaderSettingsStore {
     try {
       const data = await this.plugin.loadData(STORAGE_KEY);
       if (data && typeof data === "object") {
+        // 浅合并 + 各子对象（text/paragraph/layout/note）逐层合并，
+        // 保证旧版已保存的配置也能补齐新增字段（如 bottomBarMode），不会因整体覆盖而丢失默认。
         this.settings = {
           ...READER_DEFAULT_SETTINGS,
           ...data,
+          text: { ...READER_DEFAULT_SETTINGS.text, ...(data.text ?? {}) },
+          paragraph: { ...READER_DEFAULT_SETTINGS.paragraph, ...(data.paragraph ?? {}) },
+          layout: { ...READER_DEFAULT_SETTINGS.layout, ...(data.layout ?? {}) },
+          note: { ...READER_DEFAULT_SETTINGS.note, ...(data.note ?? {}) },
         };
       }
     } catch (__swallowErr) { logSwallow(__swallowErr, "reader-settings.ts · load", "debug"); }

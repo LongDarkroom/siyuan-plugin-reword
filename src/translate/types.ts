@@ -24,6 +24,13 @@ export interface TranslateRequest {
    * 其他引擎（微软/LibreTranslate）忽略此字段。
    */
   bookId?: string;
+  /**
+   * 翻译模式（2026-08-30 新增，可选，默认 "default"）。
+   * - "default"：默认直译风格
+   * - "concise"：精简版（系统 prompt 追加"长度匹配、不扩展"等约束）
+   * 引擎按 mode 选不同 system prompt；缓存按 mode 路由（不同 mode 互不污染）。
+   */
+  mode?: "default" | "concise";
 }
 
 /** 翻译结果（含实际命中的提供方，便于统计 / 调试） */

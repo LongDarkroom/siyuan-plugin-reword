@@ -110,7 +110,7 @@ test("标题 h1-h6 字号 / 行高 / 边距均带 !important", () => {
 });
 
 test("引用 blockquote 边距 / 内边距 / 边框 / 字体均带 !important", () => {
-  const css = quoteStyles({});
+  const css = quoteStyles();
   const m = css.match(/blockquote\s*\{([^}]*)\}/);
   assert.ok(m, "should have blockquote block");
   for (const prop of ["margin", "padding", "border-left", "font-style"]) {
@@ -135,18 +135,14 @@ test("列表 ul,ol { margin } / li { margin } 带 !important", () => {
   assert.match(liDecl[0], /!important/, `li margin should have !important: ${liDecl[0]}`);
 });
 
-test("链接 a 颜色带 !important", () => {
-  const css = linkStyles({ isDark: false });
-  assert.match(css, /a\s*\{\s*color:\s*#185FA5\s*!important/, "a color should have !important");
-  const css2 = linkStyles({ isDark: true });
-  assert.match(css2, /a\s*\{\s*color:\s*#85B7EB\s*!important/, "a dark color should have !important");
+test("链接 a 颜色带 !important（跟随思源 --b3-protyle-inline-link-color，fallback #185FA5）", () => {
+  const css = linkStyles();
+  assert.match(css, /a\s*\{\s*color:\s*var\(--b3-protyle-inline-link-color,\s*#185FA5\)\s*!important/, "a color should use siyuan var with fallback");
 });
 
-test("代码块 pre 背景带 !important", () => {
-  const css = codeStyles({ isDark: false });
-  assert.match(css, /pre\s*\{[^}]*background:\s*rgba\(0,0,0,\.06\)\s*!important/, "pre bg should have !important");
-  const css2 = codeStyles({ isDark: true });
-  assert.match(css2, /pre\s*\{[^}]*background:\s*rgba\(255,255,255,\.08\)\s*!important/, "pre dark bg should have !important");
+test("代码块 pre 背景带 !important（跟随思源 --b3-protyle-code-background，fallback rgba(128,128,128,.08)）", () => {
+  const css = codeStyles();
+  assert.match(css, /pre\s*\{[^}]*background:\s*var\(--b3-protyle-code-background,\s*rgba\(128,128,128,0\.08\)\)\s*!important/, "pre bg should use siyuan var");
 });
 
 test("buildReaderStyles 总输出 !important 出现次数 ≥ 30（防回归被砍）", () => {

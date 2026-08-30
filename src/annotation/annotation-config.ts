@@ -22,6 +22,19 @@ const DEFAULT_PALETTE = ["#facc15", "#22c55e", "#06b6d4", "#ec4899", "#8b5cf6"];
 
 const DEFAULT_TAG_PRESETS = ["未分组", "生词", "句法", "文化", "逻辑"];
 
+/** 合法线型（与 annotation-store 的 AnnotationStyle 一致，内联避免循环 import） */
+const VALID_STYLES = ["highlight", "solid", "wavy"];
+
+/** 归一化线型：旧线型（dashed/double → solid，dotted → wavy）或脏值 → 合法值；无法识别返回 undefined。
+ *  2026-08-30：用于清洗从历史配置文件读出的 lastStyle（用户可能残留被删掉的线型）。 */
+function normalizeStyle(raw: unknown): AnnotationStyle | undefined {
+  const s = String(raw ?? "").trim();
+  if ((VALID_STYLES as string[]).includes(s)) return s as AnnotationStyle;
+  if (s === "dashed" || s === "double") return "solid";
+  if (s === "dotted") return "wavy";
+  return undefined;
+}
+
 export interface AnnotationConfig {
   /** 新建批注默认颜色（hex） */
   defaultColor: string;
@@ -31,6 +44,13 @@ export interface AnnotationConfig {
   palette: string[];
   /** 标签预设（每行/逗号分隔的语义标签） */
   tagPresets: string[];
+  /* ---- 2026-08-30「上次使用样式」记忆（微信读书式一键高亮） ----
+   * 点「标注」时直接用这两个值创建，无需每次展开样式条重选样式/颜色。
+   * 与 defaultStyle/defaultColor 的区别：那两个是「用户配置的新建默认」（首次或重置时用），
+   * 这两个是「最近一次实际用过」的样式，优先级更高；为空则回退到那两个。
+   * 每次真正落库的高亮/批注都会覆写，跨会话、跨 Tab 生效（模块级单例）。 */
+  lastStyle?: AnnotationStyle;
+  lastColor?: string;
 }
 
 const STORAGE_KEY = "hiword-annotation-config.json";
@@ -62,6 +82,12 @@ export async function loadAnnotationConfig(): Promise<AnnotationConfig> {
         ...data,
         palette: Array.isArray(data.palette) && data.palette.length ? data.palette : [...DEFAULT_PALETTE],
         tagPresets: Array.isArray(data.tagPresets) && data.tagPresets.length ? data.tagPresets : [...DEFAULT_TAG_PRESETS],
+        // 2026-08-30：上次样式来自用户历史文件，可能是被删掉的旧线型（dashed/double/dotted）
+        // 或任意脏值 → 归一化为 3 种合法样式，非法则丢弃（回退到用户默认）。
+        lastStyle: normalizeStyle(data.lastStyle),
+        lastColor: typeof data.lastColor === "string" && /^#[0-9a-fA-F]{3,8}$/.test(data.lastColor.trim())
+          ? data.lastColor.trim()
+          : undefined,
       };
     }
   } catch (__swallowErr) { logSwallow(__swallowErr, "annotation-config.ts · loadAnnotationConfig", "debug"); }
@@ -108,4 +134,40 @@ export function getAnnotationPalette(): string[] {
 /** 当前标签预设（副本） */
 export function getAnnotationTagPresets(): string[] {
   return current.tagPresets && current.tagPresets.length ? [...current.tagPresets] : [...DEFAULT_TAG_PRESETS];
+}
+
+/* ================= 上次使用样式（2026-08-30，微信读书式一键高亮） =================
+ * 点「标注」直接用上次样式创建；样式条仅在用户主动点 ▼ 时才展开改样式。
+ * 写入走 300ms 防抖：用户在样式条里连续点颜色/样式会产生高频写入，
+ * 防抖后只在停手时落盘一次，避免拖慢 UI。
+ */
+
+/** 上次使用的高亮线型（无历史 → 回退用户配置的默认线型） */
+export function getLastAnnotationStyle(): AnnotationStyle {
+  return current.lastStyle || getDefaultAnnotationStyle();
+}
+
+/** 上次使用的高亮颜色（无历史 → 回退用户配置的默认颜色） */
+export function getLastAnnotationColor(): string {
+  return current.lastColor || getDefaultAnnotationColor();
+}
+
+const LAST_STYLE_SAVE_MS = 300;
+let lastStyleSaveTimer: any = null;
+
+/**
+ * 记录本次实际使用的样式（供下次「标注」一键复用），防抖落盘。
+ * 只接受合法线型；非法值直接忽略，不污染记忆。
+ */
+export function setLastAnnotationStyle(style: AnnotationStyle, color: string): void {
+  const s = normalizeStyle(style);
+  if (!s) return;
+  const c = String(color ?? "").trim();
+  if (!/^#[0-9a-fA-F]{3,8}$/.test(c)) return;
+  current = { ...current, lastStyle: s, lastColor: c };
+  if (lastStyleSaveTimer) clearTimeout(lastStyleSaveTimer);
+  lastStyleSaveTimer = setTimeout(() => {
+    lastStyleSaveTimer = null;
+    persist();
+  }, LAST_STYLE_SAVE_MS);
 }

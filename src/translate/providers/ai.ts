@@ -19,14 +19,29 @@ import type { Translator, TranslateRequest } from "../types.ts";
  * 单条 AI 翻译函数：输入原文 + 源/目标语言，输出译文（可为空串）。
  * @param bookId 可选书籍 ID（2026-08-28 v1.3.0）：用于注入「本书前提上下文」，
  *   使译文专有名词与用户手写的背景资料保持一致（如 Sludge 恒译为「斯拉奇」）。
+ * @param mode 翻译模式（2026-08-30 新增）："default" 直译 / "concise" 精简。
+ *   不同模式调用方会构造不同 system prompt，AI 引擎层面不做特殊处理（按原样转发）。
  */
-export type AiTranslateFn = (text: string, from: string, to: string, bookId?: string) => Promise<string>;
+export type AiTranslateFn = (
+  text: string,
+  from: string,
+  to: string,
+  bookId?: string,
+  mode?: "default" | "concise"
+) => Promise<string>;
 
 /**
  * 批量 AI 翻译函数：输入同序文本数组，输出同序同长译文数组。
  * @param bookId 可选书籍 ID（2026-08-28 v1.3.0）：同 AiTranslateFn。
+ * @param mode 翻译模式（2026-08-30 新增）：同 AiTranslateFn。
  */
-export type AiTranslateBatchFn = (texts: string[], from: string, to: string, bookId?: string) => Promise<string[]>;
+export type AiTranslateBatchFn = (
+  texts: string[],
+  from: string,
+  to: string,
+  bookId?: string,
+  mode?: "default" | "concise"
+) => Promise<string[]>;
 
 export interface AiTranslatorDeps {
   translateOne?: AiTranslateFn;
@@ -52,10 +67,12 @@ export class AiTranslator implements Translator {
   async translate(req: TranslateRequest): Promise<string[]> {
     // 书籍 ID 透传（v1.3.0）：供 AI 引擎注入「本书前提上下文」
     const bookId = req.bookId;
+    // 翻译模式（2026-08-30）：不同 mode 走不同译文池
+    const mode = req.mode;
     // ① 批量优先：一次请求译整批（内部自行分桶），失败退逐段
     if (typeof this.deps.translateBatch === "function") {
       try {
-        const out = await this.deps.translateBatch(req.texts, req.from, req.to, bookId);
+        const out = await this.deps.translateBatch(req.texts, req.from, req.to, bookId, mode);
         if (Array.isArray(out) && out.length === req.texts.length) return out;
       } catch (__swallowErr) { logSwallow(__swallowErr, "ai.ts · translate", "debug"); }
     }
@@ -64,7 +81,7 @@ export class AiTranslator implements Translator {
       const out: string[] = [];
       for (const t of req.texts) {
         try {
-          out.push((await this.deps.translateOne(t, req.from, req.to, bookId)) || "");
+          out.push((await this.deps.translateOne(t, req.from, req.to, bookId, mode)) || "");
         } catch {
           out.push("");
         }

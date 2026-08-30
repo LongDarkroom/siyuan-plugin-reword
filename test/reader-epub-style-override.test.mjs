@@ -179,8 +179,8 @@ test("所有子函数均被 buildReaderStyles 调用", () => {
   assert.match(css, /ul,\s*ol\s*\{/);                                      // listStyles
   assert.match(css, /figure\s*\{[^}]*text-align:\s*center/);              // figureStyles
   assert.match(css, /body\s*\{[^}]*background:\s*#ffffff/);               // bodyStyles
-  assert.match(css, /a\s*\{\s*color:\s*#185FA5/);                          // linkStyles
-  assert.match(css, /pre\s*\{[^}]*background:\s*rgba\(0,0,0,?\.06\)/);     // codeStyles
+  assert.match(css, /a\s*\{\s*color:\s*var\(--b3-protyle-inline-link-color,\s*#185FA5\)/);   // linkStyles
+  assert.match(css, /pre\s*\{[^}]*background:\s*var\(--b3-protyle-code-background,\s*rgba\(128,128,128,0\.08\)\)/);  // codeStyles
   assert.match(css, /color-scheme:\s*light/);                              // colorSchemeStyles
   assert.match(css, /overflow-wrap:\s*break-word/);                       // wordWrapStyles
   // fontFamilyStyles

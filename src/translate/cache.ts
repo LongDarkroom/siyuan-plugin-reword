@@ -13,9 +13,22 @@ import { logSwallow } from "../core/safe.ts";
  * - 2026-08-28：额外按 bookId 维护「已缓存节」集合（cachedSections，1-based
  *   节序号），落盘进 `translations/<bookId>.meta.json`，用于 UI 展示
  *   「共缓存 N 页，第 X-Y 页缓存成功」。
+ * - 2026-08-30：多 mode 路由（2026-08-30 段落级"简洁版"改造）：
+ *   同一段原文可同时缓存多种译文风格（default 直译 / concise 精简），互不污染。
+ *   存储结构 bookId -> mode -> Record<hash, tr>，mode 默认 "default" 兼容旧数据。
+ *   mode 字符串同时混入 hash salt（即便旧版落盘无 mode 字段，getBatch(bookId, texts, "default")
+ *   也能正确路由到 .map[mode] 内的 hash 命中区，零迁移成本）。
  */
+export type TranslationMode = "default" | "concise";
+export const DEFAULT_TRANSLATION_MODE: TranslationMode = "default";
+
+/** 单 mode 的缓存结构（mode -> 原文 hash -> 译文） */
+type ModeCacheMap = Record<string, Record<string, string>>;
+/** mem 中每本书的缓存：mode -> 译文 hash map */
+type BookCacheMap = Record<TranslationMode, Record<string, string>>;
+
 export class TranslationCache {
-  private mem = new Map<string, Record<string, string>>();
+  private mem = new Map<string, BookCacheMap>();
   private timers = new Map<string, any>();
   private plugin: any;
   private saltFn?: () => string;
@@ -30,9 +43,14 @@ export class TranslationCache {
     this.saltFn = saltFn;
   }
 
-  private hash(s: string): string {
+  /**
+   * 2026-08-30 hash 加盐：salt + mode + text 三段拼接
+   * 这样不同 mode 的同段原文会产生不同 hash，缓存互不污染。
+   */
+  private hash(s: string, mode: TranslationMode = DEFAULT_TRANSLATION_MODE): string {
     const salt = this.saltFn ? this.saltFn() : "";
-    const input = salt ? salt + "\u0001" + s : s;
+    // 使用 \u0001 作分隔符（罕见字符，几乎不会出现在原文 / 提示词中）
+    const input = [salt, mode, s].filter(Boolean).join("\u0001");
     let h = 0x811c9dc5;
     for (let i = 0; i < input.length; i++) {
       h ^= input.charCodeAt(i);
@@ -45,44 +63,114 @@ export class TranslationCache {
     return "translations/" + bookId + ".json";
   }
 
-  async load(bookId: string): Promise<Record<string, string>> {
+  /**
+   * 加载本书缓存。兼容旧版本单 mode 结构（落盘文件是 Record<hash, tr>）：
+   * 检测到顶层是"原文 → 译文"而非"mode → {...}"时，自动包成 { default: 原数据 }。
+   */
+  async load(bookId: string): Promise<BookCacheMap> {
     if (this.mem.has(bookId)) return this.mem.get(bookId)!;
-    let map: Record<string, string> = {};
+    const empty: BookCacheMap = { default: {}, concise: {} };
     try {
       const raw = await this.plugin.loadData(this.path(bookId));
-      if (raw && typeof raw === "object") map = raw as Record<string, string>;
+      if (raw && typeof raw === "object") {
+        // 旧版单 mode 形态：{ "hash": "译文" } → 包成 { default: {...}, concise: {} }
+        if (this.looksLikeFlatMap(raw as Record<string, unknown>)) {
+          empty.default = raw as Record<string, string>;
+        } else {
+          // 新版多 mode 形态：{ default: {hash: tr}, concise: {...} }
+          const obj = raw as ModeCacheMap;
+          if (obj.default && typeof obj.default === "object") empty.default = obj.default;
+          if (obj.concise && typeof obj.concise === "object") empty.concise = obj.concise;
+        }
+      }
     } catch (__swallowErr) { logSwallow(__swallowErr, "cache.ts · load", "debug"); }
-    this.mem.set(bookId, map);
-    return map;
+    this.mem.set(bookId, empty);
+    return empty;
   }
 
-  /** 批量查询：返回命中项（索引→译文）与未命中索引列表 */
+  /**
+   * 判定落盘 JSON 是"旧版单 mode（hash→tr）"还是"新版多 mode（mode→hash→tr）"。
+   * 启发式：顶层 key 形如 6-10 位 base36 字符（hash 长度）→ 当作单 mode ；
+   * 顶层 key 是 "default" / "concise" 等 mode 名 → 当作多 mode。
+   */
+  private looksLikeFlatMap(obj: Record<string, unknown>): boolean {
+    const keys = Object.keys(obj);
+    if (!keys.length) return false; // 空对象按"多 mode"处理
+    // 全是 mode 关键字 → 多 mode
+    if (keys.every((k) => k === "default" || k === "concise")) return false;
+    // 含 hash 形态的 key（6-10 位 base36）→ 单 mode
+    return keys.every((k) => /^[0-9a-z]{6,10}$/.test(k));
+  }
+
+  /**
+   * 批量查询：返回命中项（索引→译文）与未命中索引列表。
+   * mode 决定走哪条译文池（default / concise），二者互不污染。
+   */
   async getBatch(
     bookId: string,
-    texts: string[]
-  ): Promise<{ hits: Record<number, string>; misses: number[] }> {
-    const map = await this.load(bookId);
+    texts: string[],
+    mode: TranslationMode = DEFAULT_TRANSLATION_MODE,
+  ): Promise<{ hits: Record<number, string>; misses: number[]; fromCache: boolean[] }> {
+    const bookMap = await this.load(bookId);
+    const modeMap = bookMap[mode] || {};
     const hits: Record<number, string> = {};
     const misses: number[] = [];
+    const fromCache: boolean[] = new Array(texts.length).fill(false);
     texts.forEach((t, i) => {
-      const v = map[this.hash(t)];
-      if (v != null && v !== "") hits[i] = v;
+      const v = modeMap[this.hash(t, mode)];
+      if (v != null && v !== "") { hits[i] = v; fromCache[i] = true; }
       else misses.push(i);
     });
-    return { hits, misses };
+    return { hits, misses, fromCache };
   }
 
-  /** 批量写入（防抖落盘） */
-  async setBatch(bookId: string, pairs: Array<[string, string]>): Promise<void> {
+  /** 单条查询（用于单段补救时快速判断/取译） */
+  async getOne(bookId: string, text: string, mode: TranslationMode = DEFAULT_TRANSLATION_MODE): Promise<string | null> {
+    const bookMap = await this.load(bookId);
+    const modeMap = bookMap[mode] || {};
+    const v = modeMap[this.hash(text, mode)];
+    return v != null && v !== "" ? v : null;
+  }
+
+  /** 单条写入（覆盖，用于单段重译后落盘） */
+  async setOne(bookId: string, text: string, tr: string, mode: TranslationMode = DEFAULT_TRANSLATION_MODE): Promise<void> {
+    await this.setBatch(bookId, [[text, tr]], mode);
+  }
+
+  /**
+   * 单条失效（用于单段删除：清除该段 AI 缓存，下次刷新不重现）。
+   * 注意：不碰用户修正库（fix），用户修正最珍贵，需单独 fixDelete。
+   */
+  async deleteOne(bookId: string, text: string, mode: TranslationMode = DEFAULT_TRANSLATION_MODE): Promise<void> {
+    const bookMap = await this.load(bookId);
+    const modeMap = bookMap[mode] || {};
+    const k = this.hash(text, mode);
+    if (k in modeMap) delete modeMap[k];
+    this.mem.set(bookId, bookMap);
+    clearTimeout(this.timers.get(bookId));
+    this.timers.set(bookId, setTimeout(() => {
+      this.plugin.saveData(this.path(bookId), bookMap).catch(() => {});
+      this.timers.delete(bookId);
+    }, 500));
+  }
+
+  /** 批量写入（防抖落盘）。同 mode 内的 hash 会被覆盖（同段再次翻译以新值为准）。 */
+  async setBatch(
+    bookId: string,
+    pairs: Array<[string, string]>,
+    mode: TranslationMode = DEFAULT_TRANSLATION_MODE,
+  ): Promise<void> {
     if (!pairs.length) return;
-    const map = await this.load(bookId);
-    for (const [t, tr] of pairs) map[this.hash(t)] = tr;
-    this.mem.set(bookId, map);
+    const bookMap = await this.load(bookId);
+    const modeMap = bookMap[mode] || (bookMap[mode] = {});
+    for (const [t, tr] of pairs) modeMap[this.hash(t, mode)] = tr;
+    this.mem.set(bookId, bookMap);
     clearTimeout(this.timers.get(bookId));
     this.timers.set(
       bookId,
       setTimeout(() => {
-        this.plugin.saveData(this.path(bookId), map).catch(() => {});
+        // 落盘多 mode 结构（一次性写整个 bookMap，旧版结构下次 load 时兼容回填）
+        this.plugin.saveData(this.path(bookId), bookMap).catch(() => {});
         this.timers.delete(bookId);
       }, 500)
     );
@@ -104,10 +192,14 @@ export class TranslationCache {
     }
   }
 
-  /** 已缓存条目数（用于 UI 展示「本书已缓存 N 段」） */
-  async size(bookId: string): Promise<number> {
-    const map = await this.load(bookId);
-    return Object.keys(map).length;
+  /**
+   * 已缓存条目数（按 mode 统计）。mode 不传时返回 default 模式数（保持原 UI 语义）。
+   * 用于 UI 展示「本书已缓存 N 段」。
+   */
+  async size(bookId: string, mode?: TranslationMode): Promise<number> {
+    const bookMap = await this.load(bookId);
+    if (mode) return Object.keys(bookMap[mode] || {}).length;
+    return Object.keys(bookMap.default || {}).length;
   }
 
   /** 元信息落盘：保存已缓存节集合（节号数组）+ 书名（用于「第 X-Y 页」+ 下拉书名） */
@@ -157,6 +249,26 @@ export class TranslationCache {
   async listCachedBooks(): Promise<Array<{ bookId: string; title: string }>> {
     await this.loadIndex();
     return [...this.bookIndex.entries()].map(([bookId, title]) => ({ bookId, title }));
+  }
+
+  /**
+   * 清理「孤儿」翻译缓存：删除书架中已不存在的书籍对应的全部缓存文件
+   * （translations/<id>.json / <id>.meta.json / <id>.fix.json），并返回清理数量。
+   *
+   * 历史原因（随机 bookId 时代 / 删书未清缓存）会导致同一本实体书在
+   * `translations/` 下遗留多份缓存、并在「选择书籍」下拉里重复出现；
+   * 本方法回收这些无效缓存，且只清书架里查不到的 id，绝不误删在读书籍的缓存。
+   */
+  async cleanOrphanCaches(validIds: Set<string>): Promise<number> {
+    await this.loadIndex();
+    let removed = 0;
+    const orphans = [...this.bookIndex.keys()].filter((id) => !validIds.has(id));
+    for (const id of orphans) {
+      await this.clear(id); // 清 .json + .meta.json + 书名索引条目
+      await this.clearFix(id); // 清 .fix.json（孤儿修正一并回收）
+      removed++;
+    }
+    return removed;
   }
 
   /** 返回本书已缓存节统计：总数 + 升序节号数组 + 连续区间文本（如「第 1-4 页」）+ 书名 */
@@ -226,5 +338,71 @@ export class TranslationCache {
     try {
       await this.plugin.removeData?.(this.metaPath(bookId));
     } catch (__swallowErr) { logSwallow(__swallowErr, "cache.ts · clear", "error"); }
+  }
+
+  /* ===================== 用户修正库（独立于 AI 缓存） =====================
+   * 用户「钉选」的正确译文：最高优先级，覆盖 AI 缓存与实时翻译。
+   * 落盘独立文件 translations/<bookId>.fix.json，clear() 不清它——
+   * 用户修正最珍贵，误删代价极高。需单独 clearFix() 才删。
+   * key 用纯原文 hash（不拼 mode/salt），使一段原文只对应一份修正，
+   * 无论当前显示 default 还是 concise 池，修正都生效。
+   */
+  private fixMem = new Map<string, Record<string, { tr: string; ts: number; model?: string }>>();
+  private fixTimers = new Map<string, any>();
+  private fixPath(bookId: string): string {
+    return "translations/" + bookId + ".fix.json";
+  }
+  private async loadFix(bookId: string): Promise<Record<string, { tr: string; ts: number; model?: string }>> {
+    if (this.fixMem.has(bookId)) return this.fixMem.get(bookId)!;
+    let map: Record<string, { tr: string; ts: number; model?: string }> = {};
+    try {
+      const raw = await this.plugin.loadData(this.fixPath(bookId));
+      if (raw && typeof raw === "object") map = raw as any;
+    } catch (__swallowErr) { logSwallow(__swallowErr, "cache.ts · loadFix", "debug"); }
+    this.fixMem.set(bookId, map);
+    return map;
+  }
+  /** 取用户钉选的修正译文（最高优先级）。返回 null 表示无修正。 */
+  async fixGet(bookId: string, text: string): Promise<string | null> {
+    const map = await this.loadFix(bookId);
+    const v = map[this.hash(text)];
+    return v && v.tr ? v.tr : null;
+  }
+  /** 写入/覆盖用户修正（钉选正确答案，持久化且不被 clear 清掉） */
+  async fixSet(bookId: string, text: string, tr: string, model?: string): Promise<void> {
+    const map = await this.loadFix(bookId);
+    map[this.hash(text)] = { tr, ts: Date.now(), model };
+    this.fixMem.set(bookId, map);
+    clearTimeout(this.fixTimers.get(bookId));
+    this.fixTimers.set(bookId, setTimeout(() => {
+      this.plugin.saveData(this.fixPath(bookId), map).catch(() => {});
+      this.fixTimers.delete(bookId);
+    }, 500));
+  }
+  /** 删除单条用户修正（仅删修正库，不影响 AI 缓存） */
+  async fixDelete(bookId: string, text: string): Promise<void> {
+    const map = await this.loadFix(bookId);
+    const k = this.hash(text);
+    if (k in map) delete map[k];
+    this.fixMem.set(bookId, map);
+    clearTimeout(this.fixTimers.get(bookId));
+    this.fixTimers.set(bookId, setTimeout(() => {
+      this.plugin.saveData(this.fixPath(bookId), map).catch(() => {});
+      this.fixTimers.delete(bookId);
+    }, 500));
+  }
+  /** 本书用户修正条数（UI 提示「已钉选 N 处修正」） */
+  async fixCount(bookId: string): Promise<number> {
+    const map = await this.loadFix(bookId);
+    return Object.keys(map).length;
+  }
+  /** 清空用户修正库（独立于 AI 缓存；默认 clear() 不清修正） */
+  async clearFix(bookId: string): Promise<void> {
+    this.fixMem.delete(bookId);
+    clearTimeout(this.fixTimers.get(bookId));
+    this.fixTimers.delete(bookId);
+    try {
+      await this.plugin.removeData?.(this.fixPath(bookId));
+    } catch (__swallowErr) { logSwallow(__swallowErr, "cache.ts · clearFix", "error"); }
   }
 }

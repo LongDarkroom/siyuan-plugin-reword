@@ -154,15 +154,18 @@ test("[B2] onSelSend 的 link 不再是恒空串（此前是死变量）", () =>
 
 /* ================= C. 书签 / 摘录抽屉 ================= */
 
-test("[C1] 底栏有书签与摘录按钮并绑定对应 toggle", () => {
-  assert.match(viewSrc, /on:click=\{toggleBookmarkDrawer\}/, "🔖 应绑定 toggleBookmarkDrawer");
-  assert.match(viewSrc, /on:click=\{toggleAnnots\}/, "📑 应绑定 toggleAnnots");
-  const start = viewSrc.indexOf('<div class="reader-bottom-bar"');
-  assert.ok(start > -1, "应定位到底栏");
-  const end = viewSrc.indexOf("{#if showTtsBar}", start); // 底栏紧跟着朗读条
-  const bar = viewSrc.slice(start, end > -1 ? end : start + 2500);
-  assert.match(bar, /🔖/, "底栏应有书签按钮");
-  assert.match(bar, /📑/, "底栏应有摘录按钮");
+test("[C1] 顶栏左侧有书签与摘录锚点并绑定 toggleDrawer", () => {
+  // 2026-08-30 改造：书签 / 摘录入口从底栏移到顶栏左侧，统一走 toggleDrawer
+  assert.match(viewSrc, /data-drawer-anchor="bookmarks"/, "顶栏左侧应有书签抽屉锚点");
+  assert.match(viewSrc, /data-drawer-anchor="annots"/, "顶栏左侧应有摘录抽屉锚点");
+  assert.match(viewSrc, /on:click=\{\(\) => toggleDrawer\("bookmarks"\)\}/, "🔖 应绑定 toggleDrawer('bookmarks')");
+  assert.match(viewSrc, /on:click=\{\(\) => toggleDrawer\("annots"\)\}/, "📝 应绑定 toggleDrawer('annots')");
+  const start = viewSrc.indexOf('<div class="reader-toolbar-left"');
+  assert.ok(start > -1, "应定位到顶栏左侧组");
+  const end = viewSrc.indexOf('</div>\n    <!-- 中：书名', start);
+  const left = viewSrc.slice(start, end > -1 ? end : start + 2000);
+  assert.match(left, /🔖/, "顶栏左侧应有书签按钮");
+  assert.match(left, /📝/, "顶栏左侧应有摘录按钮");
 });
 
 test("[C2] 两个抽屉模板存在且互斥关闭其它面板", () => {

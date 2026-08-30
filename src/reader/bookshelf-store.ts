@@ -10,6 +10,7 @@ import { logSwallow } from "../core/safe.ts";
 import { putFile, getFileBlob, removeFile } from "../siyuan/api";
 import { unzipSync } from "fflate";
 import { writable } from "svelte/store";
+import { bookFingerprint } from "./book-fingerprint.ts";
 
 /** 阅读进度：cfi（EPUB 定位）/ fraction（通用比例定位 0-1）/ index（章节或页码 0-based） */
 export interface ReadingProgress {
@@ -303,6 +304,7 @@ export class BookshelfStore {
     title?: string;
     author?: string;
     language?: string;
+    identifier?: string;
     cover?: { blob: Blob; ext: string };
   }> {
     try {
@@ -330,6 +332,7 @@ export class BookshelfStore {
       const title = q("title");
       const author = q("creator");
       const language = q("language");
+      const identifier = q("identifier");
       // 封面
       let cover: { blob: Blob; ext: string } | undefined;
       let coverId = "";
@@ -359,7 +362,7 @@ export class BookshelfStore {
           }
         }
       }
-      return { title, author, language, cover };
+      return { title, author, language, identifier, cover };
     } catch {
       return {}; // 解析失败不阻断导入
     }
@@ -378,42 +381,54 @@ export class BookshelfStore {
       (b) => b.title.toLowerCase() === nameBase.toLowerCase() && b.size === file.size
     );
     if (dup) return null;
-    const id = `b${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`;
-    const dir = BOOKS_DIR(this.plugin.name);
-    const path = `${dir}/${id}.${ext}`;
-    const ok = await putFile(path, false, file);
-    if (!ok) throw new Error(`书籍上传失败: ${file.name}`);
-    // EPUB/PDF：元数据 + 封面（失败静默，不阻断导入）
+
+    // 先提取元数据（EPUB/PDF），以便用「内容指纹」生成稳定 bookId
     let title: string | undefined;
     let author: string | undefined;
     let language: string | undefined;
-    let cover: string | undefined;
+    let identifier: string | undefined;
+    let coverBlob: { blob: Blob; ext: string } | undefined;
     if (ext === "epub") {
       const meta = await this.extractEpubMeta(file);
       title = meta.title;
       author = meta.author;
       language = meta.language;
-      if (meta.cover) {
-        try {
-          await putFile(`${dir}/covers`, true, null);
-        } catch (__swallowErr) { logSwallow(__swallowErr, "bookshelf-store.ts · importBook", "debug"); }
-        const coverPath = `${dir}/covers/${id}.${meta.cover.ext}`;
-        const coverOk = await putFile(coverPath, false, meta.cover.blob);
-        if (coverOk) cover = coverPath;
-      }
+      identifier = meta.identifier;
+      coverBlob = meta.cover;
     } else if (ext === "pdf") {
       // [REword patch 2026-08-29] PDF 适配 Phase 1：元数据 + 首页封面
       const meta = await this.extractPdfMeta(file);
       title = meta.title;
       author = meta.author;
-      if (meta.cover) {
-        try {
-          await putFile(`${dir}/covers`, true, null);
-        } catch (__swallowErr) { logSwallow(__swallowErr, "bookshelf-store.ts · importBook", "debug"); }
-        const coverPath = `${dir}/covers/${id}.${meta.cover.ext}`;
-        const coverOk = await putFile(coverPath, false, meta.cover.blob);
-        if (coverOk) cover = coverPath;
-      }
+      coverBlob = meta.cover;
+    }
+
+    // 内容指纹 → 稳定 id：同一实体书无论导入几次、删除后重导，
+    // 永远得到同一 id，复用同一份 translations/<id>.json 缓存，
+    // 从根本上避免「同一本书多份缓存翻译」。
+    const id = bookFingerprint({
+      identifier,
+      title: title || nameBase,
+      author,
+      size: file.size,
+      format: ext === "markdown" ? "md" : ext,
+    });
+    // 指纹级去重：书架已存在同指纹书则跳过重复导入（直接复用既有缓存）
+    if (this.books.some((b) => b.id === id)) return null;
+
+    const dir = BOOKS_DIR(this.plugin.name);
+    const path = `${dir}/${id}.${ext}`;
+    const ok = await putFile(path, false, file);
+    if (!ok) throw new Error(`书籍上传失败: ${file.name}`);
+
+    let cover: string | undefined;
+    if (coverBlob) {
+      try {
+        await putFile(`${dir}/covers`, true, null);
+      } catch (__swallowErr) { logSwallow(__swallowErr, "bookshelf-store.ts · importBook mkdir covers", "debug"); }
+      const coverPath = `${dir}/covers/${id}.${coverBlob.ext}`;
+      const coverOk = await putFile(coverPath, false, coverBlob.blob);
+      if (coverOk) cover = coverPath;
     }
     const book: BookMeta = {
       id,

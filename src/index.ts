@@ -8,6 +8,7 @@ import {
 import { DockManager, SLOT_LABELS, type DockableFeature, type DockSlot } from "./dock/dock-manager.ts";
 import * as path from "path";
 import * as fs from "node:fs";
+import { isPluginRootWithFs, isAsarPath, resolvePluginPathWithFs } from "./core/plugin-path.ts";
 import { VocabStore, ALL_BOOK_ID } from "./vocab/vocab-store.ts";
 import { LearningStatus, type LearningStatus as LearningStatusT } from "./types.ts";
 import { getVocabHighlighter, configureVocabHighlightDeps } from "./vocab/vocab-highlight.ts";
@@ -278,6 +279,8 @@ export default class RewordPlugin extends Plugin {
   private _hoverOutsideMd?: (e: MouseEvent) => void;  // 外部点击关闭监听（需可靠移除）
   private _hoverOutsideTimer?: ReturnType<typeof setTimeout>;
   private _hoverKeydown?: (e: KeyboardEvent) => void;  // Esc 关闭监听
+  private _hoverAnchorRect: DOMRect | null = null;     // 当前展示单词的视口矩形（锚定浮窗 + 抖动/跨词判定）
+  private _hoverScrollAt = 0;                          // 最近一次 wheel/scroll 时间戳（抑制滚动伴随的 mousemove 重识别）
   // 收藏分类浮窗（从查词弹窗内唤起）状态：用于协调释义窗口的关闭/ESC 逻辑，避免两者互相抢占
   private _vocabPickOpen: boolean = false;
   private _vocabPickEl: HTMLElement | null = null;
@@ -1239,29 +1242,42 @@ export default class RewordPlugin extends Plugin {
    * @param from  源语言（"auto" 或 ISO 代码）
    * @param to    目标语言（默认 "zh"）
    * @param bookId 书籍 ID（用于按书缓存；传空串则不落盘缓存）
+   * @param ctxBefore 与 texts 同序的「前文参考」数组（可 null），供模型理解语境、无需翻译
+   * @param meta 书籍元数据（书名/作者/语言/目录），注入 system prompt 提升准确性
    */
   public async translateBatch(
     texts: string[],
     from: string,
     to: string,
-    bookId: string
+    bookId: string,
+    ctxBefore?: (string | null)[],
+    meta?: { title?: string; author?: string; language?: string; toc?: string } | null,
+    opts?: { model?: string; overwrite?: boolean; signal?: AbortSignal; mode?: "default" | "concise" }
   ): Promise<string[]> {
     if (!Array.isArray(texts) || texts.length === 0) return [];
     const out: string[] = new Array(texts.length).fill("");
 
-    // 1) 查缓存（按书）
-    const { hits, misses } = await this.translationCache.getBatch(bookId, texts);
+    // 2026-08-30：译文模式（default 直译 / concise 精简）→ 决定查哪条译文池
+    const mode = opts?.mode ?? "default";
+    // 1) 查缓存（按书 + 模式）；overwrite 时跳过缓存，全部当作未命中重新翻译
+    const { hits, misses } = opts?.overwrite
+      ? { hits: {} as Record<number, string>, misses: texts.map((_, i) => i) }
+      : await this.translationCache.getBatch(bookId, texts, mode);
     for (const k in hits) out[+k] = hits[k];
-    trLog(`translateBatch: 缓存命中 ${Object.keys(hits).length}, 未命中 ${misses.length}/${texts.length}`);
+    trLog(`translateBatch: 缓存命中 ${Object.keys(hits).length}, 未命中 ${misses.length}/${texts.length}${opts?.overwrite ? " (覆盖缓存)" : ""}`);
 
     // 2) 未命中部分走引擎链（2026-08-28：AI 首选 + 批量模式）
     if (misses.length) {
       const reqTexts = misses.map((i) => texts[i]);
+      // 前文参考需与 misses 对齐（每个未命中索引对应的前文段）
+      const reqCtx = ctxBefore
+        ? misses.map((i) => (ctxBefore[i] ? ctxBefore[i] : null))
+        : undefined;
       try {
         trLog("translateBatch: buildProviders...");
         const providers = buildProviders(this.aiSettings, {
           translateOne: (t, f, t2, bid) => this.aiTranslateText(t, f, t2, bid),
-          translateBatch: (ts, f, t2, bid) => this.aiTranslateBatch(ts, f, t2, bid),
+          translateBatch: (ts, f, t2, bid) => this.aiTranslateBatch(ts, f, t2, bid, reqCtx, meta, { ...opts, mode }),
         });
         trLog(`translateBatch: ${providers.length} 个引擎, 调用 translateWithFallback...`);
         const res = await translateWithFallback(providers, { texts: reqTexts, from, to, bookId });
@@ -1273,7 +1289,7 @@ export default class RewordPlugin extends Plugin {
           out[idx] = translation;
           if (translation) pairs.push([texts[idx], translation]);
         });
-        if (pairs.length) await this.translationCache.setBatch(bookId, pairs);
+        if (pairs.length) await this.translationCache.setBatch(bookId, pairs, mode);
       } catch (e) {
         console.error("[REword] translateBatch: 引擎链异常:", e);
         getLogger().error("[REword] 批量翻译失败:", { error: e });
@@ -1281,6 +1297,57 @@ export default class RewordPlugin extends Plugin {
     }
     trLog(`translateBatch: 最终返回 ${out.length} 条, 非空 ${out.filter(t=>t?.trim()).length} 条`);
     return out;
+  }
+
+  /**
+   * translateBatch 的「详细信息」版本：除译文外，额外回传每段来源
+   * （providers：引擎名或 "cache"；fromCache：是否缓存命中）。
+   * 供双语注入层渲染来源徽标与缓存标记，解决「翻译不够透明」痛点。
+   * 逻辑与 translateBatch 完全一致，仅返回值多了来源元数据。
+   */
+  public async translateBatchDetailed(
+    texts: string[],
+    from: string,
+    to: string,
+    bookId: string,
+    ctxBefore?: (string | null)[],
+    meta?: { title?: string; author?: string; language?: string; toc?: string } | null,
+    opts?: { model?: string; overwrite?: boolean; signal?: AbortSignal; mode?: "default" | "concise" }
+  ): Promise<{ texts: string[]; providers: (string | null)[]; fromCache: boolean[] }> {
+    if (!Array.isArray(texts) || texts.length === 0) {
+      return { texts: [], providers: [], fromCache: [] };
+    }
+    const mode = opts?.mode ?? "default";
+    const { hits, misses, fromCache } = opts?.overwrite
+      ? { hits: {} as Record<number, string>, misses: texts.map((_, i) => i), fromCache: texts.map(() => false) }
+      : await this.translationCache.getBatch(bookId, texts, mode);
+    const out: string[] = new Array(texts.length).fill("");
+    const providers: (string | null)[] = new Array(texts.length).fill(null);
+    for (const k in hits) { out[+k] = hits[k]; providers[+k] = "cache"; }
+    if (misses.length) {
+      const reqTexts = misses.map((i) => texts[i]);
+      const reqCtx = ctxBefore ? misses.map((i) => (ctxBefore[i] ? ctxBefore[i] : null)) : undefined;
+      try {
+        const providers2 = buildProviders(this.aiSettings, {
+          translateOne: (t, f, t2, bid) => this.aiTranslateText(t, f, t2, bid),
+          translateBatch: (ts, f, t2, bid) => this.aiTranslateBatch(ts, f, t2, bid, reqCtx, meta, { ...opts, mode }),
+        });
+        const res = await translateWithFallback(providers2, { texts: reqTexts, from, to, bookId });
+        const tr = res.texts || [];
+        const pairs: Array<[string, string]> = [];
+        misses.forEach((idx, j) => {
+          const translation = (tr[j] || "").trim();
+          out[idx] = translation;
+          providers[idx] = translation ? res.provider : null;
+          if (translation) pairs.push([texts[idx], translation]);
+        });
+        if (pairs.length) await this.translationCache.setBatch(bookId, pairs, mode);
+      } catch (e) {
+        console.error("[REword] translateBatchDetailed: 引擎链异常:", e);
+        getLogger().error("[REword] 批量翻译失败:", { error: e });
+      }
+    }
+    return { texts: out, providers, fromCache };
   }
 
   /**
@@ -1295,6 +1362,21 @@ export default class RewordPlugin extends Plugin {
     const count = await this.translationCache.size(bookId);
     const sec = await this.translationCache.getCachedSections(bookId);
     return { count, cachedPages: sec.total, pageRangeText: sec.rangeText, title: sec.title };
+  }
+
+  /**
+   * 批量查询某书段落是否已缓存（供整书预翻译弹窗精确计算待译段数）。
+   * 返回与 texts 同序的 boolean[]（true=该段译文已缓存，可跳过不重复翻译）。
+   */
+  public async checkTranslationCacheHits(
+    bookId: string,
+    texts: string[]
+  ): Promise<boolean[]> {
+    if (!bookId || !texts.length) return new Array(texts.length).fill(false);
+    const { hits } = await this.translationCache.getBatch(bookId, texts);
+    const out: boolean[] = new Array(texts.length).fill(false);
+    for (const k in hits) out[+k] = true;
+    return out;
   }
 
   /**
@@ -1317,6 +1399,26 @@ export default class RewordPlugin extends Plugin {
   }
 
   /**
+   * 清理「孤儿」翻译缓存：回收书架中已不存在书籍对应的缓存文件
+   * （同一本实体书在历史随机 bookId / 删书未清缓存时可能遗留多份）。
+   * 仅清书架查不到的 id，绝不误删在读书籍的缓存。返回清理的书籍数。
+   */
+  public async cleanOrphanTranslationCaches(): Promise<number> {
+    try {
+      const store: any = (this.readerDock as any)?.storeRef;
+      const validIds = new Set<string>(
+        ((store?.list as any[] | undefined) ?? [])
+          .map((b: any) => b.id)
+          .filter(Boolean)
+      );
+      return await this.translationCache.cleanOrphanCaches(validIds);
+    } catch (e) {
+      getLogger().warn("[REword] 清理无效翻译缓存失败", { error: e });
+      return 0;
+    }
+  }
+
+  /**
    * 清空某书的翻译缓存（翻页/重开书后释义会重新按提示词翻译）。
    * 仅在用户主动点击「清空缓存」时调用；正常关闭双语不清除缓存，
    * 以实现「重开书籍与翻页之前释义不消失」的持久化语义。
@@ -1325,6 +1427,36 @@ export default class RewordPlugin extends Plugin {
   public async clearTranslationCache(bookId: string): Promise<void> {
     if (!bookId) return;
     await this.translationCache.clear(bookId);
+  }
+
+  /**
+   * 取用户钉选的双语修正译文（最高优先级，覆盖 AI 缓存与实时翻译）。
+   * 返回 null 表示该书该段无用户修正。
+   */
+  public async getTranslationFix(bookId: string, text: string): Promise<string | null> {
+    if (!bookId) return null;
+    return this.translationCache.fixGet(bookId, text);
+  }
+
+  /**
+   * 钉选/覆盖一条双语修正译文（用户手动修正的正确答案，持久化，
+   * 且「清空缓存」不会清掉它——误删代价极高）。
+   */
+  public async setTranslationFix(bookId: string, text: string, tr: string, model?: string): Promise<void> {
+    if (!bookId) return;
+    await this.translationCache.fixSet(bookId, text, tr, model);
+  }
+
+  /** 删除一条双语修正译文（仅删修正库，不影响 AI 缓存） */
+  public async deleteTranslationFix(bookId: string, text: string): Promise<void> {
+    if (!bookId) return;
+    await this.translationCache.fixDelete(bookId, text);
+  }
+
+  /** 本书用户修正条数（UI 提示「已钉选 N 处修正」） */
+  public async getTranslationFixCount(bookId: string): Promise<number> {
+    if (!bookId) return 0;
+    return this.translationCache.fixCount(bookId);
   }
 
   /**
@@ -1338,26 +1470,51 @@ export default class RewordPlugin extends Plugin {
   // 翻译流程日志走模块级 trLog（DEBUG_TRANSLATE 控制），异常仍走 warn。
 
   /**
-   * 组装翻译 prompt：把用户为本书手写的「前提上下文」拼在最前面。
-   * 这是解决专有名词前后不一致（如 Sludge 先译「斯拉奇」后译「烂泥」）的关键——
-   * AI 批量翻译本身无状态，只能看到当前这批发过去的段落。
+   * 组装翻译 prompt：把书籍元数据（自动获取，零用户输入成本）+ 用户手写的
+   * 「前提上下文」拼在最前面，提升专有名词与语境一致性。
    *
-   * 上下文用 **Markdown 原文**而非 Lute 渲染的 HTML：
-   *  - 省 60%+ token（`- Nate` vs `<ul><li>Nate</li></ul>`）；
-   *  - 模型完全理解 Markdown，无需渲染。
+   * 这是解决专有名词前后不一致（如 Sludge 先译「斯拉奇」后译「烂泥」）的关键——
+   * AI 批量翻译本身无状态，只能看到当前这批发过去的段落；元数据 + 用户前提
+   * 让它跨批次保持译法统一。
+   *
+   * 上下文用 **Markdown 原文**而非 Lute 渲染的 HTML：省 token、模型完全理解。
    *
    * @param basePrompt 基础翻译指令（AI 设置里的「翻译预置提示词」）
-   * @param bookId 书籍 ID（空则不加上下文）
+   * @param bookId 书籍 ID（用于读取用户手写前提）
+   * @param meta 书籍元数据（书名/作者/语言/目录），自动注入，帮助理解语境
    */
-  private buildTranslatePrompt(basePrompt: string, bookId?: string): string {
+  private buildTranslatePrompt(
+    basePrompt: string,
+    bookId?: string,
+    meta?: { title?: string; author?: string; language?: string; toc?: string } | null
+  ): string {
     const base = (basePrompt || "").trim();
+    const parts: string[] = [];
+    // 书籍元数据（自动，零用户输入成本）
+    if (meta && (meta.title || meta.author || meta.language || meta.toc)) {
+      const lines: string[] = [];
+      if (meta.title) lines.push(`书名：${meta.title}`);
+      if (meta.author) lines.push(`作者：${meta.author}`);
+      if (meta.language) lines.push(`原文语言：${meta.language}`);
+      // 目录较长，仅在合理长度内注入（避免 token 暴涨）；过长则截断
+      if (meta.toc && meta.toc.trim()) {
+        const toc = meta.toc.trim().length > 1200 ? meta.toc.trim().slice(0, 1200) + "…" : meta.toc.trim();
+        lines.push(`目录：\n${toc}`);
+      }
+      parts.push(`【本书信息（帮助理解语境，专有名词保持译法一致）】\n${lines.join("\n")}`);
+    }
+    // 用户手写前提（最优先，专有名词译法以用户为准）
     const primer = bookId ? (this.bookPrimerStore?.get(bookId) || "").trim() : "";
-    if (!primer) return base;
-    return (
-      `【本书背景资料（用户提供的上下文，翻译时必须遵循其中的专有名词译法）】\n${primer}\n\n` +
-      `【翻译要求】\n${base}\n` +
-      `【重要】若上文「本书背景资料」中已给出某专有名词的译法，必须严格采用该译法，不得另译。`
-    );
+    if (primer) {
+      parts.push(`【本书背景资料（用户提供的上下文，翻译时必须遵循其中的专有名词译法）】\n${primer}`);
+    }
+    if (!parts.length) return base;
+    let sys = parts.join("\n\n");
+    sys += `\n\n【翻译要求】\n${base}\n`;
+    if (primer) {
+      sys += `【重要】若「本书背景资料」中已给出某专有名词的译法，必须严格采用该译法，不得另译。`;
+    }
+    return sys;
   }
 
   /** 读取本书累计 token 用量（无数据返回零值对象） */
@@ -1458,7 +1615,10 @@ export default class RewordPlugin extends Plugin {
     texts: string[],
     from: string,
     to: string,
-    bookId?: string
+    bookId?: string,
+    ctxBefore?: (string | null)[],
+    meta?: { title?: string; author?: string; language?: string; toc?: string } | null,
+    opts?: { model?: string; overwrite?: boolean; signal?: AbortSignal; mode?: "default" | "concise" }
   ): Promise<string[]> {
     const out: string[] = new Array(texts.length).fill("");
     if (!Array.isArray(texts) || !texts.length) return out;
@@ -1470,10 +1630,23 @@ export default class RewordPlugin extends Plugin {
     // 重置 token 用量累计器
     this._lastTranslationUsage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
 
-    // v1.3.0：注入本书前提上下文（用户手写的背景/人物/译法）
-    const basePrompt = (this.aiSettings?.translatePrompt || DEFAULT_AI_SETTINGS.translatePrompt).trim();
-    const prompt = this.buildTranslatePrompt(basePrompt, bookId);
-    const settings = { ...this.aiSettings, systemPrompt: prompt, jsonMode: false, temperature: this.aiSettings?.trTemperature ?? 0.2 } as any;
+    // 2026-08-30：mode 决定 system prompt（default 走用户提示词；concise 追加精简约束）
+    const baseUserPrompt = (this.aiSettings?.translatePrompt || DEFAULT_AI_SETTINGS.translatePrompt).trim();
+    const trMode = opts?.mode ?? "default";
+    const basePrompt = trMode === "concise"
+      // 精简模式：取用户提示词 + 追加"长度匹配、不扩展"约束
+      // 用户提示词里如果有 "不要添加解释" 之类约束，这里只追加长度/简洁度补充
+      ? baseUserPrompt + "\n\n【2026-08-30 精简模式附加要求】请用最简短的中文翻译原句，**译文长度尽量贴近原文**（短句就译短句，长句才译长句）。**不要**添加：语法分析、注释、解释、背景信息、连接词。直接给译文，不要加任何前缀或后缀。"
+      : baseUserPrompt;
+    const prompt = this.buildTranslatePrompt(basePrompt, bookId, meta);
+    // 2026-08-30 预翻译细化：model 覆盖（弹窗选模型时临时替换，不影响全局 AI 设置）
+    const settings = {
+      ...this.aiSettings,
+      systemPrompt: prompt,
+      jsonMode: false,
+      temperature: this.aiSettings?.trTemperature ?? 0.2,
+      ...(opts?.model ? { model: opts.model } : {}),
+    } as any;
     trLog(`aiTranslateBatch: 入参 ${texts.length} 段, bookId=${bookId || "(无)"}, 上下文=${bookId && this.bookPrimerStore?.get(bookId) ? "有" : "无"}, model=${settings.model || "(空)"}`);
 
     // 分桶：段数 + 字符双预算
@@ -1493,7 +1666,16 @@ export default class RewordPlugin extends Plugin {
     trLog(`aiTranslateBatch: 分桶完成，${chunks.length} 个桶`);
 
     const runChunk = async (chunk: { start: number; texts: string[] }): Promise<void> => {
-      const numbered = chunk.texts.map((t, j) => `[[${j + 1}]]\n${t}`).join("\n\n");
+      // 2026-08-30：每段前拼接「前文参考」（同书前文，标注无需翻译），帮助模型
+      // 理解语境 / 代词指代 / 专有名词一致性，token 增量可控（前文每段≤160字符）。
+      const numbered = chunk.texts
+        .map((t, j) => {
+          const idx = chunk.start + j;
+          const ctx = ctxBefore && ctxBefore[idx] ? ctxBefore[idx] : null;
+          const ctxPart = ctx ? `【前文参考（仅供理解语境，无需翻译）】\n${ctx}\n\n` : "";
+          return `[[${j + 1}]]\n${ctxPart}${t}`;
+        })
+        .join("\n\n");
       const userContent =
         `请把下面 ${chunk.texts.length} 段各自翻译成中文直译。每段以 [[序号]] 开头标记，` +
         `回答时同样用 [[序号]] 开头逐段给出译文，序号与原文一一对应，` +
@@ -1506,7 +1688,7 @@ export default class RewordPlugin extends Plugin {
             [],
             [{ role: "user", content: userContent } as any],
             undefined,
-            {}
+            { signal: opts?.signal }
           );
           trLog(`aiTranslateBatch: runCopilotChat 返回 ok=${res?.ok}, content长度=${(res?.content||"").length}, 内容预览="${(res?.content||"").slice(0,120)}", error=${res?.error||"无"}`);
           // 累计 token 用量（部分 AI 服务商返回 usage，缺失则跳过）
@@ -2885,46 +3067,107 @@ export default class RewordPlugin extends Plugin {
   }
 
   /**
-   * 每次加载都清空【本插件】在「local-plugin-docks」中的缓存。
+   * 修正【本插件】在「local-plugin-docks」中的缓存，保留用户自定义的图标顺序/位置，
+   * 只覆盖可能过期的 icon / title 字段，避免旧版本残留 id 导致侧边栏图标乱码。
    *
-   * 为什么必须每次清空（而非一次性）：
-   * 思源在插件初始化（In）时会用该缓存【整体覆盖】每个 dock 的 config（含 icon / title /
-   * position）。旧版本残留的过期 icon id 会让 genButton 渲染的 <use xlink:href="#旧id"> 指向
-   * 不存在的 symbol，导致侧边栏独立 dock 图标渲染成乱码（> / #）。
-   * 本函数在 onload 中、且早于思源的 In 渲染执行，因此清空后 In 必然采用本插件当前的 config
-   * （正确图标），从根上消除乱码。
-   * 插件自身的停靠位置由 hiword-dock-layout.json + moveFeatureToSlot 管理，与思源原生缓存无关，
-   * 清空本插件缓存不影响布局持久化。
+   * 为什么不能清空：
+   * local-plugin-docks 同时保存了思源侧栏的图标顺序（index）与停靠位置（position）。
+   * 之前「每次清空」会导致用户拖拽的图标顺序在重启后丢失，全部回到默认位置。
+   * 改为只修正 icon/title，即可在消除乱码的同时保留用户布局。
    */
   private async clearStaleDockCache(): Promise<void> {
     try {
       const root = (window as any).siyuan?.storage?.["local-plugin-docks"];
-      if (root && typeof root === "object" && root[this.name] && typeof root[this.name] === "object") {
-        for (const k of Object.keys(root[this.name])) delete root[this.name][k];
+      if (!root || typeof root !== "object" || !root[this.name] || typeof root[this.name] !== "object") return;
+      const pluginDocks = root[this.name];
+      for (const type of Object.keys(pluginDocks)) {
+        const cfg = pluginDocks[type];
+        if (!cfg || typeof cfg !== "object") continue;
+        if (type === "hiword-sidebar") {
+          cfg.icon = ICON_REWORD;
+          cfg.title = "RE word";
+        } else if (type.startsWith("hiword-standalone-")) {
+          const fid = type.slice("hiword-standalone-".length);
+          const f = this.dockManager.getFeatures().find((x) => x.id === fid);
+          if (f) {
+            cfg.icon = f.icon;
+            cfg.title = f.title;
+          }
+        }
       }
-      getLogger().info("[REword] 已清空本插件 Dock 缓存（local-plugin-docks），确保图标/位置采用当前配置");
+      getLogger().info("[REword] 已修正本插件 Dock 缓存图标（local-plugin-docks），保留布局顺序");
     } catch (e) {
-      getLogger().warn("[REword] 清理 Dock 缓存失败", { error: e });
+      getLogger().warn("[REword] 修正 Dock 缓存失败", { error: e });
     }
   }
 
-  /** 修正已渲染 dock 图标的兜底：强制把 <use> 指向本功能正确的 symbol id。
-   *  思源会用 local-plugin-docks 缓存整体覆盖 config.icon，若缓存残留旧 id 会渲染乱码；
-   *  本函数直接修正 DOM，与 clearStaleDockCache 双保险，且覆盖「插件热重载不重跑 In」的场景。 */
+  /** 修正已渲染 dock 图标的兜底：强制把 <use> 指向本功能正确的 symbol id，
+   *  并把正确 icon/title 写回 local-plugin-docks，防止下次启动时思源用旧缓存覆盖。
+   *  与 clearStaleDockCache 双保险，覆盖「插件热重载不重跑 In」的场景。 */
   private fixStandaloneDockIcons(): void {
-    const apply = (type: string, iconId: string) => {
+    const root = (window as any).siyuan?.storage?.["local-plugin-docks"];
+    const pluginDocks = root?.[this.name];
+    const apply = (type: string, iconId: string, title?: string) => {
+      // 1. 修正当前 DOM
       const use = document.querySelector(`.dock__item[data-type="${type}"] svg use`) as SVGUseElement | null;
       if (use) {
         const href = "#" + iconId;
         use.setAttribute("xlink:href", href);
         use.setAttribute("href", href);
       }
+      // 2. 同步写回缓存，避免下次 In 时旧缓存覆盖
+      const shortType = type.slice(this.name.length);
+      const cfg = pluginDocks?.[shortType];
+      if (cfg && typeof cfg === "object") {
+        cfg.icon = iconId;
+        if (title) cfg.title = title;
+      }
     };
     const prefix = this.name;
     for (const { feature } of this.dockManager.getStandaloneFeatures()) {
-      apply(prefix + "hiword-standalone-" + feature.id, feature.icon);
+      apply(prefix + "hiword-standalone-" + feature.id, feature.icon, feature.title);
     }
-    apply(prefix + "hiword-sidebar", ICON_REWORD);
+    apply(prefix + "hiword-sidebar", ICON_REWORD, "RE word");
+  }
+
+  /**
+   * 布局就绪后，按 local-plugin-docks 缓存把本插件 Dock 图标恢复到上次保存的分组位置。
+   * 思源的 In 渲染通常已自动恢复，但这里做兜底：若某图标未落到缓存记录的位置/分组，
+   * 显式调用 Dock.add() 把它放回去，确保重启后用户自定义顺序不丢失。
+   */
+  private restoreDockOrderFromCache(): void {
+    try {
+      const pluginDocks = (window as any).siyuan?.storage?.["local-plugin-docks"]?.[this.name];
+      if (!pluginDocks || typeof pluginDocks !== "object") return;
+      const prefix = this.name;
+      for (const type of Object.keys(pluginDocks)) {
+        const cfg = pluginDocks[type];
+        if (!cfg || typeof cfg !== "object") continue;
+        if (type !== "hiword-sidebar" && !type.startsWith("hiword-standalone-")) continue;
+        const fullType = prefix + type;
+        const item = document.querySelector(`.dock__item[data-type="${fullType}"]`) as HTMLElement | null;
+        if (!item) continue;
+        const slot = this.positionToSlot(cfg.position);
+        if (!slot) continue;
+        const { dock, index } = this.resolveTargetDock(slot);
+        if (!dock) continue;
+        // 若已在目标 dock 的对应分组内，跳过
+        const currentDockEl = item.closest(".dock") as HTMLElement | null;
+        const targetDockEl = dock.element as HTMLElement | null;
+        if (currentDockEl && targetDockEl && currentDockEl === targetDockEl) {
+          const group = item.parentElement;
+          const groupIndex = group ? Array.from(group.children).indexOf(item) : -1;
+          if (groupIndex === index) continue;
+        }
+        try {
+          dock.add(index, item);
+        } catch (e) {
+          getLogger().warn(`[REword] 恢复 Dock 顺序失败 (${type})`, { error: e });
+        }
+      }
+    } catch (e) {
+      getLogger().warn("[REword] 恢复 Dock 顺序失败", { error: e });
+    }
   }
 
   /**
@@ -3001,6 +3244,24 @@ export default class RewordPlugin extends Plugin {
     }
   }
 
+  /** 把思源缓存里的 position 字符串映射回本插件的 DockSlot */
+  private positionToSlot(position: string): DockSlot | null {
+    switch (position) {
+      case "LeftTop":
+      case "LeftBottom":
+      case "RightTop":
+      case "RightBottom":
+      case "Bottom":
+        return position;
+      case "Left":
+        return "LeftTop";
+      case "Right":
+        return "RightBottom";
+      default:
+        return null;
+    }
+  }
+
   /**
    * 运行时即时移动某功能 dock 到目标位置（无需重载思源）。
    * - combined / hidden：隐藏独立 dock（若存在），并刷新组合栏 Tab 将其收纳为组合栏入口；
@@ -3057,8 +3318,13 @@ export default class RewordPlugin extends Plugin {
           this.setStandaloneDockVisible(f.id, false);
         }
       }
-      // 布局就绪后再兜底修正一次独立 Dock 图标（缓存污染兜底）
-      requestAnimationFrame(() => this.fixStandaloneDockIcons());
+      // 布局就绪后再兜底修正一次独立 Dock 图标（缓存污染兜底），并恢复用户自定义顺序
+      requestAnimationFrame(() => {
+        this.fixStandaloneDockIcons();
+        this.restoreDockOrderFromCache();
+      });
+      // 重启思源后自动恢复上次打开的阅读 Tab（思源不会自动恢复自定义插件 Tab）
+      try { void this.readerDock?.tabController?.restoreSession?.(); } catch (__e) { logSwallow(__e, "index.ts · restoreReaderTabs", "debug"); }
     } catch (e) {
       getLogger().warn("[REword] onLayoutReady 隐藏组合栏独立 Dock 失败", { error: e });
     }
@@ -4839,7 +5105,9 @@ export default class RewordPlugin extends Plugin {
           fs.existsSync(this.resolveDictPath(f))
         );
       }
-      return fs.existsSync(this.resolveDictPath(meta.file));
+      const fp = this.resolveDictPath(meta.file);
+      if (!fp) return false;
+      return fs.existsSync(fp);
     } catch {
       return false;
     }
@@ -5042,125 +5310,39 @@ export default class RewordPlugin extends Plugin {
    *      /Applications/SiYuan.app/Contents/Resources/app/config 等等多个候选
    *   4. 兜底：this.pluginPath(this.path)
    */
+  /**
+   * 确定性探测插件目录绝对路径。
+   * 逻辑下沉到纯函数 resolvePluginPathWithFs（src/core/plugin-path.ts，便于单测），
+   * 本方法只把运行时环境快照喂进去，并把结果写回 this.pluginPath。
+   *
+   * 加固（2026-08-30）：asar 路径绝不进入候选、兜底返回 ""；并补充便携版/绿色版
+   * SiYuan 的 workspace.json 探测位置。详见 resolvePluginPathWithFs 注释。
+   */
   private resolvePluginPath(): string {
-    const path = require("path");
-    const clean = (p: string) => path.normalize(p);
-
-    // 严格校验：必须同时满足"含 dict/*.mdx"且"含标记此插件的 package.json"
-    // ——避免误命中 renderer/dict（用户曾导入词典时遗留的文件）
-    const PLUGIN_NAME = "siyuan-plugin-reword";
-    const isPluginRoot = (dir: string): boolean => {
-      try {
-        // 1. 必须有 package.json 且 name === siyuan-plugin-reword
-        const pkg = path.join(dir, "package.json");
-        if (!fs.existsSync(pkg)) return false;
-        try {
-          const data = JSON.parse(fs.readFileSync(pkg, "utf-8"));
-          if (data.name !== PLUGIN_NAME) return false;
-        } catch { return false; }
-        // 2. 必须有 dict/ 且含至少一个 .mdx（内置词典之一）
-        const d = path.join(dir, "dict");
-        if (!fs.existsSync(d)) return false;
-        const mdx = fs.readdirSync(d).filter((f: string) => f.endsWith(".mdx"));
-        if (mdx.length === 0) return false;
-        // 3. 至少包含一个我们已知的内置词典（ncecd/ecd2/hanyu）作为额外保险
-        const known = ["ncecd.mdx", "ecd2.mdx", "hanyu.mdx"];
-        return mdx.some((f: string) => known.includes(f));
-      } catch { return false; }
-    };
-
-    // 1. 缓存（先重新校验，防止被错误缓存）
-    if (this.pluginPath && isPluginRoot(this.pluginPath)) {
-      return this.pluginPath;
-    }
-
-    // 2. 从 __dirname 向上遍历（最可靠，与环境变量无关）
-    const candidates: string[] = [];
-    if (typeof __dirname !== "undefined" && __dirname && __dirname !== ".") {
-      let cur = clean(__dirname);
-      // 最多向上 8 层（足够覆盖任何异常的 asar 嵌套结构）
-      for (let i = 0; i < 8; i++) {
-        candidates.push(cur);
-        // 常见的 siyuan-plugin-reword 路径：cur/data/plugins/siyuan-plugin-reword
-        candidates.push(clean(path.join(cur, "data", "plugins", PLUGIN_NAME)));
-        // 直接就是插件目录的情况
-        candidates.push(clean(path.join(cur, PLUGIN_NAME)));
-        const parent = path.dirname(cur);
-        if (parent === cur) break;
-        cur = parent;
-      }
-    }
-
-    // 3. 多个候选的 workspace.json 路径（跨平台：Windows / macOS / Linux 各自标准位置）
     const os = require("os");
-    // 优先用 os.homedir()（三平台通用），环境变量的回退仅作保险
-    const home = (os.homedir && os.homedir()) || process.env.HOME || process.env.USERPROFILE || "";
-    const wsCandidates: string[] = [];
-    // Linux / 通用：~/.config/{siyuan,SiYuan}
-    if (home) {
-      wsCandidates.push(
-        path.join(home, ".config", "siyuan", "workspace.json"),
-        path.join(home, ".config", "SiYuan", "workspace.json"),
+    const env = {
+      dirname: typeof __dirname !== "undefined" ? __dirname : "",
+      cwd: process.cwd(),
+      platform: process.platform,
+      homedir: (os.homedir && os.homedir()) || process.env.HOME || process.env.USERPROFILE || "",
+      appData: process.env.APPDATA || "",
+      localAppData: process.env.LOCALAPPDATA || "",
+      execPath: process.execPath,
+      resourcesPath: (process as any).resourcesPath,
+      thisPath: (this as any).path || "",
+    };
+    const resolved = resolvePluginPathWithFs(env);
+    if (resolved) {
+      this.pluginPath = resolved;
+      getLogger().info("[REword] 插件目录探测成功:" + resolved);
+    } else {
+      this.pluginPath = "";
+      getLogger().warn(
+        "[REword] 插件目录探测失败：所有候选都指向 SiYuan 程序目录(electron.asar)，无法定位真实插件目录。" +
+        "请确认插件已安装到工作空间 data/plugins/siyuan-plugin-reword/ 下，且包含 plugin.json 与 dict/ 目录。"
       );
     }
-    if (process.platform === "darwin") {
-      // macOS：~/Library/Application Support/siyuan、~/Documents/SiYuan、/Applications 内置
-      wsCandidates.push(
-        path.join(home, "Library", "Application Support", "siyuan", "workspace.json"),
-        path.join(home, "Documents", "SiYuan", "workspace.json"),
-        "/Applications/SiYuan.app/Contents/Resources/app/config/workspace.json",
-        "/Applications/SiYuan.app/Contents/Resources/config/workspace.json",
-      );
-    } else if (process.platform === "win32") {
-      // Windows：%APPDATA% / %LOCALAPPDATA% / 用户文档目录下的 SiYuan
-      const appData = process.env.APPDATA || "";
-      const localAppData = process.env.LOCALAPPDATA || "";
-      if (appData) wsCandidates.push(path.join(appData, "SiYuan", "workspace.json"));
-      if (localAppData) wsCandidates.push(path.join(localAppData, "SiYuan", "workspace.json"));
-      if (home) {
-        wsCandidates.push(
-          path.join(home, "Documents", "SiYuan", "workspace.json"),
-          path.join(home, "AppData", "Roaming", "SiYuan", "workspace.json"),
-          path.join(home, "AppData", "Local", "SiYuan", "workspace.json"),
-        );
-      }
-    }
-    for (const wsFile of wsCandidates) {
-      try {
-        if (!fs.existsSync(wsFile)) continue;
-        const raw = JSON.parse(fs.readFileSync(wsFile, "utf-8"));
-        const list = Array.isArray(raw) ? raw : raw.workspaces || [];
-        for (const ws of list) {
-          const p = typeof ws === "string" ? ws : (ws && ws.path) || "";
-          if (p) candidates.push(clean(path.join(p, "data", "plugins", PLUGIN_NAME)));
-        }
-      } catch (__swallowErr) { logSwallow(__swallowErr, "index.ts · try { if (!fs.existsSync(wsFile)) continue; const raw = JSON.pa…", "debug"); }
-    }
-
-    // 4. cwd 相对路径
-    candidates.push(clean(path.join(process.cwd(), "data", "plugins", PLUGIN_NAME)));
-    candidates.push(clean(path.join(process.cwd(), "..", "data", "plugins", PLUGIN_NAME)));
-
-    // 5. this.path 也加入候选
-    if ((this as any).path) candidates.push(clean((this as any).path));
-
-    // 遍历所有候选，找第一个**严格符合插件目录特征**的
-    for (const r of candidates) {
-      if (!r) continue;
-      if (isPluginRoot(r)) {
-        this.pluginPath = r;
-        getLogger().info("[REword] 插件目录探测成功:" + r);
-        return r;
-      }
-    }
-
-    // 兜底：保留之前的 pluginPath（可能是 __dirname），让上层报错更明确
-    const fallback = this.pluginPath
-      || (typeof __dirname !== "undefined" && __dirname ? __dirname : "")
-      || ".";
-    this.pluginPath = fallback;
-    getLogger().warn("[REword] 插件目录探测失败，兜底使用: " + fallback + " 候选数: " + candidates.length);
-    return fallback;
+    return resolved;
   }
 
   /**
@@ -5169,6 +5351,9 @@ export default class RewordPlugin extends Plugin {
    */
   private resolveDictPath(file: string): string {
     const base = this.resolvePluginPath();
+    // 兜底守卫：插件目录未定位（asar 或空）时绝不让词典路径拼到 asar 下，
+    // 否则会把路径当 MDX 包抛 "Invalid package"。返回空串，由上层给出清晰报错。
+    if (!base || isAsarPath(base)) return "";
     return path.join(base, file);
   }
 
@@ -5228,6 +5413,17 @@ export default class RewordPlugin extends Plugin {
     this.lastDictError = "";
     try {
       const fsPath = this.resolveDictPath(meta.file);
+
+      // 入口守卫：插件目录未定位（asar / 空）时，绝不把路径交给 js-mdict 当包解析，
+      // 否则会抛 "Invalid package …electron.asar" 这种令人困惑的报错。
+      if (!fsPath) {
+        const msg =
+          "插件目录未能定位（resolvePluginPath 返回空），词典路径无法解析。" +
+          "请确认插件已安装到工作空间 data/plugins/siyuan-plugin-reword/ 下，且包含 plugin.json 与 dict/ 目录。";
+        this.lastDictError = msg;
+        getLogger().error("[REword] 词典「" + meta.name + "」加载失败: " + msg);
+        return false;
+      }
 
       // 路径诊断：文件是否存在、大小、权限
       let diag: string[] = [`路径: ${fsPath}`];
@@ -5568,14 +5764,15 @@ export default class RewordPlugin extends Plugin {
    * @param popup 弹窗根元素
    * @param word  当前弹窗查询的词（作为 data 缺失时的回退）
    */
-  private bindDictPopupClick(popup: HTMLElement, word: string): void {
+  private bindDictPopupClick(popup: HTMLElement, word?: string): void {
     popup.addEventListener("click", async (e) => {
       // 用 closest 向上查找带 data-action 的祖先：点例句里的文字/🔊 小图标也能命中
       const target = (e.target as HTMLElement).closest("[data-action]") as HTMLElement || (e.target as HTMLElement);
       const action = target.dataset.action;
       if (!action) return;
-      // 例句行带 data-text（优先朗读整句），单词头部按钮带 data-word；都没有则退化为查询词
-      const ttsText = target.dataset.text || target.dataset.word || word;
+      // 例句行带 data-text（优先朗读整句），单词头部按钮带 data-word；都没有则退化为查询词。
+      // 注意：hover 浮窗跨词复用同一 DOM，闭包 word 不更新，故优先用 popup.dataset.word（每次切换已刷新）。
+      const ttsText = target.dataset.text || target.dataset.word || popup.dataset.word || word;
       if (action === "close") {
         this.closeFloatingPopup();
         this.closeHoverPopup();
@@ -5585,15 +5782,15 @@ export default class RewordPlugin extends Plugin {
         // 悬浮弹窗收藏星：两级选择（词本→子类），内部刷新星态。
         // 关键：用按钮自身 data-word（相似词跳转后即为跳转目标词），而非闭包里的原词，
         // 否则在原窗口跳转后点星标会把「原词」而非「当前展示的相似词」加入词库。
-        const starWord = target.dataset.word || word;
+        const starWord = target.dataset.word || popup.dataset.word || word || "";
         await this.toggleVocabStar(starWord, target);
       } else if (action === "lookup-in-sidebar" || action === "open-in-sidebar") {
         // 弹窗 → 侧边栏：一键把当前查询词送到侧边栏查词卡，即时展示完整释义（不打断编辑状态）
-        const sendWord = target.dataset.word || word;
+        const sendWord = target.dataset.word || popup.dataset.word || word || "";
         this.openWordInSidebar(sendWord);
       } else if (action === "dict-jump" || action === "lookup-candidate") {
         // 相关词 / 相似词跳转：在同类弹窗内重新查询
-        const jumpWord = target.dataset.word || "";
+        const jumpWord = target.dataset.word || popup.dataset.word || "";
         if (jumpWord) this.relookupInPopup(popup, jumpWord);
       } else if (action === "toggle-senses") {
         // 「查看全部 N 个义项」按钮：全量列表显隐 + 初始列表同步隐藏
@@ -5654,6 +5851,10 @@ export default class RewordPlugin extends Plugin {
     const wordEl = popup.querySelector(".hiword-float-popup-word, .hiword-hover-popup-word") as HTMLElement | null;
     if (wordEl) wordEl.textContent = word;
     popup.dataset.word = word.toLowerCase();
+    // hover 浮窗跨词复用 DOM：跳转后同步 _hoverWord，否则后续判定「同词」会误跳过重渲染
+    if (popup.classList.contains("hiword-hover-popup")) {
+      this._hoverWord = word.toLowerCase();
+    }
   }
 
   /** 定位悬浮窗到锚点下方 */
@@ -5798,20 +5999,19 @@ export default class RewordPlugin extends Plugin {
       // 光标已在浮窗自身内：保持（便于点击内部按钮、滚动、朗读）
       if (this._hoverPopup && this._hoverPopup.contains(e.target as Node)) return;
       if (!this._hoverAltDown) {
-        // 未按住 Option：固定态浮窗保持，不自动关闭（同时跟踪位置，避免重新按 Alt 时阈值误判）
+        // 未按住 Option：固定态浮窗保持，不自动关闭
         this._hoverLastX = e.clientX;
         this._hoverLastY = e.clientY;
         return;
       }
       const x = e.clientX;
       const y = e.clientY;
-      // 移动阈值：小幅抖动不重算，仅跟随定位，提升流畅度
-      if (this._hoverPopup && Math.abs(x - this._hoverLastX) < 4 && Math.abs(y - this._hoverLastY) < 4) {
-        this.positionHoverPopup(this._hoverPopup, x, y);
-        return;
-      }
-      this._hoverLastX = x;
-      this._hoverLastY = y;
+      // 滚动静默期：trackpad 滚轮会伴随一连串 mousemove，若此时重识别会反复换词/闪退，
+      // 故在最近一次 wheel/scroll 后 ~240ms 内直接忽略移动，浮窗保持稳定。
+      if (this._hoverScrollAt && Date.now() - this._hoverScrollAt < 240) return;
+      // 光标仍在当前单词锚点矩形内（含 4px 容差）：属于同词抖动，无需重查/重定位
+      if (this._hoverPopup && this.isOverAnchorWord(x, y)) return;
+
       const tEl = e.target as HTMLElement;
       if (this._hoverRaf) cancelAnimationFrame(this._hoverRaf);
       this._hoverRaf = requestAnimationFrame(() => {
@@ -5819,13 +6019,18 @@ export default class RewordPlugin extends Plugin {
         if (!this._hoverAltDown) return;
         // 仅文档编辑区(.protyle-wysiwyg)内的单词才触发，避免插件自身 UI 自触发
         if (tEl && tEl.closest(".protyle-wysiwyg")) {
-          const word = this.wordAtPoint(x, y);
-          // 识别到词→展示/刷新；未识别到（标点/空白/非英文）→保持当前固定浮窗，不再关闭
-          if (word) this.showHoverDictPopup(word, x, y);
+          const res = this.wordAtPoint(x, y);
+          // 识别到新词→平滑切换（复用同一浮窗 DOM，不重建）；未识别到（空白/标点/非英文）→保持当前浮窗
+          if (res.word) this.showHoverDictPopup(res.word, res.rect);
         }
         // 命中插件 UI 等非文档区：保持固定浮窗
       });
     };
+
+    // 滚动抑制：记录最近滚动时间戳，供 onMove 的静默期判断使用（passive，不阻断滚动）
+    const onScrollQuiet = () => { this._hoverScrollAt = Date.now(); };
+    this.disposables.addEventListener(document, "wheel", onScrollQuiet, { passive: true });
+    this.disposables.addEventListener(document, "scroll", onScrollQuiet, { capture: true, passive: true });
 
     this.disposables.addEventListener(document, "keydown", onKeyDown);
     this.disposables.addEventListener(document, "keyup", onKeyUp);
@@ -5850,8 +6055,8 @@ export default class RewordPlugin extends Plugin {
     this.disposables.addEventListener(document, "click", onVocabMarkClick, true);
   }
 
-  /** 取光标下单词（基于 caretRangeFromPoint/caretPositionFromPoint，含边界容差与元素兜底）。无英文单词则返回 null。 */
-  private wordAtPoint(x: number, y: number): string | null {
+  /** 取光标下单词及其视口矩形（用于锚定浮窗）。无英文单词则返回 { word:null, rect:null }。 */
+  private wordAtPoint(x: number, y: number): { word: string | null; rect: DOMRect | null } {
     let node: Node | null = null;
     let offset = 0;
     const anyDoc = document as any;
@@ -5862,49 +6067,72 @@ export default class RewordPlugin extends Plugin {
       const pos = anyDoc.caretPositionFromPoint(x, y) as { offsetNode: Node; offset: number } | null;
       if (pos) { node = pos.offsetNode; offset = pos.offset; }
     }
-    // 1) caret 落在文本节点：在 offset 处（及 ±1 容差）取英文词，避免刚好停在词边界/标点处漏识别
+    // 1) caret 落在文本节点：在 offset 处（及 ±1 容差）取英文词，并取该词矩形用于锚定浮窗
     if (node && node.nodeType === 3) {
       const text = node.textContent || "";
-      const w =
-        this.wordInText(text, offset) ??
-        this.wordInText(text, offset - 1) ??
-        this.wordInText(text, offset + 1);
-      if (w) return w.toLowerCase();
+      const hit =
+        this.wordInTextRange(text, offset) ??
+        this.wordInTextRange(text, offset - 1) ??
+        this.wordInTextRange(text, offset + 1);
+      if (hit) {
+        try {
+          const r = document.createRange();
+          r.setStart(node, hit.start);
+          r.setEnd(node, hit.end);
+          return { word: hit.word.toLowerCase(), rect: r.getBoundingClientRect() };
+        } catch (__e) { logSwallow(__e, "index.ts · wordAtPoint rect", "debug"); }
+      }
     }
-    // 2) 兜底：caret 落在元素节点（链接、样式标签边界等）→ 用 elementFromPoint 取该元素内最近的英文词
+    // 2) 兜底：caret 落在元素节点（链接、样式标签边界等）→ 取该元素内最近英文词 + 其矩形
     const el = document.elementFromPoint(x, y) as HTMLElement | null;
     if (el) {
       const target = (el.closest("[data-type], .protyle-wysiwyg *") as HTMLElement) || el;
-      const w = this.wordNearPoint(target, x, y);
-      if (w) return w.toLowerCase();
+      const res = this.wordNearPoint(target, x, y);
+      if (res) return { word: res.word.toLowerCase(), rect: res.rect };
     }
-    return null;
+    return { word: null, rect: null };
   }
 
-  /** 在文本串中按偏移取出覆盖该位置的英文单词（含连字符/撇号）；越界返回 null。 */
-  private wordInText(text: string, offset: number): string | null {
+  /** 在文本串中按偏移取出覆盖该位置的英文单词（含连字符/撇号），返回词与起止索引；越界返回 null。 */
+  private wordInTextRange(text: string, offset: number): { word: string; start: number; end: number } | null {
     if (offset < 0 || offset > text.length) return null;
     const WORD_RE = /[A-Za-z]+(?:['’\-][A-Za-z]+)*/g;
     let m: RegExpExecArray | null;
     while ((m = WORD_RE.exec(text)) !== null) {
-      if (offset >= m.index && offset <= m.index + m[0].length) return m[0];
+      if (offset >= m.index && offset <= m.index + m[0].length) {
+        return { word: m[0], start: m.index, end: m.index + m[0].length };
+      }
     }
     return null;
   }
 
-  /** 兜底：从某元素内取最靠近光标 x 的英文单词（单 token 直接返回；多 token 用 Range 测距取最近）。 */
-  private wordNearPoint(el: HTMLElement, x: number, _y: number): string | null {
+  /** 兜底：从某元素内取最靠近光标 x 的英文单词（单 token 直接返回；多 token 用 Range 测距取最近），同时返回其矩形。 */
+  private wordNearPoint(el: HTMLElement, x: number, _y: number): { word: string; rect: DOMRect } | null {
     const tokens = (el.textContent || "").match(/[A-Za-z]+(?:['’\-][A-Za-z]+)*/g);
     if (!tokens || tokens.length === 0) return null;
-    if (tokens.length === 1) return tokens[0];
     const range = document.createRange();
+    if (tokens.length === 1) {
+      const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT, null);
+      let n: Node | null;
+      while ((n = walker.nextNode())) {
+        const idx = (n.textContent || "").indexOf(tokens[0]);
+        if (idx >= 0) {
+          try {
+            range.setStart(n, idx);
+            range.setEnd(n, idx + tokens[0].length);
+            return { word: tokens[0], rect: range.getBoundingClientRect() };
+          } catch (__e) { break; }
+        }
+      }
+      return { word: tokens[0], rect: el.getBoundingClientRect() };
+    }
     const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT, null);
     const textNodes: Text[] = [];
     let n: Node | null;
     while ((n = walker.nextNode())) {
       if ((n.textContent || "").trim().length > 0) textNodes.push(n as Text);
     }
-    let best: string | null = null;
+    let best: { word: string; rect: DOMRect } | null = null;
     let bestDist = Infinity;
     for (const tok of tokens) {
       for (const tn of textNodes) {
@@ -5916,7 +6144,7 @@ export default class RewordPlugin extends Plugin {
           const r = range.getBoundingClientRect();
           if (r.width === 0 && r.height === 0) continue;
           const dist = Math.abs(r.left + r.width / 2 - x);
-          if (dist < bestDist) { bestDist = dist; best = tok; }
+          if (dist < bestDist) { bestDist = dist; best = { word: tok, rect: r }; }
         } catch (__swallowErr) { logSwallow(__swallowErr, "index.ts · wordNearPoint", "debug"); }
         break; // 该 token 已在某文本节点找到，跳出文本节点循环
       }
@@ -5924,36 +6152,72 @@ export default class RewordPlugin extends Plugin {
     return best;
   }
 
-  /** 将悬停浮窗定位到光标附近（带视口边界修正）。 */
-  private positionHoverPopup(popup: HTMLElement, x: number, y: number): void {
+  /** 光标是否仍在当前展示单词的锚点矩形内（含容差）——用于区分同词抖动与跨词移动。 */
+  private isOverAnchorWord(x: number, y: number): boolean {
+    const r = this._hoverAnchorRect;
+    if (!r) return false;
+    const pad = 4;
+    return x >= r.left - pad && x <= r.right + pad && y >= r.top - pad && y <= r.bottom + pad;
+  }
+
+  /** 将悬停浮窗锚定到单词矩形（显示在单词正下方，近底则翻到上方），带视口边界修正。 */
+  private positionHoverPopup(popup: HTMLElement, rect: DOMRect | null): void {
     const width = Math.min(380, window.innerWidth - 20);
     popup.style.width = `${width}px`;
     const margin = 12;
-    let left = x + 16;
-    let top = y + 16;
     const h = popup.offsetHeight || 200;
-    if (left + width > window.innerWidth - margin) left = Math.max(margin, x - width - 16);
-    if (top + h > window.innerHeight - margin) top = Math.max(margin, y - h - 16);
+    let left: number;
+    let top: number;
+    if (rect) {
+      // 锚定到单词矩形：显示在单词正下方居中（略偏左），底边贴近单词
+      left = rect.left + rect.width / 2 - width / 2;
+      top = rect.bottom + 8;
+      // 底部空间不足 → 翻到单词上方
+      if (top + h > window.innerHeight - margin) {
+        top = Math.max(margin, rect.top - h - 8);
+      }
+    } else {
+      // 兜底（无矩形）：屏幕中下部，避免紧贴边缘
+      left = window.innerWidth / 2 - width / 2;
+      top = window.innerHeight * 0.4;
+    }
+    // 左右越界夹回视口内
+    left = Math.min(Math.max(margin, left), window.innerWidth - width - margin);
+    top = Math.max(margin, top);
     popup.style.left = `${left}px`;
     popup.style.top = `${top}px`;
     popup.style.maxHeight = `${Math.min(420, window.innerHeight - top - margin)}px`;
   }
 
-  /** 显示/刷新 Alt+悬停取词浮窗（与工具栏悬浮弹窗同源渲染）。 */
-  private showHoverDictPopup(word: string, x: number, y: number): void {
-    // 同词：仅跟随光标定位，不重查（去抖）
+  /** 显示/刷新 Alt+悬停取词浮窗（与工具栏悬浮弹窗同源渲染）。跨词切换复用同一 DOM，消除 close+重建闪烁。 */
+  private showHoverDictPopup(word: string, rect: DOMRect | null): void {
+    // 同词：仅（必要时）重定位，不重查（去抖）
     if (this._hoverWord === word && this._hoverPopup) {
-      this.positionHoverPopup(this._hoverPopup, x, y);
+      if (rect) this.positionHoverPopup(this._hoverPopup, rect);
       return;
     }
-    this.closeHoverPopup();
+    // 复用同一浮窗 DOM 跨词切换：仅更新释义内容 + 重定位，避免重建造成的闪退
+    if (!this._hoverPopup) {
+      this.createHoverPopup();
+    }
+    this.renderHoverBody(word);
+    this._hoverWord = word;
+    if (rect) {
+      this._hoverAnchorRect = rect;
+      this.positionHoverPopup(this._hoverPopup!, rect);
+    } else {
+      this._hoverAnchorRect = null;
+      this.positionHoverPopup(this._hoverPopup!, null);
+    }
+  }
 
+  /** 创建悬停浮窗 DOM（仅一次），含动画收尾、点击交互绑定与外部关闭监听注册。 */
+  private createHoverPopup(): void {
     const popup = document.createElement("div");
     popup.className = "hiword-hover-popup";
-    popup.dataset.word = word;
     popup.innerHTML =
       '<div class="hiword-hover-popup-head">' +
-        '<span class="hiword-hover-popup-word">' + this.escapeHtml(word) + "</span>" +
+        '<span class="hiword-hover-popup-word"></span>' +
         '<button class="hiword-hover-popup-close" data-action="close" title="关闭（Esc 或点击外部）" aria-label="关闭">×</button>' +
       "</div>" +
       '<div class="hiword-hover-popup-body">' +
@@ -5961,10 +6225,10 @@ export default class RewordPlugin extends Plugin {
       "</div>";
     document.body.appendChild(popup);
     this._hoverPopup = popup;
-    this._hoverWord = word;
+    this._hoverPinned = true;
 
-    // 2026-08-18 修复滚动时图层割裂：与浮动弹窗相同 —— 动画结束后挂
-    // settled class 清理 transform，让合成器不再把弹窗视作独立合成层。
+    // 2026-08-18 修复滚动时图层割裂：动画结束后挂 settled class 清理 transform，
+    // 让合成器不再把弹窗视作独立合成层。
     const onHoverInEnd = (ev: AnimationEvent) => {
       if (ev.animationName === "hiword-float-in") {
         popup.classList.add("hiword-hover-popup--settled");
@@ -5973,10 +6237,15 @@ export default class RewordPlugin extends Plugin {
     };
     popup.addEventListener("animationend", onHoverInEnd);
     setTimeout(() => popup.classList.add("hiword-hover-popup--settled"), 220);
-    this._hoverPinned = true;
-    this.positionHoverPopup(popup, x, y);
 
-    // 固定态：点击外部 / Esc 关闭（延迟注册，避免触发瞬间的误关）
+    // 绑定点击交互（仅一次，跨词切换复用）；注册外部点击/Esc 关闭（延迟，避免触发瞬间误关）
+    this.bindDictPopupClick(popup);
+    this.registerHoverOutside();
+  }
+
+  /** 注册固定态的「点击外部 / Esc 关闭」监听，仅注册一次（跨词切换不重复注册）。 */
+  private registerHoverOutside(): void {
+    if (this._hoverOutsideMd) return; // 已注册
     const closeOnOutside = (ev: MouseEvent) => {
       if (this._vocabPickOpen) return; // 收藏分类浮窗打开时，保留释义窗口不被误关
       if (this._hoverPopup && !this._hoverPopup.contains(ev.target as Node)) {
@@ -5993,7 +6262,15 @@ export default class RewordPlugin extends Plugin {
       document.addEventListener("keydown", onEsc);
       this._hoverKeydown = onEsc;
     }, 120);
+  }
 
+  /** 渲染悬停浮窗释义区（跨词切换时调用，复用同一 DOM）。 */
+  private renderHoverBody(word: string): void {
+    const popup = this._hoverPopup;
+    if (!popup) return;
+    popup.dataset.word = word.toLowerCase();
+    const wordEl = popup.querySelector(".hiword-hover-popup-word") as HTMLElement | null;
+    if (wordEl) wordEl.textContent = word;
     const body = popup.querySelector(".hiword-hover-popup-body") as HTMLElement;
     const status = dictEngine.getStatus();
     if (status !== "ready") {
@@ -6015,17 +6292,16 @@ export default class RewordPlugin extends Plugin {
       } else if (this.onlineSettings?.enabled) {
         body.innerHTML = `<div class="hiword-online-loading">🌐 在线词典查询中…</div>`;
         fetchOnlineDict(word).then((r) => {
-          if (!body.isConnected) return;
+          // 跨词切换后可能已不是当前词，丢弃过期结果
+          if (!body.isConnected || this._hoverWord !== word) return;
           body.innerHTML = r ? renderOnlineDictCard(r, false) : dictRenderer.renderNotFound(word);
         });
       } else {
         body.innerHTML = dictRenderer.renderNotFound(word);
       }
     }
-
-    // 记录查询次数（仅词库内单词生效），绑定点击交互
+    // 记录查询次数（仅词库内单词生效）；仅在切到新词时调用（同词分支已提前返回）
     void this.vocabStore?.recordQuery(word);
-    this.bindDictPopupClick(popup, word);
   }
 
   /** 关闭 Alt+悬停取词浮窗（同时移除固定态的全局监听，避免跨重载累积）。 */
@@ -6048,6 +6324,9 @@ export default class RewordPlugin extends Plugin {
     }
     this._hoverWord = null;
     this._hoverPinned = false;
+    this._hoverAnchorRect = null;
+    this._hoverScrollAt = 0;
+    if (this._hoverRaf) { cancelAnimationFrame(this._hoverRaf); this._hoverRaf = 0; }
   }
 
   /**

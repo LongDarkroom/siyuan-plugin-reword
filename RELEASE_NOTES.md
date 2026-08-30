@@ -71,6 +71,59 @@
 
 ---
 
+## v1.4.3 — README 末尾新增赞赏码图片（版本号推进）
+
+- 仅新增 README 赞赏码图片（`appreciate.jpg`）与版本号推进，无功能改动。
+
+---
+
+## v1.4.4 — 双语翻译透明化 + 单段补救 + Windows 词典加载加固 + 缓存去重
+
+### 新增：双语翻译"透明化"（来源可见 + 单段补救）
+
+- **来源徽标**：每段译文后显示来源标签（缓存 / AI / 微软 / LibreTranslate / 已修正 / 失败），按来源着色，可在设置中开关「显示来源徽标」。
+- **失败可见**：翻译失败的段落明确标记，可一键重试；重试仍失败保留原文不污染。
+- **单段补救**（悬浮工具栏 / 行内操作）：
+  - **重译**：对当前段重新请求翻译。
+  - **修正**：直接编辑译文并提交，写入「用户修正库」，来源徽标显示「已修正」，优先级高于 AI 缓存。
+  - **隐藏**：隐藏某段译文（同时清掉该段缓存与修正），满足纯净阅读。
+  - **删除**：删除该段修正记录。
+- **用户修正库独立**：修正数据按 `hash(text)` 一源一修正，独立于 AI 翻译缓存，`clear()` 缓存时不被误删。
+
+### 新增：段落级"重新翻译为简洁版"
+
+- 在每段译文右上角放一个 **🔄 简洁版** 按钮（hover 时显形），点击后用更简短的口语化中文重译该段；再点还原默认译文。
+- **缓存隔离**：default / concise 各自独立池，下次翻页回来直接秒出，不重复请求。
+- **并发安全**：相同原文 in-flight 只跑一次（用户连点不重复请求）。
+- **失败回退**：AI 返回空 / 抛错时原译文保留，按钮文案与 `data-mode` 不切换。
+- **可扩展**：缓存层已按 mode 路由，未来可加 `literal` / `literary` 等风格。
+
+### 修复：Windows 集市安装后词典全部 MISSING
+
+- 根因：`isPluginRoot` 只认 `package.json` 作为插件身份证明，但 SiYuan 集市发布包只含 `plugin.json`（思源官方契约），导致 Windows 集市安装用户所有候选路径第一关就被卡掉，兜底到 `electron.asar/renderer`，dict 路径全部拼错。
+- 修复：身份证明改为 **plugin.json 优先 + package.json 兜底**双证据；额外增加 **asar 路径守卫**（`/electron\.asar/i` 大小写不敏感过滤），词典加载入口对 asar / 空路径直接返回清晰中文报错，不再把 asar 当 MDX 包解析；便携版 `workspace.json` 探测路径拓宽。
+- 新增 15 个单测覆盖 4 个维度（plugin.json / package.json / dict 目录 / 内置词典）的所有组合。
+- 之前按"临时方案"手动补了 `package.json` 的用户升级后无需清理（双命中仍正常）。
+
+### 修复：同一本书多份缓存翻译 / 点双语仍重译
+
+- 根因：旧 `bookId` 为 `b${Date.now()}${random}` 随机生成，删书重导 / 换入口即生成新 id，导致缓存对不上、看似"重译"，并积累多份孤儿缓存。
+- 修复：新增 `book-fingerprint.ts` **内容指纹**（基于 identifier / title+author / size / format 的 FNV-1a），同实体书永远同 id；`importBook` 改用指纹 id + 指纹级去重；`cache.ts` 新增 `cleanOrphanCaches`，双语缓存面板新增「清理无效缓存」按钮，一键回收历史孤儿缓存。
+
+### 内部
+
+- 新增 `src/core/plugin-path.ts` 纯函数模块，`isPluginRootWithFs(dir, pluginName, fsOps?)` 可注入 mock fs 测全部组合。
+- `src/translate/cache.ts` 新增 `TranslationMode` 路由，hash salt 拼 mode，同段多版本互不污染；旧版单 mode JSON 自动回填到 `{default, concise}` 形态；修正库 `fix*` 接口按 `hash(text)` 一源一修正。
+- `src/reader/bilingual.ts` 重构译文 div：内含 `<span class="reword-bilingual-text">` + 来源徽标 + 兄弟节点按钮；doc 级事件委托，`__rewordConciseBound` flag 防重绑；`onViewLoad` 重绑以兼容 foliate 翻页重建 Document。
+- `src/reader/reader-style.ts` 新增来源徽标与简洁版按钮样式，prefers-color-scheme 深色主题自动适配。
+
+### 测试
+
+- 新增 `test/bilingual-concise.test.mjs`（18 条）+ `test/resolve-plugin-path.test.mjs`（15 条）+ `test/bilingual-rescue.test.mjs`（8 条）+ `test/book-fingerprint.test.mjs`（8 条）；现有 `translate-ai-batch` / `bilingual-pretranslate` 等全部回归通过。
+- 全量基线：1900+ 测试 0 失败，0 type error。
+
+---
+
 ## 功能概览（历史积累）
 
 - **离线词典查词**：基于 MDX / StarDict 离线词典（NCECD、ECD2 等），无需联网，支持词形还原。

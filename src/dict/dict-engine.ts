@@ -211,6 +211,14 @@ export async function initDict(
     if (typeof MDX !== "function") {
       throw new Error("js-mdict MDX 未正确加载");
     }
+    // 纵深防御：路径无效或指向 SiYuan 程序目录时，抛清晰错误而非 js-mdict 的
+    // "Invalid package …electron.asar"（令人困惑且无法定位是插件目录没找着）。
+    if (!fsPath || /electron\.asar/i.test(fsPath)) {
+      throw new Error(
+        "词典路径无效：无法定位插件目录或路径指向 SiYuan 程序目录(electron.asar)。" +
+        "请确认插件安装在工作空间 data/plugins/siyuan-plugin-reword/ 下且含 dict/ 目录。"
+      );
+    }
 
     // MDX 构造时即解析词表索引（轻量），释义记录块按需读取
     const mdx = new MDX(fsPath);
@@ -259,6 +267,13 @@ export async function initStarDict(
   setStatus("loading");
 
   try {
+    // 纵深防御：路径无效或指向 SiYuan 程序目录时，抛清晰错误而非底层解析异常
+    if (!ifoPath || /electron\.asar/i.test(ifoPath)) {
+      throw new Error(
+        "词典路径无效：无法定位插件目录或路径指向 SiYuan 程序目录(electron.asar)。" +
+        "请确认插件安装在工作空间 data/plugins/siyuan-plugin-reword/ 下且含 dict/ 目录。"
+      );
+    }
     const sd = new StarDict(ifoPath, idxPath, dictPath);
     const count = sd.count;
 

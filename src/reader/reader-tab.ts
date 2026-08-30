@@ -18,15 +18,20 @@ import type { FontStore } from "./reader-fonts";
 
 export const READER_TAB_TYPE = "reader";
 
+/** 阅读 Tab 会话持久化键（记录关机前打开的书，重启后自动恢复） */
+export const READER_SESSION_KEY = "hiword-reader-session.json";
+
 interface TabRecord {
   tab: any; // Tab
   comp: any; // Svelte 组件
+  title: string; // 书名（用于恢复时传 title，避免先显「阅读」再闪一下）
 }
 
 export class ReaderTabController {
-  private openTabs = new Map<string, TabRecord>(); // bookId -> { tab, comp }
+  private openTabs = new Map<string, TabRecord>(); // bookId -> { tab, comp, title }
   private opening = new Set<string>(); // bookId -> 正在打开中（防重入竞态导致重复 openTab）
   private registered = false;
+  private sessionTimer: ReturnType<typeof setTimeout> | null = null; // 会话持久化防抖
 
   constructor(
     private plugin: any,
@@ -101,8 +106,21 @@ export class ReaderTabController {
               // 2026-08-27：翻译按钮发送到 AI 精读面板（自动打开）；悬浮取词「加入词库」委托 vocabStore
               onTranslateToAi: (t: string) => self.plugin?.translateToAi?.(t),
               // 2026-08-27：双语段落批量翻译（按书缓存，引擎链兜底）
-              onTranslateBatch: (texts: string[], from: string, to: string) =>
-                self.plugin?.translateBatch?.(texts, from, to, bookId) ?? Promise.resolve([]),
+              // 2026-08-30：透传 extra（model/overwrite/signal）以支持整书预翻译细化选项
+              onTranslateBatch: (texts: string[], from: string, to: string, extra?: any) =>
+                self.plugin?.translateBatch?.(texts, from, to, bookId, undefined, undefined, extra) ?? Promise.resolve([]),
+              // 2026-08-30 透明化：详细翻译（回传 provider / fromCache）供来源徽标
+              onTranslateBatchDetailed: (texts: string[], from: string, to: string, extra?: any) =>
+                self.plugin?.translateBatchDetailed?.(texts, from, to, bookId, undefined, undefined, extra) ??
+                Promise.resolve({ texts: [], providers: [], fromCache: [] }),
+              // 2026-08-30 单段补救：用户修正库（钉选正确答案，持久化且不被清空缓存删除）
+              onGetFix: (text: string) => self.plugin?.getTranslationFix?.(bookId, text) ?? Promise.resolve(null),
+              onSetFix: (text: string, tr: string) => self.plugin?.setTranslationFix?.(bookId, text, tr) ?? Promise.resolve(),
+              onDeleteFix: (text: string) => self.plugin?.deleteTranslationFix?.(bookId, text) ?? Promise.resolve(),
+              onDeleteCacheOne: (text: string) => self.plugin?.translationCache?.deleteOne?.(bookId, text, "default") ?? Promise.resolve(),
+              // 2026-08-30：整书预翻译弹窗「已缓存统计」——按书查询每段缓存命中，返回同序 boolean[]
+              onCheckCache: (texts: string[]) =>
+                self.plugin?.checkTranslationCacheHits?.(bookId, texts) ?? Promise.resolve(new Array(texts.length).fill(false)),
               isTranslationConfigured: () => !!self.plugin?.isTranslationConfigured?.(),
               onAddToVocab: (w: string) => self.plugin?.getVocabStore?.()?.addWord?.(w),
               // 2026-08-27：阅读器词典弹窗「侧边栏」按钮 → 复用主插件 openWordInSidebar
@@ -125,6 +143,9 @@ export class ReaderTabController {
               // 2026-08-28：列出所有有翻译缓存的书籍（bookId + 书名），供「选择书籍」下拉
               listCachedBooks: () =>
                 (self.plugin as any)?.listCachedBooks?.() ?? Promise.resolve([]),
+              // 2026-08-30：清理「孤儿」翻译缓存（书架已删除书籍对应的缓存文件）
+              cleanOrphanCaches: () =>
+                (self.plugin as any)?.cleanOrphanTranslationCaches?.() ?? Promise.resolve(0),
               // 2026-08-28：翻译成功入缓存后回传「节」序号（1-based），用于 UI「第 X-Y 页缓存成功」
               recordCachedSections: (bid: string, sections: number[]) =>
                 (self.plugin as any)?.recordCachedSections?.(bid, sections),
@@ -141,7 +162,9 @@ export class ReaderTabController {
           console.warn("[REword] 阅读 Tab 挂载失败:", e);
           return;
         }
-        self.openTabs.set(bookId, { tab: custom.tab, comp });
+        self.openTabs.set(bookId, { tab: custom.tab, comp, title: (rawData?.title as string) || "阅读" });
+        // 思源自定义 Tab 不随布局自动恢复，需在插件侧记录会话，重启后由 restoreSession 重开
+        self.persistSession();
         // 2026-08-24 修复（问题3）：立即给阅读 Tab 一个稳定标题，避免被思源当成
         // "无名空白 Tab" 参与「在当前页签中打开 → 替换未修改页签」的回收逻辑。
         // 书名异步加载完成后 ReaderView 会经 onTitleChange 再次更新为 "书名 · 章节"。
@@ -160,6 +183,8 @@ export class ReaderTabController {
             rec.comp?.$destroy?.();
           } catch (__swallowErr) { logSwallow(__swallowErr, "reader-tab.ts · onProtectTab", "debug"); }
           self.openTabs.delete(bookId);
+          // Tab 关闭即从会话移除（用户主动关 → 重启不再恢复）
+          self.persistSession();
         }
       },
     });
@@ -213,7 +238,9 @@ export class ReaderTabController {
       });
       console.log("[REword] openBookTab openTab 返回", { tabExists: !!tab, tabType: (tab as any)?.type });
       if (tab) {
-        this.openTabs.set(bookId, { tab, comp: this.openTabs.get(bookId)?.comp ?? null });
+        this.openTabs.set(bookId, { tab, comp: this.openTabs.get(bookId)?.comp ?? null, title: title || "阅读" });
+        // 记录会话：重启思源后自动恢复该阅读 Tab
+        this.persistSession();
         // 兜底：若 afterOpen 因时序未触发，立即再切一次
         try {
           tab.parent?.switchTab?.(tab.headElement);
@@ -224,6 +251,72 @@ export class ReaderTabController {
     } finally {
       // 无论成功失败都释放锁，避免异常时永久卡住该书无法再开
       this.opening.delete(bookId);
+    }
+  }
+
+  /**
+   * 持久化当前打开的阅读 Tab 列表（bookId + 书名）。
+   * 思源不会自动恢复自定义插件 Tab，关机/重启后这些 Tab 会丢失；
+   * 这里把「关机前还开着的书」记到插件数据，等 restart 后由 restoreSession 重开。
+   * 防抖写入，避免开/关连续触发时频繁 IO。
+   */
+  private persistSession(): void {
+    if (!this.plugin?.saveData) return;
+    if (this.sessionTimer) clearTimeout(this.sessionTimer);
+    this.sessionTimer = setTimeout(() => {
+      this.sessionTimer = null;
+      try {
+        const open = Array.from(this.openTabs.entries()).map(([bookId, rec]) => ({
+          bookId,
+          title: rec.title || "",
+        }));
+        this.plugin.saveData(READER_SESSION_KEY, { openTabs: open }).catch(() => {});
+      } catch (__e) { logSwallow(__e, "reader-tab.ts · persistSession", "debug"); }
+    }, 200);
+  }
+
+  /**
+   * 重启思源后恢复上次打开的阅读 Tab（由插件 onLayoutReady 调用）。
+   * - 仅当设置「重启后恢复阅读 Tab」开启；关闭时清理会话，下次不恢复。
+   * - 跳过书架已删除的书（避免开出空白页签）。
+   * - 与思源自带布局恢复幂等：若思源已重建该 Tab（init 已写入 openTabs），
+   *   openBookTab 会直接聚焦、不重复开。
+   */
+  async restoreSession(): Promise<void> {
+    if (!this.plugin?.loadData) return;
+    let saved: any = null;
+    try {
+      saved = await this.plugin.loadData(READER_SESSION_KEY);
+    } catch (__e) { logSwallow(__e, "reader-tab.ts · loadSession", "debug"); }
+    const open = Array.isArray(saved?.openTabs) ? saved.openTabs : [];
+
+    // 读开关：默认开（字段缺失视为开，兼容旧配置）
+    let enabled = true;
+    try {
+      enabled = (this.stores.settingsStore.get() as any)?.layout?.restoreTabsOnLaunch ?? true;
+    } catch (__e) { logSwallow(__e, "reader-tab.ts · readRestoreFlag", "debug"); }
+
+    if (!enabled) {
+      // 用户关掉了恢复：清掉会话，下次启动不再重开
+      try { await this.plugin.saveData(READER_SESSION_KEY, { openTabs: [] }); } catch (__e) {}
+      return;
+    }
+
+    if (open.length === 0) return;
+
+    // 顺序重开（Map 插入序 = 当初打开序，最后一本是最后聚焦的）
+    for (const item of open) {
+      if (!item?.bookId) continue;
+      // 书已被删除则跳过
+      try {
+        const meta = this.stores.store.get?.(item.bookId);
+        if (!meta) continue;
+      } catch (__e) { logSwallow(__e, "reader-tab.ts · checkBook", "debug"); }
+      try {
+        await this.openBookTab(item.bookId, item.title || undefined);
+      } catch (e) {
+        console.warn("[REword] 恢复阅读 Tab 失败:", e);
+      }
     }
   }
 
