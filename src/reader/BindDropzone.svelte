@@ -1,7 +1,6 @@
 <script lang="ts">
   import { createEventDispatcher } from "svelte";
   import { getDocInfo } from "../siyuan/filetree.ts";
-  import { openDocPicker } from "./doc-picker";
 
   /** 当前绑定的文档信息（用于展示，由父组件传入） */
   export let label = "目标文档";
@@ -22,17 +21,27 @@
   // 思源笔记文档树拖拽写入 dataTransfer 的 MIME 类型（常量名 Constants.SIYUAN_DROP_FILE）
   const SIYUAN_DROP_FILE = "application/siyuan-file";
 
-  async function resolveAndBind(id: string) {
-    id = (id || "").trim();
+  /** 从任意文本中解析出标准思源文档 ID（支持直接粘贴 ID 或 siyuan://blocks/xxxx 链接） */
+  function extractDocId(raw: string): string {
+    const s = (raw || "").trim();
+    const m = s.match(/[0-9]{14}-[a-zA-Z0-9]{7}/);
+    return m ? m[0] : s;
+  }
+
+  async function resolveAndBind(rawId: string) {
+    const id = extractDocId(rawId);
     if (!id) return;
     errMsg = "";
     resolving = true;
     try {
-      const info = await getDocInfo(id);
-      const title =
-        info?.name || (info as any)?.title || (info as any)?.hpath?.split("/").pop() || id;
-      const nb = (info as any)?.box || notebookId || "";
-      dispatch("bind", { docId: id, title, notebookId: nb });
+      const info: any = await getDocInfo(id);
+      // 校验返回确实对应一个存在的文档（id + 笔记本 box 必须存在）
+      if (!info || !info.id || !info.box) {
+        errMsg = "无法解析该文档 ID，请确认文档存在且为文档 ID。";
+        return;
+      }
+      const title = info.name || info.title || info.hPath?.split("/").pop() || id;
+      dispatch("bind", { docId: info.id, title, notebookId: info.box });
     } catch (e) {
       console.warn("[REword] 绑定文档解析失败:", e);
       errMsg = "无法解析该文档 ID，请确认文档存在。";
@@ -67,12 +76,7 @@
     await resolveAndBind(firstId);
   }
 
-  async function onPick() {
-    const r = await openDocPicker({ title: `选择「${label}」目标文档` });
-    if (r) dispatch("bind", { docId: r.docId, title: r.title, notebookId: r.notebookId });
-  }
-
-  function onPasteEnter() {
+  function onBindClick() {
     if (pasteId.trim()) resolveAndBind(pasteId);
   }
 
@@ -112,14 +116,13 @@
     <input
       class="bind-input"
       type="text"
-      placeholder="或粘贴文档 ID…"
+      placeholder="粘贴文档 ID…"
       bind:value={pasteId}
       on:keydown={(e) => {
-        if (e.key === "Enter") onPasteEnter();
+        if (e.key === "Enter") onBindClick();
       }}
-      on:blur={onPasteEnter}
     />
-    <button class="bind-btn" on:click={onPick} disabled={resolving}>选择文档</button>
+    <button class="bind-btn" on:click={onBindClick} disabled={resolving || !pasteId.trim()}>绑定</button>
     {#if docId}
       <button class="bind-btn bind-btn-clear" on:click={onClear}>清除</button>
     {/if}
