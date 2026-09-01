@@ -58,6 +58,9 @@ function scheduleNotify(): void {
           /* 单个订阅者出错不影响其余 */
         }
       }
+      // 主题切换后为所有已注册 iframe 重注令牌（阅读器内容 iframe 跑在 foliate srcdoc 内，
+      // CSS 自定义属性不跨 iframe 继承，必须随主题重注；注册表集中管理，避免各组件各自处理）。
+      refreshAllIframeTokens();
     }, 0);
   });
 }
@@ -95,6 +98,8 @@ const iframeRegistry = new Set<HTMLIFrameElement>();
 
 export function registerIframe(iframe: HTMLIFrameElement): void {
   iframeRegistry.add(iframe);
+  // 注册时立即把当前思源令牌注入：iframe 新建时取不到父文档 CSS 变量，必须显式注入一次
+  if (iframe.contentDocument) injectTokens(iframe.contentDocument);
 }
 
 export function unregisterIframe(iframe: HTMLIFrameElement): void {

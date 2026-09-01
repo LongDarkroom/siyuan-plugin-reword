@@ -97,8 +97,7 @@
     captureSiyuanThemeVars,
   } from "../reader/reader-style";
   // 2026-09-01 接口化第一阶段（L0/L3）：思源令牌注入 + 全局主题同步总线
-  import { injectTokens } from "../ui/siyuan-tokens.ts";
-  import { subscribeThemeChange } from "../ui/theme-bridge.ts";
+  import { subscribeThemeChange, registerIframe, unregisterIframe } from "../ui/theme-bridge.ts";
   // 2026-08-28 分类字体：EPUB 内联 serif/sans-serif/monospace 关键词 → CSS 变量（Readest 同款）
   import {
     rewriteFontKeywordsInAllContents,
@@ -751,21 +750,43 @@
     }
   }
 
+  /** 已同步进 theme-bridge iframe 注册表的内容 iframe 集合（差量同步用） */
+  let contentIframes: Set<HTMLIFrameElement> = new Set();
+
   /**
-   * 把思源令牌（--b3-* / --hw-*）注入当前阅读器所有内容 iframe（L0 令牌包）。
-   * 阅读器运行在 foliate 的 srcdoc iframe 内，CSS 自定义属性不跨 iframe 继承，
-   * 必须显式把主窗口 :root 上的令牌值写入内容文档，译文块/批注浮层等才能用 var(--hw-*)。
-   * 由 onMount 的 subscribeThemeChange 回调在「主题切换 / 开书」时调用。
+   * 把当前阅读器内容 iframe 同步进 theme-bridge 的 iframe 注册表（L0 令牌包 + L3 主题总线）。
+   * 取内容 iframe 的正路：view.renderer.getContents() 每项含 doc，
+   * doc.defaultView.frameElement 即 iframe 元素（foliate 无 view.frames API，见本文件 5361 行说明）。
+   * - 新 iframe：registerIframe 注册（注册时立即注入令牌）
+   * - 消失的 iframe：unregisterIframe 注销
+   * - 主题切换时由 theme-bridge.refreshAllIframeTokens 统一重注，无需阅读器各自处理。
+   * 由 onMount 的 subscribeThemeChange 回调在「主题切换 / 开书 / 翻页」时经 applyStyles 调用。
    */
-  function injectReaderTokens() {
+  function syncContentIframes() {
     if (!view?.renderer?.getContents) return;
+    const current = new Set<HTMLIFrameElement>();
     try {
       const contents = (view.renderer.getContents() || []) as Array<{ doc?: Document }>;
       for (const c of contents) {
-        if (c?.doc) injectTokens(c.doc);
+        const frame = c?.doc?.defaultView?.frameElement as HTMLIFrameElement | null | undefined;
+        if (frame) current.add(frame);
       }
     } catch {
       /* 内容文档尚未就绪时静默忽略 */
+    }
+    // 注销已消失的 iframe
+    for (const f of contentIframes) {
+      if (!current.has(f)) {
+        unregisterIframe(f);
+        contentIframes.delete(f);
+      }
+    }
+    // 注册新增的 iframe（registerIframe 内部立即注入令牌）
+    for (const f of current) {
+      if (!contentIframes.has(f)) {
+        registerIframe(f);
+        contentIframes.add(f);
+      }
     }
   }
 
@@ -890,9 +911,9 @@
     if (settings.fontMode === "classified") {
       requestAnimationFrame(() => applyFontKeywordRewrite());
     }
-    // 2026-09-01 L0：每次重刷样式都把思源令牌（--b3- 与 --hw-）注入内容 iframe，
-    // 保证译文块/批注浮层等用 var(--hw-*) 的 UI 始终跟随思源外观（开书 / 主题切换 / 设置变更全覆盖）。
-    injectReaderTokens();
+    // 2026-09-01 L0+L3：把内容 iframe 同步进 theme-bridge 注册表，
+    // 新 iframe 注册时立即注入令牌；主题切换由 theme-bridge 统一重注（开书/翻页/主题切换全覆盖）。
+    syncContentIframes();
   }
 
   /** 给阅读容器设置与主题一致的兜底背景，避免 iframe 渲染前/透明时透出黑底（黑底闪屏根因之一） */
@@ -6861,7 +6882,8 @@
     // 跟随思源主题（2026-08-25 新增）
     // 2026-09-01：接入全局主题同步总线（L3 theme-bridge），替代本地 MutationObserver。
     // 思源切换主题时：applyStyles 重刷 --b3-* 桥接块（bg/fg/链接/代码/译文色），
-    // applyStyles 末尾的 injectReaderTokens 同步刷新 --hw-* 令牌，使译文/批注 UI 跟随外观。
+    // applyStyles 末尾的 syncContentIframes 把内容 iframe 同步进 theme-bridge 注册表，
+    // 由 theme-bridge 统一重注 --hw-* 令牌，使译文/批注 UI 跟随外观。
     themeChangeUnsub = subscribeThemeChange(() => {
       siyuanThemeMode = detectSiyuanTheme();
       applyStyles();
@@ -6953,9 +6975,11 @@
         logSwallow(__swallowErr, "ReaderView.svelte · pinchEnd cleanup", "debug");
       }
     }
-    // 停止思源主题跟随观察器（2026-08-25 新增）
+    // 停止思源主题跟随（2026-08-25 新增）并注销内容 iframe 注册表（避免悬空引用）
     themeChangeUnsub?.();
     themeChangeUnsub = null;
+    for (const f of contentIframes) unregisterIframe(f);
+    contentIframes.clear();
     // 2026-08-24 修复：卸载 foliate view 事件 + 内容文档监听 + 清除搜索高亮，
     // 避免反复进出阅读 Tab 造成的事件泄漏/悬空回调（P0 #1/#2）与残留搜索高亮干扰 hitTest（P1 #7）。
     teardownAnnotationLayer();
