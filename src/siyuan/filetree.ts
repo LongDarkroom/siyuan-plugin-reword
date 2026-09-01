@@ -16,10 +16,20 @@ export async function lsNotebooks(): Promise<SiyuanNotebook[]> {
   return res?.notebooks ?? [];
 }
 
-/** 获取文档元信息（标题、路径、hpath 等） */
+/** 获取文档元信息（id、box、路径、hpath、标题等） */
 export async function getDocInfo(docId: string): Promise<SiyuanDocInfo> {
-  const res = await siyuanRequest<SiyuanDocInfo>(SIYUAN_API.getDocInfo, { id: docId });
-  return res ?? {};
+  // /api/filetree/getDoc 返回 box/path/id，但不返回 name/hPath；
+  // 再用 /api/filetree/getHPathByID 补人类可读路径作为标题。
+  const res = await siyuanRequest<SiyuanDocInfo>(SIYUAN_API.getDocInfo, { id: docId, mode: 0 });
+  if (!res?.id) return res ?? {};
+  try {
+    const hpath = await siyuanRequest<string>(SIYUAN_API.getHPathByID, { id: docId });
+    if (hpath) {
+      res.hpath = hpath;
+      res.name = res.name || hpath.split("/").pop() || docId;
+    }
+  } catch { /* 取不到 hpath 时仍保留 getDoc 的已有字段 */ }
+  return res;
 }
 
 /**

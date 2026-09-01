@@ -68,11 +68,13 @@ export interface SiyuanNotebook {
 }
 
 /**
- * 文档信息（filetree.getDocInfo 返回项）
+ * 文档信息（filetree.getDoc 返回项 + getHPathByID 补充标题）
  */
 export interface SiyuanDocInfo {
   /** 文档 ID */
   id?: string;
+  /** 笔记本 ID */
+  box?: string;
   /** 文档标题 */
   name?: string;
   /** 内核路径 */

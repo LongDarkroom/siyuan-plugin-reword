@@ -47,10 +47,11 @@ export const SIYUAN_API = {
   sql: "/api/query/sql",
   // 文档树 / 笔记本
   lsNotebooks: "/api/notebook/lsNotebooks",
-  getDocInfo: "/api/block/getDocInfo",
+  getDocInfo: "/api/filetree/getDoc",
   createDocWithMd: "/api/filetree/createDocWithMd",
   listDocsByPath: "/api/filetree/listDocsByPath",
   renameDoc: "/api/filetree/renameDoc",
   removeDoc: "/api/filetree/removeDoc",
   getHPathByPath: "/api/filetree/getHPathByPath",
+  getHPathByID: "/api/filetree/getHPathByID",
 } as const;
