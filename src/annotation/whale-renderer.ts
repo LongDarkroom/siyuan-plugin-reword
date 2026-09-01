@@ -225,7 +225,8 @@ export function renderWhalePanel(
   sortStyles: string[] = [],
   docInfos: { id: string; name: string; count: number }[] = [],
   styleFilterOpen: boolean = false,
-  groupMode: "time" | "doc" = "time"
+  groupMode: "time" | "doc" = "time",
+  limits?: WhaleListLimits
 ): string {
   // 统计各标签命中数（2026-08-14 改造：基于 labelStore 自定义标签）
   const labelCounts: Record<string, number> = { all: items.length };
@@ -410,7 +411,7 @@ export function renderWhalePanel(
             <div class="whale-section-body">
               ${docItems.length === 0
                 ? `<div class="whale-section-empty">暂无文档批注</div>`
-                : renderWhaleNoteList(docItems, groupMode, labelMap, labelNameMap, docInfos)}
+                : renderWhaleNoteList(docItems, groupMode, labelMap, labelNameMap, docInfos, limits?.doc, "doc")}
             </div>
           </section>
           <section class="whale-section" data-section="reading">
@@ -423,13 +424,13 @@ export function renderWhalePanel(
                   <div class="whale-subsection-head">高亮（无批注内容）<span class="whale-subsection-count">${readingHighlights.length}</span></div>
                   ${readingHighlights.length === 0
                     ? `<div class="whale-section-empty">暂无纯高亮</div>`
-                    : renderWhaleNoteList(readingHighlights, groupMode, labelMap, labelNameMap, docInfos)}
+                    : renderWhaleNoteList(readingHighlights, groupMode, labelMap, labelNameMap, docInfos, limits?.readingHl, "readingHl")}
                 </div>
                 <div class="whale-subsection">
                   <div class="whale-subsection-head">批注（带内容）<span class="whale-subsection-count">${readingNotes.length}</span></div>
                   ${readingNotes.length === 0
                     ? `<div class="whale-section-empty">暂无带内容批注</div>`
-                    : renderWhaleNoteList(readingNotes, groupMode, labelMap, labelNameMap, docInfos)}
+                    : renderWhaleNoteList(readingNotes, groupMode, labelMap, labelNameMap, docInfos, limits?.readingNote, "readingNote")}
                 </div>
               `}
             </div>
@@ -453,6 +454,12 @@ export function renderWhalePanel(
 
 /** 列表分组方式：time = 按时间分组（今天/昨天/更早）；doc = 按文档分组 */
 export type WhaleGroupMode = "time" | "doc";
+
+/** 列表分区（2026-09-01 P2：超长列表分页，按分区独立「加载更多」） */
+export type WhaleSection = "doc" | "readingHl" | "readingNote";
+
+/** 各分区已显示条目上限（undefined = 全量，向后兼容旧行为） */
+export type WhaleListLimits = Partial<Record<WhaleSection, number>>;
 
 /** 时间分组标签：今天 / 昨天 / N 天前 / 具体日期 */
 function groupLabelTime(iso?: string): string {
@@ -478,7 +485,9 @@ export function renderWhaleNoteList(
   groupMode: WhaleGroupMode = "time",
   labelMap: Record<string, string> = {},
   labelNames: Record<string, string> = {},
-  docInfos: { id: string; name: string; count: number }[] = []
+  docInfos: { id: string; name: string; count: number }[] = [],
+  limit?: number,
+  section?: WhaleSection
 ): string {
   if (items.length === 0) return "";
   const docNameMap: Record<string, string> = {};
@@ -505,12 +514,27 @@ export function renderWhaleNoteList(
     g.items.push(a);
   }
 
-  return groups
-    .map((g) => `
+  // 2026-09-01 P2：超长列表分页（「加载更多」），避免上千条批注一次性全量进 DOM 卡顿。
+  // 按分组跨组累计截断到 limit；limit 未设或 >= 总数时退化为全量（旧行为）。
+  const hasLimit = typeof limit === "number" && limit < items.length;
+  const rendered: string[] = [];
+  let shown = 0;
+  for (const g of groups) {
+    if (typeof limit === "number" && shown >= limit) break;
+    const remain = typeof limit === "number" ? limit - shown : g.items.length;
+    const slice = g.items.slice(0, remain);
+    rendered.push(`
       <h3 class="whale-notes-group">${esc(g.label)} <span class="whale-notes-count">${g.items.length}</span></h3>
-      ${g.items.map((a) => renderWhaleNoteItem(a, labelMap, labelNames)).join("")}
-    `)
-    .join("");
+      ${slice.map((a) => renderWhaleNoteItem(a, labelMap, labelNames)).join("")}
+    `);
+    shown += remain;
+  }
+
+  const moreBtn = hasLimit && section
+    ? `<button type="button" class="whale-load-more" data-action="whale-load-more" data-section="${escAttr(section)}">加载更多（剩余 ${items.length - (limit as number)} 条）</button>`
+    : "";
+
+  return rendered.join("") + moreBtn;
 }
 
 /** 渲染单条笔记化批注（无卡片边框/阴影，正文 + 元信息行，双击正文进入内联编辑） */

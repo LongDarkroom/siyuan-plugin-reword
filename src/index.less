@@ -9197,6 +9197,23 @@ body.hiword-resizing {
   border-bottom: 0.5px solid var(--b3-theme-divider);
 }
 .whale-notes-group:first-child { padding-top: 6px; }
+.whale-load-more {
+  display: block;
+  width: 100%;
+  margin: 12px 0 16px;
+  padding: 8px 12px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--b3-theme-primary, #06b6d4);
+  background: color-mix(in srgb, var(--b3-theme-primary, #06b6d4) 8%, transparent);
+  border: 1px solid color-mix(in srgb, var(--b3-theme-primary, #06b6d4) 25%, transparent);
+  border-radius: 8px;
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+.whale-load-more:hover {
+  background: color-mix(in srgb, var(--b3-theme-primary, #06b6d4) 16%, transparent);
+}
 .whale-notes-count {
   font-size: 11px;
   font-weight: 400;

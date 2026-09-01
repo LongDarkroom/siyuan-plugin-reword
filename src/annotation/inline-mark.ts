@@ -213,23 +213,8 @@ function unwrapSpan(span: HTMLElement): void {
 }
 
 /**
- * 批量对编辑区内所有已批注块施加行内标记。
- * （供 Plugin.applyAnnotationBlockMarks 调用的便捷入口）
+ * 批量行内高亮的主路径已迁移到 index.ts 的 `applyAnnotationBlockMarks`：
+ * 它用 `annotationStore.annotatedBlockIds()` 集合只遍历「已批注的块」（复杂度 O(批注块数)），
+ * 并配合 `blockTextSnapshot` 跳过未变文本，避免大文档全块扫描卡顿。
+ * 此处不再保留独立的全量遍历入口，以免回退成 O(全文档块数)。
  */
-export function applyAllInlineMarks(
-  getAnnotationsForBlock: (blockId: string) => Array<{ selectedText?: string; sentence: string; id: string }>
-): number {
-  let total = 0;
-  const roots = document.querySelectorAll(".protyle-wysiwyg");
-  roots.forEach((root) => {
-    root.querySelectorAll<HTMLElement>("[data-node-id]").forEach((el) => {
-      const nid = el.dataset.nodeId;
-      if (!nid) return;
-      const anns = getAnnotationsForBlock(nid);
-      if (anns.length > 0) {
-        total += applyInlineMarks(el, anns);
-      }
-    });
-  });
-  return total;
-}

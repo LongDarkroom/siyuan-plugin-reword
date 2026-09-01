@@ -400,6 +400,12 @@ export default class RewordPlugin extends Plugin {
   private whaleSortStyles: string[] = [];
   /** 2026-08-17 新增：批注面板列表分组方式（time=按时间分组 / doc=按文档分组，默认时间，持久化） */
   private whaleGroupMode: WhaleGroupMode = "time";
+  /** 2026-09-01 P2：批注列表「加载更多」分页——各分区已显示条目上限（默认 100，普通用户无感，上千条时分批） */
+  private whaleLimits: Record<"doc" | "readingHl" | "readingNote", number> = { doc: 100, readingHl: 100, readingNote: 100 };
+  /** 2026-09-01 P2：当前搜索关键词（实例级，供 loadMore 重渲时保持搜索态） */
+  private whaleSearchKw = "";
+  /** 2026-09-01 P2：已绑定 loadMore 委托的 contentEl（WeakSet 自动回收，dock 重建后自动重绑） */
+  private whaleLoadMoreBound = new WeakSet<HTMLElement>();
   /** v4：全局 dragstart 记录的源块 ID（拖入 AI 面板用，60s 内有效、消费即清） */
   private draggingBlockId: { id: string; ts: number } | null = null;
   /** v5：dragstart 时记录的选中文本（作为块 ID 检测失败时的回退内容） */
@@ -11329,7 +11335,7 @@ export default class RewordPlugin extends Plugin {
     this.applyWhalePanelHTML(contentEl, renderWhalePanel(
       items,
       this.currentLabel,
-      "",
+      this.whaleSearchKw,
       this.annotationLabelStore.colorMap(),
       this.annotationLabelStore.getAll(),
       this.whaleTagsCollapsed,
@@ -11339,7 +11345,8 @@ export default class RewordPlugin extends Plugin {
       this.whaleSortStyles,
       docInfos,
       false,
-      this.whaleGroupMode
+      this.whaleGroupMode,
+      this.whaleLimits
     ));
 
     // 绑定搜索事件
@@ -11348,6 +11355,31 @@ export default class RewordPlugin extends Plugin {
     this.bindWhaleTabs(contentEl, items, dockElement);
     // 绑定卡片操作（跳转/编辑/删除）
     this.bindWhaleCardActions(contentEl);
+    // 2026-09-01 P2：常驻「加载更多」事件委托（覆盖所有重渲路径，contentEl 元素常驻不随 innerHTML 替换失效）
+    this.ensureWhaleLoadMoreDelegation(contentEl);
+  }
+
+  /** P2：重置各分区分页上限（筛选/搜索/排序/分组变化时调用，避免残留上限截断新结果集） */
+  private resetWhaleLimits(): void {
+    this.whaleLimits = { doc: 100, readingHl: 100, readingNote: 100 };
+  }
+
+  /** P2：在 contentEl 上挂一次性的「加载更多」点击委托 */
+  private ensureWhaleLoadMoreDelegation(contentEl: HTMLElement): void {
+    if (this.whaleLoadMoreBound.has(contentEl)) return;
+    this.whaleLoadMoreBound.add(contentEl);
+    contentEl.addEventListener("click", (e) => {
+      const btn = (e.target as HTMLElement).closest('[data-action="whale-load-more"]') as HTMLElement | null;
+      if (!btn) return;
+      e.preventDefault();
+      const section = (btn.dataset.section || "doc") as "doc" | "readingHl" | "readingNote";
+      const kw = (contentEl.querySelector("#whale-search-input") as HTMLInputElement | null)?.value || "";
+      this.whaleSearchKw = kw; // 保持搜索态
+      this.whaleLimits[section] += 100;
+      if (this.dockElement) this.renderAnnotationsPanel(this.dockElement);
+      const ni = contentEl.querySelector("#whale-search-input") as HTMLInputElement | null;
+      if (ni && kw) ni.value = kw;
+    });
   }
 
   /**
@@ -11375,8 +11407,10 @@ export default class RewordPlugin extends Plugin {
 
     input?.addEventListener("input", () => {
       const kw = input.value;
+      this.whaleSearchKw = kw;
+      this.resetWhaleLimits();
       if (clearBtn) clearBtn.style.display = kw ? "flex" : "none";
-      this.applyWhalePanelHTML(contentEl, renderWhalePanel(allItems, this.currentLabel, kw, this.annotationLabelStore.colorMap(), this.annotationLabelStore.getAll(), this.whaleTagsCollapsed, this.whaleSortMode, this.whaleSortTimeDir, this.whaleSortDoc, this.whaleSortStyles, this.getAnnotationDocInfos(allItems), false, this.whaleGroupMode));
+      this.applyWhalePanelHTML(contentEl, renderWhalePanel(allItems, this.currentLabel, kw, this.annotationLabelStore.colorMap(), this.annotationLabelStore.getAll(), this.whaleTagsCollapsed, this.whaleSortMode, this.whaleSortTimeDir, this.whaleSortDoc, this.whaleSortStyles, this.getAnnotationDocInfos(allItems), false, this.whaleGroupMode, this.whaleLimits));
       // 重新绑定事件
       this.bindWhaleSearch(contentEl, allItems, dockElement);
       this.bindWhaleTabs(contentEl, allItems, dockElement);
@@ -11388,8 +11422,10 @@ export default class RewordPlugin extends Plugin {
 
     clearBtn?.addEventListener("click", () => {
       input.value = "";
+      this.whaleSearchKw = "";
+      this.resetWhaleLimits();
       clearBtn.style.display = "none";
-      this.applyWhalePanelHTML(contentEl, renderWhalePanel(allItems, this.currentLabel, "", this.annotationLabelStore.colorMap(), this.annotationLabelStore.getAll(), this.whaleTagsCollapsed, this.whaleSortMode, this.whaleSortTimeDir, this.whaleSortDoc, this.whaleSortStyles, this.getAnnotationDocInfos(allItems), false, this.whaleGroupMode));
+      this.applyWhalePanelHTML(contentEl, renderWhalePanel(allItems, this.currentLabel, "", this.annotationLabelStore.colorMap(), this.annotationLabelStore.getAll(), this.whaleTagsCollapsed, this.whaleSortMode, this.whaleSortTimeDir, this.whaleSortDoc, this.whaleSortStyles, this.getAnnotationDocInfos(allItems), false, this.whaleGroupMode, this.whaleLimits));
       this.bindWhaleSearch(contentEl, allItems, dockElement);
       this.bindWhaleTabs(contentEl, allItems, dockElement);
       this.bindWhaleCardActions(contentEl);
@@ -11403,7 +11439,8 @@ export default class RewordPlugin extends Plugin {
       tab.addEventListener("click", () => {
         const cat = (tab as HTMLElement).dataset.cat || "all";
         this.currentLabel = cat;
-        this.applyWhalePanelHTML(contentEl, renderWhalePanel(allItems, cat, searchInput, this.annotationLabelStore.colorMap(), this.annotationLabelStore.getAll(), this.whaleTagsCollapsed, this.whaleSortMode, this.whaleSortTimeDir, this.whaleSortDoc, this.whaleSortStyles, this.getAnnotationDocInfos(allItems), false, this.whaleGroupMode));
+        this.resetWhaleLimits();
+        this.applyWhalePanelHTML(contentEl, renderWhalePanel(allItems, cat, searchInput, this.annotationLabelStore.colorMap(), this.annotationLabelStore.getAll(), this.whaleTagsCollapsed, this.whaleSortMode, this.whaleSortTimeDir, this.whaleSortDoc, this.whaleSortStyles, this.getAnnotationDocInfos(allItems), false, this.whaleGroupMode, this.whaleLimits));
         this.bindWhaleSearch(contentEl, allItems, dockElement);
         this.bindWhaleTabs(contentEl, allItems, dockElement);
         this.bindWhaleCardActions(contentEl);
@@ -11435,12 +11472,13 @@ export default class RewordPlugin extends Plugin {
    */
   private bindWhaleSort(contentEl: HTMLElement, allItems: any[], dockElement?: HTMLElement): void {
     const rerender = () => {
+      this.resetWhaleLimits();
       const kw = (contentEl.querySelector("#whale-search-input") as HTMLInputElement)?.value || "";
       this.applyWhalePanelHTML(contentEl, renderWhalePanel(
         allItems, this.currentLabel, kw,
         this.annotationLabelStore.colorMap(), this.annotationLabelStore.getAll(), this.whaleTagsCollapsed,
         this.whaleSortMode, this.whaleSortTimeDir, this.whaleSortDoc, this.whaleSortStyles,
-        this.getAnnotationDocInfos(allItems), false, this.whaleGroupMode
+        this.getAnnotationDocInfos(allItems), false, this.whaleGroupMode, this.whaleLimits
       ));
       this.bindWhaleSearch(contentEl, allItems, dockElement);
       this.bindWhaleTabs(contentEl, allItems, dockElement);
@@ -11543,6 +11581,7 @@ export default class RewordPlugin extends Plugin {
     this.whaleSortTimeDir = "desc";
     this.whaleSortDoc = null;
     this.whaleSortStyles = [];
+    this.resetWhaleLimits();
     try {
       localStorage.removeItem("hiword-annotation-sort-mode");
       localStorage.removeItem("hiword-annotation-sort-time-dir");
@@ -11558,7 +11597,7 @@ export default class RewordPlugin extends Plugin {
           items, this.currentLabel, "",
           this.annotationLabelStore.colorMap(), this.annotationLabelStore.getAll(), this.whaleTagsCollapsed,
           this.whaleSortMode, this.whaleSortTimeDir, this.whaleSortDoc, this.whaleSortStyles,
-          this.getAnnotationDocInfos(items), false, this.whaleGroupMode
+          this.getAnnotationDocInfos(items), false, this.whaleGroupMode, this.whaleLimits
         ));
         this.bindWhaleSearch(contentEl, items, this.dockElement);
         this.bindWhaleTabs(contentEl, items, this.dockElement);
@@ -11618,6 +11657,7 @@ export default class RewordPlugin extends Plugin {
     pop.querySelectorAll("[data-style-key]").forEach((btn) => {
       btn.addEventListener("click", () => {
         const key = (btn as HTMLElement).dataset.styleKey || "";
+        this.resetWhaleLimits();
         const idx = this.whaleSortStyles.indexOf(key);
         if (idx >= 0) this.whaleSortStyles.splice(idx, 1);
         else this.whaleSortStyles.push(key);
@@ -11635,7 +11675,7 @@ export default class RewordPlugin extends Plugin {
             items, this.currentLabel, kw,
             this.annotationLabelStore.colorMap(), this.annotationLabelStore.getAll(), this.whaleTagsCollapsed,
             this.whaleSortMode, this.whaleSortTimeDir, this.whaleSortDoc, this.whaleSortStyles,
-            this.getAnnotationDocInfos(items), false, this.whaleGroupMode
+            this.getAnnotationDocInfos(items), false, this.whaleGroupMode, this.whaleLimits
           ));
           this.bindWhaleSearch(this.dockElement, items, this.dockElement);
           this.bindWhaleTabs(this.dockElement, items, this.dockElement);
@@ -11796,6 +11836,7 @@ export default class RewordPlugin extends Plugin {
         const mode = (btn as HTMLElement).dataset.groupAction as WhaleGroupMode;
         if (mode !== "time" && mode !== "doc") return;
         this.whaleGroupMode = mode;
+        this.resetWhaleLimits();
         try { localStorage.setItem("hiword-annotation-group-mode", mode); } catch (__swallowErr) { logSwallow(__swallowErr, "index.ts · try { localStorage.setItem(\"hiword-annotation-group-mode\", mode…", "debug"); }
         const kw = (contentEl.querySelector("#whale-search-input") as HTMLInputElement)?.value || "";
         const allItems = this.annotationStore.getAll();
@@ -11803,7 +11844,7 @@ export default class RewordPlugin extends Plugin {
           allItems, this.currentLabel, kw,
           this.annotationLabelStore.colorMap(), this.annotationLabelStore.getAll(), this.whaleTagsCollapsed,
           this.whaleSortMode, this.whaleSortTimeDir, this.whaleSortDoc, this.whaleSortStyles,
-          this.getAnnotationDocInfos(allItems), false, this.whaleGroupMode
+          this.getAnnotationDocInfos(allItems), false, this.whaleGroupMode, this.whaleLimits
         ));
         this.bindWhaleSearch(contentEl, allItems);
         this.bindWhaleTabs(contentEl, allItems);
