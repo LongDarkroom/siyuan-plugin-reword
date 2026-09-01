@@ -19,6 +19,8 @@ const TESTS = [
   "test/tts-settings-merge.test.mjs",
   "test/annotation-store.test.mjs",
   "test/annotation-store-subscribe.test.mjs",
+  "test/pdf-outline.test.mjs",
+  "test/pdf-phase1-ui.test.mjs",
   "test/block-mark.test.mjs",
   "test/annotation-render.test.mjs",
   "test/inline-mark.test.mjs",

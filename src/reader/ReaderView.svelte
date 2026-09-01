@@ -52,6 +52,8 @@
   // [REword patch 2026-08-29] PDF 缩放：复用 ReadingProgress.zoom 字段
   import type { ZoomState } from "../reader/bookshelf-store";
   import { ZOOM_PRESETS } from "../reader/bookshelf-store";
+  // [2026-09-01] Phase 1:PDF 大纲 / 页码提取(对齐 Obsidian PDF++ outline)
+  import { loadPdfOutline, extractPdfCurrentPage } from "../reader/pdf-outline";
   import {
     ReaderSettingsStore,
     READER_DEFAULT_SETTINGS,
@@ -450,6 +452,9 @@
   let visibilityObserver: IntersectionObserver | null = null; // 页签可见性观察器：隐藏→显示时触发高亮重绘
   let annotationsDirty = true; // 标记「需要补绘批注高亮」；由 relocate（内容就绪）或兜底定时器清掉
   let tocItems: { title: string; href: string; level: number }[] = [];
+  // [2026-09-01] Phase 1:PDF 专用(目录同样形态,工具栏「第 N/T 页」用)
+  let pdfTotalPages = 0;
+  let pdfCurrentPage = 0;
   let activeHref = "";
   let visitedHrefs = new Set<string>();
   let tocReadCount = 0;
@@ -1593,20 +1598,45 @@
         progress = frac;
         if (!dragging) progressText = fmtPct(frac);
         totalSections = view.book?.sections?.length ?? 0;
-        chapterLabel = d?.tocItem?.label ?? (totalSections ? `第 ${(d?.index ?? 0) + 1}/${totalSections} 节` : "");
+        // [2026-09-01] Phase 1:PDF 当前页反推 + 标题联动「第 N/T 页」
+        if (isPdfBook()) {
+          const page = extractPdfCurrentPage(view, d);
+          if (page > 0 && page !== pdfCurrentPage) {
+            pdfCurrentPage = page;
+            // 目录高亮跟随:找最近 ≤ 当前页 的 outline 节点
+            const matchedHref = findNearestPdfOutlineHref(page);
+            if (matchedHref && matchedHref !== activeHref) {
+              activeHref = matchedHref;
+            }
+          }
+          chapterLabel = pdfTotalPages > 0 ? `第 ${page}/${pdfTotalPages} 页` : "";
+        } else {
+          chapterLabel = d?.tocItem?.label ?? (totalSections ? `第 ${(d?.index ?? 0) + 1}/${totalSections} 节` : "");
+        }
         currentSectionIndex = typeof d?.index === "number" ? d.index : currentSectionIndex;
         // 独立 Tab 模式：标题联动「书名 · 章节」
         if (onTitleChange) {
           onTitleChange(chapterLabel ? `${title} · ${chapterLabel}` : title);
         }
-        const href = d?.tocItem?.href;
-        if (typeof href === "string" && href) {
-          activeHref = href;
-          if (!visitedHrefs.has(href)) {
+        // [2026-09-01] Phase 1:EPUB 走 tocItem.href;PDF 走 findNearestPdfOutlineHref(上面已算)
+        if (!isPdfBook()) {
+          const href = d?.tocItem?.href;
+          if (typeof href === "string" && href) {
+            activeHref = href;
+            if (!visitedHrefs.has(href)) {
+              visitedHrefs = new Set(visitedHrefs);
+              visitedHrefs.add(href);
+            }
+            tocReadCount = visitedHrefs.size;
+          }
+        } else {
+          // PDF 也累加访问过的目录(用于「已读 N/M」统计)
+          const href = activeHref;
+          if (href && !visitedHrefs.has(href)) {
             visitedHrefs = new Set(visitedHrefs);
             visitedHrefs.add(href);
+            tocReadCount = visitedHrefs.size;
           }
-          tocReadCount = visitedHrefs.size;
         }
         updateEta(frac);
         // [REword patch 2026-08-29] PDF 缩放状态一并保存
@@ -1646,10 +1676,17 @@
         sections: view.book?.sections?.length ?? 0,
       });
       try {
-        // foliate 的目录是属性 book.toc（嵌套树 [{label/title, href, subitems}]），
-        // 不是方法 getTOC()；递归展开为带层级的扁平列表
-        const toc = view.book?.toc;
-        tocItems = flattenToc(Array.isArray(toc) ? toc : []);
+        // [2026-09-01] Phase 1:PDF 与 EPUB 走不同数据源,但 tocItems 形态一致
+        if (isPdfBook()) {
+          // PDF:从 PDF.js getOutline() 拿 → 转 {title, href, level} 与 EPUB 同构
+          const pdfResult = await loadPdfOutline(file as Blob);
+          pdfTotalPages = pdfResult.totalPages;
+          tocItems = pdfResult.nodes;
+        } else {
+          // EPUB/TXT/MD:foliate 的目录是属性 book.toc(嵌套树),递归展开为扁平列表
+          const toc = view.book?.toc;
+          tocItems = flattenToc(Array.isArray(toc) ? toc : []);
+        }
         totalChars = Array.isArray(view.book?.sections)
           ? view.book.sections.reduce((s: number, x: any) => s + (x.size || 0), 0)
           : 0;
@@ -1657,6 +1694,7 @@
       } catch {
         tocItems = [];
         chapterMarks = [];
+        pdfTotalPages = 0;
       }
       settings = settingsStore.get();
       applyStyles();
@@ -1714,9 +1752,88 @@
   async function goToc(href: string) {
     if (!view) return;
     try {
+      // [2026-09-01] Phase 1:PDF 专用 href 格式 "pdf-page-N" → 走 foliate 的 page jump
+      if (isPdfBook() && href.startsWith("pdf-page-")) {
+        const page = parseInt(href.slice("pdf-page-".length), 10);
+        if (page > 0) {
+          await goPdfPage(page);
+          showToc = false;
+          return;
+        }
+      }
       await view.goTo(href);
       showToc = false;
     } catch (__swallowErr) { logSwallow(__swallowErr, "ReaderView.svelte · goToc", "debug"); }
+  }
+
+  /**
+   * [2026-09-01] Phase 1:PDF 跳到指定页(工具栏「第 N/T 页」+ 大纲点击都用这个)
+   * - foliate 公开了 `view.goToFraction(frac)` 但没有 `goToPage` 直接接口
+   * - 兜底:用 iframe 内的 pdfjs viewer 派发 page 变更(优先)
+   * - 再兜底:fraction = (page - 1) / totalPages
+   */
+  async function goPdfPage(page: number): Promise<void> {
+    if (!view || !page || page < 1) return;
+    const targetPage = Math.min(page, pdfTotalPages || page);
+    // 方案 A:fraction 反推(对单/双页 spread 模式可能略不准,但能跳到大致位置)
+    if (pdfTotalPages > 0 && view.goToFraction) {
+      const frac = (targetPage - 1) / pdfTotalPages;
+      try {
+        await view.goToFraction(frac);
+        // 同步本地状态(下次 relocate 会校正)
+        pdfCurrentPage = targetPage;
+        const matchHref = `pdf-page-${targetPage}`;
+        if (activeHref !== matchHref) activeHref = matchHref;
+        return;
+      } catch { /* fallthrough */ }
+    }
+    // 方案 B:直接用 foliate-js 内部的 page jump(如果暴露)
+    if ((view as any).goToPage) {
+      try {
+        await (view as any).goToPage(targetPage);
+        pdfCurrentPage = targetPage;
+        return;
+      } catch { /* fallthrough */ }
+    }
+    // 方案 C:lastLocation 注入
+    if (view.lastLocation) {
+      view.lastLocation = { ...view.lastLocation, index: targetPage - 1 };
+    }
+  }
+
+  /**
+   * [2026-09-01] Phase 1:从 foliate relocate 事件反推 PDF 当前页 + 目录高亮跟随
+   * - PDF:用 extractPdfCurrentPage 拿页码 → 找到最近的目录节点 → 更新 activeHref
+   * - EPUB:维持原 tocItem.href 逻辑
+   */
+  function findNearestPdfOutlineHref(page: number): string {
+    if (!page || !tocItems.length) return "";
+    // 找最后一个 page ≤ 当前页的 outline 节点
+    let nearest = "";
+    for (const it of tocItems) {
+      const m = (it.href ?? "").match(/^pdf-page-(\d+)$/);
+      if (!m) continue;
+      const p = parseInt(m[1], 10);
+      if (p && p <= page) nearest = it.href;
+      else break;
+    }
+    return nearest;
+  }
+
+  // [2026-09-01] 修复：模板事件处理器里禁用 TS `as` 断言（Svelte 模板不允许），
+  // 故把带 `as HTMLInputElement` 的逻辑收进脚本函数，模板仅引用。
+  function onPageInputKeydown(e: KeyboardEvent) {
+    if (e.key !== "Enter") return;
+    const el = e.target as HTMLInputElement;
+    const v = parseInt(el.value, 10);
+    if (v > 0) goPdfPage(v);
+  }
+  function onPageInputChange(e: Event) {
+    const el = e.target as HTMLInputElement;
+    const v = parseInt(el.value, 10);
+    if (v > 0) goPdfPage(v);
+    // 失焦后回填(避免输入 999 但总页 500 时显示错误)
+    el.value = String(pdfCurrentPage || "");
   }
 
   /* ================= TOC 展开 / 阅读统计 ================= */
@@ -7099,6 +7216,36 @@
             on:click={fitPage}
           >⊡</button>
         </span>
+        <!-- [2026-09-01] Phase 1:PDF「第 N/T 页」+ 跳转输入框(对齐 Obsidian PDF++ Go to page) -->
+        <span class="reader-page-group" title="PDF 页码跳转：←/→ 翻页,数字框内回车跳转">
+          <button
+            class="reader-btn reader-page-btn"
+            title="上一页（←）"
+            disabled={!pdfTotalPages}
+            on:click={() => goPdfPage(Math.max(1, pdfCurrentPage - 1))}
+          >‹</button>
+          <span class="reader-page-label">
+            <input
+              class="reader-page-input"
+              type="number"
+              min="1"
+              max={pdfTotalPages || undefined}
+              placeholder="?"
+              value={pdfCurrentPage || ""}
+              disabled={!pdfTotalPages}
+              on:keydown={onPageInputKeydown}
+              on:change={onPageInputChange}
+            />
+            <span class="reader-page-sep">/</span>
+            <span class="reader-page-total">{pdfTotalPages || "?"}</span>
+          </span>
+          <button
+            class="reader-btn reader-page-btn"
+            title="下一页（→）"
+            disabled={!pdfTotalPages}
+            on:click={() => goPdfPage(Math.min(pdfTotalPages, pdfCurrentPage + 1))}
+          >›</button>
+        </span>
       {/if}
     </div>
   </div>
@@ -8748,6 +8895,73 @@
     color: var(--b3-theme-on-background, #333);
     padding: 0 4px;
     user-select: none;
+  }
+  /* [2026-09-01] Phase 1:PDF「第 N/T 页」+ 跳转输入框(对齐 Obsidian PDF++ Go to page) */
+  .reader-page-group {
+    display: inline-flex;
+    align-items: center;
+    gap: 1px;
+    margin-left: 4px;
+    padding: 0 2px;
+    border-left: 1px solid var(--b3-border-color, rgba(0, 0, 0, 0.08));
+    height: 22px;
+  }
+  .reader-page-btn {
+    min-width: 22px;
+    height: 22px;
+    padding: 0 4px;
+    font-size: 12px;
+    color: var(--b3-theme-on-surface-light, #888);
+    border-radius: 4px;
+  }
+  .reader-page-btn:hover:not(:disabled) {
+    background: var(--b3-theme-primary-light, rgba(55, 138, 221, 0.14));
+    color: var(--b3-theme-primary, #378add);
+  }
+  .reader-page-btn:disabled {
+    opacity: 0.35;
+    cursor: not-allowed;
+  }
+  .reader-page-label {
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+    font-size: 11px;
+    color: var(--b3-theme-on-surface-light, #888);
+    padding: 0 4px;
+    font-variant-numeric: tabular-nums;
+  }
+  .reader-page-input {
+    width: 32px;
+    height: 18px;
+    padding: 0 2px;
+    font-size: 11px;
+    text-align: center;
+    background: var(--b3-theme-background, #fff);
+    border: 1px solid var(--b3-border-color, rgba(0, 0, 0, 0.15));
+    border-radius: 3px;
+    color: var(--b3-theme-on-background, #333);
+    font-variant-numeric: tabular-nums;
+    -moz-appearance: textfield;
+    appearance: textfield;
+    font-family: inherit;
+  }
+  .reader-page-input::-webkit-outer-spin-button,
+  .reader-page-input::-webkit-inner-spin-button {
+    -webkit-appearance: none;
+    margin: 0;
+  }
+  .reader-page-input:focus {
+    outline: none;
+    border-color: var(--b3-theme-primary, #378add);
+  }
+  .reader-page-sep {
+    color: var(--b3-theme-on-surface-light, #888);
+    opacity: 0.5;
+  }
+  .reader-page-total {
+    min-width: 28px;
+    text-align: right;
   }
   /* [REword patch 2026-08-29] 移动端 PDF 适配 Phase 1 · iPhone / Android Phone 降级模式
    * 工具栏改底部 sheet + 触摸区 ≥44px */
