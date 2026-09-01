@@ -20,7 +20,7 @@
 const TOKEN_PREFIXES = ["--b3-", "--hw-"];
 
 /**
- * 把源文档 root 上的 --b3-*/--hw-* 计算值注入目标文档 root。
+ * 把源文档 root 上的 --b3- 与 --hw- 计算值注入目标文档 root。
  * @param targetDoc 目标文档（如 iframe.contentDocument）
  * @param sourceDoc 源文档（默认 window.document，即思源主窗口）
  */

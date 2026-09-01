@@ -890,7 +890,7 @@
     if (settings.fontMode === "classified") {
       requestAnimationFrame(() => applyFontKeywordRewrite());
     }
-    // 2026-09-01 L0：每次重刷样式都把思源令牌（--b3-*/--hw-*）注入内容 iframe，
+    // 2026-09-01 L0：每次重刷样式都把思源令牌（--b3- 与 --hw-）注入内容 iframe，
     // 保证译文块/批注浮层等用 var(--hw-*) 的 UI 始终跟随思源外观（开书 / 主题切换 / 设置变更全覆盖）。
     injectReaderTokens();
   }

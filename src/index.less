@@ -12830,3 +12830,62 @@ body.hiword-resizing {
     transition: none;
   }
 }
+
+/* =========================================================================
+   L1 控件工厂 .rw-* 基础样式
+   设计：用 --b3- 与 --hw- 令牌着色，跟随思源主题（L0 注入令牌 / L3 同步）。
+   button/text-field/select 同时带思源 b3-* 类，在设置上下文进一步贴合原生外观；
+   以下补充 b3-* 未覆盖或需自包含保证（switch/checkbox/radio/slider/field/按钮兜底）的部分。
+   ========================================================================= */
+.rw-switch { display: inline-flex; align-items: center; gap: 8px; cursor: pointer; user-select: none; font-size: 12px; color: var(--b3-theme-on-background, #333); }
+.rw-switch-input { position: absolute; opacity: 0; width: 0; height: 0; margin: 0; }
+.rw-switch-graph { position: relative; display: inline-block; width: 32px; height: 18px; flex: 0 0 auto; background: ~"color-mix(in srgb, var(--b3-theme-on-surface, #888) 35%, transparent)"; border-radius: 9px; transition: background .2s ease-out; pointer-events: none; }
+.rw-switch-graph::before { content: ""; position: absolute; top: 2px; left: 2px; width: 14px; height: 14px; border-radius: 50%; background: var(--b3-theme-on-primary, #fff); transition: transform .2s ease-out, background .2s; }
+.rw-switch-input:checked + .rw-switch-graph { background: var(--b3-theme-primary, #4285f4); }
+.rw-switch-input:checked + .rw-switch-graph::before { transform: translateX(14px); }
+.rw-switch-input:disabled + .rw-switch-graph { opacity: .4; }
+.rw-switch-input:focus-visible + .rw-switch-graph { box-shadow: 0 0 0 2px ~"color-mix(in srgb, var(--b3-theme-primary, #4285f4) 40%, transparent)"; }
+.rw-switch-label { cursor: pointer; line-height: 1.4; }
+
+.rw-checkbox { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; user-select: none; font-size: 12px; color: var(--b3-theme-on-background, #333); }
+.rw-checkbox-input { position: absolute; opacity: 0; width: 0; height: 0; margin: 0; }
+.rw-checkbox-mark { position: relative; display: inline-block; width: 16px; height: 16px; flex: 0 0 auto; border: 1.5px solid var(--b3-border-color, rgba(0, 0, 0, .25)); border-radius: 4px; background: var(--b3-theme-surface, #fff); transition: background .15s, border-color .15s; }
+.rw-checkbox-mark::after { content: ""; position: absolute; left: 5px; top: 1px; width: 4px; height: 9px; border: solid var(--b3-theme-on-primary, #fff); border-width: 0 2px 2px 0; transform: rotate(45deg) scale(0); transition: transform .15s; }
+.rw-checkbox-input:checked + .rw-checkbox-mark { background: var(--b3-theme-primary, #4285f4); border-color: var(--b3-theme-primary, #4285f4); }
+.rw-checkbox-input:checked + .rw-checkbox-mark::after { transform: rotate(45deg) scale(1); }
+.rw-checkbox-input:disabled + .rw-checkbox-mark { opacity: .4; }
+.rw-checkbox-label { cursor: pointer; line-height: 1.4; }
+
+.rw-radio-group { display: inline-flex; flex-wrap: wrap; gap: 12px; }
+.rw-radio { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; user-select: none; font-size: 12px; color: var(--b3-theme-on-background, #333); }
+.rw-radio-input { position: absolute; opacity: 0; width: 0; height: 0; margin: 0; }
+.rw-radio-mark { position: relative; display: inline-block; width: 16px; height: 16px; flex: 0 0 auto; border: 1.5px solid var(--b3-border-color, rgba(0, 0, 0, .25)); border-radius: 50%; background: var(--b3-theme-surface, #fff); transition: border-color .15s; }
+.rw-radio-mark::after { content: ""; position: absolute; inset: 3px; border-radius: 50%; background: var(--b3-theme-primary, #4285f4); transform: scale(0); transition: transform .15s; }
+.rw-radio-input:checked + .rw-radio-mark { border-color: var(--b3-theme-primary, #4285f4); }
+.rw-radio-input:checked + .rw-radio-mark::after { transform: scale(1); }
+.rw-radio-input:disabled + .rw-radio-mark { opacity: .4; }
+.rw-radio-label { cursor: pointer; line-height: 1.4; }
+
+.rw-slider { display: inline-flex; align-items: center; gap: 8px; font-size: 12px; color: var(--b3-theme-on-background, #333); }
+.rw-slider-input { -webkit-appearance: none; appearance: none; flex: 1; min-width: 120px; height: 4px; border-radius: 2px; background: var(--b3-slider-track, rgba(0, 0, 0, 0.12)); outline: none; cursor: pointer; }
+.rw-slider-input::-webkit-slider-thumb { -webkit-appearance: none; appearance: none; width: 14px; height: 14px; border-radius: 50%; background: var(--b3-theme-primary, #4285f4); border: 2px solid var(--b3-theme-surface, #fff); box-shadow: 0 1px 3px rgba(0, 0, 0, .2); }
+.rw-slider-input::-moz-range-thumb { width: 14px; height: 14px; border: 2px solid var(--b3-theme-surface, #fff); border-radius: 50%; background: var(--b3-theme-primary, #4285f4); }
+.rw-slider-input:disabled { opacity: .5; }
+
+/* 按钮兜底：在缺少 SiYuan 原生 b3-button 的上下文（如 iframe）仍可用；主窗口与 b3-button 视觉对齐 */
+.rw-button { font-size: 12px; line-height: 1; padding: 6px 12px; border-radius: var(--b3-border-radius, 4px); border: 1px solid transparent; cursor: pointer; background: var(--b3-theme-surface, #fff); color: var(--b3-theme-on-background, #333); transition: background .15s, opacity .15s; }
+.rw-button:hover { background: var(--b3-list-hover, rgba(0, 0, 0, .04)); }
+.rw-button:disabled { opacity: .5; cursor: not-allowed; }
+.rw-button.b3-button--primary { background: var(--b3-theme-primary, #4285f4); color: var(--b3-theme-on-primary, #fff); }
+.rw-button.b3-button--primary:hover { background: var(--b3-theme-primary-light, #5b9bf4); }
+.rw-button.b3-button--text { background: transparent; padding-left: 6px; padding-right: 6px; }
+.rw-button.b3-button--text:hover { background: var(--b3-list-hover, rgba(0, 0, 0, .04)); }
+.rw-button.b3-button--danger { background: transparent; color: var(--b3-theme-error, #d23f3f); }
+.rw-button.b3-button--danger:hover { background: ~"color-mix(in srgb, var(--b3-theme-error, #d23f3f) 12%, transparent)"; }
+.rw-btn-icon { display: inline-flex; margin-right: 4px; }
+
+/* 字段包装（带标签 + 说明） */
+.rw-field { display: flex; flex-direction: column; gap: 4px; margin: 6px 0; }
+.rw-field-label { font-size: 12px; color: var(--b3-theme-on-background, #333); }
+.rw-field-control { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.rw-field-hint { font-size: 11px; color: var(--b3-font-color-gray, rgba(0, 0, 0, .45)); line-height: 1.4; }

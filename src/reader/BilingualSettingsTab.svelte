@@ -7,6 +7,30 @@
    */
   import { onMount } from "svelte";
   import { DEFAULT_TRANSLATE_PROMPT, DEFAULT_TRANSLATE_PROMPT_NATURAL } from "../ai/ai-settings";
+  import RWSelect from "../ui/controls/RWSelect.svelte";
+  import RWSwitch from "../ui/controls/RWSwitch.svelte";
+
+  // L1 控件工厂样板：语言下拉选项（原 bset-select 内联 <option> 提取为数据）
+  const SOURCE_LANG_OPTIONS = [
+    { value: "en", label: "英语（默认）" },
+    { value: "auto", label: "自动检测" },
+    { value: "ja", label: "日语" },
+    { value: "fr", label: "法语" },
+    { value: "de", label: "德语" },
+    { value: "ko", label: "韩语" },
+    { value: "ru", label: "俄语" },
+  ];
+  const TARGET_LANG_OPTIONS = [
+    { value: "zh", label: "中文（简体）" },
+    { value: "zh-Hant", label: "中文（繁体）" },
+    { value: "en", label: "英语" },
+    { value: "ja", label: "日语" },
+    { value: "ko", label: "韩语" },
+    { value: "fr", label: "法语" },
+    { value: "de", label: "德语" },
+    { value: "es", label: "西班牙语" },
+    { value: "ru", label: "俄语" },
+  ];
 
   export let settingsStore: any; // ReaderSettingsStore（含 get/update/subscribe）
   export let getAiSettings: () => any;
@@ -443,15 +467,7 @@
           </p>
           <div class="bset-row">
             <span class="bset-label">源语言</span>
-            <select class="bset-select" value={$settingsStore.bilingualSourceLang || "en"} on:change={(e) => patchSettings({ bilingualSourceLang: e.target.value })}>
-              <option value="en">英语（默认）</option>
-              <option value="auto">自动检测</option>
-              <option value="ja">日语</option>
-              <option value="fr">法语</option>
-              <option value="de">德语</option>
-              <option value="ko">韩语</option>
-              <option value="ru">俄语</option>
-            </select>
+            <RWSelect options={SOURCE_LANG_OPTIONS} value={$settingsStore.bilingualSourceLang || "en"} onChange={(v) => patchSettings({ bilingualSourceLang: v })} />
           </div>
           <div class="bset-row">
             <span class="bset-label">目标语言</span>
@@ -469,7 +485,7 @@
           </div>
           <div class="bset-row">
             <span class="bset-label" title="翻译时跳过已缓存段落，避免重复消耗">跳过已缓存</span>
-            <label class="bset-switch"><input type="checkbox" checked={$settingsStore.bilingualSkipCached !== false} on:change={(e) => patchSettings({ bilingualSkipCached: e.target.checked })} /><span class="bset-track"></span></label>
+            <RWSwitch checked={$settingsStore.bilingualSkipCached !== false} onChange={(c) => patchSettings({ bilingualSkipCached: c })} />
           </div>
           <div class="bset-row">
             <span class="bset-label" title="边译边显示译文；关闭则纯后台缓存">实时预览译文</span>
