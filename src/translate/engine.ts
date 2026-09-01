@@ -55,6 +55,18 @@ export interface EngineConfig {
   aiApiKey?: string;
   /** 可用 AI 模型列表 */
   aiModels?: string[];
+  /** 百度翻译已用字符数 */
+  baiduCharsUsed?: number;
+  /** 百度翻译用量锁（0=不限；>0 达到后自动禁用百度引擎） */
+  baiduCharsLock?: number;
+  /** 有道智云已用字符数 */
+  youdaoCharsUsed?: number;
+  /** 有道智云用量锁（0=不限） */
+  youdaoCharsLock?: number;
+  /** AI 翻译累计消耗 Token（跨批次累加；监督中心配额显示用） */
+  aiTokenUsed?: number;
+  /** AI 翻译 Token 配额上限（0=不限） */
+  aiTokenLimit?: number;
 }
 
 /** 引擎依赖（注入自有 AI 翻译函数） */
@@ -71,6 +83,27 @@ export function isTencentLocked(cfg: EngineConfig): boolean {
   return lock > 0 && used >= lock;
 }
 
+/** 百度翻译是否已达到用量锁 */
+export function isBaiduLocked(cfg: EngineConfig): boolean {
+  const used = cfg.baiduCharsUsed ?? 0;
+  const lock = cfg.baiduCharsLock ?? 0;
+  return lock > 0 && used >= lock;
+}
+
+/** 有道智云是否已达到用量锁 */
+export function isYoudaoLocked(cfg: EngineConfig): boolean {
+  const used = cfg.youdaoCharsUsed ?? 0;
+  const lock = cfg.youdaoCharsLock ?? 0;
+  return lock > 0 && used >= lock;
+}
+
+/** AI 翻译是否已达到 Token 上限 */
+export function isAiTokenLocked(cfg: EngineConfig): boolean {
+  const used = cfg.aiTokenUsed ?? 0;
+  const limit = cfg.aiTokenLimit ?? 0;
+  return limit > 0 && used >= limit;
+}
+
 /** 判断单引擎当前是否可用（已启用 + 已配置 + 未达用量锁） */
 export function isEngineAvailable(name: string, cfg: EngineConfig): boolean {
   switch (name) {
@@ -79,13 +112,13 @@ export function isEngineAvailable(name: string, cfg: EngineConfig): boolean {
     case "youdao":
       return !!(cfg.youdaoEnabled && cfg.youdaoAppKey && cfg.youdaoAppSecret);
     case "baidu":
-      return !!(cfg.baiduEnabled && cfg.baiduAppId && cfg.baiduKey);
+      return !!(cfg.baiduEnabled && cfg.baiduAppId && cfg.baiduKey && !isBaiduLocked(cfg));
     case "microsoft":
       return !!(cfg.msEnabled && cfg.msKey && cfg.msRegion);
     case "libretranslate":
       return !!(cfg.libreEnabled && cfg.libreUrl);
     case "ai":
-      return !!(cfg.aiEnabled && cfg.aiApiKey);
+      return !!(cfg.aiEnabled && cfg.aiApiKey && !isAiTokenLocked(cfg));
     default:
       return false;
   }

@@ -1359,10 +1359,17 @@ export default class RewordPlugin extends Plugin {
         : undefined;
       try {
         trLog("translateBatch: buildProviders...");
+        // 用量预警（黄色）：本轮翻译前，对达到告警阈值的引擎各提示一次
+        this.warnTranslationUsage();
         const providers = buildProviders(this.aiSettings, {
           translateOne: (t, f, t2, bid) => this.aiTranslateText(t, f, t2, bid),
           translateBatch: (ts, f, t2, bid) => this.aiTranslateBatch(ts, f, t2, bid, reqCtx, meta, { ...opts, mode }),
         }, opts?.engine);
+        // 用量终止（红色）：所有引擎均因达上限被移除 → 直接停止翻译并提示
+        if (providers.length === 0) {
+          this.notifyTranslationQuotaExhausted();
+          return out;
+        }
         trLog(`translateBatch: ${providers.length} 个引擎, 调用 translateWithFallback...`);
         const res = await translateWithFallback(providers, { texts: reqTexts, from, to, bookId });
         const tr = res.texts || [];
@@ -1392,6 +1399,51 @@ export default class RewordPlugin extends Plugin {
     }
     trLog(`translateBatch: 最终返回 ${out.length} 条, 非空 ${out.filter(t=>t?.trim()).length} 条`);
     return out;
+  }
+
+  // 用量预警/终止（2026-09-01：让监督中心「告警阈值 / 上限」真正生效）
+  private lastUsageWarnAt: Record<string, number> = {};
+  private quotaExhaustedNotified = false;
+
+  /** 用量预警（黄色）：本轮翻译前，对达到告警阈值的引擎各提示一次（60s 节流，避免刷屏） */
+  private warnTranslationUsage(): void {
+    const s = this.aiSettings;
+    const now = Date.now();
+    const THROTTLE = 60_000;
+    const warn = (key: string, msg: string) => {
+      if (now - (this.lastUsageWarnAt[key] || 0) < THROTTLE) return;
+      this.lastUsageWarnAt[key] = now;
+      showMessage(msg, 4000, "warning" as any);
+    };
+    // 监督中心「Token 告警阈值」滑块（默认 0.8）同时作为免费引擎的预警阈值，保持视觉一致
+    const ratio = s.aiTokenAlertRatio ?? 0.8;
+    const tLock = s.tencentCharsLock ?? 0;
+    if (tLock > 0 && s.tencentCharsUsed) {
+      const r = s.tencentCharsUsed / tLock;
+      if (r >= ratio) warn("tencent", `腾讯云翻译额度已用至 ${Math.round(r * 100)}%，接近上限将自动停止。`);
+    }
+    const bLock = s.baiduCharsLock ?? 0;
+    if (bLock > 0 && s.baiduCharsUsed) {
+      const r = s.baiduCharsUsed / bLock;
+      if (r >= ratio) warn("baidu", `百度翻译额度已用至 ${Math.round(r * 100)}%，接近上限将自动停止。`);
+    }
+    const yLock = s.youdaoCharsLock ?? 0;
+    if (yLock > 0 && s.youdaoCharsUsed) {
+      const r = s.youdaoCharsUsed / yLock;
+      if (r >= ratio) warn("youdao", `有道智云额度已用至 ${Math.round(r * 100)}%，接近上限将自动停止。`);
+    }
+    const aLimit = s.aiTokenLimit ?? 0;
+    if (aLimit > 0 && s.aiTokenUsed) {
+      const r = s.aiTokenUsed / aLimit;
+      if (r >= ratio) warn("ai", `AI 翻译 Token 已用至 ${Math.round(r * 100)}%，接近上限将自动停止。`);
+    }
+  }
+
+  /** 用量终止（红色）：所有引擎因达上限被移除后，提示一次并停止翻译 */
+  private notifyTranslationQuotaExhausted(): void {
+    if (this.quotaExhaustedNotified) return;
+    this.quotaExhaustedNotified = true;
+    showMessage("翻译额度已耗尽，已停止翻译。请到「双语翻译设置 → 监督中心」重置用量或提高上限。", 5000, "error" as any);
   }
 
   /** 累计腾讯翻译用量并持久化 */
@@ -1432,12 +1484,16 @@ export default class RewordPlugin extends Plugin {
     if (engine === "tencent") s.tencentCharsUsed = 0;
     else if (engine === "baidu") s.baiduCharsUsed = 0;
     else if (engine === "youdao") s.youdaoCharsUsed = 0;
+    this.quotaExhaustedNotified = false;
+    this.lastUsageWarnAt = {};
     await this.saveAiSettings();
   }
 
   /** 重置 AI Token 累计 */
   public async resetAiTokenUsage(): Promise<void> {
     this.aiSettings.aiTokenUsed = 0;
+    this.quotaExhaustedNotified = false;
+    this.lastUsageWarnAt = {};
     await this.saveAiSettings();
   }
 
@@ -1508,10 +1564,17 @@ export default class RewordPlugin extends Plugin {
       const reqTexts = misses.map((i) => texts[i]);
       const reqCtx = ctxBefore ? misses.map((i) => (ctxBefore[i] ? ctxBefore[i] : null)) : undefined;
       try {
+        // 用量预警（黄色）：本轮翻译前，对达到告警阈值的引擎各提示一次
+        this.warnTranslationUsage();
         const providers2 = buildProviders(this.aiSettings, {
           translateOne: (t, f, t2, bid) => this.aiTranslateText(t, f, t2, bid),
           translateBatch: (ts, f, t2, bid) => this.aiTranslateBatch(ts, f, t2, bid, reqCtx, meta, { ...opts, mode }),
         }, opts?.engine);
+        // 用量终止（红色）：所有引擎均因达上限被移除 → 直接停止翻译并提示
+        if (providers2.length === 0) {
+          this.notifyTranslationQuotaExhausted();
+          return { texts: out, providers, fromCache };
+        }
         const res = await translateWithFallback(providers2, { texts: reqTexts, from, to, bookId });
         const tr = res.texts || [];
         const pairs: Array<[string, string]> = [];
