@@ -7489,8 +7489,8 @@
       <details class="reader-setting-section">
         <summary class="reader-setting-section-title">📤 笔记导出绑定</summary>
         <p class="reader-setting-hint">
-          将「阅读摘录」「书图谱」发送到你指定的思源文档。可直接把左侧思源文档树中的文档拖入下方窗口完成绑定；
-          也可点「选择文档」或粘贴文档 ID。未绑定时仍使用默认位置。
+          将「阅读摘录」「书图谱」发送到你指定的思源文档。可直接把左侧思源文档树中的文档拖入下方窗口完成绑定，
+          或粘贴文档 ID 后点「绑定」。未绑定时不导出。
         </p>
         <BindDropzone
           label="阅读摘录"

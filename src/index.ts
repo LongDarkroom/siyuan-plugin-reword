@@ -2061,29 +2061,18 @@ export default class RewordPlugin extends Plugin {
     this.speak(text);
   }
 
-  /** 阅读器划词发送到设置笔记本（默认 REword/阅读摘录，可在 localStorage 配置） */
+  /** 阅读器划词发送：必须先在「阅读器设置 → 笔记导出绑定」中绑定阅读摘录目标文档 */
   public async sendReaderSelection(opts: { markdown: string; title: string }): Promise<string> {
     try {
-      // 2026-09-01：若已绑定阅读摘录目标文档，直接 append 到该文档
-      try {
-        const st = getGlobalSettingsStore()?.get?.();
-        const targetDocId = st?.excerptDocId?.trim();
-        if (targetDocId) {
-          const { appendBlock } = await import("./siyuan/api.ts");
-          await appendBlock("markdown", opts.markdown, targetDocId);
-          return targetDocId;
-        }
-      } catch (be) {
-        getLogger().warn("[REword] 发送摘录到绑定文档失败，回退默认:", { error: be });
+      const st = getGlobalSettingsStore()?.get?.();
+      const targetDocId = st?.excerptDocId?.trim();
+      if (!targetDocId) {
+        getLogger().warn("[REword] 阅读摘录未绑定目标文档，跳过发送。请在阅读器设置中绑定。");
+        return "";
       }
-      let notebookId = (typeof localStorage !== "undefined" && localStorage.getItem("hiword-reader-send-notebook")) || "";
-      if (!notebookId) {
-        const nbs = await this.listNotebooks();
-        notebookId = nbs[0]?.id || "";
-      }
-      if (!notebookId) return "";
-      const path = (typeof localStorage !== "undefined" && localStorage.getItem("hiword-reader-send-path")) || "/REword/阅读摘录";
-      return await this.saveToNote({ markdown: opts.markdown, notebookId, path, title: opts.title, openAfterSave: false });
+      const { appendBlock } = await import("./siyuan/api.ts");
+      await appendBlock("markdown", opts.markdown, targetDocId);
+      return targetDocId;
     } catch (e) {
       getLogger().error("[REword] 发送摘录失败:", { error: e });
       return "";

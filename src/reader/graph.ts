@@ -9,7 +9,6 @@
 
 import type { BookMeta } from "./bookshelf-store";
 import type { AnnotationItem } from "../annotation/annotation-store";
-import { lsNotebooks, createDocWithMd } from "../siyuan/filetree";
 import { getGlobalSettingsStore } from "./reader-settings.ts";
 import { getDoc, updateBlock, appendBlock } from "../siyuan/api.ts";
 
@@ -159,39 +158,23 @@ function buildBookMarkdown(book: BookMeta, anns: AnnotationItem[]): string {
  */
 export async function exportBookCanvasDoc(book: BookMeta, anns: AnnotationItem[]): Promise<string> {
   const md = buildBookMarkdown(book, anns);
-  // 2026-09-01：若已绑定书图谱目标文档，按书名去重 append 到该文档
-  try {
-    const st = getGlobalSettingsStore()?.get?.();
-    const targetDocId = st?.bookGraphDocId?.trim();
-    if (targetDocId) {
-      const heading = `《${book.title}》`;
-      const html = await getDoc(targetDocId);
-      const foundId = findBookSectionId(html, heading);
-      if (foundId) {
-        await updateBlock("markdown", md, foundId);
-      } else {
-        await appendBlock("markdown", md, targetDocId);
-      }
-      return targetDocId;
-    }
-  } catch (e) {
-    console.warn("[REword] 导出书图谱到绑定文档失败，回退默认:", e);
+  // 2026-09-01：必须先在「阅读器设置 → 笔记导出绑定」中绑定书图谱目标文档，
+  // 不再隐式创建 /REword/书图谱/《书名》等默认路径，避免父目录不存在时报错。
+  const st = getGlobalSettingsStore()?.get?.();
+  const targetDocId = st?.bookGraphDocId?.trim();
+  if (!targetDocId) {
+    console.warn("[REword] 书图谱未绑定目标文档，跳过导出。请在阅读器设置中绑定。");
+    return "";
   }
-  // 原逻辑：按书名在 /REword/书图谱 下新建子文档
-  let notebookId =
-    (typeof localStorage !== "undefined" && localStorage.getItem("hiword-reader-send-notebook")) || "";
-  if (!notebookId) {
-    const nbs = await lsNotebooks();
-    notebookId = nbs.find((x) => !x.closed)?.id || nbs[0]?.id || "";
+  const heading = `《${book.title}》`;
+  const html = await getDoc(targetDocId);
+  const foundId = findBookSectionId(html, heading);
+  if (foundId) {
+    await updateBlock("markdown", md, foundId);
+  } else {
+    await appendBlock("markdown", md, targetDocId);
   }
-  if (!notebookId) throw new Error("未找到可用笔记本");
-  const safeTitle = book.title.replace(/[\\/:*?"<>|]/g, "_");
-  const path =
-    (typeof localStorage !== "undefined" && localStorage.getItem("hiword-reader-send-path")) ||
-    "/REword/阅读摘录";
-  const base = path.replace(/\/[^/]+$/, "") || "/REword";
-  const docPath = `${base}/书图谱/${safeTitle}`;
-  return await createDocWithMd(notebookId, docPath, md);
+  return targetDocId;
 }
 
 /** 在书图谱文档 HTML 中定位某本书章节块 ID（一级标题含书名），用于去重更新 */
