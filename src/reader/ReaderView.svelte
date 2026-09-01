@@ -96,6 +96,9 @@
     buildFontFamilyLists,
     captureSiyuanThemeVars,
   } from "../reader/reader-style";
+  // 2026-09-01 接口化第一阶段（L0/L3）：思源令牌注入 + 全局主题同步总线
+  import { injectTokens } from "../ui/siyuan-tokens.ts";
+  import { subscribeThemeChange } from "../ui/theme-bridge.ts";
   // 2026-08-28 分类字体：EPUB 内联 serif/sans-serif/monospace 关键词 → CSS 变量（Readest 同款）
   import {
     rewriteFontKeywordsInAllContents,
@@ -444,7 +447,7 @@
   let footnoteReqToken = 0;            // 异步竞态守卫：快速划过多个脚注时丢弃过期请求
   // 思源主题跟随（auto 模式）
   let siyuanThemeMode: "light" | "dark" = "light";
-  let themeObserver: MutationObserver | null = null;
+  let themeChangeUnsub: (() => void) | null = null;
   let visibilityObserver: IntersectionObserver | null = null; // 页签可见性观察器：隐藏→显示时触发高亮重绘
   let annotationsDirty = true; // 标记「需要补绘批注高亮」；由 relocate（内容就绪）或兜底定时器清掉
   let tocItems: { title: string; href: string; level: number }[] = [];
@@ -709,7 +712,7 @@
    * - auto（跟随思源）：实时读取思源笔记的 data-theme-mode + 实际 CSS 变量
    *   · 背景跟随思源实际背景色（--b3-theme-background），缺省回退纯黑/纯白
    *   · 文字色跟随思源 --b3-theme-on-background / --b3-theme-on-surface
-   *   背景/文字与思源笔记视觉无缝同步；切换由 MutationObserver（startThemeObserver）触发重刷。
+   *   背景/文字与思源笔记视觉无缝同步；切换由全局主题同步总线（theme-bridge）触发重刷。
    */
   function themeOf(): { bg: string; fg: string; fg2: string } {
     if (settings.theme === "custom") {
@@ -748,31 +751,22 @@
     }
   }
 
-  /** 启动 MutationObserver 监听思源主题切换（data-theme-mode 变化时自动重刷阅读器样式） */
-  function startThemeObserver() {
-    stopThemeObserver();
-    siyuanThemeMode = detectSiyuanTheme();
-    themeObserver = new MutationObserver((mutations) => {
-      for (const m of mutations) {
-        if (m.type === "attributes" && m.attributeName === "data-theme-mode") {
-          const newMode = detectSiyuanTheme();
-          if (newMode !== siyuanThemeMode) {
-            siyuanThemeMode = newMode;
-            // 主题模式变化：重刷样式使桥接块（--b3-*）随思源重新抓取，链接/代码/引用/译文色同步
-            applyStyles();
-          }
-          break;
-        }
+  /**
+   * 把思源令牌（--b3-* / --hw-*）注入当前阅读器所有内容 iframe（L0 令牌包）。
+   * 阅读器运行在 foliate 的 srcdoc iframe 内，CSS 自定义属性不跨 iframe 继承，
+   * 必须显式把主窗口 :root 上的令牌值写入内容文档，译文块/批注浮层等才能用 var(--hw-*)。
+   * 由 onMount 的 subscribeThemeChange 回调在「主题切换 / 开书」时调用。
+   */
+  function injectReaderTokens() {
+    if (!view?.renderer?.getContents) return;
+    try {
+      const contents = (view.renderer.getContents() || []) as Array<{ doc?: Document }>;
+      for (const c of contents) {
+        if (c?.doc) injectTokens(c.doc);
       }
-    });
-    themeObserver.observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme-mode"] });
-    // 2026-08-30 思源化：主题切换时不论当前阅读器主题，都重刷样式。
-    // 因为桥接块（--b3-*）需随思源主题模式重抓，链接/代码/引用色才能同步切换。
-  }
-
-  function stopThemeObserver() {
-    themeObserver?.disconnect();
-    themeObserver = null;
+    } catch {
+      /* 内容文档尚未就绪时静默忽略 */
+    }
   }
 
   /**
@@ -896,6 +890,9 @@
     if (settings.fontMode === "classified") {
       requestAnimationFrame(() => applyFontKeywordRewrite());
     }
+    // 2026-09-01 L0：每次重刷样式都把思源令牌（--b3-*/--hw-*）注入内容 iframe，
+    // 保证译文块/批注浮层等用 var(--hw-*) 的 UI 始终跟随思源外观（开书 / 主题切换 / 设置变更全覆盖）。
+    injectReaderTokens();
   }
 
   /** 给阅读容器设置与主题一致的兜底背景，避免 iframe 渲染前/透明时透出黑底（黑底闪屏根因之一） */
@@ -6862,7 +6859,13 @@
       document.addEventListener("pointerdown", onFootnoteOutsidePointerDown as EventListener, true);
     }
     // 跟随思源主题（2026-08-25 新增）
-    startThemeObserver();
+    // 2026-09-01：接入全局主题同步总线（L3 theme-bridge），替代本地 MutationObserver。
+    // 思源切换主题时：applyStyles 重刷 --b3-* 桥接块（bg/fg/链接/代码/译文色），
+    // applyStyles 末尾的 injectReaderTokens 同步刷新 --hw-* 令牌，使译文/批注 UI 跟随外观。
+    themeChangeUnsub = subscribeThemeChange(() => {
+      siyuanThemeMode = detectSiyuanTheme();
+      applyStyles();
+    });
     // 2026-08-28：初始化连续朗读控制器
     ensureTtsController();
   });
@@ -6951,7 +6954,8 @@
       }
     }
     // 停止思源主题跟随观察器（2026-08-25 新增）
-    stopThemeObserver();
+    themeChangeUnsub?.();
+    themeChangeUnsub = null;
     // 2026-08-24 修复：卸载 foliate view 事件 + 内容文档监听 + 清除搜索高亮，
     // 避免反复进出阅读 Tab 造成的事件泄漏/悬空回调（P0 #1/#2）与残留搜索高亮干扰 hitTest（P1 #7）。
     teardownAnnotationLayer();
