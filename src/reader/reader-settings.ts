@@ -1,5 +1,5 @@
 import { logSwallow } from "../core/safe.ts";
-import { lsNotebooks, createDocWithMd, listDocsByPath } from "../siyuan/filetree.ts";
+import { lsNotebooks, listDocsByPath } from "../siyuan/filetree.ts";
 import { getIDsByHPath } from "../siyuan/api.ts";
 
 /** 阅读设置全局单例（供非 Svelte 模块如 graph.ts / index.ts 读取绑定文档 ID） */
@@ -630,22 +630,16 @@ export class ReaderSettingsStore {
                 targets.splice(i, 1);
               }
             } else {
-              // 书图谱旧结构是文件夹：取其下首个文档，否则在文件夹内新建「书图谱总览」文档
+              // 书图谱旧结构是文件夹：取其下首个文档绑定；不存在则不自动创建
+              // （早期版本会在 /REword/书图谱 不存在时 createDocWithMd 报「no such file or directory」，
+              // 现改为保持未绑定，由用户在「阅读器设置 → 笔记导出绑定」中手动拖入绑定）
               const kids = await listDocsByPath(nb.id, t.hpath);
-              const firstDoc = (kids || []).find((k: any) => k.type !== "node");
+              const firstDoc = (kids || [])[0];
               if (firstDoc) {
                 this.settings.bookGraphDocId = firstDoc.id;
                 this.settings.bookGraphDocTitle = firstDoc.name || "书图谱";
                 this.settings.bookGraphNotebookId = nb.id;
                 targets.splice(i, 1);
-              } else {
-                const newId = await createDocWithMd(nb.id, `${t.hpath}/书图谱总览`, "");
-                if (newId) {
-                  this.settings.bookGraphDocId = newId;
-                  this.settings.bookGraphDocTitle = "书图谱总览";
-                  this.settings.bookGraphNotebookId = nb.id;
-                  targets.splice(i, 1);
-                }
               }
             }
           } catch { /* 单笔记本失败跳过，继续下一个 */ }

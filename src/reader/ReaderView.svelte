@@ -17,6 +17,8 @@
   // [REword patch 2026-08-29] Phase 3 Apple Pencil 墨迹批注
   import InkLayer from "./ink/InkLayer.svelte";
   import InkToolbar from "./ink/InkToolbar.svelte";
+  // [REword 2026-09-01] 笔记导出绑定拖拽框（阅读摘录 / 书图谱目标文档绑定）
+  import BindDropzone from "./BindDropzone.svelte";
   import {
     inkState,
     // inkStrokes：擦除时直接 update 笔触列表（onInkPointerDown L1686）
@@ -502,9 +504,9 @@
       showSearch = false;
       showSettings = false;
     }
-    // 打开抽屉时确保数据已加载
-    if (activeDrawer === "bookmarks") reloadBookmarks();
-    if (activeDrawer === "annots") reloadAnnots();
+    // 打开抽屉时确保数据已加载（2026-09-01 修复：reloadBookmarks/reloadAnnots 是死引用,改用真实存在的函数）
+    if (activeDrawer === "bookmarks") refreshBookmarks();
+    if (activeDrawer === "annots") refreshAnnotsList();
     // 等 DOM 渲染出抽屉后再算尾巴位置，保证指向对应图标中心
     if (activeDrawer) {
       await tick();
@@ -1671,6 +1673,10 @@
       attachAllContentDocs();
       attachTimer1 = setTimeout(attachAllContentDocs, 400);
       attachTimer2 = setTimeout(attachAllContentDocs, 1200);
+      // 2026-09-01 修复：开书时主动拉一次「本书摘录」数据,这样首点抽屉就有内容
+      // 之前完全依赖「删除时刷新」,导致新建/编辑的标注永远不进列表
+      refreshAnnotsList();
+      refreshBookmarks();
     } catch (e: any) {
       console.error("[REword] openBook 失败:", e);
       // 错误分类 + 友好中文提示（2026-08-25 增强）
@@ -2146,11 +2152,18 @@
     bookmarks = store?.getBookmarks?.(bookId) ?? [];
   }
 
-  /** 从 annStore 重读本书摘录（按创建时间倒序；已软删的过滤掉） */
+  /**
+   * 从 annStore 拉一次本书摘录(按 createdAt 倒序,已软删过滤)。
+   * 2026-09-01 重构:不再每处写路径手动调本函数,改用 annStore.subscribe() 响应式;
+   *   保留函数本体作为「立即同步」入口(开书 / 打开抽屉时用)。
+   *
+   * 过滤放宽:不再要求 it.cfi 必须有值——txt/md/fb2/pdf 等 foliate-js 不生成 cfi
+   *   的格式,只要有 selectedText/sentence 就能在面板里展示。
+   */
   function refreshAnnotsList() {
     if (!annStore) { try { annStore = getAnnotationStore(); } catch { annStore = null; } }
     if (!annStore || !bookId) { annotsList = []; return; }
-    const list = (annStore.getByBook(bookId) || []).filter((it: any) => !it.deletedAt && it.cfi);
+    const list = (annStore.getByBook(bookId) || []).filter((it: any) => !it.deletedAt);
     list.sort((a: any, b: any) => String(b.createdAt ?? "").localeCompare(String(a.createdAt ?? "")));
     annotsList = list;
   }
@@ -2199,8 +2212,8 @@
   }
 
   async function removeAnnot(it: any) {
+    // 2026-09-01 修复：removeAnnotationById 内部已调 refreshAnnotsList,这里去重
     await removeAnnotationById(it?.id ?? null, it?.cfi ?? "");
-    refreshAnnotsList();
     toast("已删除");
   }
 
@@ -5438,6 +5451,9 @@
     } catch (err) {
       console.warn("[REword] 绘制失败（批注数据已保存，高亮稍后由 create-overlay 补绘）:", err);
     }
+    // 2026-09-01 修复：创建标注后必须刷新「本书摘录」面板（之前只 dispatchAnnotationChanged
+    // 通知侧边栏，但 ReaderView 内部的 annotsList 没更新，导致摘录抽屉永远显示空列表）
+    refreshAnnotsList();
     dispatchAnnotationChanged();
   }
 
@@ -5585,6 +5601,8 @@
     }
     if (!delId) {
       if (delCfi) { await eraseAnnotationVisual(delCfi); annByValue.delete(delCfi); }
+      // 2026-09-01：即使用户没拿到 id（视觉擦除后跳过数据软删），也要刷新摘录列表
+      refreshAnnotsList();
       return;
     }
     const stored = annStore?.get(delId);
@@ -5599,7 +5617,8 @@
         if (win) { const sel = win.getSelection(); if (sel) sel.removeAllRanges(); }
       }
     } catch (__swallowErr) { logSwallow(__swallowErr, "ReaderView.svelte · nc", "debug"); }
-    // 通知侧边栏：标注已变更，需重新渲染
+    // 2026-09-01：删除后刷新「本书摘录」面板 + 通知侧边栏
+    refreshAnnotsList();
     dispatchAnnotationChanged();
   }
 
@@ -5637,6 +5656,8 @@
       noteEditor = { ...noteEditor, visible: false, mode: "create", id: null };
       closeSelToolbar();
       toast("已更新批注");
+      // 2026-09-01：编辑批注后刷新「本书摘录」面板(笔记/样式/颜色可能变化)
+      refreshAnnotsList();
       dispatchAnnotationChanged(); // 通知侧边栏刷新
       onProtectTab?.(); // 已修改/批注：固定阅读 Tab，避免被数量超限回收顶掉
     } else {
@@ -5668,6 +5689,8 @@
       annByValue.set(cfi, { id: noteEditor.id, cfi, color });
     }
     noteEditor = { ...noteEditor, color };
+    // 2026-09-01：改色后刷新「本书摘录」面板(色点要更新)
+    refreshAnnotsList();
     dispatchAnnotationChanged(); // 通知侧边栏刷新
   }
 
@@ -5684,6 +5707,8 @@
       annByValue.set(cfi, { id: noteEditor.id, cfi, color: noteEditor.color });
     }
     noteEditor = { ...noteEditor, style };
+    // 2026-09-01：改样式后刷新「本书摘录」面板
+    refreshAnnotsList();
     dispatchAnnotationChanged(); // 通知侧边栏刷新
   }
 
@@ -5739,6 +5764,8 @@
       if (effId) annByValue.set(cfi, { id: effId, cfi, color });
     }
     selToolbar = { ...selToolbar, annStyle: style, annId: effId || selToolbar.annId, annCfi: cfi };
+    // 2026-09-01：edit 态改样式后刷新「本书摘录」面板(色点 / 文本保持不变但列表要同步)
+    refreshAnnotsList();
     dispatchAnnotationChanged(); // 通知侧边栏刷新
   }
 
@@ -5788,6 +5815,8 @@
       if (effId) annByValue.set(cfi, { id: effId, cfi, color });
     }
     selToolbar = { ...selToolbar, annColor: color, annId: effId || selToolbar.annId, annCfi: cfi };
+    // 2026-09-01：edit 态改色后刷新「本书摘录」面板
+    refreshAnnotsList();
     dispatchAnnotationChanged(); // 通知侧边栏刷新
   }
 
@@ -6720,6 +6749,26 @@
   // 2026-08-24：dock 批注面板等"旁路删除"广播 → 本 ReaderView 全量 reconcile，
   // 保证当前页被删高亮立即消失（不依赖翻页重绘）
   let unsubAnnChanged: (() => void) | undefined;
+  // 2026-09-01：annStore 数据订阅(任何 upsert/remove/load 都自动刷新「本书摘录」面板)
+  let unsubAnnStore: (() => void) | undefined;
+  /** 标记是否已订阅 annStore(避免重复订阅) */
+  let annStoreSubscribed = false;
+  /** annStore 单例可能晚于 onMount 才注入(插件初始化时序),需要延迟订阅 */
+  function ensureAnnStoreSubscription() {
+    if (annStoreSubscribed) return;
+    let store: any = null;
+    try { store = getAnnotationStore(); } catch { store = null; }
+    if (!store) return;
+    annStore = store; // 顺手捕获(让 refreshAnnotsList 后续调用不必再 try/catch)
+    annStoreSubscribed = true;
+    unsubAnnStore = store.subscribe(() => {
+      // 任何写操作 → 立即同步面板
+      refreshAnnotsList();
+    });
+    // 订阅成功后立即拉一次(此时 store 已就绪,annStore 变量也同步了)
+    refreshAnnotsList();
+    refreshBookmarks();
+  }
   onMount(() => {
     unsubSettings = settingsStore.subscribe((s) => {
       settings = s;
@@ -6734,6 +6783,16 @@
     unsubAnnChanged = subscribeAnnotationsChanged((bid) => {
       if (bid === bookId && view) syncVisualWithStore(view, annStore, bookId);
     });
+    // 2026-09-01：先尝试订阅(可能 annStore 已就绪);否则起一个轮询兜底
+    ensureAnnStoreSubscription();
+    if (!annStoreSubscribed) {
+      const t = setInterval(() => {
+        if (annStoreSubscribed) { clearInterval(t); return; }
+        ensureAnnStoreSubscription();
+      }, 200);
+      // 5 秒后放弃(避免无限轮询)
+      setTimeout(() => clearInterval(t), 5000);
+    }
     // load() 解析后推送最新设置，订阅回调自动 applyStyles（view 就绪时）
     startTimer();
     // 先等待设置/字体加载完成再开书：用用户真实主题打开，避免打开瞬间用默认主题、iframe 透明导致的黑底/错主题闪屏
@@ -6797,8 +6856,8 @@
       // onGlobalKey 内部跳过 input/textarea/contenteditable 保留原生行为。
       document.addEventListener("keydown", onGlobalKey, true);
       // 2026-08-29 双击缩放：PDF 上双击切换 fit-width ↔ 上次缩放
-      // 也注册到 main document capture 阶段（iframe 内的 dblclick 也会冒泡）
-      document.addEventListener("dblclick", onDblClickToggleZoom, true);
+    // 也注册到 main document capture 阶段（iframe 内的 dblclick 也会冒泡）
+    document.addEventListener("dblclick", onDblClickToggleZoom, true);
       // 2026-08-29：点击脚注气泡外部（reader UI 空白区）关闭
       document.addEventListener("pointerdown", onFootnoteOutsidePointerDown as EventListener, true);
     }
@@ -6808,9 +6867,21 @@
     ensureTtsController();
   });
 
+  /**
+   * 2026-09-01：bookId 变化(切到另一本书)时,重新拉取摘录 + 书签 + 标注视觉。
+   * 用 reactive `$:` 触发,Svelte 静态分析可追踪 bookId 变化。
+   */
+  $: if (bookId && annStore) {
+    refreshAnnotsList();
+    refreshBookmarks();
+    if (view) syncVisualWithStore(view, annStore, bookId);
+  }
+
   onDestroy(() => {
     if (unsubSettings) unsubSettings();
     if (unsubAnnChanged) unsubAnnChanged();
+    // 2026-09-01：注销 annStore 订阅(避免组件销毁后回调仍被触发)
+    if (unsubAnnStore) unsubAnnStore();
     if (saveTimer) clearTimeout(saveTimer);
     if (selReadTimer) clearTimeout(selReadTimer);
     if (timeTimer) clearInterval(timeTimer);
@@ -7412,6 +7483,47 @@
             <option value="90">90 分钟</option>
           </select>
         </div>
+      </details>
+
+      <!-- 2026-09-01 笔记导出绑定：从双语设置迁移至阅读器设置浮层，支持拖拽绑定 -->
+      <details class="reader-setting-section">
+        <summary class="reader-setting-section-title">📤 笔记导出绑定</summary>
+        <p class="reader-setting-hint">
+          将「阅读摘录」「书图谱」发送到你指定的思源文档。可直接把左侧思源文档树中的文档拖入下方窗口完成绑定；
+          也可点「选择文档」或粘贴文档 ID。未绑定时仍使用默认位置。
+        </p>
+        <BindDropzone
+          label="阅读摘录"
+          docId={settings.excerptDocId}
+          docTitle={settings.excerptDocTitle}
+          notebookId={settings.excerptNotebookId}
+          on:bind={(e) => (settings = settingsStore.update({
+            excerptDocId: e.detail.docId,
+            excerptDocTitle: e.detail.title,
+            excerptNotebookId: e.detail.notebookId,
+          }))}
+          on:clear={() => (settings = settingsStore.update({
+            excerptDocId: "",
+            excerptDocTitle: "",
+            excerptNotebookId: "",
+          }))}
+        />
+        <BindDropzone
+          label="书图谱"
+          docId={settings.bookGraphDocId}
+          docTitle={settings.bookGraphDocTitle}
+          notebookId={settings.bookGraphNotebookId}
+          on:bind={(e) => (settings = settingsStore.update({
+            bookGraphDocId: e.detail.docId,
+            bookGraphDocTitle: e.detail.title,
+            bookGraphNotebookId: e.detail.notebookId,
+          }))}
+          on:clear={() => (settings = settingsStore.update({
+            bookGraphDocId: "",
+            bookGraphDocTitle: "",
+            bookGraphNotebookId: "",
+          }))}
+        />
       </details>
 
       <!-- 3. 页面布局：4 边距 + 分栏间距 + 3 开关 + 进度样式 + 参考页数 + 时间 + 24h -->

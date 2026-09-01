@@ -7,7 +7,6 @@
    */
   import { onMount } from "svelte";
   import { DEFAULT_TRANSLATE_PROMPT, DEFAULT_TRANSLATE_PROMPT_NATURAL } from "../ai/ai-settings";
-  import { openDocPicker } from "./doc-picker";
 
   export let settingsStore: any; // ReaderSettingsStore（含 get/update/subscribe）
   export let getAiSettings: () => any;
@@ -297,22 +296,6 @@
       cacheMsg = "已关闭译文归档；当前没有需要清理的归档文档。";
     }
     await loadCache();
-  }
-
-  // ----- 2026-09-01 笔记文档绑定：选择 / 清除目标文档 -----
-  async function pickExcerpt() {
-    const r = await openDocPicker({ title: "选择阅读摘录目标文档" });
-    if (r) settingsStore.update({ excerptDocId: r.docId, excerptDocTitle: r.title, excerptNotebookId: r.notebookId });
-  }
-  async function clearExcerpt() {
-    settingsStore.update({ excerptDocId: "", excerptDocTitle: "", excerptNotebookId: "" });
-  }
-  async function pickGraph() {
-    const r = await openDocPicker({ title: "选择书图谱目标文档" });
-    if (r) settingsStore.update({ bookGraphDocId: r.docId, bookGraphDocTitle: r.title, bookGraphNotebookId: r.notebookId });
-  }
-  async function clearGraph() {
-    settingsStore.update({ bookGraphDocId: "", bookGraphDocTitle: "", bookGraphNotebookId: "" });
   }
 
   // ----- 术语表（新增子页） -----
@@ -660,28 +643,6 @@
             {:else}
               <span style="font-size:12px;color:var(--b3-theme-on-surface,#999);">归档已关闭，无需清理</span>
             {/if}
-          </div>
-
-          <!-- 2026-09-01 笔记文档绑定 -->
-          <div style="margin:14px 0;padding:12px 14px;border:1px solid var(--b3-theme-surface-lighter,#e5e5e5);border-radius:8px;background:var(--b3-theme-background,#fafafa);">
-            <div style="font-weight:600;font-size:13px;margin-bottom:6px;">笔记文档绑定</div>
-            <p class="bset-desc">将「阅读摘录」与「书图谱」发送到你指定的思源文档（替代默认 /REword 路径）。未绑定时仍使用默认位置。</p>
-            <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin:8px 0 4px;">
-              <span style="font-size:13px;">阅读摘录目标文档</span>
-              <span style="font-size:12px;color:var(--b3-theme-on-surface,#999);">{($settingsStore.excerptDocTitle || "未绑定（默认 /REword/阅读摘录）")}</span>
-            </div>
-            <div style="display:flex;gap:8px;margin-bottom:10px;">
-              <button class="bset-btn" on:click={pickExcerpt}>选择 / 更改</button>
-              {#if $settingsStore.excerptDocId}<button class="bset-btn" on:click={clearExcerpt}>清除绑定</button>{/if}
-            </div>
-            <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin:8px 0 4px;">
-              <span style="font-size:13px;">书图谱目标文档</span>
-              <span style="font-size:12px;color:var(--b3-theme-on-surface,#999);">{($settingsStore.bookGraphDocTitle || "未绑定（默认 /REword/书图谱）")}</span>
-            </div>
-            <div style="display:flex;gap:8px;">
-              <button class="bset-btn" on:click={pickGraph}>选择 / 更改</button>
-              {#if $settingsStore.bookGraphDocId}<button class="bset-btn" on:click={clearGraph}>清除绑定</button>{/if}
-            </div>
           </div>
 
           <div class="bset-cache-summary">

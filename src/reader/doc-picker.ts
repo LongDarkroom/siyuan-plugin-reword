@@ -1,5 +1,5 @@
 import { Dialog } from "siyuan";
-import { lsNotebooks, createDocWithMd, listDocsByPath } from "../siyuan/filetree.ts";
+import { lsNotebooks, listDocsByPath } from "../siyuan/filetree.ts";
 
 export interface PickedDoc {
   notebookId: string;
@@ -81,60 +81,37 @@ export function openDocPicker(opts: { title?: string } = {}): Promise<PickedDoc 
         const row = document.createElement("div");
         row.style.cssText = "display:flex;align-items:center;justify-content:space-between;padding:8px 10px;border-bottom:1px solid var(--b3-border-color,#eee);";
         const name = document.createElement("span");
-        name.textContent = (n.type === "node" ? "📁 " : "📄 ") + (n.name || n.title || "未命名");
+        name.textContent = "📄 " + (n.name || n.title || "未命名");
         row.appendChild(name);
         const right = document.createElement("span");
-        if (n.type === "node") {
-          const enter = document.createElement("button");
-          enter.className = "bset-btn";
-          enter.textContent = "进入";
-          enter.onclick = () => {
-            currentPath = (currentPath ? currentPath : "") + "/" + (n.name || n.title || "");
-            render(container);
-          };
-          right.appendChild(enter);
-        } else {
-          const pick = document.createElement("button");
-          pick.className = "bset-btn bset-btn-primary";
-          pick.textContent = "选择";
-          pick.onclick = () => {
-            resolve({
-              notebookId,
-              docId: n.id,
-              path: n.path || (currentPath ? currentPath : "") + "/" + (n.name || n.title),
-              title: n.name || n.title || "未命名",
-            });
-            dlg?.destroy();
-          };
-          right.appendChild(pick);
-        }
+        right.style.cssText = "display:flex;gap:6px;";
+        // 进入：导航进该文档的子文档（2026-09-01 修正：原 n.type 字段不存在导致无法展开，现每个文档均可进入）
+        const enter = document.createElement("button");
+        enter.className = "bset-btn";
+        enter.textContent = "进入";
+        enter.onclick = () => {
+          currentPath = (currentPath ? currentPath : "") + "/" + (n.name || n.title || "");
+          render(container);
+        };
+        right.appendChild(enter);
+        // 选择：绑定当前文档（文档本身也可作为绑定目标）
+        const pick = document.createElement("button");
+        pick.className = "bset-btn bset-btn-primary";
+        pick.textContent = "选择";
+        pick.onclick = () => {
+          resolve({
+            notebookId,
+            docId: n.id,
+            path: n.path || (currentPath ? currentPath : "") + "/" + (n.name || n.title),
+            title: n.name || n.title || "未命名",
+          });
+          dlg?.destroy();
+        };
+        right.appendChild(pick);
         row.appendChild(right);
         list.appendChild(row);
       });
       container.appendChild(list);
-
-      // 新建文档
-      const newBtn = document.createElement("button");
-      newBtn.className = "bset-btn bset-btn-primary";
-      newBtn.style.cssText = "margin-top:10px;";
-      newBtn.textContent = "＋ 在当前位置新建文档";
-      newBtn.onclick = async () => {
-        const name = window.prompt("新文档名称：", "新文档");
-        if (!name) return;
-        const safe = name.trim().replace(/[\\/:*?"<>|]/g, "_");
-        if (!safe) return;
-        const p = (currentPath ? currentPath : "") + "/" + safe;
-        try {
-          const id = await createDocWithMd(notebookId, p, "");
-          if (id) {
-            resolve({ notebookId, docId: id, path: p, title: safe });
-            dlg?.destroy();
-          }
-        } catch (e) {
-          console.warn("[REword] 新建文档失败:", e);
-        }
-      };
-      container.appendChild(newBtn);
 
       // 取消
       const cancel = document.createElement("button");

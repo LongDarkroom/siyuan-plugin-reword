@@ -320,9 +320,29 @@ export class AnnotationStore {
   private items = new Map<string, AnnotationItem>();
   private byKey = new Map<string, string>(); // annotationKey -> id
   private onChange?: () => void | Promise<void>;
+  /** 2026-09-01：轻量订阅机制,供 ReaderView 等 Svelte 组件响应式刷新(避免每个写点都要手动 refreshAnnotsList) */
+  private listeners = new Set<() => void>();
 
   constructor(onChange?: () => void | Promise<void>) {
     this.onChange = onChange;
+  }
+
+  /**
+   * 订阅数据变更(任何 upsert/remove/load 后都会触发)。
+   * 返回退订函数(WeakSet 行为类似)。
+   * 用法:`const off = annStore.subscribe(() => refreshAnnotsList()); ...; off();`
+   * 注意:回调里应做幂等操作(避免递归触发),不要在本回调里再调 upsert/remove。
+   */
+  subscribe(listener: () => void): () => void {
+    this.listeners.add(listener);
+    return () => { this.listeners.delete(listener); };
+  }
+
+  /** 内部通知所有订阅者(upsert/remove/load 后调) */
+  private notify(): void {
+    for (const l of this.listeners) {
+      try { l(); } catch (e) { getLogger().warn("[REword] annotation listener 异常:", { error: e }); }
+    }
   }
 
   /** 从持久化数据载入（容错：非法 / 旧结构不抛错，仅收集有效项） */
@@ -368,6 +388,9 @@ export class AnnotationStore {
       getLogger().info(`[REword-Store] load 时自动迁移 ${migrated} 条阅读批注的 bookId`);
       // 触发一次落盘以持久化修复结果（异步，不阻塞 load）
       this.emit().catch(() => {});
+    } else {
+      // 2026-09-01：load 后必通知订阅者(即使没迁移也要触发,确保 ReaderView 等响应式刷新)
+      this.notify();
     }
   }
 
@@ -734,5 +757,8 @@ export class AnnotationStore {
         getLogger().warn("[REword] annotation onChange 失败:", { error: e });
       }
     }
+    // 2026-09-01：触发数据变更订阅(ReaderView 摘录面板等响应式刷新用)。
+    // 写在 emit 末尾,确保 onChange 落盘后才通知;即使 onChange 抛错也会继续 notify。
+    this.notify();
   }
 }

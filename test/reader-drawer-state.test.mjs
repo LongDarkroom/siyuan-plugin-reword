@@ -55,8 +55,10 @@ test("A4. toggleDrawer 同步到旧 3 个 bool（兼容）", () => {
 });
 
 test("A5. toggleDrawer 打开时刷新数据（bookmarks/annots）", () => {
-  assert.match(readerSrc, /if\s*\(\s*activeDrawer\s*===\s*["']bookmarks["']\s*\)\s*reloadBookmarks\(\)/);
-  assert.match(readerSrc, /if\s*\(\s*activeDrawer\s*===\s*["']annots["']\s*\)\s*reloadAnnots\(\)/);
+  // 2026-09-01 修复：之前断言的是死引用 reloadBookmarks/reloadAnnots(函数未定义),
+  // 改用真实存在的 refreshBookmarks/refreshAnnotsList
+  assert.match(readerSrc, /if\s*\(\s*activeDrawer\s*===\s*["']bookmarks["']\s*\)\s*refreshBookmarks\(\)/);
+  assert.match(readerSrc, /if\s*\(\s*activeDrawer\s*===\s*["']annots["']\s*\)\s*refreshAnnotsList\(\)/);
 });
 
 /* ============================================================
