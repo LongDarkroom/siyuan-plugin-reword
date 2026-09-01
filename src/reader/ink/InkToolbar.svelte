@@ -30,7 +30,7 @@
 </script>
 
 {#if $isInkMode}
-  <div class="ink-toolbar" role="toolbar" aria-label="PDF 墨迹批注工具栏">
+  <div class="ink-toolbar rw-card rw-card--light" role="toolbar" aria-label="PDF 墨迹批注工具栏">
     <!-- 笔刷选择 -->
     <div class="ink-group" title="笔刷">
       {#each BRUSHES as brush (brush)}
@@ -95,14 +95,7 @@
     flex-direction: column;
     gap: 8px;
     padding: 8px;
-    background: var(--reword-glass-light-bg);
-    -webkit-backdrop-filter: blur(var(--reword-glass-blur))
-      saturate(var(--reword-glass-saturate));
-    backdrop-filter: blur(var(--reword-glass-blur))
-      saturate(var(--reword-glass-saturate));
-    border: 1px solid var(--reword-glass-light-border);
-    border-radius: var(--reword-radius-lg);
-    box-shadow: var(--reword-glass-light-shadow);
+    /* 玻璃外观统一交由 .rw-card.rw-card--light（L2 组件规范），不再硬抄 --reword-glass-* */
     user-select: none;
   }
   .ink-group {
