@@ -2687,6 +2687,17 @@ export default class RewordPlugin extends Plugin {
         }
         return ok;
       },
+      async restoreAnnotation(id: string) {
+        const ok = await self.annotationStore.restore(id);
+        if (ok) {
+          self.refreshAnnotationMarkers();
+          self.renderDockIfTab("annotations");
+          const ann = self.annotationStore.get(id);
+          if (ann?.bookId) notifyAnnotationsChanged(ann.bookId);
+        }
+        return ok;
+      },
+      showUndoForDeleted: (id: string) => self.showUndoForDeleted(id),
       jumpToBlock(blockId: string) { self.openAnnotationBlock(blockId); },
       copyText(text: string) { self.copyText(text); },
       showMessage(msg: string, type?: "info" | "success" | "error") {
@@ -2990,6 +3001,11 @@ export default class RewordPlugin extends Plugin {
   /** 查询批注（本地过滤，基于 AnnotationStore） */
   async queryAnnotations(query?: import("./annotation/annotation-query.ts").AnnotationQuery): Promise<AnnotationQueryResult> {
     return queryAnns(this.annotationStore.getAll(), query);
+  }
+
+  /** 获取批注分类标签（id → name/color），供 AI 上下文解析 label id 为 #名称 */
+  getLabels(): { id: string; name: string; color: string }[] {
+    return this.annotationLabelStore.getAll();
   }
 
   /** 获取所有被批注过的文档 ID 列表 */
@@ -11997,16 +12013,65 @@ export default class RewordPlugin extends Plugin {
     });
   }
 
-  /** 删除一条批注（#22）：更新数据层 + 刷新面板 + 刷新正文块标记 + 广播阅读器视觉同步 */
+  /** 删除一条批注（#22）：更新数据层 + 刷新面板 + 刷新正文块标记 + 广播阅读器视觉同步 + 撤销浮条 */
   private async deleteAnnotation(id: string, dockElement: HTMLElement) {
     const ann = this.annotationStore.get(id); // remove 前取（remove 后 get 已过滤软删）
     if (await this.annotationStore.remove(id)) {
-      showMessage("批注已删除", 2000, "success" as any);
+      this.showUndoForDeleted(id); // 替换原「批注已删除」提示，提供 5s 内撤销
       this.renderAnnotationsPanel(dockElement);
       this.refreshAnnotationMarkers();
       // 2026-08-24：广播 → 打开中的阅读面板立即清除该高亮（不依赖翻页重绘）
       if (ann?.bookId) notifyAnnotationsChanged(ann.bookId);
     }
+  }
+
+  /**
+   * 删除批注后弹出「撤销」浮条（微信读书式）。
+   *  - 固定底部居中，5s 超时自动消失；
+   *  - 点「撤销」→ 软删还原（restore）+ 刷新正文标记/面板/阅读器视觉；
+   *  - 数据层为软删，restore 即恢复，零正文污染。
+   */
+  private showUndoForDeleted(id: string): void {
+    const old = document.getElementById("reword-undo-toast");
+    if (old) old.remove();
+    const toast = document.createElement("div");
+    toast.id = "reword-undo-toast";
+    Object.assign(toast.style, {
+      position: "fixed", left: "50%", bottom: "32px", transform: "translateX(-50%)",
+      zIndex: "9999", display: "flex", alignItems: "center", gap: "12px",
+      padding: "8px 12px 8px 16px", borderRadius: "8px",
+      background: "var(--b3-theme-surface, #fff)", color: "var(--b3-theme-on-surface, #333)",
+      boxShadow: "0 4px 16px rgba(0,0,0,.18)", fontSize: "14px",
+      border: "1px solid var(--b3-border-color, rgba(0,0,0,.08))",
+    } as any);
+    const msg = document.createElement("span");
+    msg.textContent = "批注已删除";
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.textContent = "撤销";
+    Object.assign(btn.style, {
+      border: "none", background: "var(--b3-theme-primary, #4285f4)", color: "#fff",
+      borderRadius: "6px", padding: "4px 12px", cursor: "pointer", fontSize: "13px",
+    } as any);
+    toast.appendChild(msg);
+    toast.appendChild(btn);
+    document.body.appendChild(toast);
+    let timer: any = null;
+    const close = () => {
+      if (timer) clearTimeout(timer);
+      if (document.body.contains(toast)) toast.remove();
+    };
+    timer = setTimeout(close, 5000);
+    btn.addEventListener("click", async () => {
+      const ok = await this.annotationStore.restore(id);
+      if (ok) {
+        this.refreshAnnotationMarkers();
+        this.renderDockIfTab("annotations");
+        const ann = this.annotationStore.get(id);
+        if (ann?.bookId) notifyAnnotationsChanged(ann.bookId);
+      }
+      close();
+    });
   }
 
   // ==================== 内联批注点击浮层 ====================

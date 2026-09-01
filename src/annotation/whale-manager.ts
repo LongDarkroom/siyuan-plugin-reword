@@ -18,7 +18,7 @@ import { logSwallow } from "../core/safe.ts";
 
 import type { AnnotationItem, AnnotationStyle, AnnotationCategory, ANNOTATION_STYLES } from "./annotation-store.ts";
 import { WHALE_COLORS } from "./annotation-store.ts";
-import { getDefaultAnnotationColor, getDefaultAnnotationStyle } from "./annotation-config.ts";
+import { getDefaultAnnotationColor, getDefaultAnnotationStyle, getLastAnnotationStyle, getLastAnnotationColor, setLastAnnotationStyle } from "./annotation-config.ts";
 import { requestEditSession, releaseEditSession } from "./edit-session.ts";
 import { mountAnnEditor, DEFAULT_ANN_TOOLBAR, hasBlockTable, type AnnEditor } from "./ann-editor.ts";
 import { confirmDelete } from "./whale-confirm.ts";
@@ -55,6 +55,10 @@ export interface IWhaleHost {
   }): Promise<AnnotationItem>;
   /** 删除批注 */
   removeAnnotation(id: string): Promise<boolean>;
+  /** 撤销软删除（恢复批注） */
+  restoreAnnotation(id: string): Promise<boolean>;
+  /** 删除后弹出「撤销」浮条（自动超时消失） */
+  showUndoForDeleted(id: string): void;
   /** 跳转到指定块 */
   jumpToBlock(blockId: string): void;
   /** 复制文本 */
@@ -251,6 +255,7 @@ export class WhaleAnnotationManager {
   private isDragging = false;
   private dragStartPos = { x: 0, y: 0 };
   private dragAnnotations: string[] = []; // 拖动批注队列
+  private altDragging = false; // Alt 拖选批注模式（按住 Alt 拖选连续创建）
   private styleMenuOpen = false; // 样式菜单打开状态
   private _styleMenuCloseHandler: ((e: MouseEvent) => void) | null = null; // 样式菜单外部点击关闭的全局监听
   /** 生命周期托管：统一释放全局监听（根因修复 #2） */
@@ -718,7 +723,7 @@ export class WhaleAnnotationManager {
       try {
         const removed = await this.host.removeAnnotation(id);
         if (removed) {
-          this.host.showMessage("批注已删除", "success");
+          this.host.showUndoForDeleted(id);
           this.closeDialog();
         } else {
           this.host.showMessage("删除失败：批注不存在或已删除", "error");
@@ -1136,13 +1141,116 @@ export class WhaleAnnotationManager {
 
   // ==================== 5. 拖动连续批注 ====================
 
-  /** 绑定拖动批注（按住 Alt 键拖选时连续创建批注） */
+  /**
+   * 绑定 Alt 拖选批注：在思源编辑器内按住 Alt 键拖选文字，
+   * 抬起时按「上次使用的样式/颜色」对选区覆盖的每个块逐段创建批注（纯高亮，无弹窗）。
+   * 复用微信读书式「标注」记忆（annotation-config 的 lastStyle/lastColor），
+   * 与工具栏「标注」按钮、Alt+Cmd+C 快捷键保持一致的视觉。
+   * 与 Alt+Cmd/Ctrl+C 快捷键不冲突（后者需按 C 键）。
+   */
   private bindDragAnnotation(): void {
-    // TODO: 实现拖动连续批注逻辑
-    // 思路：
-    // 1. mousedown 时检测 Alt 键按下 → 进入拖动模式
-    // 2. mouseup 时获取选区 → 自动创建批注（使用默认样式）
-    // 3. 不关闭弹窗，允许继续拖动下一段
+    this.disposables.addEventListener(document, "mousedown", (e: MouseEvent) => {
+      // 仅 Alt 键触发（不要求 Ctrl/Cmd，避免与 Alt+Cmd+C 冲突）；非编辑器内忽略
+      if (!e.altKey) { this.altDragging = false; return; }
+      const t = e.target as HTMLElement | null;
+      if (!t || !t.closest(".protyle-wysiwyg")) { this.altDragging = false; return; }
+      this.altDragging = true;
+    });
+
+    this.disposables.addEventListener(document, "mouseup", (e: MouseEvent) => {
+      if (!this.altDragging) return;
+      this.altDragging = false;
+      if (!e.altKey) return; // 抬起时已松开 Alt → 视为普通点击，不创建
+      this.createFromDragSelection();
+    });
+  }
+
+  /** Alt 拖选后，按选区覆盖的块逐段创建批注 */
+  private createFromDragSelection(): void {
+    const sel = window.getSelection();
+    if (!sel || sel.isCollapsed || sel.rangeCount === 0) return;
+    const range = sel.getRangeAt(0);
+
+    // 定位选区所在的编辑器根（取公共祖先，回退首个编辑器）
+    const cac = range.commonAncestorContainer;
+    const root = (
+      (cac.nodeType === 1 ? (cac as Element) : cac.parentElement)?.closest(".protyle-wysiwyg") as HTMLElement | null
+    ) || (document.querySelector(".protyle-wysiwyg") as HTMLElement | null);
+    if (!root) return;
+
+    const blocks = Array.from(root.querySelectorAll<HTMLElement>("[data-node-id]"));
+    const style = getLastAnnotationStyle();
+    const color = getLastAnnotationColor();
+    let docId = "";
+    let count = 0;
+
+    for (const block of blocks) {
+      if (!range.intersectsNode(block)) continue;
+      const text = this.selectedTextInBlock(block, range);
+      if (!text) continue;
+      if (!docId) {
+        // 同文档拖选复用主块 docId；跨文档极少见，跳过无法解析的块
+        docId = block.closest("[data-doc-id]")?.getAttribute("data-doc-id")
+          || block.closest("[data-id]")?.getAttribute("data-id")
+          || "";
+      }
+      const blockId = block.getAttribute("data-node-id") || "";
+      if (!blockId || !docId) continue;
+
+      this.host.upsertAnnotation({
+        blockId,
+        docId,
+        sentence: text,
+        selectedText: text,
+        note: "",
+        color,
+        style,
+        scope: "both",
+        lineColor: color,
+        labels: [],
+        tags: [],
+      });
+      count++;
+    }
+
+    if (count > 0) {
+      setLastAnnotationStyle(style, color);
+      this.host.showMessage(`已批注 ${count} 处`, "success");
+    }
+  }
+
+  /**
+   * 提取某块内与选区相交的子选区文本（支持跨块拖选逐段标注）。
+   * 取 range 与 block 范围的交集：start = 较晚者，end = 较早者。
+   */
+  private selectedTextInBlock(block: HTMLElement, range: Range): string {
+    const br = document.createRange();
+    br.selectNodeContents(block);
+    // 无交集（range 在 block 之前 / 之后）→ 返回空
+    if (range.compareBoundaryPoints(Range.END_TO_START, br) >= 0) return "";
+    if (range.compareBoundaryPoints(Range.START_TO_END, br) <= 0) return "";
+
+    let startC: Node, startO: number;
+    let endC: Node, endO: number;
+    if (range.compareBoundaryPoints(Range.START_TO_START, br) < 0) {
+      startC = br.startContainer; startO = br.startOffset;
+    } else {
+      startC = range.startContainer; startO = range.startOffset;
+    }
+    if (range.compareBoundaryPoints(Range.END_TO_END, br) > 0) {
+      endC = br.endContainer; endO = br.endOffset;
+    } else {
+      endC = range.endContainer; endO = range.endOffset;
+    }
+
+    const sub = document.createRange();
+    try {
+      sub.setStart(startC, startO);
+      sub.setEnd(endC, endO);
+    } catch {
+      return "";
+    }
+    return sub.toString().trim();
   }
 
   // ==================== 工具方法 ====================

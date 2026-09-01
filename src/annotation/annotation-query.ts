@@ -24,7 +24,9 @@ export interface AnnotationQuery {
   color?: string;
   /** 下划线样式筛选 */
   style?: AnnotationStyle;
-  /** 标签筛选（命中任一即通过） */
+  /** 标签筛选：按 label id 匹配 a.labels（现代分类标签），同时兼容旧 a.tags 字段 */
+  label?: string;
+  /** @deprecated 请改用 label，按 label id 匹配 */
   tag?: string;
   /** 所属文档 ID */
   docId?: string;
@@ -46,7 +48,7 @@ export interface AnnotationQueryResult {
   total: number;        // 匹配总数（不受 limit 截断）
   queriedAt: string;     // 查询时间 ISO
   /** 按文档分组的摘要（供 AI 上下文概览） */
-  byDoc: Record<string, { docId: string; count: number; sampleNote: string }>;
+  byDoc: Record<string, { docId: string; count: number; sampleNote: string; labels?: string[] }>;
 }
 
 /**
@@ -83,9 +85,12 @@ export function queryAnnotations(
     list = list.filter((a) => a.style === query.style);
   }
 
-  // 2c) 标签筛选（命中任一）
-  if (query.tag) {
-    list = list.filter((a) => Array.isArray(a.tags) && a.tags.includes(query.tag!));
+  // 2c) 标签筛选（按 label id 命中 a.labels，兼容旧 a.tags）
+  const labelFilter = query.label || query.tag;
+  if (labelFilter) {
+    list = list.filter(
+      (a) => (a.labels || []).includes(labelFilter!) || (a.tags || []).includes(labelFilter!)
+    );
   }
 
   // 3) 文档范围
@@ -127,6 +132,10 @@ export function queryAnnotations(
       byDoc[d] = { docId: d, count: 0, sampleNote: "" };
     }
     byDoc[d].count++;
+    if (!byDoc[d].labels) byDoc[d].labels = [];
+    for (const lid of a.labels || []) {
+      if (!byDoc[d].labels!.includes(lid)) byDoc[d].labels!.push(lid);
+    }
     if (!byDoc[d].sampleNote && a.note) {
       byDoc[d].sampleNote = a.note.length > 60 ? a.note.slice(0, 60) + "…" : a.note;
     }
@@ -144,7 +153,10 @@ export function queryAnnotations(
  * 将查询结果格式化为 AI 友好的文本摘要。
  * 用于「发送给 AI 讲解」时作为上下文注入。
  */
-export function formatAnnotationsForAi(result: AnnotationQueryResult): string {
+export function formatAnnotationsForAi(
+  result: AnnotationQueryResult,
+  labelResolver?: (id: string) => string | undefined
+): string {
   if (!result.items.length) return "（未找到匹配的批注）";
 
   const lines: string[] = [
@@ -162,7 +174,11 @@ export function formatAnnotationsForAi(result: AnnotationQueryResult): string {
     lines.push(`- **批注内容**: ${a.note}`);
     if (a.color) lines.push(`- **颜色**: ${a.color}`);
     if (a.style) lines.push(`- **样式**: ${a.style}`);
-    if (a.tags?.length) lines.push(`- **标签**: ${a.tags.join(", ")}`);
+    if (a.labels?.length || a.tags?.length) {
+      const labelNames = (a.labels || []).map((id) => "#" + (labelResolver ? labelResolver(id) || id : id));
+      const legacyTags = (a.tags || []).map((t) => "#" + t);
+      lines.push(`- **标签**: ${[...labelNames, ...legacyTags].join(", ")}`);
+    }
     lines.push(`- **来源**: ${a.origin === "ai" ? "AI 生成" : "手动添加"}`);
     lines.push(`- **时间**: ${a.createdAt.slice(0, 10)}`);
     lines.push("");

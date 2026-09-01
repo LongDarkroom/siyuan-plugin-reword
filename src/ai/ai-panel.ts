@@ -97,6 +97,8 @@ export interface AiHost {
   ): Promise<{ added: boolean }>;
   /** 将标签名列表解析为标签 id 列表（不存在则新建） */
   resolveLabelNames(names: string[]): string[];
+  /** 获取所有批注分类标签（id → name/color），供 AI 上下文解析 label id 为 #名称 */
+  getLabels(): { id: string; name: string; color: string }[];
   /** 把句子加入批注（落批注数据层并打标记） */
   annotateSentence(sentence: string, blockId?: string, note?: string, color?: string, style?: string, tags?: string[]): Promise<void>;
   /**
@@ -3050,7 +3052,8 @@ export class AiPanel {
       closeQueryPanel();
 
       // 将查询结果格式化后填入输入框
-      const aiText = formatAnnotationsForAi(lastQueryResult);
+      const labelMap = Object.fromEntries((this.host.getLabels?.() || []).map((l) => [l.id, l.name]));
+      const aiText = formatAnnotationsForAi(lastQueryResult, (id) => labelMap[id]);
       this.setInputMarkdown(
         `请根据以下我的批注记录进行讲解：\n\n${aiText}\n\n请逐条分析每条批注的要点，并给出综合学习建议。`
       );
