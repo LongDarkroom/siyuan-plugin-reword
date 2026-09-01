@@ -86,14 +86,16 @@ test("buildProviders: AI 恒为链首，未配置的免费引擎不入链", () =
   assert.equal(providers[0].name, "ai");
 });
 
-test("buildProviders: 开关开启且已配置时排在 AI 之后", () => {
+test("buildProviders: 开关开启且已配置时免费引擎在前，AI 在链尾兜底", () => {
+  // 2026-08-30 重构：AI 从"链首"改为"链尾兜底"（省 token：免费额度内不消耗 AI）
+  // 引擎链顺序：① 免费机器翻译（按 priority 顺序）→ ② AI 兜底
   const providers = buildProviders(
     { msEnabled: true, msKey: "k", msRegion: "r", libreEnabled: true, libreUrl: "http://x" },
     { translateOne: async () => "" }
   );
   assert.deepEqual(
     providers.map((p) => p.name),
-    ["ai", "microsoft", "libretranslate"]
+    ["microsoft", "libretranslate", "ai"]
   );
 });
 

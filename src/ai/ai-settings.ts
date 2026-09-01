@@ -34,6 +34,12 @@ export interface AiSettings {
   soulDocId: string;         // SOUL 文档 ID（用于记忆上下文）
   /** 阅读器「翻译」按钮发送到 AI 精读时预置的提示词（如「请把下面这句话翻译一下」） */
   translatePrompt: string;
+  /**
+   * 段落级"简洁版"翻译的提示词（2026-08-30 v1.4.3 新增）。
+   * 用户点击译文右上角 `🔄 简洁版` 按钮时使用，与 default 直译风格互不污染。
+   * 留空则回退到 translatePrompt 拼"精简附加要求"后缀。
+   */
+  conciseTranslatePrompt?: string;
   /** 翻译引擎：微软 Translator 订阅 Key（Azure 认知服务） */
   msKey?: string;
   /** 翻译引擎：微软 Translator 区域（如 eastasia / westeurope） */
@@ -46,6 +52,46 @@ export interface AiSettings {
   libreEnabled?: boolean;
   /** 免费翻译引擎优先级（按数组顺序尝试；AI 永远兜底，不在此列） */
   translatePriority?: string[];
+  /** 腾讯云机器翻译（TMT） */
+  tencentSecretId?: string;
+  tencentSecretKey?: string;
+  tencentEnabled?: boolean;
+  /** 腾讯翻译本月已用字符数（用于 500 万免费额度内的用量锁） */
+  tencentCharsUsed?: number;
+  /** 腾讯翻译用量锁（默认 400 万字符；达到后自动禁用腾讯引擎） */
+  tencentCharsLock?: number;
+  /** 有道智云文本翻译 */
+  youdaoAppKey?: string;
+  youdaoAppSecret?: string;
+  youdaoEnabled?: boolean;
+  /** 百度翻译开放平台 */
+  baiduAppId?: string;
+  baiduKey?: string;
+  baiduEnabled?: boolean;
+  /** 百度翻译已用字符数（用于用量监控，达到锁后自动禁用） */
+  baiduCharsUsed?: number;
+  /** 百度翻译用量锁（0=不限；>0 达到后自动禁用百度引擎） */
+  baiduCharsLock?: number;
+  /** 有道智云已用字符数（用于用量监控） */
+  youdaoCharsUsed?: number;
+  /** 有道智云用量锁（0=不限） */
+  youdaoCharsLock?: number;
+  /** AI 翻译累计消耗 Token（跨批次累加；监督中心配额显示用） */
+  aiTokenUsed?: number;
+  /** AI 翻译 Token 配额上限（0=不限） */
+  aiTokenLimit?: number;
+  /** AI Token 告警阈值（0~1，默认 0.8） */
+  aiTokenAlertRatio?: number;
+  /** AI 兜底翻译风格（2026-08-30）：literal 硬直译（默认，低温度）/ natural 允许轻微润色 */
+  bilingualStyle?: "literal" | "natural";
+  /**
+   * 2026-08-31 v1.4.4：是否启用"段落级简洁版重译"功能。
+   * - true（默认）：阅读器译文右上角显示 `🔄 简洁版` 按钮，user 可单段切换
+   * - false：隐藏按钮（用户明确不需要此功能，避免 UI 噪音）
+   * 注意：此开关与 cache.ts 的 TranslationMode 路由是独立的——关闭此开关只是 UI
+   * 隐藏，缓存层仍支持多 mode（未来可作"自动简洁"等功能）。
+   */
+  conciseEnabled?: boolean;
   /** AI 翻译参数：每批段数（单次 API 请求合并的段落数，默认 8） */
   trBatchSize?: number;
   /** AI 翻译参数：翻译温度（覆写「AI 服务」的 temperature，默认 0.2，直译低稳） */
@@ -118,12 +164,45 @@ export const DEFAULT_AI_DEEPREAD_SYSTEM = `你是 REword 英语学习助手，�
  */
 
 /**
- * 翻译默认提示词（2026-08-28 改直译版）。
- * 阅读器「翻译」按钮与双语对照共用：直译、不为了流畅而润色改写，
- * 仅在不改变单词基本意思的前提下做极轻微调整以助记。
+ * 2026-08-30 重构：翻译提示词收紧为「硬直译」。
+ * 目标：限制 AI 不要发挥、不要润色、不要拓展，只做精确直译，省 token 且风格稳定。
  */
+/** 硬直译（默认风格 literal）：逐词直译、禁止发挥 */
 export const DEFAULT_TRANSLATE_PROMPT =
-  "你是一位严谨的英译中翻译器。请遵循「直译」原则：逐句忠实翻译，不要为了阅读流畅而过度润色、改写或合并句子；仅在不改变单词基本意思的前提下做极轻微调整，以帮助单词认识与学习。保持原文的段落与句子顺序一一对应。只输出译文本身，不要添加解释、注音或任何额外内容。";
+  "你是逐段直译助手。严格遵循：\n" +
+  "1. 逐句翻译，不要合并或拆句子。\n" +
+  "2. 忠于原文字面意思，禁止扩写、润色、添加解释、注音、词性、例句或任何额外内容。\n" +
+  "3. 人名、地名、专有名词保留原文或按通用译法，不要意译。\n" +
+  "4. 只输出中文译文，一段对应一段。\n" +
+  "5. 保持原文语序，不要为通顺而调顺序。";
+
+/**
+ * 自然译（风格 natural）：允许在不改意前提下做极轻微润色，读起来更顺。
+ *
+ * 2026-08-31：末尾追加「排版引导」，让译文可携带轻量 Markdown 结构，
+ * 由 lute 渲染层（bilingual-v2/render.ts 的 mdToHtml）美化排版——
+ * 解决长译文糊成一坨、多义项无层次的「释义排版问题」。
+ * 只改呈现形式，不改翻译内容要求（忠实 / 极轻微润色 / 只输出译文）。
+ * 注：直译（literal）风格刻意保持不变，仍是纯译文。
+ */
+export const DEFAULT_TRANSLATE_PROMPT_NATURAL =
+  "你是一位严谨的英译中翻译器。请逐句忠实翻译，不要过度发挥；仅在不改变单词基本意思的前提下做极轻微润色，使中文通顺易读。保持原文段落与句子顺序一一对应。只输出译文本身，不要添加解释、注音或任何额外内容。\n" +
+  "排版（只影响呈现，不改变译文内容）：若一句含多个义项或并列成分，可用 Markdown 无序列表分行；需要留意的关键词用 **加粗**；多个自然段之间空一行。";
+
+/**
+ * 简洁版（2026-08-30 v1.4.3 新增）：段落级"重新翻译为简洁版"按钮触发的 prompt。
+ * 默认策略：保留默认直译 prompt + 在末尾追加"精简附加要求"（控制 token / 不破坏用户自定义 base prompt）。
+ * 进阶用户可在设置里覆盖 `conciseTranslatePrompt`，则完全替换。
+ */
+export const DEFAULT_CONCISE_TRANSLATE_PROMPT =
+  "你是逐段直译助手（同默认模式），但对每段译文做极严格的长度控制与去冗余：\n" +
+  "1. 用最简短的中文翻译原句，长度贴近原文（不扩写、不补充、不解释）。\n" +
+  "2. 去掉语法分析、注释、背景信息、连接词、语气词、过渡短语。\n" +
+  "3. 直接给译文，不要加任何前缀（如\"翻译：\"）或后缀（如\"。\" 之外的标点）。\n" +
+  "4. 逐句翻译，不要合并或拆句子。\n" +
+  "5. 忠于原文字面意思，禁止扩写、润色、添加解释、注音、词性、例句或任何额外内容。\n" +
+  "6. 人名、地名、专有名词保留原文或按通用译法，不要意译。\n" +
+  "7. 只输出中文译文，一段对应一段。";
 
 export const DEFAULT_AI_SETTINGS: AiSettings = {
   enabled: false,
@@ -131,6 +210,7 @@ export const DEFAULT_AI_SETTINGS: AiSettings = {
   apiKey: "",
   // 2026-08-21 精简：chatApi 字段删除,统一 openai-completion
   model: "gpt-4o-mini",
+  conciseTranslatePrompt: DEFAULT_CONCISE_TRANSLATE_PROMPT,
   models: [...DEFAULT_MODELS],
   temperature: 0.3,
   maxTokens: 2048,
@@ -149,16 +229,40 @@ export const DEFAULT_AI_SETTINGS: AiSettings = {
   soulDocId: "",
   // 2026-08-27 阅读器「翻译」预置提示词
   translatePrompt: DEFAULT_TRANSLATE_PROMPT,
-  // 2026-08-27 翻译引擎配置（微软 / LibreTranslate / 优先级；AI 兜底固定末位）
+  // 2026-08-27 翻译引擎配置（免费引擎链 + AI 兜底）
   msKey: "",
   msRegion: "",
   msEnabled: false,
   libreUrl: "",
   libreEnabled: false,
-  translatePriority: ["microsoft", "libretranslate"],
+  // 2026-08-30 新增三个免费引擎（默认关闭，用户填 key 后启用）
+  tencentSecretId: "",
+  tencentSecretKey: "",
+  tencentEnabled: false,
+  tencentCharsUsed: 0,
+  tencentCharsLock: 4_000_000,
+  youdaoAppKey: "",
+  youdaoAppSecret: "",
+  youdaoEnabled: false,
+  baiduAppId: "",
+  baiduKey: "",
+  baiduEnabled: false,
+  baiduCharsUsed: 0,
+  baiduCharsLock: 0,
+  youdaoCharsUsed: 0,
+  youdaoCharsLock: 0,
+  aiTokenUsed: 0,
+  aiTokenLimit: 0,
+  aiTokenAlertRatio: 0.8,
+  // 免费引擎顺序（AI 永远兜底，不在此列）；缓存命中仍由调用方优先拦截
+  translatePriority: ["tencent", "youdao", "baidu", "microsoft", "libretranslate"],
+  // AI 兜底翻译风格（默认硬直译）
+  bilingualStyle: "literal",
+  // 2026-08-31 v1.4.4：段落级"简洁版"按钮默认开启（UI 暴露给用户可关）
+  conciseEnabled: true,
   // 2026-08-28 AI 翻译参数（翻译引擎 Tab 可调；默认值与 index.ts 常量一致）
   trBatchSize: 8,
-  trTemperature: 0.2,
+  trTemperature: 0.1,
   trConcurrency: 2,
   // 2026-08-21 精简：双模式字段 defaultMode / chatPromptTemplate 已删除
 };
@@ -237,19 +341,46 @@ export function normalizeAiSettings(raw: any): AiSettings {
     translatePrompt: (typeof r.translatePrompt === "string" && r.translatePrompt.trim())
       ? r.translatePrompt
       : DEFAULT_TRANSLATE_PROMPT,
-    // 2026-08-27 翻译引擎配置（2026-08-28 起默认关闭，AI 为首选引擎）
+    // 2026-08-30 翻译引擎配置（免费引擎在前，AI 兜底）
+    tencentSecretId: str(r.tencentSecretId, ""),
+    tencentSecretKey: str(r.tencentSecretKey, ""),
+    tencentEnabled: bool(r.tencentEnabled, false),
+    tencentCharsUsed: Math.max(0, Math.round(num(r.tencentCharsUsed, 0, 0, Number.MAX_SAFE_INTEGER))),
+    tencentCharsLock: Math.max(0, Math.round(num(r.tencentCharsLock, 4_000_000, 0, Number.MAX_SAFE_INTEGER))),
+    youdaoAppKey: str(r.youdaoAppKey, ""),
+    youdaoAppSecret: str(r.youdaoAppSecret, ""),
+    youdaoEnabled: bool(r.youdaoEnabled, false),
+    baiduAppId: str(r.baiduAppId, ""),
+    baiduKey: str(r.baiduKey, ""),
+    baiduEnabled: bool(r.baiduEnabled, false),
+    baiduCharsUsed: Math.max(0, Math.round(num(r.baiduCharsUsed, 0, 0, Number.MAX_SAFE_INTEGER))),
+    baiduCharsLock: Math.max(0, Math.round(num(r.baiduCharsLock, 0, 0, Number.MAX_SAFE_INTEGER))),
+    youdaoCharsUsed: Math.max(0, Math.round(num(r.youdaoCharsUsed, 0, 0, Number.MAX_SAFE_INTEGER))),
+    youdaoCharsLock: Math.max(0, Math.round(num(r.youdaoCharsLock, 0, 0, Number.MAX_SAFE_INTEGER))),
+    aiTokenUsed: Math.max(0, Math.round(num(r.aiTokenUsed, 0, 0, Number.MAX_SAFE_INTEGER))),
+    aiTokenLimit: Math.max(0, Math.round(num(r.aiTokenLimit, 0, 0, Number.MAX_SAFE_INTEGER))),
+    aiTokenAlertRatio: num(r.aiTokenAlertRatio, 0.8, 0, 1),
     msKey: str(r.msKey, ""),
     msRegion: str(r.msRegion, ""),
     msEnabled: bool(r.msEnabled, false),
     libreUrl: str(r.libreUrl, ""),
     libreEnabled: bool(r.libreEnabled, false),
-    translatePriority: Array.isArray(r.translatePriority) && r.translatePriority.length
-      ? r.translatePriority.filter((x: any) => x === "microsoft" || x === "libretranslate")
-      : ["microsoft", "libretranslate"],
+    bilingualStyle: r.bilingualStyle === "natural" ? "natural" : "literal",
+    translatePriority: (() => {
+      const valid = ["tencent", "youdao", "baidu", "microsoft", "libretranslate"];
+      const arr = Array.isArray(r.translatePriority) ? r.translatePriority.filter((x: any) => valid.includes(x)) : [];
+      // 去重保序；AI 不在此列（恒为最后兜底）
+      const seen = new Set<string>();
+      const out = arr.filter((x: string) => (seen.has(x) ? false : (seen.add(x), true)));
+      return out.length ? out : ["tencent", "youdao", "baidu", "microsoft", "libretranslate"];
+    })(),
     // 2026-08-28 AI 翻译参数（与翻译引擎 Tab 联动）
     trBatchSize: Math.round(num(r.trBatchSize, 8, 1, 30)),
-    trTemperature: num(r.trTemperature, 0.2, 0, 1),
+    trTemperature: num(r.trTemperature, 0.1, 0, 1),
     trConcurrency: Math.round(num(r.trConcurrency, 2, 1, 8)),
+    // 2026-08-31 v1.4.4 P1.2：段落级"简洁版"按钮总开关（默认 true，缺失回退到默认）
+    //   当前 v2 模式下不消费此字段，但保留字段位以便 v1.5.0 恢复按钮时无缝衔接
+    conciseEnabled: typeof r.conciseEnabled === "boolean" ? r.conciseEnabled : DEFAULT_AI_SETTINGS.conciseEnabled,
     // 2026-08-21 精简：defaultMode / chatPromptTemplate 双模式字段已删除
     //   若 raw 中存在,normalize 会忽略(用户可自行编辑 promptTemplate)
   };

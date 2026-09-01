@@ -212,7 +212,8 @@ test("[UI] 网格 / 列表双视图切换", () => {
 });
 
 test("[UI] 列表渲染 visible（筛选排序后结果），不是原始 books", () => {
-  const each = viewSrc.match(/\{#each visible as book \(book\.id\)\}/g) || [];
+  // 允许 {#each visible as book (book.id)} 或 {#each visible as book, idx (book.id)}
+  const each = viewSrc.match(/\{#each visible as book(?:,\s*idx)?\s*\(book\.id\)\}/g) || [];
   assert.ok(each.length >= 2, "网格与列表都应遍历 visible");
   assert.ok(!/\{#each books as book \(book\.id\)\}/.test(viewSrc), "不应再直接遍历未筛选的 books");
 });

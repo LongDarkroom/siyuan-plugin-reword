@@ -75,6 +75,73 @@ function markDedup(key: string): void {
 let installed = false;
 
 /**
+ * 2026-08-31 v1.4.5 P6：给 foliate 创建的 srcdoc iframe 注入 console 钩子。
+ *
+ * 背景：Chrome 的 iframe sandbox 警告是从 foliate 的 srcdoc iframe **内部**的
+ *       console 派发，父窗口的 `console.error = ...` 钩子**拦截不到**（跨 frame 隔离）。
+ *       用户截图里 7 条相同警告就是从 foliate paginator.js 创建的 srcdoc iframe 出来的。
+ *
+ * 解决：监听 foliate 创建的 iframe 元素，等 load 后给 iframe.contentWindow
+ *       装 console 钩子（同源可行：srcdoc iframe 与父文档同源）。
+ *
+ * 风险：第三方代码（foliate vendor）的 console 可能被改写，需保证 installOnce 防重复。
+ */
+const iframeHooksInstalled = new WeakSet<Window>();
+
+/**
+ * 给单个 srcdoc iframe 装 console 钩子（幂等，重复调用安全）
+ * @returns true 成功安装；false iframe 跨源或不可写
+ */
+function installIframeConsoleHook(iframe: HTMLIFrameElement): boolean {
+  try {
+    const win = iframe.contentWindow;
+    if (!win) return false;
+    if (iframeHooksInstalled.has(win)) return true; // 已装过
+    // 检测同源（srcdoc iframe 应该是同源，但保险起见）
+    let sameOrigin = false;
+    try {
+      sameOrigin = win.document !== null;
+    } catch {
+      return false; // 跨域
+    }
+    if (!sameOrigin) return false;
+
+    const winAny = win as any;
+    const origError = winAny.console.error.bind(winAny.console);
+    winAny.console.error = (...args: any[]) => {
+      if (shouldSuppress(args).suppressed) return;
+      origError(...args);
+    };
+    const origWarn = winAny.console.warn.bind(winAny.console);
+    winAny.console.warn = (...args: any[]) => {
+      if (shouldSuppress(args).suppressed) return;
+      origWarn(...args);
+    };
+    iframeHooksInstalled.add(win);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** 全局挂一个 srcdoc iframe 监听器（绑定在 document.body 即可捕获 foliate 创建的 iframe） */
+function installIframeObserver(): void {
+  if (typeof document === "undefined" || !document.body) return;
+  const obs = new MutationObserver((muts) => {
+    for (const m of muts) {
+      for (const node of m.addedNodes) {
+        // foliate 注入的 iframe 是 srcdoc 类型（paginator.js:716）
+        if (node instanceof HTMLIFrameElement && (node as any).srcdoc) {
+          // load 事件触发后再装钩子（contentWindow 才可用）
+          node.addEventListener("load", () => installIframeConsoleHook(node), { once: true });
+        }
+      }
+    }
+  });
+  obs.observe(document.body, { childList: true, subtree: true });
+}
+
+/**
  * 一次性安装 console + window.onerror 过滤。
  * 应在 onload 开头(日志初始化之后)调用。
  * 多次调用幂等:只在首次生效。
@@ -126,10 +193,36 @@ export function installConsoleFilter(): void {
     }
     return false; // 让浏览器继续默认上报
   };
+
+  // 4) 2026-08-31 P6：跨 frame 拦截
+  //    foliate 创建的 srcdoc iframe 内 console 派发，父窗口钩子拦不到
+  //    通过 MutationObserver 监听新加的 srcdoc iframe，load 后注入 console 钩子
+  //    注：等 document.body 可用（onload 时通常已可用；用 MutationObserver 兜底）
+  //    重要：try/catch 保护，Node 测试环境无 document，应安全 noop
+  try {
+    const tryStartObserver = () => {
+      try { installIframeObserver(); } catch { /* DOM 异常时静默 */ }
+    };
+    if (document.body) {
+      tryStartObserver();
+    } else {
+      // DOM 还没就绪：等 body 可用后启动
+      const bodyWatcher = new MutationObserver(() => {
+        if (document.body) {
+          bodyWatcher.disconnect();
+          tryStartObserver();
+        }
+      });
+      bodyWatcher.observe(document.documentElement, { childList: true });
+    }
+  } catch {
+    // Node 测试环境 / DOM 异常：跨 frame 钩子跳过，不阻断主流程
+  }
 }
 
 /** 测试/运维:重置安装标志(用于单测隔离) */
 export function __resetConsoleFilterForTest(): void {
   installed = false;
   SUPPRESSED_HISTORY.clear();
+  // WeakSet 不暴露清空 API，但 installOnce 仍会因 installed=false 重新走流程
 }

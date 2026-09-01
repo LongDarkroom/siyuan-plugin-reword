@@ -37,11 +37,46 @@ export const ZOOM_PRESETS: readonly number[] = [0.5, 0.75, 1.0, 1.25, 1.5, 2.0] 
 /** 阅读状态：想读（未开始）/ 在读 / 读完 */
 export type BookStatus = "unread" | "reading" | "finished";
 
+/* ================================================================
+ * 2026-08-29 书架 P2：macOS 风格 7 色 token
+ * - 用于 BookGroup.color / BookMeta.color / BookFilter.color
+ * - 不用裸 hex 存储,token 化便于未来扩展自定义色 + 主题适配
+ * - 与 docs/bookshelf-interaction-refinement.md §2.1 保持一致
+ * ================================================================ */
+
+/** 7 色 token（与 macOS Finder 6 色 + 灰色归档对齐,沿用用户截图） */
+export type BookColor = "red" | "orange" | "yellow" | "green" | "blue" | "purple" | "gray";
+
+/** 7 色字典:UI swatch 渲染 / 排序时反查索引 / 任意模块查找 token 用 */
+export const BOOK_COLORS: readonly { token: BookColor; label: string; hex: string }[] = [
+  { token: "red",    label: "红", hex: "#ff453a" },
+  { token: "orange", label: "橙", hex: "#ff9f0a" },
+  { token: "yellow", label: "黄", hex: "#ffd60a" },
+  { token: "green",  label: "绿", hex: "#34c759" },
+  { token: "blue",   label: "蓝", hex: "#0a84ff" },
+  { token: "purple", label: "紫", hex: "#bf5af2" },
+  { token: "gray",   label: "灰", hex: "#8e8e93" },
+] as const;
+
+/** 反查 token → 索引(用于颜色排序),O(1) 字典 */
+const BOOK_COLOR_INDEX: Record<BookColor, number> = (() => {
+  const out = {} as Record<BookColor, number>;
+  BOOK_COLORS.forEach((c, i) => (out[c.token] = i));
+  return out;
+})();
+
+/** 校验颜色 token 合法性,用于 API 入口的脏数据防御 */
+export function isValidBookColor(s: unknown): s is BookColor {
+  return typeof s === "string" && s in BOOK_COLOR_INDEX;
+}
+
 /** 用户自建分组（书架「文件夹」），独立索引文件持久化 */
 export interface BookGroup {
   id: string;
   name: string;
   createdAt: number;
+  /** 2026-08-29 新增:macOS 风格 7 色 token,见 BOOK_COLORS 字典;缺省 = 无色 */
+  color?: BookColor;
 }
 
 /** 排序键 */
@@ -53,7 +88,8 @@ export type BookSortKey =
   | "progress"
   | "readingTime"
   | "rating"
-  | "size";
+  | "size"
+  | "color";
 
 /** 排序方向 */
 export type SortDir = "asc" | "desc";
@@ -74,6 +110,8 @@ export interface BookFilter {
   favoriteOnly?: boolean;
   /** 最低评分（1-5） */
   minRating?: number;
+  /** 2026-08-29 新增:单色精确匹配;缺省 = 不限 */
+  color?: BookColor;
 }
 
 /** 阅读书签（2026-08-29 新增：对齐 Obsidian weave 的「书签 / 参考阅读点」） */
@@ -123,6 +161,10 @@ export interface BookMeta {
   groupId?: string;
   /** 2026-08-29 新增：本书书签（按 createdAt 升序；老数据无此字段，缺省空数组） */
   bookmarks?: BookMark[];
+  /** 2026-08-29 P2 新增:macOS 风格 7 色 token,见 BOOK_COLORS 字典;缺省 = 无色 */
+  color?: BookColor;
+  /** 2026-08-29 P2 新增:同组内手动排序用(数字小 = 靠前),缺省 = 跟随 query 排序 */
+  order?: number;
 }
 
 const INDEX_KEY = "hiword-bookshelf.json";
@@ -458,7 +500,17 @@ export class BookshelfStore {
     patch: Partial<
       Pick<
         BookMeta,
-        "title" | "author" | "series" | "status" | "rating" | "favorite" | "tags" | "groupId" | "bookmarks"
+        | "title"
+        | "author"
+        | "series"
+        | "status"
+        | "rating"
+        | "favorite"
+        | "tags"
+        | "groupId"
+        | "bookmarks"
+        | "color"
+        | "order"
       >
     >
   ): Promise<boolean> {
@@ -479,6 +531,14 @@ export class BookshelfStore {
       meta.tags = clean.length ? clean : undefined;
     }
     if (patch.groupId !== undefined) meta.groupId = patch.groupId || undefined;
+    // [2026-08-29] P2:颜色 / 手动排序
+    if (patch.color !== undefined) {
+      meta.color = isValidBookColor(patch.color) ? patch.color : undefined;
+    }
+    if (patch.order !== undefined) {
+      const o = Number(patch.order);
+      meta.order = Number.isFinite(o) ? o : undefined;
+    }
     if (patch.bookmarks !== undefined) {
       const clean = patch.bookmarks
         .filter((b) => b && typeof b.cfi === "string" && b.cfi)
@@ -679,6 +739,33 @@ export class BookshelfStore {
     return this.updateMeta(id, { tags: next });
   }
 
+  /* ===================== 2026-08-29 P2:颜色 / 排序 ===================== */
+
+  /** 单本设色(color = undefined 表示移除颜色) */
+  async setColor(id: string, color?: BookColor): Promise<boolean> {
+    return this.updateMeta(id, { color });
+  }
+
+  /** 单本在同组内手动排序(数字小 = 靠前;0/缺省 = 跟随 query 排序) */
+  async setOrder(id: string, order: number): Promise<boolean> {
+    return this.updateMeta(id, { order });
+  }
+
+  /** 分组设色(groupId 无效或 color = undefined = 移除) */
+  async setGroupColor(id: string, color?: BookColor): Promise<boolean> {
+    await this.load();
+    const g = this._groups.find((x) => x.id === id);
+    if (!g) return false;
+    if (isValidBookColor(color)) {
+      g.color = color;
+    } else {
+      g.color = undefined;
+    }
+    await this.saveGroups();
+    this._store.set([...this.books]);
+    return true;
+  }
+
   /* ===================== 书签（2026-08-29 新增） ===================== */
 
   /** 取本书书签（按创建时间升序）；书不存在 / 无书签 → 空数组 */
@@ -794,6 +881,22 @@ export class BookshelfStore {
   }
 
   /**
+   * 「继续读最近一本」:按 lastReadAt 倒序,返回未读完且有进度的书的 id。
+   * 已读完的(进度 >= 99.5%)会被跳过;无任何读过的书则返回 null。
+   * 用于顶栏 ⏵ 按钮(2026-08-29 P2 I5)。
+   */
+  getContinueReadId(): string | null {
+    let best: BookMeta | null = null;
+    for (const b of this.books) {
+      const frac = b.progress?.fraction;
+      // 跳过没读过的、读完的、零进度的
+      if (typeof frac !== "number" || frac <= 0 || frac >= 0.995) continue;
+      if (!best || (b.lastReadAt ?? 0) > (best.lastReadAt ?? 0)) best = b;
+    }
+    return best?.id ?? null;
+  }
+
+  /**
    * 搜索 + 筛选 + 排序一次出结果（UI 的唯一数据入口）
    * 排序稳定性：数值键相等时用书名做次级键，避免列表抖动
    */
@@ -820,6 +923,8 @@ export class BookshelfStore {
       if (filter.favoriteOnly && !b.favorite) return false;
       if (typeof filter.minRating === "number" && filter.minRating > 0 && (b.rating ?? 0) < filter.minRating)
         return false;
+      // [2026-08-29] P2:颜色筛选
+      if (filter.color && b.color !== filter.color) return false;
       if (kw) {
         const hay = [b.title, b.author ?? "", b.series ?? "", ...(b.tags ?? [])].join(" ").toLowerCase();
         if (!hay.includes(kw)) return false;
@@ -845,11 +950,25 @@ export class BookshelfStore {
       }
     };
     out.sort((a, b) => {
+      // [2026-08-29] P2:颜色排序按 BOOK_COLORS 数组索引(色相 HSL 顺序:红→橙→黄→绿→蓝→紫→灰)
+      // 无色的书排在最后(索引 = 999),保证有色的始终相邻
+      if (sortKey === "color") {
+        const ai = a.color ? BOOK_COLOR_INDEX[a.color] : 999;
+        const bi = b.color ? BOOK_COLOR_INDEX[b.color] : 999;
+        const r = ai - bi;
+        if (r !== 0) return r * sign;
+        return a.title.localeCompare(b.title, "zh-Hans-CN");
+      }
       if (sortKey === "title" || sortKey === "author") {
         const av = (sortKey === "title" ? a.title : a.author ?? "") || "";
         const bv = (sortKey === "title" ? b.title : b.author ?? "") || "";
         // 中文按拼音序（localeCompare zh-Hans-CN）
         return av.localeCompare(bv, "zh-Hans-CN") * sign;
+      }
+      // [2026-08-29] P2:同组内手动排序优先(数字小 = 靠前)
+      // 只在两边都设置了 order 时按 order 排,否则走原本的次级键
+      if (typeof a.order === "number" && typeof b.order === "number" && a.order !== b.order) {
+        return (a.order - b.order) * sign;
       }
       const r = num(a) - num(b);
       if (r !== 0) return r * sign;
@@ -941,6 +1060,97 @@ export class BookshelfStore {
       n++;
     }
     return n;
+  }
+
+  /* ===================== 2026-08-29 P2:批量设色 / 评分 / 收藏 ===================== */
+
+  /** 批量设色(color = undefined = 移除颜色),返回实际生效数量 */
+  async batchSetColor(ids: string[], color?: BookColor): Promise<number> {
+    await this.load();
+    let n = 0;
+    for (const b of this.books) {
+      if (!ids.includes(b.id)) continue;
+      if (isValidBookColor(color)) {
+        if (b.color !== color) {
+          b.color = color;
+          n++;
+        }
+      } else if (b.color !== undefined) {
+        b.color = undefined;
+        n++;
+      }
+    }
+    if (n) {
+      await this.save();
+      this._store.set([...this.books]);
+    }
+    return n;
+  }
+
+  /** 批量评分(0 = 清除),返回实际生效数量 */
+  async batchSetRating(ids: string[], rating: number): Promise<number> {
+    await this.load();
+    const r = Math.max(0, Math.min(5, Math.round(rating)));
+    const next = r > 0 ? r : undefined;
+    let n = 0;
+    for (const b of this.books) {
+      if (!ids.includes(b.id)) continue;
+      if (b.rating !== next) {
+        b.rating = next;
+        n++;
+      }
+    }
+    if (n) {
+      await this.save();
+      this._store.set([...this.books]);
+    }
+    return n;
+  }
+
+  /** 批量收藏 / 取消收藏,返回实际生效数量 */
+  async batchSetFavorite(ids: string[], favorite: boolean): Promise<number> {
+    await this.load();
+    const next = !!favorite;
+    let n = 0;
+    for (const b of this.books) {
+      if (!ids.includes(b.id)) continue;
+      if (!!b.favorite !== next) {
+        b.favorite = next || undefined;
+        n++;
+      }
+    }
+    if (n) {
+      await this.save();
+      this._store.set([...this.books]);
+    }
+    return n;
+  }
+
+  /* ===================== 2026-08-29 P2:facets 计数(颜色 / 丛书) ===================== */
+
+  /** 颜色使用计数:每色用了多少本(只含已用色,用于侧边栏 7 色区块) */
+  colorCounts(): { color: BookColor; count: number }[] {
+    const map = new Map<BookColor, number>();
+    for (const b of this.books) {
+      if (b.color) map.set(b.color, (map.get(b.color) ?? 0) + 1);
+    }
+    // 按 BOOK_COLORS 数组顺序输出(色相 HSL 顺序)
+    return BOOK_COLORS.filter((c) => map.has(c.token)).map((c) => ({
+      color: c.token,
+      count: map.get(c.token) ?? 0,
+    }));
+  }
+
+  /** 丛书使用计数:同 series 至少 2 本才显示(避免小书库的噪音,见设计 §10 风险表) */
+  seriesCounts(): { series: string; count: number }[] {
+    const map = new Map<string, number>();
+    for (const b of this.books) {
+      const s = (b.series ?? "").trim();
+      if (s) map.set(s, (map.get(s) ?? 0) + 1);
+    }
+    return Array.from(map, ([series, count]) => ({ series, count }))
+      .filter((x) => x.count >= 2)
+      .sort((a, b) => b.count - a.count || a.series.localeCompare(b.series, "zh-Hans-CN"));
   }
 
   /**

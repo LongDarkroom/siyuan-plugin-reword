@@ -68,10 +68,14 @@ test("品牌改名：anno-ai-dialog.ts 系统提示词已含「微阅批注」",
 
 test("品牌改名：index.ts dock tab 文字已是「微阅批注」", async () => {
   const src = await readFile("src/index.ts", "utf8");
-  assert.match(
-    src,
-    /data-tab="annotations">微阅批注</,
-    "dock tab 文字应为「微阅批注」"
+  // 2026-08-31：dock tab 已从手写 HTML（data-tab="annotations">微阅批注<）
+  // 改为 dockManager 配置式（{ id: "annotations", title: "微阅批注" }）。
+  // 两种形态都接受，重点校验「用户可见标题是微阅批注」这一事实。
+  const hasHtmlTab = /data-tab="annotations">微阅批注</.test(src);
+  const hasConfigTab = /id:\s*"annotations"[\s\S]{0,120}?title:\s*"微阅批注"/.test(src);
+  assert.ok(
+    hasHtmlTab || hasConfigTab,
+    "dock tab 文字应为「微阅批注」（HTML 形态或 dockManager 配置形态）"
   );
 });
 

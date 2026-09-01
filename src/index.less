@@ -7040,6 +7040,67 @@ body.hiword-dragging {
 }
 .hiword-ai-setting-group:last-child { margin-bottom: 0; }
 
+/* ---- 2026-08-30 双语翻译设置：免费引擎可拖拽重排列表 ---- */
+.hiword-ai-engine-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 4px;
+}
+.hiword-ai-engine-row {
+  border: 1px solid var(--b3-border-color, #e8e8e8);
+  border-radius: 8px;
+  padding: 10px 12px;
+  background: var(--b3-theme-background, #fafafa);
+  cursor: default;
+}
+.hiword-ai-engine-row.dragging {
+  opacity: 0.55;
+  border-style: dashed;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.12);
+}
+.hiword-ai-engine-row.drag-over {
+  border-color: var(--b3-theme-primary, #06b6d4);
+  box-shadow: inset 0 0 0 1px var(--b3-theme-primary, #06b6d4);
+}
+.hiword-ai-engine-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+.hiword-ai-engine-drag {
+  cursor: grab;
+  color: var(--b3-theme-on-surface-light, #888);
+  font-size: 14px;
+  line-height: 1;
+  letter-spacing: 1.5px;
+  padding: 4px 6px;
+  margin: -4px 0;
+  border-radius: 5px;
+  user-select: none;
+  -webkit-user-select: none;
+}
+.hiword-ai-engine-row:active .hiword-ai-engine-drag { cursor: grabbing; }
+.hiword-ai-engine-drag:hover {
+  color: var(--b3-theme-primary, #06b6d4);
+  background: var(--b3-theme-surface, rgba(255, 255, 255, 0.5));
+}
+.hiword-ai-engine-name {
+  flex: 1;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--b3-theme-on-surface, #222);
+}
+.hiword-ai-engine-head .hiword-ai-check { margin-left: auto; }
+.hiword-ai-engine-fields {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  margin-top: 10px;
+}
+.hiword-ai-engine-fields .hiword-ai-field:only-child { grid-column: 1 / -1; }
+
 .hiword-ai-setting-label {
   margin-bottom: 8px;
 }
@@ -12703,7 +12764,7 @@ body.hiword-resizing {
     padding: 8px 12px;
     font-size: 13px;
   }
-  /* 鲸鱼批注弹窗：内嵌编辑器的 toolbar 按钮触屏友好 */
+  /* 批注模块弹窗：内嵌编辑器的 toolbar 按钮触屏友好 */
   .protyle-toolbar__item {
     min-width: 28px;
     min-height: 28px;

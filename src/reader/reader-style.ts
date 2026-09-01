@@ -130,6 +130,8 @@ export function deriveStyleOutput(
 /**
  * 思源主题调色板（阅读器需要、且应跟随思源外观的变量子集）。
  * 不在此列的项（如各主题预设的纯色背景）仍由阅读器自带主题控制，不跟随思源。
+ *
+ * 2026-08-31 v1.4.5 P4：补齐"选区色 / 搜索高亮 / 错误色"三类，让阅读器与思源主题联动。
  */
 export interface SiyuanThemeVars {
   bg: string;
@@ -143,6 +145,12 @@ export interface SiyuanThemeVars {
   codeBg: string;
   bqBg: string;
   markBg: string;
+  /** 选区底色（rgba 形式，思源主色 25% 透明）。selectionStyles() 实际渲染时用 var(--b3-theme-primary) + color-mix 派生更精细 */
+  selectionBg: string;
+  /** 搜索高亮色（思源主色 50% 透明）。与选区色错开，避免视觉冲突 */
+  searchHighlight: string;
+  /** 错误色（思源 --b3-theme-error，用于翻译失败占位 / 批注错误等） */
+  error: string;
 }
 
 /**
@@ -159,19 +167,43 @@ export interface SiyuanThemeVars {
 export function captureSiyuanThemeVars(
   get: (name: string, fallback: string) => string
 ): SiyuanThemeVars {
+  const primary = get("--b3-theme-primary", "#0f6bff");
   return {
     bg: get("--b3-theme-background", "#ffffff"),
     onBackground: get("--b3-theme-on-background", "#222222"),
     onSurface: get("--b3-theme-on-surface", "#888888"),
     onSurfaceLight: get("--b3-theme-on-surface-light", "#9aa0a6"),
-    primary: get("--b3-theme-primary", "#0f6bff"),
-    surface: get("--b3-theme-surface", "#f7f8f9"),
+    primary,
+    surface: get("--b3-theme-surface", "#f7f8fa"),
     border: get("--b3-border-color", "#e0e0e0"),
     link: get("--b3-protyle-inline-link-color", "#185FA5"),
     codeBg: get("--b3-protyle-code-background", "rgba(128,128,128,0.08)"),
     bqBg: get("--b3-bq-background", "rgba(128,128,128,0.06)"),
     markBg: get("--b3-protyle-inline-mark-background", "#ffe9a8"),
+    // 选区色：思源主色 50% 透明（v1.4.5 P5：与主文档选区色统一）
+    // hex → rgba 简单换算，作为 fallback 备查；真实渲染走 selectionStyles() 的
+    // var(--b3-theme-primary) + color-mix() 派生（精度更高）
+    selectionBg: hexToRgba(primary, 0.5),
+    // 搜索高亮：思源主色 70% 透明（更深更显眼，与 50% 选区色错开）
+    searchHighlight: hexToRgba(primary, 0.7),
+    // 错误色：思源 --b3-theme-error
+    error: get("--b3-theme-error", "#d44c47"),
   };
+}
+
+/**
+ * hex → rgba 简单换算（不支持 #rrggbbaa 8 位形式，思源 v3.8 也不输出 8 位）
+ * 用于 selectionBg / searchHighlight 等需要"主色 + 透明度"预计算的兜底场景
+ * 真实渲染优先用 selectionStyles() 的 var(--b3-theme-primary) + color-mix() 派生（精度更高）
+ */
+function hexToRgba(hex: string, alpha: number): string {
+  const m = /^#?([0-9a-fA-F]{6})$/.exec(hex.trim());
+  if (!m) return `rgba(15, 107, 255, ${alpha})`; // fallback to default primary
+  const n = parseInt(m[1], 16);
+  const r = (n >> 16) & 0xff;
+  const g = (n >> 8) & 0xff;
+  const b = n & 0xff;
+  return `rgba(${r}, ${g}, ${b}, ${alpha})`;
 }
 
 /**
@@ -192,6 +224,9 @@ export function siyuanVarBridgeStyles(v: SiyuanThemeVars): string {
   --b3-protyle-code-background: ${v.codeBg};
   --b3-bq-background: ${v.bqBg};
   --b3-protyle-inline-mark-background: ${v.markBg};
+  --reword-selection-bg: ${v.selectionBg};
+  --reword-search-highlight: ${v.searchHighlight};
+  --b3-theme-error: ${v.error};
 }`.trim();
 }
 
@@ -387,6 +422,8 @@ export function buildReaderStyles(
     codeStyles(),
     colorSchemeStyles(o),
     wordWrapStyles(),
+    // 2026-08-31 v1.4.5 P4.2：选区色 / 搜索高亮（思源主题联动 + 书内色温调节）
+    selectionStyles(settings.theme),
   ];
   // 思源调色板桥接块须在所有 var() 使用之前声明；仅当传入 siyuanVars 才前置，避免空字符串留下多余换行
   const bridge = siyuanVars ? siyuanVarBridgeStyles(siyuanVars) + "\n" : "";
@@ -425,6 +462,76 @@ export function fontSizeOverrideStyles(fontSize: number, flatten: boolean): stri
 body { font-size: ${fontSize}px !important; }
 p, li, blockquote, div, dd, dt, td, th {
   font-size: inherit !important;
+}`.trim();
+}
+
+/**
+ * 2026-08-31 v1.4.5 P4.2：选区 / 搜索高亮样式（思源主题联动 + 书内主题色温调节）。
+ *
+ * 关键设计：
+ *  - 选区色基底 = 思源 `--b3-theme-primary`（25% 透明）：用户切换思源主题时实时跟随
+ *  - 文本色 `inherit`：不破坏书内主题（sepia 主题用暖色时，选区文字仍是书色不被选区色覆盖）
+ *  - color-mix()：现代 CSS 推导（透明 + 主色），不支持的浏览器降级到 --reword-selection-bg 预计算 rgba
+ *  - 书内主题色温调节：sepia 主题选区色变暖（米黄），dark 主题选区色提亮（更显），auto 跟思源
+ *  - PDF 选区由 pdfjs 自带 AccentColor 处理，**不**被本样式覆盖（pdfjs 选择器在 vendor CSS 中更具体）
+ *
+ * 联动矩阵：
+ *   思源 Light + 书 light    → 选区 = 蓝 25%（你截图里 pancakes 的色就是这种，巧合）
+ *   思源 Light + 书 sepia   → 选区 = 暖米黄 30%（`color-mix` 派生）
+ *   思源 Dark  + 书 dark     → 选区 = 亮蓝 30%（color-mix 衍生）
+ *   思源自定义主色           → 选区 = 自定义色 25%
+ *
+ * @param theme 书内主题（"auto" / "light" / "sepia" / "night" / "dark" / "almond" / ...）
+ *               仅 sepia/night/almond/autumn 等暖/暗主题需要色温调节；light/dark 走默认
+ */
+export function selectionStyles(theme: string = "auto"): string {
+  // 暖主题：选区色往米黄/棕色偏（sepia/almond/autumn/gold）
+  // 暗主题：选区色提亮（night/dark）
+  // 其他（light/auto）：走思源主色原汁原味
+  const isWarm = theme === "sepia" || theme === "almond" || theme === "autumn" || theme === "gold";
+  const isDark = theme === "night" || theme === "dark";
+  // 暖主题：color-mix 把思源主色往 sepia 暖色（#c4a06a 模拟米黄）拉 30%
+  // 暗主题：color-mix 把思源主色往白色拉 30%（提亮）
+  const tintCss = isWarm
+    ? `::selection { background: color-mix(in srgb, var(--b3-theme-primary, #0f6bff) 30%, #c4a06a 70%); }`
+    : isDark
+    ? `::selection { background: color-mix(in srgb, var(--b3-theme-primary, #0f6bff) 30%, white 30%); }`
+    : "";
+  return `
+/* === 选区底色：跟思源主色 50% 透明（v1.4.5 P5：与主文档选区色统一） === */
+::selection {
+  background: var(--reword-selection-bg, rgba(15, 107, 255, 0.5));
+  color: inherit;
+}
+::-moz-selection {
+  background: var(--reword-selection-bg, rgba(15, 107, 255, 0.5));
+  color: inherit;
+}
+/* 现代 CSS：color-mix 派生的精细版（浏览器支持时优先用，色值更准） */
+@supports (background: color-mix(in srgb, red, transparent 50%)) {
+  ::selection {
+    background: color-mix(in srgb, var(--b3-theme-primary, #0f6bff) 50%, transparent);
+  }
+  ::-moz-selection {
+    background: color-mix(in srgb, var(--b3-theme-primary, #0f6bff) 50%, transparent);
+  }
+}
+/* 书内主题色温调节：暖主题往米黄、暗主题提亮 */
+${tintCss}
+
+/* === 搜索高亮：思源主色 70% 透明（更深更显眼，与选区色 50% 错开） === */
+mark.reword-search-hit,
+.reader ::mark.reword-search-hit {
+  background: var(--reword-search-highlight, rgba(15, 107, 255, 0.7));
+  color: inherit;
+  padding: 0 1px;
+  border-radius: 2px;
+}
+@supports (background: color-mix(in srgb, red, transparent 50%)) {
+  mark.reword-search-hit,
+  .reader ::mark.reword-search-hit {
+    background: color-mix(in srgb, var(--b3-theme-primary, #0f6bff) 70%, transparent);
+  }
 }`.trim();
 }
 
@@ -718,14 +825,28 @@ export function bilingualStyles(fontFamilyStack: string, fg: string, translation
   // 2026-08-30 段级"简洁版"按钮：右上角悬浮，hover 译文块时显形（避免干扰阅读）。
   return `
 /* ---- 双语译文块（段落内子节点注入，独立成块的温和对照样式） ---- */
-.reword-bilingual {
+/* 高权重选择器：类 + 两个属性选择器，压住 EPUB 中更具体的自定义选择器 */
+.reword-bilingual[cfi-inert][data-translation-mark] {
   display: block !important;
-  /* 段落块化：与上一段（原文）留 0.25em、与下一段原文留 0.7em，形成呼吸单元 */
-  margin: 0.25em 0 0.7em 0;
-  /* 淡色左边线 + 轻微左内边距：把译文从原文中视觉分层（不抢眼、不破坏极简） */
-  padding: 0.1em 0 0.1em 0.7em;
-  /* 左边线：跟随思源边框色 --b3-border-color（fallback 中性灰） */
-  border-left: 2px solid var(--b3-border-color, rgba(128, 128, 128, 0.22)) !important;
+  /* 段落块化：与上一段（原文）留 0.25em、与下一段原文留 0.7em，形成呼吸单元。
+     margin-left 由 injectSibling（render.ts）按英文段 paddingLeft+textIndent 动态计算，
+     使译文文字左缘精确对齐英文文字左缘（齐平）；此处 0 仅作兜底初值（会被 inline 覆盖）。 */
+  margin: 0.25em 0 0.7em 0 !important;
+  text-indent: 0 !important;
+  /* Task B（2026-08-31）：强制译文文字左对齐。
+     EPUB 容器常自带 text-align:center，且 injectSibling 只清了 margin/padding，
+     没清 text-align，导致译文文字被居中（与上方英文左缘不对齐）。
+     这里用 !important 压过书籍继承值；左侧竖线由 border-left 绘制（不占内容位，
+     文字左缘仅比英文左缘内缩 2.5px 边框宽，视觉等同对齐）。 */
+  text-align: left !important;
+  /* 思源引述块风格：左侧竖线 + 浅底色 + 圆角。
+     竖线颜色随思源主题边框色 --b3-border-color；
+     padding-left 给文本与竖线之间留出呼吸空间。 */
+  padding: 0.35em 0.6em 0.35em 0.7em !important;
+  border-left: 2.5px solid var(--b3-border-color, rgba(128, 128, 128, 0.22)) !important;
+  border-radius: 0 6px 6px 0;
+  background: var(--b3-theme-surface-light, rgba(128, 128, 128, 0.06));
+  position: relative;
 
   /* 字号：默认 0.62em —— CJK 字体的 x-height 远大于英文 serif，
      0.62em 渲染后视觉尺寸 ≈ 英文正文的 0.88~0.92 倍，略小一号、不抢焦点 */
@@ -736,156 +857,128 @@ export function bilingualStyles(fontFamilyStack: string, fg: string, translation
 
   /* 字体：思源阅读字体栈（!important 压过 publisherFontOverride 的 inherit） */
   font-family: ${fontFamilyStack} !important;
-  /* 色彩：跟随思源正文色 --b3-theme-on-background（fallback 注入时的具体 hex） */
-  color: var(--b3-theme-on-background, ${fg});
+  /* 颜色：思源次级文本色，比正文淡一级；fallback 用传入的 fg */
+  color: var(--b3-theme-on-surface, ${fg});
   /* 轻微透明：译文是辅助信息，淡于原文但不至于看不清 */
-  opacity: 0.8;
+  opacity: 0.9;
 
-  /* 译文块不再继承正文首行缩进（原文已是 1~2em 缩进，译文再缩就太靠里） */
-  text-indent: 0;
   /* CJK 字间距微调，让中文更紧凑自然 */
   letter-spacing: 0.02em;
 
   /* 行为 */
   word-break: break-word;
   overflow-wrap: break-word;
-  user-select: none;
-  transition: opacity 0.2s ease;
-  /* 2026-08-30 简洁版按钮定位锚点（bilingual.ts 也 inline 了 style.position 兜底） */
-  position: relative;
+  /* 2026-08-31：放开选中。原为 none，导致译文既不能划词查词也不能复制。
+     配合 cfi-inert（见 bilingual-v2/render.ts），译文仍被 CFI 索引排除，
+     所以放开选中不会让选区污染锚点。 */
+  user-select: text;
+  transition: opacity 0.2s ease, background 0.2s ease;
 }
 
-/* 悬停时恢复完全不透明 */
-.reword-bilingual:hover {
+/* 译文内部文本容器：再保险一层，确保 span 自身没有 margin/padding/缩进 */
+.reword-bilingual[cfi-inert][data-translation-mark] > .reword-bilingual-text {
+  display: inline !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  text-indent: 0 !important;
+}
+
+/* Task B（2026-08-31）：Lute 会把含结构的译文渲染成内部 <p>，
+   它会被全局 p{ text-align:justify !important; margin:0.6em 0 } 命中 → 译文又变两端对齐/带段距。
+   这里用更高权重的「类+双属性」选择器压回左对齐、零段距，使整段译文左缘与英文对齐。 */
+.reword-bilingual[cfi-inert][data-translation-mark] p {
+  text-align: left !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  text-indent: 0 !important;
+}
+
+/* 悬停时恢复完全不透明 + 底色加深 */
+.reword-bilingual[cfi-inert][data-translation-mark]:hover {
   opacity: 1;
+  background: var(--b3-list-hover, rgba(128, 128, 128, 0.1));
 }
 
-/* 列表项内的译文：随项目符号缩进，去掉大段左边距避免与符号重叠 */
-li > .reword-bilingual {
-  margin: 0.2em 0 0.5em 0.5em;
-  padding-left: 0.5em;
-  border-left: 2px solid rgba(128, 128, 128, 0.18);
+/* 列表项内的译文：随项目符号缩进，其余样式继承基类。
+   因基类已用 !important，列表项规则也必须 !important 才能覆盖。 */
+li > .reword-bilingual[cfi-inert][data-translation-mark] {
+  margin: 0.2em 0 0.5em 0.5em !important;
+  text-indent: 0 !important;
+  border-left: 2.5px solid var(--b3-border-color, rgba(128, 128, 128, 0.22)) !important;
+  background: var(--b3-theme-surface-light, rgba(128, 128, 128, 0.06));
 }
 
-/* 2026-08-30 段落级操作按钮组（重译/修正/简洁版/隐藏）：右上角悬浮，hover 译文块时显形 */
-.reword-bilingual-actions {
+/* 2026-08-31 Phase 3：段落级「✨ 用 AI 重译」按钮。
+   默认完全隐藏，只在 hover 译文块时显形——避免常驻按钮干扰阅读。 */
+.reword-bilingual-ai-redo {
   position: absolute;
-  top: 2px;
-  right: 2px;
-  display: flex;
-  gap: 4px;
+  top: 0;
+  right: 0;
   opacity: 0;
-  transition: opacity 0.18s ease;
-  pointer-events: auto;
-  z-index: 2;
-}
-.reword-bilingual:hover .reword-bilingual-actions {
-  opacity: 0.94;
-}
-/* 单按钮：容器内横向排列（不再各自绝对定位） */
-.reword-bilingual-action {
-  font-size: ${fs * 0.82}em;
+  pointer-events: none;
+  transition: opacity 0.15s ease;
   font-family: -apple-system, "PingFang SC", "Microsoft YaHei", system-ui, sans-serif !important;
-  line-height: 1.2;
-  padding: 1px 6px;
-  margin: 0;
-  border: 1px solid var(--b3-border-color, rgba(128, 128, 128, 0.32));
-  border-radius: 4px;
-  background: var(--b3-theme-surface, rgba(255, 255, 255, 0.88));
+  font-size: ${Math.max(0.72, fs * 1.15)}em;
+  line-height: 1;
+  padding: 3px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--b3-border-color, rgba(128, 128, 128, 0.3));
+  background: var(--b3-theme-background, #fff);
   color: var(--b3-theme-on-background, ${fg});
   cursor: pointer;
-  /* 不让它被划词 / text-walker 命中 */
-  user-select: none;
-  -webkit-user-select: none;
   white-space: nowrap;
 }
-.reword-bilingual-action:hover,
-.reword-bilingual-action:focus-visible {
-  background: rgba(220, 220, 220, 0.98);
-  outline: none;
+.reword-bilingual[cfi-inert][data-translation-mark]:hover > .reword-bilingual-ai-redo {
+  opacity: 0.85;
+  pointer-events: auto;
+}
+.reword-bilingual-ai-redo:hover {
   opacity: 1;
 }
-@media (prefers-color-scheme: dark) {
-  .reword-bilingual-action {
-    background: var(--b3-theme-surface, rgba(40, 40, 40, 0.88));
-    border-color: var(--b3-border-color, rgba(200, 200, 200, 0.28));
-  }
-  .reword-bilingual-action:hover,
-  .reword-bilingual-action:focus-visible { background: rgba(80, 80, 80, 0.98); }
+.reword-bilingual-ai-redo:disabled {
+  opacity: 0.5;
+  cursor: default;
 }
 
-/* 来源徽标：跟在译文文字后（inline），按 data-provider 着色区分来源 */
-.reword-bilingual-badge {
-  display: inline-block;
-  margin-left: 0.5em;
-  vertical-align: middle;
-  font-size: ${fs * 0.72}em;
-  font-family: -apple-system, "PingFang SC", "Microsoft YaHei", system-ui, sans-serif !important;
-  padding: 0 6px;
-  border-radius: 999px;
-  border: 1px solid transparent;
-  opacity: 0.9;
-  user-select: none;
+/* 2026-08-31：段落级「✕ 删除此段译文」按钮。
+   与 AI 重译按钮同构，默认隐藏、hover 显形；放在译文块左上角避免与右上角重译按钮重叠。 */
+.reword-bilingual-hide {
+  position: absolute;
+  top: 0;
+  left: 0;
+  opacity: 0;
   pointer-events: none;
-  background: rgba(128, 128, 128, 0.14);
-  color: #6b7280;
+  transition: opacity 0.15s ease;
+  font-family: -apple-system, "PingFang SC", "Microsoft YaHei", system-ui, sans-serif !important;
+  font-size: 0.72em;
+  line-height: 1;
+  padding: 3px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--b3-border-color, rgba(128, 128, 128, 0.3));
+  background: var(--b3-theme-background, #fff);
+  color: var(--b3-theme-on-background, #555);
+  cursor: pointer;
+  white-space: nowrap;
 }
-.reword-bilingual-badge[data-provider="cache"] { background: rgba(59, 130, 246, 0.14); color: #2563eb; }
-.reword-bilingual-badge[data-provider="fixed"] { background: rgba(34, 197, 94, 0.16); color: #16a34a; border-color: rgba(34, 197, 94, 0.3); }
-.reword-bilingual-badge[data-provider="microsoft"] { background: rgba(168, 85, 247, 0.14); color: #9333ea; }
-.reword-bilingual-badge[data-provider="libretranslate"] { background: rgba(249, 115, 22, 0.14); color: #ea580c; }
-@media (prefers-color-scheme: dark) {
-  .reword-bilingual-badge { background: rgba(160, 160, 160, 0.16); color: #cbd5e1; }
-  .reword-bilingual-badge[data-provider="cache"] { background: rgba(59, 130, 246, 0.22); color: #93c5fd; }
-  .reword-bilingual-badge[data-provider="fixed"] { background: rgba(34, 197, 94, 0.24); color: #86efac; }
-  .reword-bilingual-badge[data-provider="microsoft"] { background: rgba(168, 85, 247, 0.22); color: #d8b4fe; }
-  .reword-bilingual-badge[data-provider="libretranslate"] { background: rgba(249, 115, 22, 0.22); color: #fdba74; }
+.reword-bilingual[cfi-inert][data-translation-mark]:hover > .reword-bilingual-hide {
+  opacity: 0.85;
+  pointer-events: auto;
 }
-
-/* 翻译失败块：明显红色提示，重试按钮常显 */
-.reword-bilingual-failed {
-  border-left-color: #ef4444 !important;
-  color: #b91c1c;
+.reword-bilingual-hide:hover {
   opacity: 1;
-  background: rgba(239, 68, 68, 0.06);
-}
-.reword-bilingual-failed-text { font-style: italic; }
-.reword-bilingual-failed .reword-bilingual-action {
-  position: static;
-  opacity: 1 !important;
-  margin-left: 6px;
-  border-color: #ef4444;
-  color: #b91c1c;
-}
-@media (prefers-color-scheme: dark) {
-  .reword-bilingual-failed { color: #fca5a5; background: rgba(239, 68, 68, 0.12); }
+  color: var(--b3-theme-error, #d9534f);
+  border-color: var(--b3-theme-error, #d9534f);
 }
 
-/* 修正编辑态（contenteditable 正在编辑） */
-.reword-bilingual-text.reword-bilingual-editing {
-  outline: 1px dashed var(--b3-theme-primary, #0f6bff);
-  outline-offset: 1px;
-  background: rgba(255, 255, 255, 0.6);
-  cursor: text;
-  border-radius: 3px;
+/* 翻译失败块：静默灰色占位，不抢眼（无重试按钮）。
+   需用与主块同权重的属性选择器才能覆盖主块颜色。 */
+.reword-bilingual-failed[cfi-inert][data-translation-mark] {
+  color: #9ca3af;
+  background: rgba(128, 128, 128, 0.06);
 }
-@media (prefers-color-scheme: dark) {
-  .reword-bilingual-text.reword-bilingual-editing { background: rgba(255, 255, 255, 0.12); }
-}
+.reword-bilingual-failed-text { font-style: italic; opacity: 0.8; }
 
-/* 当前已切到 concise 模式：按钮轻微高亮区分 */
-.reword-bilingual[data-mode="concise"] .reword-bilingual-action.reword-bilingual-mode-concise {
-  background: rgba(255, 220, 120, 0.78);
-  color: #4a3500;
-  border-color: rgba(200, 150, 0, 0.42);
-}
-@media (prefers-color-scheme: dark) {
-  .reword-bilingual[data-mode="concise"] .reword-bilingual-action.reword-bilingual-mode-concise {
-    background: rgba(200, 150, 50, 0.42);
-    color: #ffe7a8;
-    border-color: rgba(255, 220, 120, 0.5);
-  }
-}`.trim();
+`.trim();
 }
 
 /**

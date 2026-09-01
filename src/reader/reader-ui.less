@@ -258,3 +258,24 @@
     transition: none !important;
   }
 }
+
+/* === 2026-08-31 v1.4.5 P4.4 / P5：选区/搜索高亮兜底（不依赖 siyuanVar 桥接） ===
+   当 siyuanVarBridgeStyles 还未注入（如父文档变量未抓到、桥接失败）时，
+   给一个中性默认值，至少能跟浏览器默认色区分开。
+   v1.4.5 P5：透明度从 25% 提到 50%，与主窗口选区色统一。
+   真实色值仍由 buildReaderStyles 的 selectionStyles() 提供（含 color-mix 派生的精细版）。
+*/
+.reader ::selection {
+  background: rgba(15, 107, 255, 0.5);
+  color: inherit;
+}
+.reader ::-moz-selection {
+  background: rgba(15, 107, 255, 0.5);
+  color: inherit;
+}
+.reader mark.reword-search-hit {
+  background: rgba(15, 107, 255, 0.7);
+  color: inherit;
+  padding: 0 1px;
+  border-radius: 2px;
+}

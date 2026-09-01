@@ -97,10 +97,19 @@ test("B1: rec 找不到时弹 selToolbar（create 模式）兜底", () => {
   assert.match(handler, /selToolbar\s*=\s*\{[^}]*visible:\s*true/s, "rec 失败分支应设 selToolbar.visible=true");
 });
 
-test("B2: rec 找不到时 toast 提示", () => {
+test("B2: rec 找不到时有可见的用户反馈（如清除残留高亮入口）", () => {
   const handler = extractShowAnnotationHandler(src);
   assert.ok(handler);
-  assert.match(handler, /toast\s*\(\s*["']批注记录未找到/, "rec 失败分支应 toast 提示");
+  // 2026 修正（原断言具体 toast 文案「批注记录未找到」）：
+  // 2026-08-24 死锁解除改为「弹 edit 工具栏 + 清除残留高亮按钮」，刻意**不再**弹 toast
+  // ——按钮本身就能说明情况，且给了用户可操作的出口，比一闪而过的 toast 更实用。
+  // 因此这里只断言「存在可见反馈」，不断言具体形式。
+  const hasToast = /toast\s*\(/.test(handler);
+  const hasVisibleUi = /selToolbar\s*=\s*\{[^}]*visible:\s*true/s.test(handler);
+  assert.ok(
+    hasToast || hasVisibleUi,
+    "rec 找不到时必须有可见反馈（toast 或兜底工具栏）"
+  );
 });
 
 test("B3: rec 找不到分支不再 silent return（必须有可见 UI 反馈）", () => {

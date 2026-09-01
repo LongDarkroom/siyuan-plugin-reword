@@ -61,7 +61,10 @@ test("EdgeBackend：WebSocket 立即 onerror → speak reject < 1s", { timeout: 
   } finally { restore(); }
 });
 
-test("EdgeBackend：open 后不发音频 → 8s 内 reject (no-audio-timeout)", { timeout: 12000 }, async () => {
+test("EdgeBackend：open 后不发音频 → 4s 内 reject (no-audio-timeout)", { timeout: 12000 }, async () => {
+  // 2026 修正（原断言 8s±0.5s）：Edge 公开 readaloud 端点在纯前端环境几乎必然
+  // 握手失败（浏览器 WebSocket 无法携带 Sec-MS-GEC 认证头），8s 会让用户每句都
+  // 干等。实现已把 NO_AUDIO_TIMEOUT_MS 收紧到 4000，让失败快速回退系统语音。
   function SilentWS() {
     this.binaryType = "";
     this.onopen = null;
@@ -78,7 +81,7 @@ test("EdgeBackend：open 后不发音频 → 8s 内 reject (no-audio-timeout)", 
     const t0 = Date.now();
     await assert.rejects(b.speak("hello", { lang: "en-US" }), /edge tts no audio in time|edge ws error/);
     const dur = Date.now() - t0;
-    assert.ok(dur >= 7500 && dur <= 9500, `no-audio timeout 必须在 8s±0.5s 触发，实际 ${dur}ms`);
+    assert.ok(dur >= 3500 && dur <= 5500, `no-audio timeout 必须在 4s±0.5s 触发，实际 ${dur}ms`);
   } finally { restore(); }
 });
 

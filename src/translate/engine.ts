@@ -2,9 +2,12 @@
  * 翻译引擎编排
  * ------------------------------------------------------------------
  * buildProviders：根据 AI 设置里的引擎配置，组装一条带优先级的 provider 链。
- *   - 2026-08-28：AI 升为链首首选（支持批量，一次请求译 N 段）；
- *     微软 / LibreTranslate 按 translatePriority 排在后面，仅当已配置
- *     key/url 时加入，作为 AI 失败时的兜底。
+ *   - 2026-08-30 重构：缓存由调用方（translateBatch）先行拦截，本链只负责
+ *     「未命中缓存」的段落。链内顺序为：
+ *       ① 免费机器翻译引擎（腾讯 / 有道 / 百度 / 微软 / LibreTranslate），
+ *          按 translatePriority 顺序，仅加入「已启用 + 已配置」的；
+ *       ② AI 翻译，恒为兜底（链尾），仅在全部免费引擎失败/未配置时承担成本。
+ *     这样最省 token：免费额度内的段落不消耗任何 AI 调用。
  *
  * translateWithFallback：依次尝试，返回第一个「成功且译文非空」的结果；
  *   全部失败则返回全空串（provider: "none"）。
@@ -12,19 +15,46 @@
 import type { Translator, TranslateRequest, TranslateOutcome } from "./types.ts";
 import { MicrosoftTranslator } from "./providers/microsoft.ts";
 import { LibreTranslator } from "./providers/libretranslate.ts";
+import { TencentTranslator } from "./providers/tencent.ts";
+import { YoudaoTranslator } from "./providers/youdao.ts";
+import { BaiduTranslator } from "./providers/baidu.ts";
 import { AiTranslator } from "./providers/ai.ts";
 import type { AiTranslateFn, AiTranslateBatchFn } from "./providers/ai.ts";
 
 /** 引擎配置（来自 AiSettings 的翻译相关字段） */
 export interface EngineConfig {
+  // 腾讯翻译（Tencent Cloud TMT）
+  tencentSecretId?: string;
+  tencentSecretKey?: string;
+  tencentEnabled?: boolean;
+  // 有道翻译（有道智云）
+  youdaoAppKey?: string;
+  youdaoAppSecret?: string;
+  youdaoEnabled?: boolean;
+  // 百度翻译
+  baiduAppId?: string;
+  baiduKey?: string;
+  baiduEnabled?: boolean;
+  // 微软 Translator
   msKey?: string;
   msRegion?: string;
-  /** 兜底引擎开关（2026-08-28 默认关闭；AI 恒为首选） */
+  /** 兜底引擎开关（默认关闭；AI 恒为首选） */
   msEnabled?: boolean;
+  // LibreTranslate
   libreUrl?: string;
   libreEnabled?: boolean;
-  /** 免费引擎兜底顺序（仅当开关开启且已配置才生效） */
+  /** 免费引擎优先级（仅当开关开启且已配置才生效；AI 永远兜底，不在此列） */
   priority?: string[];
+  /** 腾讯翻译已用字符数（用于 400 万用量锁） */
+  tencentCharsUsed?: number;
+  /** 腾讯翻译用量锁 */
+  tencentCharsLock?: number;
+  /** AI 是否启用（用于可用性判断） */
+  aiEnabled?: boolean;
+  /** AI API Key */
+  aiApiKey?: string;
+  /** 可用 AI 模型列表 */
+  aiModels?: string[];
 }
 
 /** 引擎依赖（注入自有 AI 翻译函数） */
@@ -34,25 +64,88 @@ export interface EngineDeps {
   translateBatch?: AiTranslateBatchFn;
 }
 
-/** 组装 provider 链：AI 首选，免费引擎按配置兜底在后 */
-export function buildProviders(cfg: EngineConfig, deps: EngineDeps): Translator[] {
+/** 腾讯翻译是否已达到用量锁 */
+export function isTencentLocked(cfg: EngineConfig): boolean {
+  const used = cfg.tencentCharsUsed ?? 0;
+  const lock = cfg.tencentCharsLock ?? 4_000_000;
+  return lock > 0 && used >= lock;
+}
+
+/** 判断单引擎当前是否可用（已启用 + 已配置 + 未达用量锁） */
+export function isEngineAvailable(name: string, cfg: EngineConfig): boolean {
+  switch (name) {
+    case "tencent":
+      return !!(cfg.tencentEnabled && cfg.tencentSecretId && cfg.tencentSecretKey && !isTencentLocked(cfg));
+    case "youdao":
+      return !!(cfg.youdaoEnabled && cfg.youdaoAppKey && cfg.youdaoAppSecret);
+    case "baidu":
+      return !!(cfg.baiduEnabled && cfg.baiduAppId && cfg.baiduKey);
+    case "microsoft":
+      return !!(cfg.msEnabled && cfg.msKey && cfg.msRegion);
+    case "libretranslate":
+      return !!(cfg.libreEnabled && cfg.libreUrl);
+    case "ai":
+      return !!(cfg.aiEnabled && cfg.aiApiKey);
+    default:
+      return false;
+  }
+}
+
+/**
+ * 组装 provider 链：免费机器翻译引擎（按 priority 顺序）在前，AI 兜底在后。
+ * 仅加入「已启用 + 已配置 credentials + 未达用量锁」的引擎；未启用的被链式跳过。
+ *
+ * @param engine 强制指定引擎："auto" 或不传则按 priority 链；"ai" 则只用 AI；
+ *               其他具体引擎则仅该引擎 + AI 兜底（方便预翻译弹窗指定引擎）。
+ */
+export function buildProviders(cfg: EngineConfig, deps: EngineDeps, engine?: string): Translator[] {
   const providers: Translator[] = [];
-  // 2026-08-28：AI 首选（批量模式），微软/LibreTranslate 失效场景直接命中
+  const requested = (engine || "auto").trim();
+
+  // 单引擎强制模式：仅启用指定引擎（AI 兜底可选）
+  if (requested && requested !== "auto") {
+    if (requested === "tencent" && isEngineAvailable("tencent", cfg)) {
+      providers.push(new TencentTranslator(cfg.tencentSecretId!, cfg.tencentSecretKey!));
+    } else if (requested === "youdao" && isEngineAvailable("youdao", cfg)) {
+      providers.push(new YoudaoTranslator(cfg.youdaoAppKey!, cfg.youdaoAppSecret!));
+    } else if (requested === "baidu" && isEngineAvailable("baidu", cfg)) {
+      providers.push(new BaiduTranslator(cfg.baiduAppId!, cfg.baiduKey!));
+    } else if (requested === "microsoft" && isEngineAvailable("microsoft", cfg)) {
+      providers.push(new MicrosoftTranslator(cfg.msKey!, cfg.msRegion!));
+    } else if (requested === "libretranslate" && isEngineAvailable("libretranslate", cfg)) {
+      providers.push(new LibreTranslator(cfg.libreUrl!));
+    }
+    // AI 引擎（或 fallback）：指定 ai 时只留 AI；指定其他引擎失败时也可用 AI 兜底
+    if (requested === "ai" || isEngineAvailable("ai", cfg)) {
+      providers.push(new AiTranslator({ translateOne: deps.translateOne, translateBatch: deps.translateBatch }));
+    }
+    return providers;
+  }
+
+  // ① 免费引擎链（默认顺序：腾讯 → 有道 → 百度 → 微软 → LibreTranslate）
+  const order = Array.isArray(cfg.priority) && cfg.priority.length
+    ? cfg.priority
+    : ["tencent", "youdao", "baidu", "microsoft", "libretranslate"];
+
+  for (const name of order) {
+    if (name === "tencent" && isEngineAvailable("tencent", cfg)) {
+      providers.push(new TencentTranslator(cfg.tencentSecretId!, cfg.tencentSecretKey!));
+    } else if (name === "youdao" && isEngineAvailable("youdao", cfg)) {
+      providers.push(new YoudaoTranslator(cfg.youdaoAppKey!, cfg.youdaoAppSecret!));
+    } else if (name === "baidu" && isEngineAvailable("baidu", cfg)) {
+      providers.push(new BaiduTranslator(cfg.baiduAppId!, cfg.baiduKey!));
+    } else if (name === "microsoft" && isEngineAvailable("microsoft", cfg)) {
+      providers.push(new MicrosoftTranslator(cfg.msKey!, cfg.msRegion!));
+    } else if (name === "libretranslate" && isEngineAvailable("libretranslate", cfg)) {
+      providers.push(new LibreTranslator(cfg.libreUrl!));
+    }
+  }
+
+  // ② AI 兜底（链尾，仅在免费引擎全失败或未配置时承担成本）
   providers.push(
     new AiTranslator({ translateOne: deps.translateOne, translateBatch: deps.translateBatch })
   );
 
-  const order = Array.isArray(cfg.priority) && cfg.priority.length
-    ? cfg.priority
-    : ["microsoft", "libretranslate"];
-
-  for (const name of order) {
-    if (name === "microsoft" && cfg.msEnabled && cfg.msKey && cfg.msRegion) {
-      providers.push(new MicrosoftTranslator(cfg.msKey, cfg.msRegion));
-    } else if (name === "libretranslate" && cfg.libreEnabled && cfg.libreUrl) {
-      providers.push(new LibreTranslator(cfg.libreUrl));
-    }
-  }
   return providers;
 }
 

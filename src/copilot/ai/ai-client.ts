@@ -310,7 +310,8 @@ export async function requestAIGenerate(
   let usage: AiUsage | undefined;
   let truncated = false;
   try {
-    const j = JSON.parse(res.body);
+    const bodyText = res.body || "";
+    const j = bodyText.trim() ? JSON.parse(bodyText) : {};
     if (typeof j?.model === "string") model = j.model;
     if (j?.usage) {
       usage = {

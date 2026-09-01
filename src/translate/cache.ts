@@ -1,4 +1,13 @@
 import { logSwallow } from "../core/safe.ts";
+import { readDir } from "../siyuan/api.ts";
+import {
+  isSqliteCacheReady,
+  sqliteDeleteBook,
+  sqliteDeleteKeys,
+  sqliteGetBatch,
+  sqliteSetBatch,
+  translationKey,
+} from "./sqlite-cache.ts";
 /**
  * 翻译缓存（按书落盘）
  * ------------------------------------------------------------------
@@ -21,6 +30,19 @@ import { logSwallow } from "../core/safe.ts";
  */
 export type TranslationMode = "default" | "concise";
 export const DEFAULT_TRANSLATION_MODE: TranslationMode = "default";
+
+/** 插件名（思源插件数据目录 = /data/storage/petal/<name>/） */
+const PLUGIN_NAME = "siyuan-plugin-reword";
+/** 翻译缓存在思源工作空间内的目录（readDir 用工作空间相对绝对路径） */
+const TRANSLATIONS_DIR = `/data/storage/petal/${PLUGIN_NAME}/translations`;
+
+/** 一本书的缓存条目（UI 列表用；title 可能为空，由上层用书架书名兜底） */
+export interface CachedBookInfo {
+  bookId: string;
+  title: string;
+  /** 缓存文件最后更新时间（Unix 秒，readDir 的 updated 字段；取不到时为空） */
+  updated?: number;
+}
 
 /** 单 mode 的缓存结构（mode -> 原文 hash -> 译文） */
 type ModeCacheMap = Record<string, Record<string, string>>;
@@ -121,6 +143,38 @@ export class TranslationCache {
       if (v != null && v !== "") { hits[i] = v; fromCache[i] = true; }
       else misses.push(i);
     });
+
+    // 2026-08-31 Phase 2：JSON 未命中的段，兜底查 SQLite（思源块 / attributes 表）。
+    // 只有 misses 非空才会发起查询，JSON 全命中时零额外开销。
+    if (misses.length && isSqliteCacheReady()) {
+      const stillMiss: number[] = [];
+      const missKeys = misses.map((i) => translationKey(bookId, mode, this.hash(texts[i], mode)));
+      let found: Map<string, string>;
+      try {
+        found = await sqliteGetBatch(missKeys);
+      } catch (__swallowErr) {
+        logSwallow(__swallowErr, "cache.ts · getBatch·sqlite", "debug");
+        found = new Map();
+      }
+      for (const i of misses) {
+        const k = translationKey(bookId, mode, this.hash(texts[i], mode));
+        const v = found.get(k);
+        if (v) {
+          hits[i] = v;
+          fromCache[i] = true;
+          // 回写内存，下次直接命中，不必再查 SQLite
+          modeMap[this.hash(texts[i], mode)] = v;
+        } else {
+          stillMiss.push(i);
+        }
+      }
+      if (stillMiss.length !== misses.length) {
+        this.mem.set(bookId, bookMap);
+        misses.length = 0;
+        misses.push(...stillMiss);
+      }
+    }
+
     return { hits, misses, fromCache };
   }
 
@@ -139,7 +193,6 @@ export class TranslationCache {
 
   /**
    * 单条失效（用于单段删除：清除该段 AI 缓存，下次刷新不重现）。
-   * 注意：不碰用户修正库（fix），用户修正最珍贵，需单独 fixDelete。
    */
   async deleteOne(bookId: string, text: string, mode: TranslationMode = DEFAULT_TRANSLATION_MODE): Promise<void> {
     const bookMap = await this.load(bookId);
@@ -147,6 +200,10 @@ export class TranslationCache {
     const k = this.hash(text, mode);
     if (k in modeMap) delete modeMap[k];
     this.mem.set(bookId, bookMap);
+    // Phase 2：同步删 SQLite 里的对应块
+    if (isSqliteCacheReady()) {
+      void sqliteDeleteKeys([translationKey(bookId, mode, k)]).catch(() => {});
+    }
     clearTimeout(this.timers.get(bookId));
     this.timers.set(bookId, setTimeout(() => {
       this.plugin.saveData(this.path(bookId), bookMap).catch(() => {});
@@ -174,6 +231,16 @@ export class TranslationCache {
         this.timers.delete(bookId);
       }, 500)
     );
+
+    // 2026-08-31 Phase 2：同步写一份进思源 SQLite（块 + attributes 检索键），
+    // 使译文可被思源搜索 / 随同步跨设备 / 用 SQL 查询。
+    // 异步且不 await——SQLite 写入失败不应阻塞翻译主流程。
+    if (isSqliteCacheReady()) {
+      const sp = pairs.map(
+        ([t, tr]) => [translationKey(bookId, mode, this.hash(t, mode)), tr] as [string, string]
+      );
+      void sqliteSetBatch(sp, { bookId, mode }).catch(() => {});
+    }
   }
 
   /** 记录本书已缓存节（增量合并进 cachedSections，并落盘元信息 + 书名索引）。节号 1-based */
@@ -222,6 +289,11 @@ export class TranslationCache {
     return "translations/" + bookId + ".meta.json";
   }
 
+  /** 人工修订缓存（clear 时一并删除） */
+  private fixPath(bookId: string): string {
+    return "translations/" + bookId + ".fix.json";
+  }
+
   private indexPath(): string {
     return "translations/_index.json";
   }
@@ -245,10 +317,82 @@ export class TranslationCache {
     this.plugin.saveData(this.indexPath(), obj).catch(() => {});
   }
 
+  /**
+   * 扫描磁盘上真实存在的翻译缓存文件，返回 bookId 列表。
+   * ------------------------------------------------------------------
+   * 2026-09-01 修复：书名索引（translations/_index.json）依赖 recordSections()
+   * 被调用时才写入，v2 翻译链路未调用它 → 索引文件从未生成 → 「缓存管理」
+   * 永远显示「暂无翻译缓存」，而磁盘上其实有几十本缓存文件。
+   * 这里用 readDir 直接扫目录做兜底，与索引取并集，保证 UI 与磁盘一致。
+   *
+   * 过滤规则：只认 `<bookId>.json`，排除 `.meta.json` / `.fix.json` / `_index.json`。
+   * readDir 失败（路径不存在 / 权限 / 接口变更）时静默降级为空数组，由索引兜底。
+   */
+  private async scanDiskCacheIds(): Promise<Array<{ bookId: string; updated?: number }>> {
+    try {
+      const res: any = await readDir(TRANSLATIONS_DIR);
+      // 不同思源版本返回形态不一：直接数组 / { data: [...] }
+      const arr: any[] = Array.isArray(res) ? res : (res?.data ?? []);
+      return arr
+        .filter((e: any) => e && !e.isDir && typeof e.name === "string")
+        .filter((e: any) => {
+          const n = e.name as string;
+          return n.endsWith(".json") && !n.endsWith(".meta.json") && !n.endsWith(".fix.json") && n !== "_index.json";
+        })
+        .map((e: any) => ({
+          bookId: (e.name as string).slice(0, -".json".length),
+          // readDir 会带 updated（Unix 秒），用于 UI 展示「最近翻译」；取不到就是 undefined
+          updated: typeof e.updated === "number" ? e.updated : undefined,
+        }))
+        .filter((x: { bookId: string }) => Boolean(x.bookId));
+    } catch (__swallowErr) {
+      logSwallow(__swallowErr, "cache.ts · scanDiskCacheIds", "debug");
+      return [];
+    }
+  }
+
+  /** 从 <bookId>.meta.json 里读回书名（索引里没有时的第二数据源） */
+  private async titleFromMeta(bookId: string): Promise<string> {
+    try {
+      const raw = await this.plugin.loadData(this.metaPath(bookId));
+      if (raw && typeof raw === "object" && typeof (raw as any).title === "string") {
+        return (raw as any).title;
+      }
+    } catch (__swallowErr) {
+      logSwallow(__swallowErr, "cache.ts · titleFromMeta", "debug");
+    }
+    return "";
+  }
+
   /** 列出所有有翻译缓存的书籍（bookId + 书名），供 UI「选择书籍」下拉 */
-  async listCachedBooks(): Promise<Array<{ bookId: string; title: string }>> {
+  async listCachedBooks(): Promise<CachedBookInfo[]> {
     await this.loadIndex();
-    return [...this.bookIndex.entries()].map(([bookId, title]) => ({ bookId, title }));
+    // 磁盘扫描 ∪ 书名索引：磁盘为准（可能比索引多），索引补充标题
+    const updatedMap = new Map<string, number>();
+    const ids = new Set<string>([...this.bookIndex.keys()]);
+    for (const { bookId, updated } of await this.scanDiskCacheIds()) {
+      ids.add(bookId);
+      if (typeof updated === "number") updatedMap.set(bookId, updated);
+    }
+
+    const out: CachedBookInfo[] = [];
+    let backfilled = false;
+    for (const bookId of ids) {
+      let title = this.bookIndex.get(bookId) || "";
+      if (!title) {
+        // meta 文件是索引之外唯一的书名来源（recordSections 曾写进去过）
+        const t = await this.titleFromMeta(bookId);
+        if (t) {
+          title = t;
+          this.bookIndex.set(bookId, t);
+          backfilled = true;
+        }
+      }
+      out.push({ bookId, title, updated: updatedMap.get(bookId) });
+    }
+    // 回填落盘：下次直接命中 _index.json，不必再逐本读 meta
+    if (backfilled) this.saveIndex();
+    return out;
   }
 
   /**
@@ -260,12 +404,12 @@ export class TranslationCache {
    * 本方法回收这些无效缓存，且只清书架里查不到的 id，绝不误删在读书籍的缓存。
    */
   async cleanOrphanCaches(validIds: Set<string>): Promise<number> {
-    await this.loadIndex();
+    // 2026-09-01：从「磁盘 ∪ 索引」取全量，避免只清索引里的、磁盘上的孤儿文件还在
+    const all = await this.listCachedBooks();
     let removed = 0;
-    const orphans = [...this.bookIndex.keys()].filter((id) => !validIds.has(id));
+    const orphans = all.map((b) => b.bookId).filter((id) => !validIds.has(id));
     for (const id of orphans) {
       await this.clear(id); // 清 .json + .meta.json + 书名索引条目
-      await this.clearFix(id); // 清 .fix.json（孤儿修正一并回收）
       removed++;
     }
     return removed;
@@ -332,77 +476,18 @@ export class TranslationCache {
     this.saveIndex();
     clearTimeout(this.timers.get(bookId));
     this.timers.delete(bookId);
+    // Phase 2：同步清 SQLite 里该书的全部译文块
+    if (isSqliteCacheReady()) void sqliteDeleteBook(bookId).catch(() => {});
     try {
       await this.plugin.removeData?.(this.path(bookId));
     } catch (__swallowErr) { logSwallow(__swallowErr, "cache.ts · clear", "error"); }
     try {
       await this.plugin.removeData?.(this.metaPath(bookId));
     } catch (__swallowErr) { logSwallow(__swallowErr, "cache.ts · clear", "error"); }
-  }
-
-  /* ===================== 用户修正库（独立于 AI 缓存） =====================
-   * 用户「钉选」的正确译文：最高优先级，覆盖 AI 缓存与实时翻译。
-   * 落盘独立文件 translations/<bookId>.fix.json，clear() 不清它——
-   * 用户修正最珍贵，误删代价极高。需单独 clearFix() 才删。
-   * key 用纯原文 hash（不拼 mode/salt），使一段原文只对应一份修正，
-   * 无论当前显示 default 还是 concise 池，修正都生效。
-   */
-  private fixMem = new Map<string, Record<string, { tr: string; ts: number; model?: string }>>();
-  private fixTimers = new Map<string, any>();
-  private fixPath(bookId: string): string {
-    return "translations/" + bookId + ".fix.json";
-  }
-  private async loadFix(bookId: string): Promise<Record<string, { tr: string; ts: number; model?: string }>> {
-    if (this.fixMem.has(bookId)) return this.fixMem.get(bookId)!;
-    let map: Record<string, { tr: string; ts: number; model?: string }> = {};
-    try {
-      const raw = await this.plugin.loadData(this.fixPath(bookId));
-      if (raw && typeof raw === "object") map = raw as any;
-    } catch (__swallowErr) { logSwallow(__swallowErr, "cache.ts · loadFix", "debug"); }
-    this.fixMem.set(bookId, map);
-    return map;
-  }
-  /** 取用户钉选的修正译文（最高优先级）。返回 null 表示无修正。 */
-  async fixGet(bookId: string, text: string): Promise<string | null> {
-    const map = await this.loadFix(bookId);
-    const v = map[this.hash(text)];
-    return v && v.tr ? v.tr : null;
-  }
-  /** 写入/覆盖用户修正（钉选正确答案，持久化且不被 clear 清掉） */
-  async fixSet(bookId: string, text: string, tr: string, model?: string): Promise<void> {
-    const map = await this.loadFix(bookId);
-    map[this.hash(text)] = { tr, ts: Date.now(), model };
-    this.fixMem.set(bookId, map);
-    clearTimeout(this.fixTimers.get(bookId));
-    this.fixTimers.set(bookId, setTimeout(() => {
-      this.plugin.saveData(this.fixPath(bookId), map).catch(() => {});
-      this.fixTimers.delete(bookId);
-    }, 500));
-  }
-  /** 删除单条用户修正（仅删修正库，不影响 AI 缓存） */
-  async fixDelete(bookId: string, text: string): Promise<void> {
-    const map = await this.loadFix(bookId);
-    const k = this.hash(text);
-    if (k in map) delete map[k];
-    this.fixMem.set(bookId, map);
-    clearTimeout(this.fixTimers.get(bookId));
-    this.fixTimers.set(bookId, setTimeout(() => {
-      this.plugin.saveData(this.fixPath(bookId), map).catch(() => {});
-      this.fixTimers.delete(bookId);
-    }, 500));
-  }
-  /** 本书用户修正条数（UI 提示「已钉选 N 处修正」） */
-  async fixCount(bookId: string): Promise<number> {
-    const map = await this.loadFix(bookId);
-    return Object.keys(map).length;
-  }
-  /** 清空用户修正库（独立于 AI 缓存；默认 clear() 不清修正） */
-  async clearFix(bookId: string): Promise<void> {
-    this.fixMem.delete(bookId);
-    clearTimeout(this.fixTimers.get(bookId));
-    this.fixTimers.delete(bookId);
+    // 2026-09-01：补删人工修订缓存 <id>.fix.json（clear 的文档一直承诺会删，
+    // 但实现里漏了，导致孤儿清理后残留 fix 文件）
     try {
       await this.plugin.removeData?.(this.fixPath(bookId));
-    } catch (__swallowErr) { logSwallow(__swallowErr, "cache.ts · clearFix", "error"); }
+    } catch (__swallowErr) { logSwallow(__swallowErr, "cache.ts · clear · fix", "error"); }
   }
 }

@@ -54,11 +54,15 @@ test("createBackend: engine=edge → primary=edge, fallback=system（fake WebSoc
   assert.equal(fallback.name, "system");
 });
 
-test("createBackend: engine=auto → 在线优先（fake stub 下应选 edge）", () => {
+test("createBackend: engine=auto → 系统语音优先，在线引擎兜底", () => {
   const { primary, fallback } = createBackend({ ...DEFAULT_REWORD_TTS, engine: "auto" });
-  // fake WebSocket + Audio 已 stub → supported(edge)=true → primary=edge
-  assert.equal(primary.name, "edge");
-  assert.equal(fallback?.name, "system");
+  // 2026 修正（原断言为「在线优先选 edge」）：
+  // Edge 公开 readaloud 端点自 2024 起陆续下线，若 auto 仍优先在线，
+  // 每句朗读都要先等 8s 无音频超时才降级 → 体验极差。
+  // 故改为 system 直接作主引擎（离线、多语言嗓音最稳），在线只作兜底，
+  // 容错由 speakWithFallback 的一次性降级保证。
+  assert.equal(primary.name, "system", "auto 应以离线系统语音为主引擎");
+  assert.equal(fallback?.name, "youdao", "在线引擎应作为兜底");
 });
 
 test("createBackend: 三种后端实例都实现 TtsBackend 接口契约", () => {

@@ -94,6 +94,8 @@ import { openLogViewer, exportLogsCommand } from "./core/log-viewer.ts";
 // foliate customElement 注册保护（必须在 reader 其他模块之前）—— 防止热重载重复 define 抛错阻断 plugin onload
 import "./reader/foliate-shim.ts";
 import { ReaderDockController, READER_FEATURE_ID } from "./reader/reader-dock.ts";
+// 2026-08-31 Phase 4：双语翻译设置弹窗（Dialog 弹窗，命令/按钮直接打开）
+import { openBilingualSettingsTab } from "./reader/bilingual-settings-tab.ts";
 // 2026-08-24：dock 批注面板删除后广播 → 各 ReaderView 全量 reconcile 清除当前页残留高亮
 import { notifyAnnotationsChanged } from "./reader/annotation-visual.ts";
 
@@ -116,9 +118,11 @@ import {
   parsePrompts as parseCopilotPrompts,
 } from "./copilot/copilot/prompt-manager.ts";
 import { runChat as runCopilotChat } from "./copilot/ai/ai-orchestrator.ts";
-import { buildProviders, translateWithFallback } from "./translate/engine";
+import { buildProviders, translateWithFallback, isTencentLocked } from "./translate/engine";
 import { parseNumberedTranslations, parseTranslationsPositional } from "./translate/providers/ai";
 import { TranslationCache } from "./translate/cache";
+import { BookModeStore } from "./reader/bilingual-book-mode.ts";
+import { GLOSSARY_STORAGE_KEY, GlossaryStore } from "./translate/glossary.ts";
 import { BookPrimerStore } from "./reader/book-primer";
 import type {
   AiSettings as CopilotAiSettings,
@@ -305,14 +309,30 @@ export default class RewordPlugin extends Plugin {
   private aiSettings!: AiSettings;       // AI 精读设置（persist: hiword-ai.json）
   private aiPanel?: AiPanel;             // AI 精读 dock 面板控制器
   private translationCache!: TranslationCache; // 双语翻译按书缓存（persist: translations/<bookId>.json）
+  /** 2026-08-31 Task A：双语翻译「按书记忆」模式（persist: bilingual-book-modes.json） */
+  private bookModeStore!: BookModeStore;
+  /** 2026-08-31 Phase 3：全局术语表（persist: glossary.json）；version 并入缓存 salt */
+  private glossaryStore!: GlossaryStore;
   /** 本书前提上下文（persist: book-primers.json）——用户手写的背景/人物/译法，注入翻译 prompt */
   private bookPrimerStore!: BookPrimerStore;
   /** 供 UI（阅读器设置面板）读写本书上下文 */
   get bookPrimer() { return this.bookPrimerStore; }
-  /** 最近一次双语翻译的累计 token 用量（UI 层读取展示用） */
-  private _lastTranslationUsage: { promptTokens: number; completionTokens: number; totalTokens: number } | null = null;
-  /** 读取最近一次翻译的 token 用量（null 表示无数据 / 未走 AI） */
-  get lastTranslationUsage() { return this._lastTranslationUsage; }
+  /**
+   * 2026-08-30 v1.4.3：按 mode 隔离的最近一次翻译 token 用量。
+   * 背景：aiTranslateBatch 被多个并发桶调用（trConcurrency 默认 2），并发场景下
+   * 单一实例字段会被不同请求 reset / 累加 串台 → UI 看到的"最近一次"不可信。
+   * 现在按 mode 分桶：default 的累加不影响 concise 的；UI 层按需读对应 mode。
+   */
+  private _lastTranslationUsageByMode: Record<"default" | "concise", { promptTokens: number; completionTokens: number; totalTokens: number } | null> = {
+    default: null,
+    concise: null,
+  };
+  /** 读取最近一次翻译的 token 用量（mode 不传则返回 default，兼容历史 UI 读取） */
+  get lastTranslationUsage() { return this._lastTranslationUsageByMode.default; }
+  /** 读取指定 mode 的最近一次 token 用量 */
+  getLastTranslationUsage(mode: "default" | "concise" = "default") {
+    return this._lastTranslationUsageByMode[mode];
+  }
   /** 按书累计的 AI token 用量（persist: book-token-usage.json） */
   private bookTokenUsage: Record<string, { total: number; prompt: number; completion: number }> = {};
   /** token 统计持久化键 */
@@ -393,6 +413,43 @@ export default class RewordPlugin extends Plugin {
 
   async onload() {
     getLogger().info("[REword] 插件加载中... (build=2026-08-21-A3-page-v3)");
+
+    // 2026-08-31 v1.4.5 P5：往思源主窗口注入选区色 CSS，让主文档与阅读器选区色统一跟思源主题联动
+    //   - 思源切主题时 --b3-theme-primary 自动变；CSS 用 var() 实时解析，无需监听
+    //   - 透明度 50%：与思源自带 lj editor ::selection 视觉接近（深色调），但仍可读
+    //   - 唯一 id 防重复注入（思源切布局时可能重渲染 head）
+    try {
+      const SELECTION_STYLE_ID = "reword-global-selection";
+      let styleEl = document.getElementById(SELECTION_STYLE_ID) as HTMLStyleElement | null;
+      if (!styleEl) {
+        styleEl = document.createElement("style");
+        styleEl.id = SELECTION_STYLE_ID;
+        styleEl.textContent = `
+/* === REword v1.4.5 P5：主文档选区色与思源主题联动（不破坏 lute 渲染） === */
+::selection {
+  background: rgba(15, 107, 255, 0.5);
+  color: inherit !important;
+}
+::-moz-selection {
+  background: rgba(15, 107, 255, 0.5);
+  color: inherit !important;
+}
+/* 现代 CSS：color-mix 派生的精细版（浏览器支持时优先用，色值更准） */
+@supports (background: color-mix(in srgb, red, transparent 50%)) {
+  ::selection {
+    background: color-mix(in srgb, var(--b3-theme-primary, #0f6bff) 50%, transparent) !important;
+  }
+  ::-moz-selection {
+    background: color-mix(in srgb, var(--b3-theme-primary, #0f6bff) 50%, transparent) !important;
+  }
+}
+`.trim();
+        document.head.appendChild(styleEl);
+        getLogger().info("[REword] 主窗口选区色 CSS 已注入（v1.4.5 P5）");
+      }
+    } catch (e) {
+      getLogger().warn("[REword] 注入主窗口选区色 CSS 失败（不影响主功能）:" + (e as Error)?.message);
+    }
 
     // 记录插件目录绝对路径：先取 SiYuan 基类的 this.path，再用确定性探测纠正
     // （SiYuan 运行时 __dirname 可能指向 electron.asar/renderer，this.path 版本间也可能不同）
@@ -529,11 +586,29 @@ export default class RewordPlugin extends Plugin {
       this.aiPresetStore = new AiPresetStore(() => this.persistAiPresets.update(this.aiPresetStore.export()));
       this.promptTemplateStore = new PromptTemplateStore(() => this.persistAiPrompts.update(this.promptTemplateStore.export()));
       this.aiSettings = { ...DEFAULT_AI_SETTINGS };
+      // 2026-08-31 Phase 3：术语表（全局一本，存 glossary.json）
+      this.glossaryStore = new GlossaryStore((d) => {
+        this.saveData(GLOSSARY_STORAGE_KEY, d).catch(() => {});
+      });
+      this.glossaryStore.load((k) => this.loadData(k)).catch(() => {
+        /* 加载失败保持空表，不影响翻译主流程 */
+      });
       // 2026-08-28：缓存 hash 拼入当前翻译提示词（salt），提示词改版后旧译文自动失效
+      // 2026-08-31：术语表版本也并入 salt——改了词条，相关译文自然失效触发重译。
+      //   只有 version > 0（即用过户术语表）才并入，未使用过时 salt 完全不变。
       this.translationCache = new TranslationCache(
         this,
-        () => this.aiSettings?.translatePrompt || DEFAULT_AI_SETTINGS.translatePrompt
+        () => {
+          const p = this.aiSettings?.translatePrompt || DEFAULT_AI_SETTINGS.translatePrompt;
+          const gv = this.glossaryStore?.version ?? 0;
+          // 2026-08-31：术语表变更 → 版本号自增 → salt 变化 → 旧译文缓存全部失效触发重译。
+          // 仅以 version>0 判定（未用过术语表时 version 恒为 0，salt 完全不变）；
+          // 去掉 isEmpty 限制，避免「清空术语表」时 salt 回退导致失效判定不一致。
+          return gv > 0 ? `${p}|g${gv}` : p;
+        }
       );
+      // 2026-08-31 Task A：按书记忆用户为每本书选定的翻译模式
+      this.bookModeStore = new BookModeStore(this);
       // 2026-08-28 v1.3.0：本书前提上下文（用户手写的背景/人物/译法，注入翻译 prompt）
       this.bookPrimerStore = new BookPrimerStore(this);
       this.bookPrimerStore.load().catch(() => {
@@ -645,6 +720,7 @@ export default class RewordPlugin extends Plugin {
     } catch (e) {
       getLogger().warn("[REword] 阅读器初始化失败（阅读器面板将不可用）", { error: e });
     }
+    // 2026-08-31 Phase 4：双语翻译设置已改为 Dialog 弹窗（openBilingualSettingsTab 直接打开，无需注册 Tab 类型）
     try { await this.initDictionary(); } catch (e) { getLogger().error("词典引擎初始化失败", { operation: "初始化-词典", error: e }); }
     // 词典就绪后按当前激活 Tab 刷新（避免覆盖非词库 Tab 的内容）
     if (this.dictReady) {
@@ -666,6 +742,7 @@ export default class RewordPlugin extends Plugin {
       { langKey: "extractWords", langText: "RE word: 框选提取单词到词库", hotkey: "⌥⌘E", cb: () => this.extractWordsFromSelection() },
       { langKey: "aiDeepRead", langText: "RE word: AI 精读（当前块/选区）", hotkey: "⌥⌘A", cb: () => this.showAiPanel() },
       { langKey: "aiSettings", langText: "RE word: AI 设置", cb: () => this.openAiSettings() },
+      { langKey: "bilingualSettings", langText: "RE word: 双语翻译设置", cb: () => this.openBilingualSettingsTab() },
       { langKey: "openDictManager", langText: "RE word: 词典管理（添加离线词典）", cb: () => this.openDictManager() },
       { langKey: "exportVocab", langText: "RE word: 导出词库为 CSV", cb: () => this.exportVocabCSV() },
       { langKey: "pruneOrphanAnn", langText: "RE word: 清理失效批注（来源块已删除）", cb: () => this.pruneOrphanAnnotations() },
@@ -1252,7 +1329,7 @@ export default class RewordPlugin extends Plugin {
     bookId: string,
     ctxBefore?: (string | null)[],
     meta?: { title?: string; author?: string; language?: string; toc?: string } | null,
-    opts?: { model?: string; overwrite?: boolean; signal?: AbortSignal; mode?: "default" | "concise" }
+    opts?: { model?: string; overwrite?: boolean; signal?: AbortSignal; mode?: "default" | "concise"; engine?: string }
   ): Promise<string[]> {
     if (!Array.isArray(texts) || texts.length === 0) return [];
     const out: string[] = new Array(texts.length).fill("");
@@ -1266,7 +1343,7 @@ export default class RewordPlugin extends Plugin {
     for (const k in hits) out[+k] = hits[k];
     trLog(`translateBatch: 缓存命中 ${Object.keys(hits).length}, 未命中 ${misses.length}/${texts.length}${opts?.overwrite ? " (覆盖缓存)" : ""}`);
 
-    // 2) 未命中部分走引擎链（2026-08-28：AI 首选 + 批量模式）
+    // 2) 未命中部分走引擎链（2026-08-28：AI 首选 + 批量模式；2026-08-30 支持指定 engine）
     if (misses.length) {
       const reqTexts = misses.map((i) => texts[i]);
       // 前文参考需与 misses 对齐（每个未命中索引对应的前文段）
@@ -1278,7 +1355,7 @@ export default class RewordPlugin extends Plugin {
         const providers = buildProviders(this.aiSettings, {
           translateOne: (t, f, t2, bid) => this.aiTranslateText(t, f, t2, bid),
           translateBatch: (ts, f, t2, bid) => this.aiTranslateBatch(ts, f, t2, bid, reqCtx, meta, { ...opts, mode }),
-        });
+        }, opts?.engine);
         trLog(`translateBatch: ${providers.length} 个引擎, 调用 translateWithFallback...`);
         const res = await translateWithFallback(providers, { texts: reqTexts, from, to, bookId });
         const tr = res.texts || [];
@@ -1290,6 +1367,17 @@ export default class RewordPlugin extends Plugin {
           if (translation) pairs.push([texts[idx], translation]);
         });
         if (pairs.length) await this.translationCache.setBatch(bookId, pairs, mode);
+        // 翻译成功后累计用量（按实际提交字符数 / AI Token 计费）
+        const submitChars = reqTexts.reduce((s, t) => s + t.length, 0);
+        if (res.provider === "tencent") {
+          await this.recordTencentUsage(submitChars);
+        } else if (res.provider === "baidu") {
+          await this.recordBaiduUsage(submitChars);
+        } else if (res.provider === "youdao") {
+          await this.recordYoudaoUsage(submitChars);
+        } else if (res.provider === "ai") {
+          await this.recordAiTokenUsage(this._lastTranslationUsageByMode[mode]?.totalTokens ?? 0);
+        }
       } catch (e) {
         console.error("[REword] translateBatch: 引擎链异常:", e);
         getLogger().error("[REword] 批量翻译失败:", { error: e });
@@ -1299,10 +1387,95 @@ export default class RewordPlugin extends Plugin {
     return out;
   }
 
+  /** 累计腾讯翻译用量并持久化 */
+  private async recordTencentUsage(chars: number): Promise<void> {
+    if (!chars) return;
+    const s = this.aiSettings;
+    s.tencentCharsUsed = (s.tencentCharsUsed || 0) + chars;
+    await this.saveAiSettings();
+  }
+
+  /** 累计百度翻译用量并持久化 */
+  private async recordBaiduUsage(chars: number): Promise<void> {
+    if (!chars) return;
+    const s = this.aiSettings;
+    s.baiduCharsUsed = (s.baiduCharsUsed || 0) + chars;
+    await this.saveAiSettings();
+  }
+
+  /** 累计有道翻译用量并持久化 */
+  private async recordYoudaoUsage(chars: number): Promise<void> {
+    if (!chars) return;
+    const s = this.aiSettings;
+    s.youdaoCharsUsed = (s.youdaoCharsUsed || 0) + chars;
+    await this.saveAiSettings();
+  }
+
+  /** 累计 AI 翻译 Token 并持久化 */
+  private async recordAiTokenUsage(tokens: number): Promise<void> {
+    if (!tokens) return;
+    const s = this.aiSettings;
+    s.aiTokenUsed = (s.aiTokenUsed || 0) + tokens;
+    await this.saveAiSettings();
+  }
+
+  /** 重置某免费引擎用量计数 */
+  public async resetEngineUsage(engine: string): Promise<void> {
+    const s = this.aiSettings;
+    if (engine === "tencent") s.tencentCharsUsed = 0;
+    else if (engine === "baidu") s.baiduCharsUsed = 0;
+    else if (engine === "youdao") s.youdaoCharsUsed = 0;
+    await this.saveAiSettings();
+  }
+
+  /** 重置 AI Token 累计 */
+  public async resetAiTokenUsage(): Promise<void> {
+    this.aiSettings.aiTokenUsed = 0;
+    await this.saveAiSettings();
+  }
+
+  /**
+   * 测试某翻译引擎连通性：用一句样例走指定引擎（或单引擎+AI 兜底），返回是否拿到有效译文。
+   * 供「双语翻译设置」Tab 的「测试连接」按钮调用。
+   */
+  public async testTranslationEngine(
+    engineId: string
+  ): Promise<{ ok: boolean; provider?: string; error?: string }> {
+    try {
+      const sample = "Hello, world! This is a connectivity test.";
+      const providers = buildProviders(
+        this.aiSettings,
+        {
+          translateOne: (t: string, f: string, t2: string, bid?: string) => this.aiTranslateText(t, f, t2, bid),
+          translateBatch: (ts: string[], f: string, t2: string, bid?: string) =>
+            this.aiTranslateBatch(ts, f, t2, bid, undefined, null, { mode: "default" }),
+        },
+        engineId === "ai" ? "ai" : engineId
+      );
+      const res = await translateWithFallback(providers, { texts: [sample], from: "en", to: "zh", bookId: "__test__" });
+      const out = res.texts?.[0] || "";
+      if (res.provider && res.provider !== "none" && out.trim()) {
+        return { ok: true, provider: res.provider };
+      }
+      return { ok: false, provider: res.provider, error: "引擎未返回有效译文（请检查密钥/配置）" };
+    } catch (e: any) {
+      return { ok: false, error: String(e?.message ?? e) };
+    }
+  }
+
+  /** 打开「双语翻译设置」独立 Tab（Phase 4） */
+  public openBilingualSettingsTab(): void {
+    try {
+      openBilingualSettingsTab(this);
+    } catch (e) {
+      getLogger().warn("[REword] 打开双语设置 Tab 失败", { error: e });
+    }
+  }
+
   /**
    * translateBatch 的「详细信息」版本：除译文外，额外回传每段来源
    * （providers：引擎名或 "cache"；fromCache：是否缓存命中）。
-   * 供双语注入层渲染来源徽标与缓存标记，解决「翻译不够透明」痛点。
+   * 供双语注入层做成本与引擎统计遥测。
    * 逻辑与 translateBatch 完全一致，仅返回值多了来源元数据。
    */
   public async translateBatchDetailed(
@@ -1312,7 +1485,7 @@ export default class RewordPlugin extends Plugin {
     bookId: string,
     ctxBefore?: (string | null)[],
     meta?: { title?: string; author?: string; language?: string; toc?: string } | null,
-    opts?: { model?: string; overwrite?: boolean; signal?: AbortSignal; mode?: "default" | "concise" }
+    opts?: { model?: string; overwrite?: boolean; signal?: AbortSignal; mode?: "default" | "concise"; engine?: string }
   ): Promise<{ texts: string[]; providers: (string | null)[]; fromCache: boolean[] }> {
     if (!Array.isArray(texts) || texts.length === 0) {
       return { texts: [], providers: [], fromCache: [] };
@@ -1331,7 +1504,7 @@ export default class RewordPlugin extends Plugin {
         const providers2 = buildProviders(this.aiSettings, {
           translateOne: (t, f, t2, bid) => this.aiTranslateText(t, f, t2, bid),
           translateBatch: (ts, f, t2, bid) => this.aiTranslateBatch(ts, f, t2, bid, reqCtx, meta, { ...opts, mode }),
-        });
+        }, opts?.engine);
         const res = await translateWithFallback(providers2, { texts: reqTexts, from, to, bookId });
         const tr = res.texts || [];
         const pairs: Array<[string, string]> = [];
@@ -1342,6 +1515,16 @@ export default class RewordPlugin extends Plugin {
           if (translation) pairs.push([texts[idx], translation]);
         });
         if (pairs.length) await this.translationCache.setBatch(bookId, pairs, mode);
+        const submitChars = reqTexts.reduce((s, t) => s + t.length, 0);
+        if (res.provider === "tencent") {
+          await this.recordTencentUsage(submitChars);
+        } else if (res.provider === "baidu") {
+          await this.recordBaiduUsage(submitChars);
+        } else if (res.provider === "youdao") {
+          await this.recordYoudaoUsage(submitChars);
+        } else if (res.provider === "ai") {
+          await this.recordAiTokenUsage(this._lastTranslationUsageByMode[mode]?.totalTokens ?? 0);
+        }
       } catch (e) {
         console.error("[REword] translateBatchDetailed: 引擎链异常:", e);
         getLogger().error("[REword] 批量翻译失败:", { error: e });
@@ -1394,8 +1577,23 @@ export default class RewordPlugin extends Plugin {
   /**
    * 列出所有有翻译缓存的书籍（bookId + 书名），供阅读器设置面板「选择书籍」下拉。
    */
-  public async listCachedBooks(): Promise<Array<{ bookId: string; title: string }>> {
-    return this.translationCache.listCachedBooks();
+  public async listCachedBooks(): Promise<Array<{ bookId: string; title: string; updated?: number }>> {
+    const list = await this.translationCache.listCachedBooks();
+    // 2026-09-01：缓存里没有书名的（v2 链路未写 meta / 索引未生成），
+    // 用书架里的书名兜底，避免 UI 一堆「(未命名)」。书架里也查不到的才是真孤儿。
+    try {
+      await this.readerDock?.storeRef?.load?.();
+    } catch { /* 书架加载失败不影响列表，仅标题兜底失效 */ }
+    const store: any = (this.readerDock as any)?.storeRef;
+    const shelfList: any[] = ((store?.list as any[] | undefined) ?? []) || [];
+    const titleMap = new Map<string, string>(
+      shelfList.map((b: any) => [b.id, b.title || b.name || ""]).filter((p: any) => p[0] && p[1]) as Array<[string, string]>
+    );
+    return list.map((b) => ({
+      bookId: b.bookId,
+      title: b.title || titleMap.get(b.bookId) || "",
+      updated: b.updated,
+    }));
   }
 
   /**
@@ -1405,11 +1603,17 @@ export default class RewordPlugin extends Plugin {
    */
   public async cleanOrphanTranslationCaches(): Promise<number> {
     try {
+      // 2026-09-01：必须先确保书架已加载。书架为空时若照旧拿 validIds=∅ 去删，
+      // 会把磁盘上全部缓存当孤儿清掉（索引修好后这个后果是灾难性的）。
+      await this.readerDock?.storeRef?.load?.();
       const store: any = (this.readerDock as any)?.storeRef;
+      const shelfList: any[] = ((store?.list as any[] | undefined) ?? []) || [];
+      if (!shelfList.length) {
+        getLogger().warn("[REword] 书架为空，跳过清理无效翻译缓存（避免误删全部缓存）");
+        return 0;
+      }
       const validIds = new Set<string>(
-        ((store?.list as any[] | undefined) ?? [])
-          .map((b: any) => b.id)
-          .filter(Boolean)
+        shelfList.map((b: any) => b.id).filter(Boolean)
       );
       return await this.translationCache.cleanOrphanCaches(validIds);
     } catch (e) {
@@ -1429,34 +1633,38 @@ export default class RewordPlugin extends Plugin {
     await this.translationCache.clear(bookId);
   }
 
-  /**
-   * 取用户钉选的双语修正译文（最高优先级，覆盖 AI 缓存与实时翻译）。
-   * 返回 null 表示该书该段无用户修正。
-   */
-  public async getTranslationFix(bookId: string, text: string): Promise<string | null> {
+  /* ================= 双语翻译「按书记忆」模式（2026-08-31 Task A） ================= */
+
+  /** 读取某本书被记住的翻译模式（whole-book / progressive），未记忆返回 null */
+  public async getBilingualBookMode(bookId: string): Promise<"whole-book" | "progressive" | null> {
     if (!bookId) return null;
-    return this.translationCache.fixGet(bookId, text);
+    return this.bookModeStore?.getMode(bookId) ?? null;
+  }
+
+  /** 记住某本书的翻译模式（仅 whole-book / progressive 生效） */
+  public async setBilingualBookMode(bookId: string, mode: "whole-book" | "progressive"): Promise<void> {
+    if (!bookId) return;
+    await this.bookModeStore?.setMode(bookId, mode);
+  }
+
+  /** 清除某本书被记住的翻译模式（重置为「每次询问」） */
+  public async clearBilingualBookMode(bookId: string): Promise<void> {
+    if (!bookId) return;
+    await this.bookModeStore?.clearMode(bookId);
   }
 
   /**
-   * 钉选/覆盖一条双语修正译文（用户手动修正的正确答案，持久化，
-   * 且「清空缓存」不会清掉它——误删代价极高）。
+   * 列出全部已记忆翻译模式的书籍（含书名，书名取自翻译缓存索引），供设置面板管理 / 重置。
+   * 无记忆时返回空数组。
    */
-  public async setTranslationFix(bookId: string, text: string, tr: string, model?: string): Promise<void> {
-    if (!bookId) return;
-    await this.translationCache.fixSet(bookId, text, tr, model);
-  }
-
-  /** 删除一条双语修正译文（仅删修正库，不影响 AI 缓存） */
-  public async deleteTranslationFix(bookId: string, text: string): Promise<void> {
-    if (!bookId) return;
-    await this.translationCache.fixDelete(bookId, text);
-  }
-
-  /** 本书用户修正条数（UI 提示「已钉选 N 处修正」） */
-  public async getTranslationFixCount(bookId: string): Promise<number> {
-    if (!bookId) return 0;
-    return this.translationCache.fixCount(bookId);
+  public async listBilingualBookModes(): Promise<
+    Array<{ bookId: string; mode: "whole-book" | "progressive"; title: string }>
+  > {
+    const modes = (await this.bookModeStore?.listModes?.()) ?? [];
+    if (!modes.length) return [];
+    const books = await this.listCachedBooks();
+    const titleMap = new Map(books.map((b) => [b.bookId, b.title]));
+    return modes.map((m) => ({ bookId: m.bookId, mode: m.mode, title: titleMap.get(m.bookId) || m.bookId }));
   }
 
   /**
@@ -1486,7 +1694,8 @@ export default class RewordPlugin extends Plugin {
   private buildTranslatePrompt(
     basePrompt: string,
     bookId?: string,
-    meta?: { title?: string; author?: string; language?: string; toc?: string } | null
+    meta?: { title?: string; author?: string; language?: string; toc?: string } | null,
+    mode?: "default" | "concise"
   ): string {
     const base = (basePrompt || "").trim();
     const parts: string[] = [];
@@ -1508,9 +1717,32 @@ export default class RewordPlugin extends Plugin {
     if (primer) {
       parts.push(`【本书背景资料（用户提供的上下文，翻译时必须遵循其中的专有名词译法）】\n${primer}`);
     }
-    if (!parts.length) return base;
+    // 2026-08-31 Phase 3：术语表（硬性约束，与前文上下文互补）
+    //  前文靠模型推断一致性，术语表是明确规则。空表时 toPromptBlock 返回空串 → 不占 token。
+    const gloss = this.glossaryStore?.toPromptBlock?.() || "";
+    if (gloss) {
+      parts.push(gloss);
+    }
+    if (!parts.length) {
+      // 2026-08-30 v1.4.3：mode=concise 时无条件用用户的 conciseTranslatePrompt（无元数据时也要切换）
+      if (mode === "concise" && this.aiSettings?.conciseTranslatePrompt) {
+        return this.aiSettings.conciseTranslatePrompt;
+      }
+      return base;
+    }
     let sys = parts.join("\n\n");
-    sys += `\n\n【翻译要求】\n${base}\n`;
+    // 2026-08-30 v1.4.3：mode 决定选哪条 prompt
+    //   - default：用户 base prompt（aiSettings.translatePrompt）
+    //   - concise：优先用 aiSettings.conciseTranslatePrompt（用户可自定义），否则 base + 精简附加要求
+    let chosen = base;
+    if (mode === "concise") {
+      if (this.aiSettings?.conciseTranslatePrompt && this.aiSettings.conciseTranslatePrompt.trim()) {
+        chosen = this.aiSettings.conciseTranslatePrompt;
+      } else {
+        chosen = base + "\n\n【2026-08-30 精简模式附加要求】请用最简短的中文翻译原句，长度贴近原文，不要添加语法分析、注释、解释、背景信息、连接词、语气词。直接给译文，不要加任何前缀或后缀。";
+      }
+    }
+    sys += `\n\n【翻译要求】\n${chosen}\n`;
     if (primer) {
       sys += `【重要】若「本书背景资料」中已给出某专有名词的译法，必须严格采用该译法，不得另译。`;
     }
@@ -1591,7 +1823,7 @@ export default class RewordPlugin extends Plugin {
     const basePrompt = (this.aiSettings?.translatePrompt || DEFAULT_AI_SETTINGS.translatePrompt).trim();
     // v1.3.0：注入本书前提上下文，保证专有名词与用户手写译法一致
     const prompt = this.buildTranslatePrompt(basePrompt, bookId);
-    const settings = { ...this.aiSettings, systemPrompt: prompt, jsonMode: false, temperature: this.aiSettings?.trTemperature ?? 0.2 } as any;
+    const settings = { ...this.aiSettings, systemPrompt: prompt, jsonMode: false, temperature: this.aiSettings?.trTemperature ?? 0.1 } as any;
     const body = bookId ? `请翻译以下内容：\n\n${text}` : text;
     const res = await runCopilotChat(settings, [], [{ role: "user", content: body } as any], undefined, {});
     return res?.content || "";
@@ -1627,24 +1859,23 @@ export default class RewordPlugin extends Plugin {
       return out;
     }
 
-    // 重置 token 用量累计器
-    this._lastTranslationUsage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
+    // 双语 AI 翻译：mode 决定选哪条 prompt（2026-08-30 v1.4.3）
+    //  - default：用户 base prompt（aiSettings.translatePrompt）
+    //  - concise：段落级"简洁版"按钮触发，走 conciseTranslatePrompt（用户可自定义）
+    //    二者共享同一模型与并发桶，但 prompt 不同 → 不同译文，cache.ts 按 mode 分池
+    const trMode = (opts?.mode ?? "default") as "default" | "concise";
 
-    // 2026-08-30：mode 决定 system prompt（default 走用户提示词；concise 追加精简约束）
-    const baseUserPrompt = (this.aiSettings?.translatePrompt || DEFAULT_AI_SETTINGS.translatePrompt).trim();
-    const trMode = opts?.mode ?? "default";
-    const basePrompt = trMode === "concise"
-      // 精简模式：取用户提示词 + 追加"长度匹配、不扩展"约束
-      // 用户提示词里如果有 "不要添加解释" 之类约束，这里只追加长度/简洁度补充
-      ? baseUserPrompt + "\n\n【2026-08-30 精简模式附加要求】请用最简短的中文翻译原句，**译文长度尽量贴近原文**（短句就译短句，长句才译长句）。**不要**添加：语法分析、注释、解释、背景信息、连接词。直接给译文，不要加任何前缀或后缀。"
-      : baseUserPrompt;
-    const prompt = this.buildTranslatePrompt(basePrompt, bookId, meta);
+    // 重置 token 用量累计器（按 mode 隔离，避免并发桶之间串台）
+    this._lastTranslationUsageByMode[trMode] = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
+
+    const basePrompt = (this.aiSettings?.translatePrompt || DEFAULT_AI_SETTINGS.translatePrompt).trim();
+    const prompt = this.buildTranslatePrompt(basePrompt, bookId, meta, trMode);
     // 2026-08-30 预翻译细化：model 覆盖（弹窗选模型时临时替换，不影响全局 AI 设置）
     const settings = {
       ...this.aiSettings,
       systemPrompt: prompt,
       jsonMode: false,
-      temperature: this.aiSettings?.trTemperature ?? 0.2,
+      temperature: this.aiSettings?.trTemperature ?? 0.1,
       ...(opts?.model ? { model: opts.model } : {}),
     } as any;
     trLog(`aiTranslateBatch: 入参 ${texts.length} 段, bookId=${bookId || "(无)"}, 上下文=${bookId && this.bookPrimerStore?.get(bookId) ? "有" : "无"}, model=${settings.model || "(空)"}`);
@@ -1692,13 +1923,16 @@ export default class RewordPlugin extends Plugin {
           );
           trLog(`aiTranslateBatch: runCopilotChat 返回 ok=${res?.ok}, content长度=${(res?.content||"").length}, 内容预览="${(res?.content||"").slice(0,120)}", error=${res?.error||"无"}`);
           // 累计 token 用量（部分 AI 服务商返回 usage，缺失则跳过）
+          // 2026-08-30 v1.4.3：按 mode 隔离，default/concise 互不串台
           if (res?.usage) {
-            this._lastTranslationUsage!.promptTokens += res.usage.promptTokens || 0;
-            this._lastTranslationUsage!.completionTokens += res.usage.completionTokens || 0;
-            this._lastTranslationUsage!.totalTokens += res.usage.totalTokens || 0;
-            // v1.3.0：按书累计（供 UI 展示「本书累计 Token」）
+            const u = this._lastTranslationUsageByMode[trMode]!;
+            u.promptTokens += res.usage.promptTokens || 0;
+            u.completionTokens += res.usage.completionTokens || 0;
+            u.totalTokens += res.usage.totalTokens || 0;
+            // v1.3.0：按书累计（供 UI 展示「本书累计 Token」）—— 不分 mode，
+            //   因为「本书」是总消耗视角，default + concise 都算
             if (bookId) this.addBookTokenUsage(bookId, res.usage);
-            trLog(`aiTranslateBatch: 桶#${chunks.indexOf(chunk)} token 用量 prompt=${res.usage.promptTokens} completion=${res.usage.completionTokens} total=${res.usage.totalTokens}`);
+            trLog(`aiTranslateBatch: 桶#${chunks.indexOf(chunk)} mode=${trMode} token 用量 prompt=${res.usage.promptTokens} completion=${res.usage.completionTokens} total=${res.usage.totalTokens}`);
           }
           let pairs = parseNumberedTranslations(res?.content || "");
           // 2026-08-28 兜底：模型未遵守 [[序号]] 格式（返回纯译文 / 数字编号）时，
@@ -1711,7 +1945,11 @@ export default class RewordPlugin extends Plugin {
             });
           }
           for (const [idx, tr] of pairs) {
-            if (idx >= 1 && idx <= chunk.texts.length) out[chunk.start + idx - 1] = tr;
+            if (idx >= 1 && idx <= chunk.texts.length) {
+              // 2026-08-31 Phase 3：译后兜底——模型未遵守术语表时强制纠正。
+              // 空术语表时 apply 原样返回，零开销。
+              out[chunk.start + idx - 1] = this.glossaryStore?.apply?.(tr) ?? tr;
+            }
           }
           trLog(`aiTranslateBatch: 桶#${chunks.indexOf(chunk)} 完成，out 非空 ${out.filter(Boolean).length}/${texts.length}`);
           return; // 桶完成（漏译序号交给下方逐段兜底）
@@ -1770,11 +2008,27 @@ export default class RewordPlugin extends Plugin {
    * 「开关开启 + 已配置」时才计入。
    */
   public isTranslationConfigured(): boolean {
+    const s = this.aiSettings;
+    if (!s) return false;
     return (
-      !!(this.aiSettings?.enabled && this.aiSettings?.apiKey) ||
-      !!(this.aiSettings?.msEnabled && this.aiSettings?.msKey && this.aiSettings?.msRegion) ||
-      !!(this.aiSettings?.libreEnabled && this.aiSettings?.libreUrl)
+      !!(s.enabled && s.apiKey) ||
+      !!(s.tencentEnabled && s.tencentSecretId && s.tencentSecretKey && !this.isTencentLocked()) ||
+      !!(s.youdaoEnabled && s.youdaoAppKey && s.youdaoAppSecret) ||
+      !!(s.baiduEnabled && s.baiduAppId && s.baiduKey) ||
+      !!(s.msEnabled && s.msKey && s.msRegion) ||
+      !!(s.libreEnabled && s.libreUrl)
     );
+  }
+
+  /** 腾讯翻译是否已触发 400 万字符用量锁 */
+  public isTencentLocked(): boolean {
+    return isTencentLocked(this.aiSettings);
+  }
+
+  /** 保存腾讯翻译用量锁（单位：字符；阅读器预翻译弹窗调用） */
+  public async saveTencentCharsLock(lock: number): Promise<void> {
+    this.aiSettings.tencentCharsLock = Math.max(0, Math.round(lock));
+    await this.saveAiSettings();
   }
 
   /**
@@ -1986,6 +2240,35 @@ export default class RewordPlugin extends Plugin {
 
   getAiSettings(): AiSettings {
     return this.aiSettings;
+  }
+
+  /** 2026-08-31：增量更新并持久化 AI 设置（双语设置独立弹窗复用，避免整窗回写） */
+  /**
+   * 2026-08-31 Phase 3：读取全局术语表词条（供阅读器 UI 展示/编辑）。
+   * 返回副本，避免 UI 直接改到内部状态。
+   */
+  public getGlossaryTerms(): Array<{ src: string; dst: string; caseSensitive?: boolean; note?: string }> {
+    try {
+      return (this.glossaryStore?.terms || []).map((t) => ({ ...t }));
+    } catch {
+      return [];
+    }
+  }
+
+  /**
+   * 2026-08-31 Phase 3：整体替换术语表词条。
+   * 内部会 version++，从而让相关译文缓存失效 → 下次翻到该段自动重译。
+   */
+  public async setGlossaryTerms(
+    terms: Array<{ src: string; dst: string; caseSensitive?: boolean; note?: string }>
+  ): Promise<void> {
+    if (!this.glossaryStore) return;
+    this.glossaryStore.replaceAll(terms || []);
+  }
+
+  public async updateAiSettings(partial: Partial<AiSettings>): Promise<void> {
+    this.aiSettings = { ...this.aiSettings, ...partial };
+    await this.saveAiSettings();
   }
 
   /** 获取词库存储实例（AI 精读词库自动闭环用） */
@@ -7143,8 +7426,8 @@ export default class RewordPlugin extends Plugin {
 
     const dialog = new Dialog({
       title: "RE word 设置",
-      width: responsiveDialogSize(720, "width"),
-      height: "580px",
+      width: responsiveDialogSize(880, "width"),
+      height: responsiveDialogSize(680, "height"),
       content: `
         <div class="hiword-unified-panel">
           <!-- 左侧导航 -->
@@ -8290,8 +8573,8 @@ export default class RewordPlugin extends Plugin {
             <div class="hiword-ai-settings-tab" data-tab="service">AI 服务</div>
             <div class="hiword-ai-settings-tab" data-tab="prompt">精读提示词</div>
             <div class="hiword-ai-settings-tab" data-tab="memory">记忆与导出</div>
-            <div class="hiword-ai-settings-tab" data-tab="translate">翻译引擎</div>
             <!-- 2026-08-22 调整：许可证已迁到总设置面板 -->
+            <!-- 2026-08-31：原「翻译引擎」Tab 已拆除为阅读器顶栏 ⚙ 双语设置独立弹窗 -->
           </nav>
           <!-- 右侧内容区 -->
           <main class="hiword-ai-settings-main">
@@ -8462,81 +8745,6 @@ export default class RewordPlugin extends Plugin {
               </div>
             </section>
 
-            <!-- ===== Tab 5: 翻译引擎（2026-08-28：AI 首选，免费引擎默认关闭、可开关兜底） ===== -->
-            <section class="hiword-ai-settings-page" data-page="translate" style="display:none;">
-              <div class="hiword-ai-setting-group">
-                <div class="hiword-ai-setting-label">
-                  <span class="hiword-ai-setting-name">翻译引擎说明</span>
-                  <span class="hiword-ai-setting-desc">双语对照 / 划词翻译默认使用上方「AI 服务」中配置的模型（AI 首选，批量直译）。以下免费引擎默认关闭，仅作为 AI 失败时的兜底。</span>
-                </div>
-              </div>
-              <!-- ===== 2026-08-28 AI 翻译参数（首选引擎，默认同 index.ts 常量） ===== -->
-              <div class="hiword-ai-setting-group" style="border: 0.5px solid var(--b3-theme-primary, #4285f4); border-radius: 8px; padding: 14px 16px;">
-                <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 8px;">
-                  <span class="hiword-ai-setting-name" style="font-size: 14px; font-weight: 500;">AI 翻译参数</span>
-                  <span style="font-size: 11px; background: var(--b3-theme-primary, #4285f4); color: #fff; padding: 1px 7px; border-radius: 10px;">首选引擎</span>
-                </div>
-                <p class="hiword-ai-setting-desc" style="margin-bottom: 12px;">调节 AI 批量翻译的行为。大部分情况保持默认即可；模型较弱或网络不稳时可降低每批段数。以下参数与「精读提示词」Tab 共用同一翻译提示词。</p>
-                <div class="hiword-ai-field">
-                  <label class="hiword-ai-field-label" for="ais-tr-prompt">翻译提示词</label>
-                  <textarea id="ais-tr-prompt" class="hiword-ai-setting-textarea" spellcheck="false">${this.escapeHtml(s.translatePrompt)}</textarea>
-                  <span class="hiword-ai-setting-desc" style="display: block; margin-top: 3px;">发送给模型的系统提示词，控制翻译风格与输出格式（与「精读提示词」Tab 同步）。</span>
-                </div>
-                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-top: 10px;">
-                  <div class="hiword-ai-field">
-                    <label class="hiword-ai-field-label" for="ais-tr-batch-size">每批段数</label>
-                    <input id="ais-tr-batch-size" class="hiword-ai-input" type="number" min="2" max="20" step="1" value="${s.trBatchSize ?? 8}" />
-                    <span class="hiword-ai-setting-desc" style="display: block; margin-top: 3px;">每次 API 请求合并的段落数（默认 8）。值越大越省 token 但易截断。</span>
-                  </div>
-                  <div class="hiword-ai-field">
-                    <label class="hiword-ai-field-label" for="ais-tr-temperature">翻译温度</label>
-                    <input id="ais-tr-temperature" class="hiword-ai-input" type="number" min="0" max="1" step="0.1" value="${s.trTemperature ?? 0.2}" />
-                    <span class="hiword-ai-setting-desc" style="display: block; margin-top: 3px;">直译建议 0~0.3（低=稳定）；调高会增加润色/改写。</span>
-                  </div>
-                </div>
-                <div class="hiword-ai-field" style="margin-top: 12px;">
-                  <label class="hiword-ai-field-label" for="ais-tr-concurrency">并发请求数：<span id="ais-tr-concurrency-val">${s.trConcurrency ?? 2}</span></label>
-                  <input id="ais-tr-concurrency" class="hiword-ai-input" type="range" min="1" max="5" step="1" value="${s.trConcurrency ?? 2}" style="width: 100%; accent-color: var(--b3-theme-primary, #4285f4);" />
-                  <span class="hiword-ai-setting-desc" style="display: block; margin-top: 3px;">同时发送的批次数（默认 2）。网络好可提高到 3~4 加速。</span>
-                </div>
-              </div>
-              <div class="hiword-ai-setting-group">
-                <div class="hiword-ai-setting-label">
-                  <span class="hiword-ai-setting-name">Microsoft Translator</span>
-                  <span class="hiword-ai-setting-desc">Azure 认知服务翻译，免费 200 万字符/月。默认关闭。</span>
-                </div>
-                <div class="hiword-ai-field-row">
-                  <label class="hiword-ai-check">
-                    <input type="checkbox" id="ais-ms-enabled" ${s.msEnabled ? "checked" : ""} />
-                    <span>启用（AI 失败时兜底）</span>
-                  </label>
-                </div>
-                <div class="hiword-ai-field">
-                  <label class="hiword-ai-field-label" for="ais-ms-key">订阅 Key</label>
-                  <input id="ais-ms-key" class="hiword-ai-input" type="password" value="${this.escapeAttr(s.msKey || "")}" placeholder="xxxxxxxxxxxxxxxx" />
-                </div>
-                <div class="hiword-ai-field">
-                  <label class="hiword-ai-field-label" for="ais-ms-region">区域</label>
-                  <input id="ais-ms-region" class="hiword-ai-input" value="${this.escapeAttr(s.msRegion || "")}" placeholder="如 eastasia / westeurope" />
-                </div>
-              </div>
-              <div class="hiword-ai-setting-group">
-                <div class="hiword-ai-setting-label">
-                  <span class="hiword-ai-setting-name">LibreTranslate</span>
-                  <span class="hiword-ai-setting-desc">开源免费翻译，可填公共实例（如 https://libretranslate.com）。限流/隐私较弱。默认关闭。</span>
-                </div>
-                <div class="hiword-ai-field-row">
-                  <label class="hiword-ai-check">
-                    <input type="checkbox" id="ais-libre-enabled" ${s.libreEnabled ? "checked" : ""} />
-                    <span>启用（AI 失败时兜底）</span>
-                  </label>
-                </div>
-                <div class="hiword-ai-field">
-                  <label class="hiword-ai-field-label" for="ais-libre-url">实例地址</label>
-                  <input id="ais-libre-url" class="hiword-ai-input" value="${this.escapeAttr(s.libreUrl || "")}" placeholder="https://libretranslate.com" />
-                </div>
-              </div>
-            </section>
 
           </main>
         </div>
@@ -8576,10 +8784,6 @@ export default class RewordPlugin extends Plugin {
       const tempVal = dlg.querySelector("#ais-temp-val") as HTMLElement;
       tempSlider?.addEventListener("input", () => { if (tempVal) tempVal.textContent = tempSlider.value; });
 
-      // 2026-08-28 AI 翻译并发滑块实时值
-      const trConcSlider = dlg.querySelector("#ais-tr-concurrency") as HTMLInputElement;
-      const trConcVal = dlg.querySelector("#ais-tr-concurrency-val") as HTMLElement;
-      trConcSlider?.addEventListener("input", () => { if (trConcVal) trConcVal.textContent = trConcSlider.value; });
 
       // 模型变化时自动推断上下文窗口（仅在用户未手动修改过时）
       const aisModelInput = dlg.querySelector("#ais-model") as HTMLInputElement;
@@ -8826,26 +9030,6 @@ export default class RewordPlugin extends Plugin {
     const inputVal = (sel: string) => (q(sel) as HTMLInputElement)?.value?.trim() || "";
     const selectVal = (sel: string) => (q(sel) as HTMLSelectElement)?.value || "";
     const checkboxVal = (sel: string) => !!(q(sel) as HTMLInputElement)?.checked;
-    // 2026-08-28 AI 翻译参数：数字输入容错
-    const inputNum = (sel: string): number | null => {
-      const raw = (q(sel) as HTMLInputElement)?.value?.trim();
-      if (raw == null || raw === "") return null;
-      const n = parseFloat(raw);
-      return isFinite(n) ? n : null;
-    };
-    const numOr = (v: number | null, fallback: number, min: number, max: number): number => {
-      if (v == null || !isFinite(v)) return fallback;
-      return Math.min(max, Math.max(min, Math.round(v)));
-    };
-    // 翻译提示词：精读提示词 Tab(ais-translate-prompt) 与翻译引擎 Tab(ais-tr-prompt) 共用，取有改动的那个
-    const resolveTranslatePrompt = (): string => {
-      const cur = this.aiSettings?.translatePrompt || DEFAULT_AI_SETTINGS.translatePrompt;
-      const trVal = (q("tr-prompt") as HTMLTextAreaElement)?.value?.trim();
-      const deepVal = (q("translate-prompt") as HTMLTextAreaElement)?.value?.trim();
-      if (trVal && trVal !== cur) return trVal;
-      if (deepVal && deepVal !== cur) return deepVal;
-      return cur;
-    };
 
     // 模型列表：从 DOM 列表项读取
     const modelListEl = dlg.querySelector("#" + prefix + "model-list") as HTMLElement | null;
@@ -8879,20 +9063,6 @@ export default class RewordPlugin extends Plugin {
       exportSavePath: inputVal("export-path"),
       // 记忆文档
       soulDocId: inputVal("soul-id"),
-      // 2026-08-27 阅读器「翻译」预置提示词（与「翻译引擎」Tab 的 ais-tr-prompt 共用同一字段，取有改动的那个）
-      translatePrompt: resolveTranslatePrompt(),
-      // 2026-08-28 AI 翻译参数（翻译引擎 Tab 可调）
-      trBatchSize: numOr(inputNum("tr-batch-size"), 8, 1, 30),
-      trTemperature: numOr(inputNum("tr-temperature"), 0.2, 0, 1),
-      trConcurrency: numOr(inputNum("tr-concurrency"), 2, 1, 8),
-      // 2026-08-27 翻译引擎配置（2026-08-28：开关默认关闭，AI 首选；优先级固定 微软→Libre）
-      msKey: inputVal("ms-key"),
-      msRegion: inputVal("ms-region"),
-      msEnabled: checkboxVal("ms-enabled"),
-      libreUrl: inputVal("libre-url").replace(/\/+$/, ""),
-      libreEnabled: checkboxVal("libre-enabled"),
-      translatePriority: ["microsoft", "libretranslate"],
-      // 2026-08-21 精简：defaultMode 已删除
     } as AiSettings;
   }
 
@@ -9496,6 +9666,10 @@ export default class RewordPlugin extends Plugin {
   onunload() {
     getLogger().info("[REword] 插件卸载");
     getLogger().info("插件卸载", { operation: "插件生命周期" });
+    // 2026-08-31 v1.4.5 P5：移除主窗口选区色 CSS（避免重复注入或内存泄漏）
+    try {
+      document.getElementById("reword-global-selection")?.remove();
+    } catch { /* 忽略：head 不存在时 */ }
     // 逆序释放全部托管资源：全局监听 + eventBus 订阅 + 定时器
     this.disposables.dispose();
     // 各子模块独立持有的全局/文档级监听器

@@ -4,19 +4,22 @@
    * 封面（EPUB 真实封面 / 占位）、导入（多选 + 拖拽 + 批量进度 + 去重 + 失败汇总重试）、
    * 续读、删除、编辑信息（书名/作者）。
    */
-  import { onMount, onDestroy } from "svelte";
+  import { onMount, onDestroy, tick } from "svelte";
   import type {
     BookshelfStore,
     BookMeta,
     BookGroup,
     BookStatus,
+    BookColor,
     BookSortKey,
     SortDir,
   } from "../reader/bookshelf-store";
+  import { BOOK_COLORS, isValidBookColor } from "../reader/bookshelf-store";
   import { isSupportedBookFile } from "../reader/book-adapters";
   import ReadingStatsPanel from "./ReadingStatsPanel.svelte";
   import OpdsSearchPanel from "./OpdsSearchPanel.svelte";
   import GraphPanel from "./GraphPanel.svelte";
+  import BookshelfContextMenu, { type MenuItem } from "./bookshelf-context-menu.svelte";
 
   export let store: BookshelfStore;
   export let onOpen: (bookId: string) => void;
@@ -26,6 +29,20 @@
   let importing = false;
   let importError = "";
   let coverUrls: Record<string, string> = {};
+  // [2026-08-29] P2:续读最近一本的 id + 标题(顶栏 ⏵ 按钮用)
+  let continueReadId = "";
+  let continueReadTitle = "";
+
+  // [2026-08-29] P2:右键菜单(x/y/items;null = 关闭)
+  let ctxMenu: { x: number; y: number; items: MenuItem[] } | null = null;
+  function openCtxMenu(e: MouseEvent, items: MenuItem[]) {
+    e.preventDefault();
+    e.stopPropagation();
+    ctxMenu = { x: e.clientX, y: e.clientY, items };
+  }
+  function closeCtxMenu() {
+    ctxMenu = null;
+  }
 
   /* ================================================================
    * 2026-08-29 书架 P0/P1：搜索 / 排序 / 视图 / 分组 / 标签 / 批量
@@ -46,6 +63,10 @@
   /** "all" | "ungrouped" | 具体 groupId */
   let filterGroup = "all";
   let favoriteOnly = false;
+  /** 2026-08-29 P2:颜色筛选("" = 不限) */
+  let filterColor: BookColor | "" = "";
+  /** 2026-08-29 P2:丛书筛选("" = 不限) */
+  let filterSeries = "";
 
   /** 侧栏分组折叠状态（仅视觉收起，不影响筛选逻辑） */
   let collapsed: Record<string, boolean> = {};
@@ -91,19 +112,24 @@
     { key: "readingTime", label: "阅读时长" },
     { key: "rating", label: "评分" },
     { key: "size", label: "文件大小" },
+    // [2026-08-29] P2:按颜色排序(色相 HSL 顺序:红→橙→黄→绿→蓝→紫→灰)
+    { key: "color", label: "颜色" },
   ];
 
   /** 侧栏分面数据：依赖 books 变化重算（单一 helper，避免多个 $: 各自失效） */
   function computeFacets(_b: BookMeta[]) {
     void _b;
     return {
-      // 分组计数在此一次算好：模板里直接调 store.groupCount 不会被 Svelte 追踪，会显示过期数字
+      // 分组计数在此一次算好：模板里直接调 store API 不会被 Svelte 追踪，会显示过期数字
       groups: store.groups.map((g) => ({ ...g, count: store.groupCount(g.id) })),
       tags: store.tagCounts(),
       formats: store.formatCounts(),
       status: store.statusCounts(),
       favorites: store.favoriteCount(),
       ungrouped: store.ungroupedCount(),
+      // [2026-08-29] P2:颜色 / 丛书 facets
+      colors: store.colorCounts(),
+      series: store.seriesCounts(),
     };
   }
   $: facets = computeFacets(books);
@@ -120,11 +146,14 @@
     tag: string,
     grp: string,
     fav: boolean,
+    col: BookColor | "",
+    ser: string,
     sk: BookSortKey,
     sd: SortDir
   ): BookMeta[] {
     void _b;
-    return store.query(
+    // [2026-08-29] P2:丛书筛选在 store.query 不支持(避免对 store 内部改),在 UI 层过滤
+    let list = store.query(
       {
         keyword: kw,
         status: st,
@@ -132,10 +161,13 @@
         tag: tag || undefined,
         groupId: grp,
         favoriteOnly: fav,
+        color: col || undefined,
       },
       sk,
       sd
     );
+    if (ser) list = list.filter((b) => (b.series ?? "").trim() === ser);
+    return list;
   }
   $: visible = computeVisible(
     books,
@@ -145,6 +177,8 @@
     filterTag,
     filterGroup,
     favoriteOnly,
+    filterColor,
+    filterSeries,
     sortKey,
     sortDir
   );
@@ -156,6 +190,8 @@
     filterFormat !== "all" ||
     !!filterTag ||
     filterGroup !== "all" ||
+    !!filterColor ||
+    !!filterSeries ||
     favoriteOnly;
 
   function loadUiPrefs() {
@@ -207,6 +243,9 @@
     filterTag = "";
     filterGroup = "all";
     favoriteOnly = false;
+    // [2026-08-29] P2:颜色 / 丛书筛选也清
+    filterColor = "";
+    filterSeries = "";
   }
 
   /** 侧栏：选中某个「视图」（互斥切换，避免多条件叠加后一本书都不剩） */
@@ -224,6 +263,16 @@
   function pickGroup(id: string) {
     filterGroup = filterGroup === id ? "all" : id;
     favoriteOnly = false;
+  }
+
+  /** [2026-08-29] P2:颜色筛选(互斥切换) */
+  function pickColor(c: BookColor) {
+    filterColor = filterColor === c ? "" : c;
+  }
+
+  /** [2026-08-29] P2:丛书筛选(互斥切换) */
+  function pickSeries(s: string) {
+    filterSeries = filterSeries === s ? "" : s;
   }
 
   function pickTag(t: string) {
@@ -265,6 +314,8 @@
   let editTags: string[] = [];
   let editTagInput = "";
   let editGroupId = "";
+  // [2026-08-29] P2:颜色(BookColor | undefined;undefined = 无色)
+  let editColor: BookColor | undefined = undefined;
   let coverInput: HTMLInputElement;
   let coverBusy = false;
 
@@ -279,6 +330,14 @@
   let newGroupName = "";
   let renamingGroupId = "";
   let renamingGroupName = "";
+  let renamingInput: HTMLInputElement;
+  /** 取消按钮 mousedown 时阻止 blur 提交；click 后再恢复 */
+  let renameBlurCommit = true;
+  // [2026-08-29] P2:分组色点 popover 状态(id = 当前展开的分组)
+  let groupColorPickerId = "";
+  function toggleGroupColorPicker(id: string) {
+    groupColorPickerId = groupColorPickerId === id ? "" : id;
+  }
 
   // 批量加标签弹窗
   let batchTagOpen = false;
@@ -327,6 +386,10 @@
     books = store.list;
     // 加载真实封面（EPUB/PDF 提取或用户替换；TXT/MD 无封面保持首字占位）
     loadCovers(books);
+    // [2026-08-29] P2:同步续读最近一本(顶栏 ⏵ 按钮)
+    const cid = store.getContinueReadId();
+    continueReadId = cid ?? "";
+    continueReadTitle = cid ? store.get(cid)?.title ?? "" : "";
   }
 
   function fmtDate(t: number | undefined): string {
@@ -447,6 +510,8 @@
     editTags = [...(b.tags ?? [])];
     editTagInput = "";
     editGroupId = b.groupId || "";
+    // [2026-08-29] P2:颜色
+    editColor = b.color;
     coverBusy = false;
   }
 
@@ -462,6 +527,8 @@
       favorite: editFavorite,
       tags: editTags,
       groupId: editGroupId,
+      // [2026-08-29] P2:颜色(只有变化才落盘,updateMeta 已走 isValidBookColor 校验)
+      color: editColor,
     });
     editTarget = null;
     if (ok) {
@@ -550,17 +617,257 @@
     if (g) showToast(`已创建分组「${g.name}」`);
   }
 
-  function startRenameGroup(g: BookGroup) {
+  async function startRenameGroup(g: BookGroup) {
     renamingGroupId = g.id;
     renamingGroupName = g.name;
+    groupColorPickerId = "";
+    await tick();
+    renamingInput?.focus();
+    renamingInput?.select();
+  }
+
+  /**
+   * [2026-08-29] P2:从侧边栏点分组色点 → 打开分组管理弹窗并展开该组的颜色 popover
+   * (避免在侧边栏小空间里塞 popover 触发遮挡)
+   */
+  async function openGroupColorDialog(id: string) {
+    groupDialogOpen = true;
+    groupColorPickerId = id;
+    await refresh();
+  }
+
+  /* ============== [2026-08-29] P2:右键菜单构造 ============== */
+
+  /** 书籍右键菜单(高效操作总入口) */
+  function buildBookMenu(b: BookMeta): MenuItem[] {
+    return [
+      {
+        icon: b.progress?.fraction ? "📖" : "▶",
+        label: b.progress?.fraction ? "续读" : "开始阅读",
+        onClick: () => onOpen(b.id),
+      },
+      { divider: true },
+      { icon: "✎", label: "编辑信息", onClick: () => openEdit(b) },
+      {
+        icon: "🏷",
+        label: "设置标签…",
+        children: facets.tags.length
+          ? [
+              ...facets.tags.map((t) => ({
+                label: t.tag,
+                active: (b.tags ?? []).includes(t.tag),
+                onClick: () => {
+                  if ((b.tags ?? []).includes(t.tag)) removeTag(b.id, t.tag);
+                  else addTag(b.id, t.tag);
+                },
+              })),
+              { divider: true },
+              {
+                label: "打开标签管理…",
+                onClick: () => {
+                  editTarget = b;
+                  editTags = [...(b.tags ?? [])];
+                  editTagInput = "";
+                },
+              },
+            ]
+          : [{ label: "(打开编辑弹窗管理标签)", onClick: () => openEdit(b) }],
+      },
+      {
+        icon: "📁",
+        label: "移到分组…",
+        children: [
+          ...facets.groups.map((g) => ({
+            label: g.name,
+            active: b.groupId === g.id,
+            onClick: () => setGroup(b.id, g.id),
+          })),
+          { divider: true },
+          {
+            label: "(移出分组)",
+            active: !b.groupId,
+            onClick: () => setGroup(b.id, undefined),
+          },
+          { divider: true },
+          {
+            label: "管理分组…",
+            onClick: () => (groupDialogOpen = true),
+          },
+        ],
+      },
+      {
+        icon: b.favorite ? "★" : "☆",
+        label: b.favorite ? "取消收藏" : "收藏",
+        onClick: () => toggleFav(b),
+      },
+      {
+        icon: "⏱",
+        label: "状态",
+        children: (["unread", "reading", "finished"] as BookStatus[]).map((s) => ({
+          label: STATUS_LABEL[s],
+          active: (b.status ?? "unread") === s,
+          onClick: () => setStatus(b.id, s),
+        })),
+      },
+      {
+        icon: "★",
+        label: "评分",
+        children: [
+          ...[1, 2, 3, 4, 5].map((n) => ({
+            label: `${"★".repeat(n)}${"☆".repeat(5 - n)}`,
+            active: b.rating === n,
+            onClick: () => setRating(b.id, n),
+          })),
+          { divider: true },
+          { label: "清除评分", active: !b.rating, onClick: () => setRating(b.id, 0) },
+        ],
+      },
+      {
+        icon: "●",
+        label: "颜色",
+        children: [
+          ...BOOK_COLORS.map((c) => ({
+            label: c.label,
+            active: b.color === c.token,
+            onClick: () => setBookColor(b.id, c.token === b.color ? undefined : c.token),
+          })),
+          { divider: true },
+          { label: "移除颜色", active: !b.color, onClick: () => setBookColor(b.id, undefined) },
+        ],
+      },
+      { divider: true },
+      {
+        icon: "🖼",
+        label: "替换封面…",
+        onClick: () => {
+          editTarget = b;
+          coverInput?.click();
+        },
+      },
+      {
+        icon: "📋",
+        label: "复制书名",
+        onClick: () => {
+          try {
+            navigator.clipboard?.writeText(b.title);
+            showToast("已复制书名");
+          } catch {
+            showToast("复制失败");
+          }
+        },
+      },
+      { divider: true },
+      { icon: "🗑", label: "从书架移除…", danger: true, onClick: () => openRemove(b) },
+    ];
+  }
+
+  /** 分组右键菜单 */
+  function buildGroupMenu(g: BookGroup): MenuItem[] {
+    const count = store.groupCount(g.id);
+    return [
+      { icon: "✎", label: "重命名", onClick: () => startRenameGroup(g) },
+      {
+        icon: "●",
+        label: "颜色",
+        children: [
+          ...BOOK_COLORS.map((c) => ({
+            label: c.label,
+            active: g.color === c.token,
+            onClick: () => setGroupColor(g.id, c.token === g.color ? undefined : c.token),
+          })),
+          { divider: true },
+          { label: "移除颜色", active: !g.color, onClick: () => setGroupColor(g.id, undefined) },
+        ],
+      },
+      { divider: true },
+      {
+        icon: "📂",
+        label: "在主区域打开",
+        onClick: () => {
+          filterGroup = g.id;
+          favoriteOnly = false;
+        },
+      },
+      {
+        icon: "📋",
+        label: "复制组名",
+        onClick: () => {
+          try {
+            navigator.clipboard?.writeText(g.name);
+            showToast("已复制组名");
+          } catch {
+            showToast("复制失败");
+          }
+        },
+      },
+      { divider: true },
+      {
+        icon: "🗑",
+        label: "删除分组",
+        danger: true,
+        onClick: () => {
+          if (confirm(`确定删除分组「${g.name}」?\n组内 ${count} 本书将回到「未分组」`)) {
+            deleteGroup(g);
+          }
+        },
+      },
+    ];
+  }
+
+  /* ---- 右键菜单触发的 store 动作 wrapper(带 refresh + toast) ---- */
+  async function setBookColor(id: string, color: BookColor | undefined) {
+    await store.setColor(id, color);
+    await refresh();
+    showToast(color ? `已设为${BOOK_COLORS.find((c) => c.token === color)?.label}` : "已移除颜色");
+  }
+  async function setGroupColor(id: string, color: BookColor | undefined) {
+    await store.setGroupColor(id, color);
+    await refresh();
+    showToast(color ? `分组已设为${BOOK_COLORS.find((c) => c.token === color)?.label}` : "分组颜色已移除");
+  }
+  async function setStatus(id: string, s: BookStatus) {
+    await store.setStatus(id, s);
+    await refresh();
+    showToast(`已标记为「${STATUS_LABEL[s]}」`);
+  }
+  async function setRating(id: string, n: number) {
+    await store.setRating(id, n);
+    await refresh();
+    showToast(n > 0 ? `已评 ${n} 星` : "已清除评分");
+  }
+  async function setGroup(id: string, gid: string | undefined) {
+    await store.setGroup(id, gid);
+    await refresh();
+    showToast(gid ? "已移入分组" : "已移出分组");
+  }
+  async function addTag(id: string, t: string) {
+    await store.addTag(id, t);
+    await refresh();
+    showToast(`已添加标签「${t}」`);
+  }
+  async function removeTag(id: string, t: string) {
+    await store.removeTag(id, t);
+    await refresh();
+    showToast(`已移除标签「${t}」`);
   }
 
   async function commitRenameGroup() {
     if (!renamingGroupId) return;
-    await store.renameGroup(renamingGroupId, renamingGroupName);
+    const name = renamingGroupName.trim();
+    if (!name) {
+      renamingGroupId = "";
+      renamingGroupName = "";
+      return;
+    }
+    const ok = await store.renameGroup(renamingGroupId, name);
     renamingGroupId = "";
     renamingGroupName = "";
-    await refresh();
+    if (ok) {
+      showToast(`已重命名为「${name}」`);
+      await refresh();
+    } else {
+      showToast("重命名失败");
+    }
   }
 
   async function deleteGroup(g: BookGroup) {
@@ -605,6 +912,41 @@
     (e.target as HTMLSelectElement).value = "";
     await refresh();
     showToast(v === "__none__" ? `已将 ${n} 本移出分组` : `已将 ${n} 本移入分组`);
+  }
+
+  /** [2026-08-29] P2:批量设色 */
+  async function batchColor(e: Event) {
+    const v = (e.target as HTMLSelectElement).value;
+    if (!v || !selectedIds.length) return;
+    const color = v === "__none__" ? undefined : (v as BookColor);
+    if (color && !isValidBookColor(color)) return;
+    const n = await store.batchSetColor(selectedIds, color);
+    (e.target as HTMLSelectElement).value = "";
+    await refresh();
+    if (n === 0) showToast("所选书已是该颜色");
+    else showToast(color ? `已将 ${n} 本设为${BOOK_COLORS.find((c) => c.token === color)?.label}` : `已移除 ${n} 本颜色`);
+  }
+
+  /** [2026-08-29] P2:批量评分 */
+  async function batchRating(e: Event) {
+    const raw = (e.target as HTMLSelectElement).value;
+    if (raw === "" || !selectedIds.length) return;
+    const v = Number(raw);
+    if (!Number.isFinite(v)) return;
+    const n = await store.batchSetRating(selectedIds, v);
+    (e.target as HTMLSelectElement).value = "";
+    await refresh();
+    showToast(v > 0 ? `已将 ${n} 本评为 ${v} 星` : `已清除 ${n} 本评分`);
+  }
+
+  /** [2026-08-29] P2:批量收藏 */
+  async function batchFavorite(e: Event) {
+    const v = (e.target as HTMLSelectElement).value;
+    if (v === "" || !selectedIds.length) return;
+    const n = await store.batchSetFavorite(selectedIds, v === "1");
+    (e.target as HTMLSelectElement).value = "";
+    await refresh();
+    showToast(v === "1" ? `已收藏 ${n} 本` : `已取消收藏 ${n} 本`);
   }
 
   async function commitBatchTag() {
@@ -706,6 +1048,8 @@
       books = [...list];
       loadCovers(books);
     });
+    // [2026-08-29] P2 抛光:全局 Esc 关闭任意弹窗/菜单(N1)
+    window.addEventListener("keydown", onGlobalKeydown);
   });
 
   onDestroy(() => {
@@ -725,7 +1069,88 @@
     }
     coverUrls = {};
     coverPaths = {};
+    window.removeEventListener("keydown", onGlobalKeydown);
   });
+
+  /** [2026-08-29] P2 N1:Esc 关闭任意打开的弹窗(优先级:右键菜单 → 编辑 → 重命名 → 移除/批量 → 弹窗栈) */
+  function onGlobalKeydown(e: KeyboardEvent) {
+    if (e.key !== "Escape") return;
+    if (e.defaultPrevented) return; // 让上下文菜单组件自己处理
+    if (ctxMenu) {
+      ctxMenu = null;
+      e.preventDefault();
+      return;
+    }
+    if (editTarget) {
+      editTarget = null;
+      e.preventDefault();
+      return;
+    }
+    if (removeTarget) {
+      removeTarget = null;
+      e.preventDefault();
+      return;
+    }
+    if (batchRemoveOpen) {
+      batchRemoveOpen = false;
+      e.preventDefault();
+      return;
+    }
+    if (batchTagOpen) {
+      batchTagOpen = false;
+      e.preventDefault();
+      return;
+    }
+    if (groupDialogOpen) {
+      // 重命名中优先
+      if (renamingGroupId) {
+        renamingGroupId = "";
+        renamingGroupName = "";
+      } else {
+        groupDialogOpen = false;
+      }
+      e.preventDefault();
+      return;
+    }
+    if (fails.length) {
+      fails = [];
+      e.preventDefault();
+      return;
+    }
+  }
+
+  /** [2026-08-29] P2 N2:列表视图 J/K 上下移动焦点 + Enter 打开 */
+  let rowFocusIdx = -1;
+  function onListKeydown(e: KeyboardEvent) {
+    // 只在列表视图 + 无输入焦点时生效
+    if (viewMode !== "list") return;
+    if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
+    if (e.target instanceof HTMLSelectElement) return;
+    if (e.target instanceof HTMLButtonElement && (e.target as HTMLButtonElement).getAttribute("role") === "menuitem") return;
+    if (ctxMenu || editTarget || groupDialogOpen || batchRemoveOpen || batchTagOpen) return;
+    if (!visible.length) return;
+
+    if (e.key === "j" || e.key === "ArrowDown") {
+      e.preventDefault();
+      rowFocusIdx = Math.min(visible.length - 1, rowFocusIdx + 1);
+      scrollRowIntoView(rowFocusIdx);
+    } else if (e.key === "k" || e.key === "ArrowUp") {
+      e.preventDefault();
+      rowFocusIdx = Math.max(0, rowFocusIdx - 1);
+      scrollRowIntoView(rowFocusIdx);
+    } else if (e.key === "Enter" && rowFocusIdx >= 0 && rowFocusIdx < visible.length) {
+      e.preventDefault();
+      onOpen(visible[rowFocusIdx].id);
+    }
+  }
+
+  function scrollRowIntoView(idx: number) {
+    // 用 setTimeout 等 DOM 更新
+    setTimeout(() => {
+      const el = document.querySelector(`.shelf-row[data-idx="${idx}"]`) as HTMLElement | null;
+      el?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+    }, 0);
+  }
 </script>
 
 <div
@@ -734,6 +1159,7 @@
   on:dragenter={onDragEnter}
   on:dragover={onDragOver}
   on:dragleave={onDragLeave}
+  on:keydown={onListKeydown}
   on:drop={onDrop}
 >
   <div class="bookshelf-header">
@@ -748,6 +1174,14 @@
       {#if hasFilter}{visible.length} / {books.length} 本{:else}{books.length} 本{/if}
     </span>
     <span class="bookshelf-spacer"></span>
+    <!-- [2026-08-29] P2:续读最近一本(顶栏总入口) -->
+    {#if continueReadId}
+      <button
+        class="shelf-icon-btn primary"
+        title="继续读 · {continueReadTitle}"
+        on:click={() => continueReadId && onOpen(continueReadId)}
+      >▶ 续读</button>
+    {/if}
     <button
       class="shelf-icon-btn"
       class:active={selectMode}
@@ -847,6 +1281,28 @@
           <option value={g.id}>{g.name}</option>
         {/each}
         <option value="__none__">（移出分组）</option>
+      </select>
+      <!-- [2026-08-29] P2:批量设色(7 色 token) -->
+      <select class="shelf-select" disabled={!selectedIds.length} on:change={batchColor}>
+        <option value="">设颜色…</option>
+        {#each BOOK_COLORS as c}
+          <option value={c.token}>{c.label}</option>
+        {/each}
+        <option value="__none__">（移除颜色）</option>
+      </select>
+      <!-- [2026-08-29] P2:批量评分 -->
+      <select class="shelf-select" disabled={!selectedIds.length} on:change={batchRating}>
+        <option value="">设评分…</option>
+        {#each [1, 2, 3, 4, 5] as n}
+          <option value={n}>{n} 星</option>
+        {/each}
+        <option value={0}>（清除）</option>
+      </select>
+      <!-- [2026-08-29] P2:批量收藏 -->
+      <select class="shelf-select" disabled={!selectedIds.length} on:change={batchFavorite}>
+        <option value="">收藏…</option>
+        <option value="1">★ 收藏</option>
+        <option value="0">（取消）</option>
       </select>
       <button
         class="shelf-batch-btn"
@@ -960,19 +1416,80 @@
           </div>
           {#if !collapsed.groups}
             {#each facets.groups as g (g.id)}
-              <button
-                class="shelf-sb-item"
+              <div
+                class="shelf-sb-item shelf-sb-group"
                 class:active={filterGroup === g.id}
                 class:dropping={dropGroupId === g.id}
-                title="点击筛选，可把书拖到这里归组"
-                on:click={() => pickGroup(g.id)}
+                role="button"
+                tabindex="0"
+                title="点击筛选 · 双击重命名 · 拖书归组 · 右键更多"
+                on:click={() => {
+                  if (renamingGroupId !== g.id) pickGroup(g.id);
+                }}
+                on:dblclick={() => startRenameGroup(g)}
+                on:keydown={(e) => (e.key === "Enter" || e.key === " ") && renamingGroupId !== g.id && pickGroup(g.id)}
+                on:contextmenu={(e) => openCtxMenu(e, buildGroupMenu(g))}
                 on:dragover={(e) => onGroupDragOver(e, g.id)}
                 on:dragleave={() => onGroupDragLeave(g.id)}
                 on:drop={(e) => onGroupDrop(e, g.id)}
               >
-                <span class="shelf-sb-label">📁 {g.name}</span>
-                <span class="shelf-sb-num">{g.count}</span>
-              </button>
+                {#if renamingGroupId === g.id && !groupDialogOpen}
+                  <input
+                    class="group-rename shelf-sb-rename"
+                    bind:value={renamingGroupName}
+                    bind:this={renamingInput}
+                    on:click|stopPropagation
+                    on:keydown={(e) => {
+                      if (e.key === "Enter") {
+                        e.preventDefault();
+                        commitRenameGroup();
+                      } else if (e.key === "Escape") {
+                        e.preventDefault();
+                        renamingGroupId = "";
+                        renamingGroupName = "";
+                      }
+                    }}
+                    on:blur={() => {
+                      if (renameBlurCommit) commitRenameGroup();
+                      renameBlurCommit = true;
+                    }}
+                  />
+                  <button
+                    type="button"
+                    class="group-op"
+                    on:click|stopPropagation={() => commitRenameGroup()}
+                    on:mousedown|preventDefault={() => (renameBlurCommit = true)}
+                  >确定</button>
+                  <button
+                    type="button"
+                    class="group-op"
+                    on:click|stopPropagation={() => { renamingGroupId = ""; renamingGroupName = ""; }}
+                    on:mousedown|preventDefault={() => (renameBlurCommit = false)}
+                  >取消</button>
+                {:else}
+                  <!-- [2026-08-29] P2:分组色点(无色时透明占位) -->
+                  <span
+                    class="shelf-sb-color"
+                    class:has={!!g.color}
+                    style="--swatch-color: {g.color ? BOOK_COLORS.find((c) => c.token === g.color)?.hex : 'transparent'}"
+                  ></span>
+                  <span class="shelf-sb-label">📁 {g.name}</span>
+                  <span class="shelf-sb-num">{g.count}</span>
+                  <!-- [2026-08-29] P2:悬停显示重命名 + 颜色 popover 入口 -->
+                  <button
+                    type="button"
+                    class="shelf-sb-edit"
+                    title="重命名(双击组名也行)"
+                    on:click|stopPropagation={() => startRenameGroup(g)}
+                  >✎</button>
+                  <button
+                    type="button"
+                    class="shelf-sb-colorbtn"
+                    title="分组颜色"
+                    on:click|stopPropagation={() => openGroupColorDialog(g.id)}
+                  >●</button>
+                {/if}
+              </div>
             {:else}
               <div class="shelf-sb-hint">还没有分组，点 ＋ 新建</div>
             {/each}
@@ -990,6 +1507,51 @@
                 {#each facets.tags as t (t.tag)}
                   <button class="shelf-tag-chip" class:active={filterTag === t.tag} on:click={() => pickTag(t.tag)}>
                     {t.tag}<span class="shelf-tag-num">{t.count}</span>
+                  </button>
+                {/each}
+              </div>
+            {/if}
+          </div>
+        {/if}
+
+        <!-- [2026-08-29] P2:颜色筛选区块(7 色 swatch + 计数) -->
+        {#if facets.colors.length}
+          <div class="shelf-sb-block">
+            <button class="shelf-sb-title toggle" on:click={() => toggleBlock("colors")}>
+              <span class="shelf-sb-caret" class:closed={collapsed.colors}>▾</span>
+              <span class="shelf-sb-title-text">颜色</span>
+            </button>
+            {#if !collapsed.colors}
+              <div class="shelf-sb-swatches">
+                {#each facets.colors as c (c.color)}
+                  <button
+                    type="button"
+                    class="shelf-sb-swatch"
+                    class:on={filterColor === c.color}
+                    style="--swatch-color: {BOOK_COLORS.find((x) => x.token === c.color)?.hex}"
+                    title="{BOOK_COLORS.find((x) => x.token === c.color)?.label} · {c.count} 本"
+                    on:click={() => pickColor(c.color)}
+                  >
+                    <span class="shelf-sb-swatch-num">{c.count}</span>
+                  </button>
+                {/each}
+              </div>
+            {/if}
+          </div>
+        {/if}
+
+        <!-- [2026-08-29] P2:丛书筛选区块(≥ 2 本才显示) -->
+        {#if facets.series.length}
+          <div class="shelf-sb-block">
+            <button class="shelf-sb-title toggle" on:click={() => toggleBlock("series")}>
+              <span class="shelf-sb-caret" class:closed={collapsed.series}>▾</span>
+              <span class="shelf-sb-title-text">丛书</span>
+            </button>
+            {#if !collapsed.series}
+              <div class="shelf-sb-tags">
+                {#each facets.series as s (s.series)}
+                  <button class="shelf-tag-chip" class:active={filterSeries === s.series} on:click={() => pickSeries(s.series)}>
+                    {s.series}<span class="shelf-tag-num">{s.count}</span>
                   </button>
                 {/each}
               </div>
@@ -1043,6 +1605,7 @@
               class:selected={selectedIds.includes(book.id)}
               draggable={true}
               on:dragstart={(e) => onBookDragStart(e, book.id)}
+              on:contextmenu={(e) => openCtxMenu(e, buildBookMenu(book))}
             >
               <div class="book-cover-wrap">
                 <button
@@ -1063,6 +1626,14 @@
                     title="选择"
                     on:click|stopPropagation={() => toggleSelect(book.id)}
                   >{selectedIds.includes(book.id) ? "✓" : ""}</button>
+                {/if}
+                <!-- [2026-08-29] P2:封面右上色点(hover 显示色名 tooltip) -->
+                {#if book.color}
+                  <span
+                    class="book-color-dot"
+                    style="--swatch-color: {BOOK_COLORS.find((c) => c.token === book.color)?.hex}"
+                    title="颜色: {BOOK_COLORS.find((c) => c.token === book.color)?.label}"
+                  ></span>
                 {/if}
                 <button
                   class="book-fav"
@@ -1119,12 +1690,15 @@
       {:else}
         <!-- [2026-08-29] P0 列表视图：一行看全信息 -->
         <div class="shelf-list">
-          {#each visible as book (book.id)}
+          {#each visible as book, idx (book.id)}
             <div
               class="shelf-row"
+              class:focused={rowFocusIdx === idx}
+              data-idx={idx}
               class:selected={selectedIds.includes(book.id)}
               draggable={true}
               on:dragstart={(e) => onBookDragStart(e, book.id)}
+              on:contextmenu={(e) => openCtxMenu(e, buildBookMenu(book))}
             >
               {#if selectMode}
                 <button
@@ -1144,6 +1718,14 @@
               <div class="row-main">
                 <div class="row-title-line">
                   <span class="row-title" title={book.title}>{book.title}</span>
+                  <!-- [2026-08-29] P2:列表行色点(放在标题后,小圆点) -->
+                  {#if book.color}
+                    <span
+                      class="row-color-dot"
+                      style="--swatch-color: {BOOK_COLORS.find((c) => c.token === book.color)?.hex}"
+                      title="颜色: {BOOK_COLORS.find((c) => c.token === book.color)?.label}"
+                    ></span>
+                  {/if}
                   <button
                     class="row-status-chip"
                     class:reading={(book.status ?? "unread") === "reading"}
@@ -1154,6 +1736,19 @@
                   {#if book.favorite}<span class="row-fav" title="收藏">★</span>{/if}
                 </div>
                 <div class="row-sub">
+                  <!-- [2026-08-29] P2:组 chip(放最前) -->
+                  {#if book.groupId}
+                    {@const g = facets.groups.find((x) => x.id === book.groupId)}
+                    {#if g}
+                      <span class="row-group-chip" title="分组">
+                        {#if g.color}<span
+                          class="row-group-dot"
+                          style="--swatch-color: {BOOK_COLORS.find((c) => c.token === g.color)?.hex}"
+                        ></span>{/if}📁 {g.name}
+                      </span>
+                      <span class="row-dot">·</span>
+                    {/if}
+                  {/if}
                   <span class="row-author" title={book.author || ""}>{book.author || "未知作者"}</span>
                   <span class="row-dot">·</span>
                   <span>{book.format.toUpperCase()}</span>
@@ -1293,10 +1888,46 @@
                 <button class="group-op" on:click={commitRenameGroup}>确定</button>
                 <button class="group-op" on:click={() => (renamingGroupId = "")}>取消</button>
               {:else}
+                <!-- [2026-08-29] P2:分组色点(点击展开 7 色 swatch) -->
+                <button
+                  type="button"
+                  class="group-color-dot"
+                  class:has={!!g.color}
+                  style="--swatch-color: {g.color ? BOOK_COLORS.find((c) => c.token === g.color)?.hex : 'transparent'}"
+                  title="分组颜色"
+                  on:click={() => toggleGroupColorPicker(g.id)}
+                ></button>
                 <span class="group-name">📁 {g.name}</span>
                 <span class="group-count">{g.count} 本</span>
                 <button class="group-op" on:click={() => startRenameGroup(g)}>重命名</button>
                 <button class="group-op danger" on:click={() => deleteGroup(g)}>删除</button>
+                {#if groupColorPickerId === g.id}
+                  <div class="group-color-pop">
+                    {#each BOOK_COLORS as c}
+                      <button
+                        type="button"
+                        class="shelf-swatch"
+                        class:on={g.color === c.token}
+                        style="--swatch-color: {c.hex}"
+                        title={c.label}
+                        on:click={async () => {
+                          await store.setGroupColor(g.id, c.token === g.color ? undefined : c.token);
+                          groupColorPickerId = "";
+                          await refresh();
+                        }}
+                      ></button>
+                    {/each}
+                    <button
+                      type="button"
+                      class="shelf-swatch-clear"
+                      on:click={async () => {
+                        await store.setGroupColor(g.id, undefined);
+                        groupColorPickerId = "";
+                        await refresh();
+                      }}
+                    >✕</button>
+                  </div>
+                {/if}
               {/if}
             </div>
           {:else}
@@ -1416,6 +2047,31 @@
               </div>
             {/if}
           </div>
+
+          <!-- [2026-08-29] P2:macOS 风格 7 色 swatch -->
+          <div class="edit-field">
+            <span>颜色</span>
+            <div class="shelf-swatch-row">
+              {#each BOOK_COLORS as c}
+                <button
+                  type="button"
+                  class="shelf-swatch"
+                  class:on={editColor === c.token}
+                  style="--swatch-color: {c.hex}"
+                  title={c.label}
+                  aria-label={c.label}
+                  on:click={() => (editColor = editColor === c.token ? undefined : c.token)}
+                ></button>
+              {/each}
+            </div>
+            {#if editColor}
+              <button
+                type="button"
+                class="shelf-swatch-clear"
+                on:click={() => (editColor = undefined)}
+              >✕ 移除颜色</button>
+            {/if}
+          </div>
         </div>
 
         <div class="edit-actions">
@@ -1449,6 +2105,16 @@
     style="display:none"
     on:change={onCoverChosen}
   />
+
+  <!-- [2026-08-29] P2:右键菜单(单例,按需打开) -->
+  {#if ctxMenu}
+    <BookshelfContextMenu
+      items={ctxMenu.items}
+      x={ctxMenu.x}
+      y={ctxMenu.y}
+      on:close={closeCtxMenu}
+    />
+  {/if}
 </div>
 
 <style>
@@ -1917,6 +2583,241 @@
   }
   .edit-field input:focus {
     border-color: var(--b3-theme-primary, #378add);
+  }
+
+  /* ================================================================
+   * 2026-08-29 书架 P2：macOS 风格 7 色 swatch / 色点 / 组 chip
+   * ================================================================ */
+
+  /* ---- 编辑弹窗 / 分组管理弹窗 swatch 容器 ---- */
+  .shelf-swatch-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-wrap: wrap;
+  }
+  .shelf-swatch {
+    width: 28px;
+    height: 28px;
+    border-radius: 4px;
+    border: 2px solid transparent;
+    background: var(--swatch-color, #888);
+    cursor: pointer;
+    padding: 0;
+    transition: transform 0.1s ease, box-shadow 0.1s ease;
+  }
+  .shelf-swatch:hover {
+    transform: scale(1.08);
+    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.2);
+  }
+  .shelf-swatch.on {
+    border-color: var(--b3-theme-primary, #378add);
+    box-shadow: 0 0 0 1px #fff inset, 0 2px 6px rgba(0, 0, 0, 0.2);
+  }
+  .shelf-swatch-clear {
+    font-size: 12px;
+    color: var(--b3-theme-on-surface-light, #888);
+    background: none;
+    border: 1px solid var(--b3-border-color, rgba(0, 0, 0, 0.15));
+    border-radius: 4px;
+    padding: 3px 8px;
+    cursor: pointer;
+  }
+  .shelf-swatch-clear:hover {
+    background: var(--b3-theme-background-light, rgba(0, 0, 0, 0.05));
+  }
+
+  /* ---- 网格卡片色点(右上) ---- */
+  .book-color-dot {
+    position: absolute;
+    top: 8px;
+    right: 36px; /* 收藏星标旁边 */
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    background: var(--swatch-color, #888);
+    box-shadow: 0 0 0 1px var(--b3-border-color, rgba(0, 0, 0, 0.15)), 0 1px 2px rgba(0, 0, 0, 0.2);
+    z-index: 2;
+    pointer-events: auto;
+  }
+  /* 列表行色点(标题后) */
+  .row-color-dot {
+    display: inline-block;
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background: var(--swatch-color, #888);
+    box-shadow: 0 0 0 1px var(--b3-border-color, rgba(0, 0, 0, 0.12));
+    flex-shrink: 0;
+  }
+
+  /* ---- 列表行组 chip ---- */
+  .row-group-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    font-size: 11px;
+    color: var(--b3-theme-primary, #378add);
+    background: var(--b3-theme-primary-light, rgba(55, 138, 221, 0.12));
+    padding: 1px 6px;
+    border-radius: 3px;
+    flex-shrink: 0;
+  }
+  .row-group-dot {
+    display: inline-block;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--swatch-color, #888);
+  }
+
+  /* ---- 侧边栏分组色点 + 编辑入口 ---- */
+  .shelf-sb-item.shelf-sb-group {
+    display: flex;
+    align-items: center;
+    gap: 0;
+    width: 100%;
+    cursor: pointer;
+  }
+  .shelf-sb-color {
+    display: inline-block;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--swatch-color, transparent);
+    margin-left: 4px;
+    margin-right: 2px;
+    flex-shrink: 0;
+    box-shadow: 0 0 0 1px var(--b3-border-color, rgba(0, 0, 0, 0.1));
+  }
+  .shelf-sb-color.has {
+    box-shadow: none;
+  }
+  .shelf-sb-edit,
+  .shelf-sb-colorbtn {
+    font-size: 11px;
+    line-height: 1;
+    width: 18px;
+    height: 18px;
+    border: none;
+    background: none;
+    color: var(--b3-theme-on-surface-light, #888);
+    cursor: pointer;
+    padding: 0;
+    border-radius: 3px;
+    flex-shrink: 0;
+    margin-left: 2px;
+    opacity: 0;
+    transition: opacity 0.15s ease;
+  }
+  .shelf-sb-item.shelf-sb-group:hover .shelf-sb-edit,
+  .shelf-sb-item.shelf-sb-group:hover .shelf-sb-colorbtn {
+    opacity: 1;
+  }
+  .shelf-sb-edit:hover,
+  .shelf-sb-colorbtn:hover {
+    background: var(--b3-theme-primary-light, rgba(55, 138, 221, 0.18));
+    color: var(--b3-theme-primary, #378add);
+  }
+  .shelf-sb-item.shelf-sb-group:hover .shelf-sb-label {
+    text-decoration: underline dashed;
+    text-underline-offset: 2px;
+    cursor: text;
+  }
+  .shelf-sb-item.shelf-sb-group .shelf-sb-rename {
+    flex: 1;
+    min-width: 0;
+    font-size: 12px;
+    padding: 3px 6px;
+    margin: -2px 0;
+    pointer-events: auto;
+  }
+  .shelf-sb-item.shelf-sb-group .shelf-sb-rename + .group-op {
+    margin-left: 4px;
+    padding: 2px 4px;
+    font-size: 11px;
+    flex-shrink: 0;
+  }
+
+  /* ---- 侧边栏 swatch 区块(颜色筛选) ---- */
+  .shelf-sb-swatches {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 4px 4px 4px 0;
+    flex-wrap: wrap;
+  }
+  .shelf-sb-swatch {
+    position: relative;
+    width: 22px;
+    height: 22px;
+    border-radius: 4px;
+    border: 2px solid transparent;
+    background: var(--swatch-color, #888);
+    cursor: pointer;
+    padding: 0;
+    transition: transform 0.1s ease;
+  }
+  .shelf-sb-swatch:hover {
+    transform: scale(1.1);
+  }
+  .shelf-sb-swatch.on {
+    border-color: var(--b3-theme-primary, #378add);
+    box-shadow: 0 0 0 1px #fff inset;
+  }
+  .shelf-sb-swatch-num {
+    position: absolute;
+    bottom: -14px;
+    left: 50%;
+    transform: translateX(-50%);
+    font-size: 9px;
+    color: var(--b3-theme-on-surface-light, #888);
+    line-height: 1;
+    pointer-events: none;
+  }
+
+  /* ---- 分组管理弹窗色点 + popover ---- */
+  .group-color-dot {
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    background: var(--swatch-color, transparent);
+    border: 1px solid var(--b3-border-color, rgba(0, 0, 0, 0.2));
+    cursor: pointer;
+    padding: 0;
+    flex-shrink: 0;
+  }
+  .group-color-dot.has {
+    border-color: transparent;
+  }
+  .group-color-pop {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 6px 8px;
+    background: var(--b3-theme-background, #fff);
+    border: 1px solid var(--b3-border-color, rgba(0, 0, 0, 0.12));
+    border-radius: 6px;
+    margin-top: 4px;
+    width: 100%;
+    flex-wrap: wrap;
+  }
+
+  /* ---- 顶栏 ⏵ 续读按钮变 primary ---- */
+  .shelf-icon-btn.primary {
+    background: var(--b3-theme-primary, #378add);
+    color: #fff;
+    font-weight: 500;
+    padding: 0 10px;
+  }
+  .shelf-icon-btn.primary:hover {
+    background: var(--b3-theme-primary, #357abd);
+  }
+
+  /* ---- 列表行 J/K 焦点高亮 ---- */
+  .shelf-row.focused {
+    outline: 2px solid var(--b3-theme-primary, #378add);
+    outline-offset: -2px;
   }
 
   /* ================================================================

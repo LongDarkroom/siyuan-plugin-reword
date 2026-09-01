@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { JSDOM } from "jsdom";
-import { createBilingual } from "../src/reader/bilingual.ts";
+import { createBilingualV2 } from "../src/reader/bilingual-v2/bilingual-v2.ts";
 
 function makeDoc(html) {
   const dom = new JSDOM(`<!DOCTYPE html><body>${html}</body>`);
@@ -33,7 +33,7 @@ let doc, calls, lastTexts, lastCtx, lastExtra;
 test("pretranslateAll: 遍历全书段落并携带前文上下文送译", async () => {
   doc = makeDoc("<p>第一段</p><p>第二段</p><p>第三段</p>");
   calls = 0; lastTexts = []; lastCtx = []; lastExtra = undefined;
-  const handle = createBilingual(baseOpts());
+  const handle = createBilingualV2(baseOpts());
   let prog = null;
   await handle.pretranslateAll({
     onProgress: (p) => { prog = { d: p.done, t: p.total, status: p.status, pending: p.pending }; },
@@ -48,14 +48,14 @@ test("pretranslateAll: 遍历全书段落并携带前文上下文送译", async 
   assert.equal(prog.d, 3);
   assert.equal(prog.t, 3);
   assert.equal(prog.status, "done");
-  assert.equal(prog.pending, 3);
+  assert.equal(prog.pending, 0, "完成后剩余待译为 0");
 });
 
 test("pretranslateAll: 批大小上限为 8（分段送译）", async () => {
   const paras = Array.from({ length: 20 }, (_, i) => `<p>段${i + 1}</p>`).join("");
   doc = makeDoc(paras);
   calls = 0; lastExtra = undefined;
-  const handle = createBilingual({
+  const handle = createBilingualV2({
     bookId: "book-2",
     getContents: () => [doc],
     translateBatch: async (texts) => {
@@ -73,7 +73,7 @@ test("pretranslateAll: 批大小上限为 8（分段送译）", async () => {
 test("pretranslateAll: 空文档不调用翻译且不抛错", async () => {
   doc = makeDoc("<div></div>");
   calls = 0;
-  const handle = createBilingual({
+  const handle = createBilingualV2({
     bookId: "book-3",
     getContents: () => [doc],
     translateBatch: async (texts) => {
@@ -91,7 +91,7 @@ test("pretranslateAll: checkCached 全部命中则跳过翻译（pending=0, 状�
   doc = makeDoc("<p>A</p><p>B</p><p>C</p>");
   calls = 0;
   let lastStatus = null;
-  const handle = createBilingual({
+  const handle = createBilingualV2({
     bookId: "book-4",
     getContents: () => [doc],
     translateBatch: async (texts) => {
@@ -112,7 +112,7 @@ test("pretranslateAll: checkCached 全部命中则跳过翻译（pending=0, 状�
 test("pretranslateAll: overwrite=true 时忽略缓存（仍翻译全部）", async () => {
   doc = makeDoc("<p>A</p><p>B</p><p>C</p>");
   calls = 0;
-  const handle = createBilingual({
+  const handle = createBilingualV2({
     bookId: "book-5",
     getContents: () => [doc],
     translateBatch: async (texts) => {
@@ -130,7 +130,7 @@ test("pretranslateAll: overwrite=true 时忽略缓存（仍翻译全部）", asy
 test("pretranslateAll: model 选项透传到 translateBatch 的 extra.model", async () => {
   doc = makeDoc("<p>A</p>");
   calls = 0; lastExtra = undefined;
-  const handle = createBilingual(baseOpts());
+  const handle = createBilingualV2(baseOpts());
   await handle.pretranslateAll({ model: "deepseek-chat" });
   assert.equal(calls, 1);
   assert.ok(lastExtra && lastExtra.model === "deepseek-chat", "model 应透传为 extra.model");
@@ -141,7 +141,7 @@ test("pretranslateAll: signal 中断后状态为 cancelled", async () => {
   doc = makeDoc(paras);
   calls = 0;
   const ac = new AbortController();
-  const handle = createBilingual({
+  const handle = createBilingualV2({
     bookId: "book-6",
     getContents: () => [doc],
     translateBatch: async (texts) => {

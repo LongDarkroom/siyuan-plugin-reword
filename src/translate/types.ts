@@ -6,8 +6,14 @@
  * 返回「同序同长的译文数组」，便于调用方按索引回填，也便于按书缓存。
  */
 
-/** 翻译引擎提供方标识 */
-export type TranslateProviderName = "microsoft" | "libretranslate" | "ai";
+/** 翻译引擎提供方标识（2026-08-30 新增腾讯/有道/百度三个免费引擎） */
+export type TranslateProviderName =
+  | "tencent"
+  | "youdao"
+  | "baidu"
+  | "microsoft"
+  | "libretranslate"
+  | "ai";
 
 /** 一次翻译请求（批量） */
 export interface TranslateRequest {
@@ -25,10 +31,11 @@ export interface TranslateRequest {
    */
   bookId?: string;
   /**
-   * 翻译模式（2026-08-30 新增，可选，默认 "default"）。
+   * 翻译模式（可选，默认 "default"）。
    * - "default"：默认直译风格
-   * - "concise"：精简版（系统 prompt 追加"长度匹配、不扩展"等约束）
-   * 引擎按 mode 选不同 system prompt；缓存按 mode 路由（不同 mode 互不污染）。
+   * - "concise"：简洁版（2026-08-30 v1.4.3 新增），段落级"简洁版"按钮触发
+   *   不同 mode 走 cache.ts 的独立译文池，互不污染
+   * 未来可扩展 literal / literary 等。
    */
   mode?: "default" | "concise";
 }

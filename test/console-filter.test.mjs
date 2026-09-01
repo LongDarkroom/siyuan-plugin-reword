@@ -12,7 +12,13 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { dirname, resolve } from "node:path";
 import { installConsoleFilter, __resetConsoleFilterForTest } from "../src/core/console-filter.ts";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
 
 /** 模拟浏览器环境:在 globalThis 上挂伪 window */
 function mockWindow() {
@@ -258,4 +264,29 @@ test("installConsoleFilter 幂等:console.warn 也只包装一次", () => {
     restore();
     __resetConsoleFilterForTest();
   }
+});
+
+// ============ 2026-08-31 v1.4.5 P6：跨 frame 拦截（foliate srcdoc iframe）============
+// 注：P6 通过源码合约 + tsc 验证（jsdom 模拟 srcdoc iframe 异步 load 成本高，
+//     且 console 替换全局副作用大）。现有 14 个测试覆盖父窗口 console.error/warn
+//     路径；P6 复用相同 SUPPRESSED_PATTERNS，仅扩展到 iframe.contentWindow。
+
+test("P6: 跨 frame 钩子源码合约（MutationObserver + srcdoc + WeakSet 防重）", () => {
+  const src = readFileSync(
+    resolve(__dirname, "../src/core/console-filter.ts"),
+    "utf-8"
+  );
+  // P6 关键符号存在
+  assert.match(src, /installIframeConsoleHook/);
+  assert.match(src, /srcdoc/);
+  assert.match(src, /MutationObserver/);
+  assert.match(src, /iframeHooksInstalled/);
+  // 类型转换（TypeScript strict 模式 Window 不带 console）
+  assert.match(src, /winAny\.console/);
+  // 跨域拒绝：try/catch + return false
+  assert.match(src, /catch[\s\S]*?return false/);
+  // installConsoleFilter 末尾应调用 installIframeObserver
+  assert.match(src, /installIframeObserver\(\)/);
+  // bodyWatcher 兜底：DOM 未就绪时启动
+  assert.match(src, /bodyWatcher/);
 });

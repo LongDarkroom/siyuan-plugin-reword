@@ -107,21 +107,48 @@ export class ReaderTabController {
               onTranslateToAi: (t: string) => self.plugin?.translateToAi?.(t),
               // 2026-08-27：双语段落批量翻译（按书缓存，引擎链兜底）
               // 2026-08-30：透传 extra（model/overwrite/signal）以支持整书预翻译细化选项
-              onTranslateBatch: (texts: string[], from: string, to: string, extra?: any) =>
-                self.plugin?.translateBatch?.(texts, from, to, bookId, undefined, undefined, extra) ?? Promise.resolve([]),
-              // 2026-08-30 透明化：详细翻译（回传 provider / fromCache）供来源徽标
-              onTranslateBatchDetailed: (texts: string[], from: string, to: string, extra?: any) =>
-                self.plugin?.translateBatchDetailed?.(texts, from, to, bookId, undefined, undefined, extra) ??
-                Promise.resolve({ texts: [], providers: [], fromCache: [] }),
-              // 2026-08-30 单段补救：用户修正库（钉选正确答案，持久化且不被清空缓存删除）
-              onGetFix: (text: string) => self.plugin?.getTranslationFix?.(bookId, text) ?? Promise.resolve(null),
-              onSetFix: (text: string, tr: string) => self.plugin?.setTranslationFix?.(bookId, text, tr) ?? Promise.resolve(),
-              onDeleteFix: (text: string) => self.plugin?.deleteTranslationFix?.(bookId, text) ?? Promise.resolve(),
-              onDeleteCacheOne: (text: string) => self.plugin?.translationCache?.deleteOne?.(bookId, text, "default") ?? Promise.resolve(),
+              // 2026-08-30 修复：ctxBefore（前文参考）+ meta（书籍元数据）必须透传，
+              //   否则 AI 翻译拿不到前文语境，专有名词一致性（v1.3.0）失效
+              //   meta 兜底用 plugin.getBookMeta(bookId) 现场取；ctxBefore 由调用方（bilingual.ts）传入
+              onTranslateBatch: (
+                texts: string[],
+                from: string,
+                to: string,
+                ctxBefore?: (string | null)[],
+                meta?: { title?: string; author?: string; language?: string; toc?: string } | null,
+                extra?: any
+              ) => {
+                const finalMeta = meta ?? (self.plugin as any)?.getBookMeta?.(bookId) ?? null;
+                return (
+                  self.plugin?.translateBatch?.(texts, from, to, bookId, ctxBefore, finalMeta, extra) ??
+                  Promise.resolve([])
+                );
+              },
+              // 2026-08-30 详细翻译（回传 provider / fromCache）供成本与引擎统计
+              // 2026-08-30 修复：同 onTranslateBatch，ctxBefore/meta 透传
+              onTranslateBatchDetailed: (
+                texts: string[],
+                from: string,
+                to: string,
+                ctxBefore?: (string | null)[],
+                meta?: { title?: string; author?: string; language?: string; toc?: string } | null,
+                extra?: any
+              ) => {
+                const finalMeta = meta ?? (self.plugin as any)?.getBookMeta?.(bookId) ?? null;
+                return (
+                  self.plugin?.translateBatchDetailed?.(texts, from, to, bookId, ctxBefore, finalMeta, extra) ??
+                  Promise.resolve({ texts: [], providers: [], fromCache: [] })
+                );
+              },
               // 2026-08-30：整书预翻译弹窗「已缓存统计」——按书查询每段缓存命中，返回同序 boolean[]
               onCheckCache: (texts: string[]) =>
                 self.plugin?.checkTranslationCacheHits?.(bookId, texts) ?? Promise.resolve(new Array(texts.length).fill(false)),
               isTranslationConfigured: () => !!self.plugin?.isTranslationConfigured?.(),
+              getAiSettings: () => (self.plugin as any)?.getAiSettings?.() ?? null,
+              onSaveTencentLock: (chars: number) => (self.plugin as any)?.saveTencentCharsLock?.(chars) ?? Promise.resolve(),
+              onSaveAiSettings: (partial: any) => (self.plugin as any)?.updateAiSettings?.(partial) ?? Promise.resolve(),
+              // 2026-08-31 Phase 4：打开「双语翻译设置」独立 Tab（替换原内联弹窗）
+              onOpenBilingualSettingsTab: () => (self.plugin as any)?.openBilingualSettingsTab?.(),
               onAddToVocab: (w: string) => self.plugin?.getVocabStore?.()?.addWord?.(w),
               // 2026-08-27：阅读器词典弹窗「侧边栏」按钮 → 复用主插件 openWordInSidebar
               onOpenInSidebar: (w: string) => self.plugin?.openWordInSidebar?.(w),
@@ -136,6 +163,10 @@ export class ReaderTabController {
               resetTokenUsage: (bid: string) => (self.plugin as any)?.resetBookTokenUsage?.(bid),
               // v1.3.0：最近一次翻译 token 用量（修复原裸 plugin 引用未定义）
               getLastUsage: () => (self.plugin as any)?.lastTranslationUsage ?? null,
+              // 2026-08-31 Phase 3：术语表（读写全局词条；改动会让相关译文失效重译）
+              getGlossaryTerms: () => (self.plugin as any)?.getGlossaryTerms?.() ?? [],
+              setGlossaryTerms: (terms: any[]) =>
+                (self.plugin as any)?.setGlossaryTerms?.(terms) ?? Promise.resolve(),
               // 2026-08-28：翻译缓存统计 / 清空（按书；UI 展示已缓存条数 + 清空按钮）
               getTranslationCacheStats: (bid: string) =>
                 (self.plugin as any)?.getTranslationCacheStats?.(bid) ?? Promise.resolve({ count: 0 }),
@@ -146,6 +177,12 @@ export class ReaderTabController {
               // 2026-08-30：清理「孤儿」翻译缓存（书架已删除书籍对应的缓存文件）
               cleanOrphanCaches: () =>
                 (self.plugin as any)?.cleanOrphanTranslationCaches?.() ?? Promise.resolve(0),
+              // 2026-08-31 Task A：双语翻译「按书记忆」模式（读 / 写）
+              // 点「双语」且全局默认=ask 时，先查本书是否已有记忆；有则直接套用不弹窗。
+              getBilingualBookMode: (bid: string) =>
+                (self.plugin as any)?.getBilingualBookMode?.(bid) ?? Promise.resolve(null),
+              setBilingualBookMode: (bid: string, mode: "whole-book" | "progressive") =>
+                (self.plugin as any)?.setBilingualBookMode?.(bid, mode) ?? Promise.resolve(),
               // 2026-08-28：翻译成功入缓存后回传「节」序号（1-based），用于 UI「第 X-Y 页缓存成功」
               recordCachedSections: (bid: string, sections: number[]) =>
                 (self.plugin as any)?.recordCachedSections?.(bid, sections),

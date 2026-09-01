@@ -100,7 +100,15 @@
     rewriteFontKeywordsInDocument,
   } from "../reader/reader-font-classify";
   // 2026-08-27 重设计：双语段落注入（顶栏「双语」开关）
-  import { createBilingual, type BilingualHandle, type PretranslateProgress, type PretranslateOptions } from "./bilingual";
+  // 2026-08-31：v1（bilingual.ts）已删除，统一走 v2 兄弟节点渲染
+  import { type BilingualHandle, type PretranslateProgress, type PretranslateOptions } from "./bilingual-types";
+  import { createBilingualV2 } from "./bilingual-v2/bilingual-v2";
+  import { telemetry, engineLabel } from "./bilingual-v2/telemetry";
+  // 2026-08-30：预翻译弹窗读取可用引擎/模型
+  import { isEngineAvailable } from "../translate/engine";
+  import {
+    type AiSettings,
+  } from "../ai/ai-settings";
   // 2026-08-28：连续朗读控制器（参考 Readest：多引擎 system/youdao/edge + 句子高亮 + 控制条）
   import { ReaderTtsController, DEFAULT_REWORD_TTS, type RewordTtsSettings, type TtsState } from "./reader-tts";
   import { getFileBlob } from "../siyuan/api";
@@ -203,28 +211,54 @@
   /** 翻译选中文本并直接发送到 AI 精读面板（委托 plugin.translateToAi） */
   export let onTranslateToAi: ((text: string) => void) | undefined = undefined;
   /** 双语段落批量翻译（委托 plugin.translateBatch，按书缓存 + 引擎链兜底）；
-   *  2026-08-30 增加 extra（model/overwrite/signal）以支持整书预翻译细化选项 */
-  export let onTranslateBatch: ((texts: string[], from: string, to: string, extra?: any) => Promise<string[]>) | undefined = undefined;
+   *  2026-08-30 增加 extra（model/overwrite/signal）以支持整书预翻译细化选项
+   *  2026-08-30 修复：ctxBefore（前文参考）+ meta（书籍元数据）透传，供 AI 语境理解与
+   *    v1.3.0 专有名词一致性生效；bridge 端 reader-tab.ts 会兜底补 meta（plugin.getBookMeta） */
+  export let onTranslateBatch:
+    | ((
+        texts: string[],
+        from: string,
+        to: string,
+        ctxBefore?: (string | null)[],
+        meta?: { title?: string; author?: string; language?: string; toc?: string } | null,
+        extra?: any
+      ) => Promise<string[]>)
+    | undefined = undefined;
   /** 批量查询缓存命中（委托 plugin.checkTranslationCacheHits），供预翻译弹窗精确计算待译数 */
   export let onCheckCache: ((texts: string[]) => Promise<boolean[]>) | undefined = undefined;
-  /** 2026-08-30 详细翻译（回传 provider/fromCache），供来源徽标；未提供时回落 onTranslateBatch */
+  /** 2026-08-30 详细翻译（回传 provider/fromCache），供成本与引擎统计；未提供时回落 onTranslateBatch
+   *  2026-08-30 修复：ctxBefore/meta 透传（语义同 onTranslateBatch） */
   export let onTranslateBatchDetailed:
-    | ((texts: string[], from: string, to: string, extra?: any) => Promise<{ texts: string[]; providers: (string | null)[]; fromCache: boolean[] }>)
+    | ((
+        texts: string[],
+        from: string,
+        to: string,
+        ctxBefore?: (string | null)[],
+        meta?: { title?: string; author?: string; language?: string; toc?: string } | null,
+        extra?: any
+      ) => Promise<{ texts: string[]; providers: (string | null)[]; fromCache: boolean[] }>)
     | undefined = undefined;
-  /** 2026-08-30 单段补救：取用户钉选修正译文（最高优先级，覆盖 AI 缓存） */
-  export let onGetFix: ((text: string) => Promise<string | null>) | undefined = undefined;
-  /** 2026-08-30 单段补救：钉选/覆盖一条修正译文 */
-  export let onSetFix: ((text: string, tr: string) => Promise<void> | void) | undefined = undefined;
-  /** 2026-08-30 单段补救：删除一条修正译文（仅删修正库） */
-  export let onDeleteFix: ((text: string) => Promise<void> | void) | undefined = undefined;
-  /** 2026-08-30 单段补救：删除单段 AI 缓存（用于「隐藏」时彻底清除） */
-  export let onDeleteCacheOne: ((text: string) => Promise<void> | void) | undefined = undefined;
   /** 是否已配置任一翻译引擎（用于双语开关前置提示） */
   export let isTranslationConfigured: (() => boolean) | undefined = undefined;
+  /** 获取当前 AI 设置快照（用于预翻译弹窗判断可用引擎/模型） */
+  export let getAiSettings: (() => AiSettings | null) | undefined = undefined;
+  /** 2026-08-31 Task A：读取某本书被记住的双语翻译模式（whole-book / progressive），未记忆返回 null */
+  export let getBilingualBookMode: ((bookId: string) => Promise<"whole-book" | "progressive" | null>) | undefined = undefined;
+  /** 2026-08-31 Task A：记住某本书的双语翻译模式（用户选定后持久化，再次开同书不弹窗） */
+  export let setBilingualBookMode: ((bookId: string, mode: "whole-book" | "progressive") => Promise<void>) | undefined = undefined;
+  /** 保存腾讯翻译用量锁（单位：字符） */
+  export let onSaveTencentLock: ((chars: number) => Promise<void> | void) | undefined = undefined;
+  /** 2026-08-31：双语设置独立弹窗增量保存 AI 设置（翻译风格/提示词/引擎/参数） */
+  export let onSaveAiSettings: ((partial: Partial<AiSettings>) => Promise<void> | void) | undefined = undefined;
+  // 2026-08-31 Phase 3：术语表（读写全局词条；改动会让相关译文失效重译）
+  export let getGlossaryTerms: (() => Array<{ src: string; dst: string; caseSensitive?: boolean; note?: string }>) | undefined = undefined;
+  export let setGlossaryTerms: ((terms: Array<{ src: string; dst: string; caseSensitive?: boolean; note?: string }>) => Promise<void> | void) | undefined = undefined;
   /** 加入词库（委托 plugin vocabStore.addWord） */
   export let onAddToVocab: ((word: string) => Promise<void> | void) | undefined = undefined;
   /** 在 REword 侧边栏查词（委托 plugin.openWordInSidebar：切到查词 Tab、自动填词查询、不打断编辑） */
   export let onOpenInSidebar: ((word: string) => void) | undefined = undefined;
+  /** 2026-08-31 Phase 4：打开「双语翻译设置」独立 Tab（替换原内联弹窗） */
+  export let onOpenBilingualSettingsTab: (() => void) | undefined = undefined;
   /** 移出词库（委托 plugin vocabStore.removeWord） */
   export let onRemoveFromVocab: ((word: string) => Promise<void> | void) | undefined = undefined;
   /** 判断单词是否在词库（委托 plugin vocabStore.hasWord） */
@@ -311,6 +345,8 @@
   // 2026-08-27 重设计：双语对照状态与注入句柄
   let bilingualOn = false;
   let bilingualHandle: BilingualHandle | null = null;
+  /** 2026-08-31：已隐藏译文段落的指纹集合（segHash），按本书维护，关闭/重开双语后保持隐藏 */
+  let bilingualHidden = new Set<string>();
   let bilingualProgress = { done: 0, total: 0, active: false };
   // 2026-08-30：整书预翻译（后台填充翻译缓存，不注入 DOM）
   let ptRunning = false;          // 是否有预翻译任务在跑（弹窗内或后台）
@@ -319,12 +355,44 @@
   let ptProgress: PretranslateProgress = { done: 0, total: 0, cached: 0, pending: 0, status: "idle" };
   let ptAbort: AbortController | null = null;
   // 弹窗表单（细化选项）
-  let ptForm = { to: "zh", model: "", batchSize: 8, concurrency: 1, overwrite: false };
+  let ptForm = { to: "zh", model: "", engine: "auto", batchSize: 8, concurrency: 1, overwrite: false, tencentLockWan: 400 };
+  // 若当前选中引擎在可用列表中失效或被锁定，自动回退到 auto
+  $: {
+    const opts = ptEngineOptions();
+    const cur = opts.find((o) => o.value === ptForm.engine);
+    if (ptForm.engine !== "auto" && (!cur || cur.disabled)) {
+      ptForm.engine = "auto";
+    }
+  }
   // 打开弹窗时展示的初始统计（总数/已缓存/待译/预估 token）
   let ptStats = { total: 0, cached: 0, pending: 0, estTokens: 0 };
   let bilingualInitDone = false; // 设置恢复只执行一次
   // 2026-08-28：最近一次双语翻译的 AI token 用量（null = 无数据 / 未走 AI）
   let bilingualTokenUsage: { promptTokens: number; completionTokens: number; totalTokens: number } | null = null;
+  // 2026-08-30 v2：引擎状态 / 成本看板（订阅 Telemetry 总线实时聚合）
+  let ptTelemetry = { cache: 0, engines: {} as Record<string, number>, tencentChars: 0, errors: 0 };
+  /** 重置看板（每次打开弹窗 / 开始任务时清零） */
+  function ptTelemetryReset() {
+    ptTelemetry = { cache: 0, engines: {}, tencentChars: 0, errors: 0 };
+  }
+  /** 订阅 Telemetry 总线，聚合本次预翻译的引擎状态与成本 */
+  let ptTelemetryUnsub: (() => void) | null = null;
+  function ptTelemetrySubscribe() {
+    ptTelemetryUnsub?.();
+    ptTelemetryUnsub = telemetry.on((e) => {
+      if (e.bookId && e.bookId !== bookId) return;
+      if (e.phase === "hit" && e.engine === "cache") {
+        ptTelemetry = { ...ptTelemetry, cache: ptTelemetry.cache + (e.segmentCount || 0) };
+      } else if (e.phase === "try" && e.engine) {
+        const engines = { ...ptTelemetry.engines };
+        engines[e.engine] = (engines[e.engine] || 0) + (e.segmentCount || 0);
+        const tencentChars = e.engine === "tencent" ? ptTelemetry.tencentChars + (e.chars || 0) : ptTelemetry.tencentChars;
+        ptTelemetry = { ...ptTelemetry, engines, tencentChars };
+      } else if (e.phase === "error") {
+        ptTelemetry = { ...ptTelemetry, errors: ptTelemetry.errors + 1 };
+      }
+    });
+  }
   // ========== 2026-08-26 调试 HUD：高亮渲染链路诊断（foliate 原生管线） ==========
   // 退回 foliate 原生：view.addAnnotation + draw-annotation 事件 + Overlayer 静态方法。
   // 不再自建 SVG 层（rewordOverlays / rewordHighlights 已移除）。
@@ -2945,14 +3013,6 @@
     if (bilingualOn) ensureBilingualHandle().refresh();
   }
 
-  /** 2026-08-30 透明化：显示来源徽标（缓存/AI/微软/Libre/已修正） */
-  function setBilingualShowProvider(e: Event) {
-    const v = (e.target as HTMLInputElement).checked;
-    settings = settingsStore.update({ bilingualShowProvider: v });
-    // 徽标是注入时带上的 DOM 属性，开关变化需刷新当前屏重新注入以同步显隐
-    if (bilingualOn) ensureBilingualHandle().refresh();
-  }
-
   /** 2026-08-30 透明化：双语调试信息（译文块显示引擎与送译原文/前文参考） */
   function setBilingualDebug(e: Event) {
     const v = (e.target as HTMLInputElement).checked;
@@ -2960,6 +3020,32 @@
     if (bilingualOn) ensureBilingualHandle().refresh();
   }
 
+  /**
+   * 2026-08-31 Phase 2：归档译文到思源 SQLite（可搜索 / 可 SQL 查询 / 随同步）。
+   * 首次启用才会在笔记本里建「REword 译文归档」文档——在用户思源里建文档是
+   * 写入操作，所以只有用户主动打开这个开关时才做。
+   */
+  async function setTranslationArchive(e: Event) {
+    const v = (e.target as HTMLInputElement).checked;
+    settings = settingsStore.update({ translationArchiveEnabled: v });
+    if (!v) return;
+
+    try {
+      const { ensureTranslationArchiveDoc } = await import("../translate/sqlite-cache.ts");
+      const docId = await ensureTranslationArchiveDoc(
+        () => settings.translationArchiveDocId || "",
+        async (id: string) => {
+          settings = settingsStore.update({ translationArchiveDocId: id });
+        }
+      );
+      toast(docId ? "已启用译文归档，新建译文会同步写进思源" : "启用失败：无法创建归档文档，请检查思源笔记本", 2600);
+    } catch (err) {
+      console.warn("[REword] 启用译文归档失败:", err);
+      toast("启用译文归档失败，请重试", 2600, "error" as any);
+    }
+  }
+
+  let askModeOpen = false;
   /* ================= 本书前提上下文（v1.3.0：lite Protyle 富文本编辑） ================= */
 
   let primerOpen = false;
@@ -3046,12 +3132,21 @@
   async function onClearBilingualCache() {
     const target = selectedCacheBookId || bookId;
     if (!target || !clearTranslationCache || clearingCache) return;
+    // 2026-08-31 v1.4.4 P2：清空缓存是不可逆操作，强制二次确认
+    //   避免用户误触导致所有译文丢失（下次翻页会全量重译，费 token）
+    const isCurrentBook = target === bookId;
+    const msg = isCurrentBook
+      ? `清空本书「${meta?.title || title || "当前书籍"}」全部翻译缓存？\n\n将删除 ${bilingualCacheCount} 段译文（${bilingualCachedPages} 页）。\n之后翻页会重新翻译，会消耗 AI token。\n\n确定继续？`
+      : `清空所选书籍 ${cacheBookList.find((b) => b.bookId === target)?.title || target} 的翻译缓存？\n\n确定继续？`;
+    if (!confirm(msg)) return;
     clearingCache = true;
     try {
       await clearTranslationCache(target);
       await refreshCacheStats(target);
       await refreshCacheBookList();
-      toast(target === bookId ? "本书翻译缓存已清空" : "已清空所选书籍翻译缓存");
+      // 2026-08-31 v1.4.4 P2：清空后立即 refresh 眼前屏（避免残留旧译文）
+      if (bilingualOn) ensureBilingualHandle()?.refresh();
+      toast(isCurrentBook ? "本书翻译缓存已清空，下次翻页会重新翻译" : "已清空所选书籍翻译缓存");
     } catch (e) {
       console.warn("[REword] 清空翻译缓存失败:", e);
       toast("清空缓存失败，请重试", 2600, "error" as any);
@@ -3064,6 +3159,8 @@
    * （同一本实体书在历史随机 bookId / 删书未清缓存时可能遗留多份）。 */
   async function onCleanOrphanCaches() {
     if (!cleanOrphanCaches || clearingOrphans) return;
+    // 2026-08-31 v1.4.4 P2：清理无效缓存也加二次确认（不可逆）
+    if (!confirm("清理无效（孤儿）翻译缓存？\n\n仅清书架中已不存在书籍对应的缓存文件，\n当前在读书籍的缓存不受影响。\n\n确定继续？")) return;
     clearingOrphans = true;
     try {
       const n = await cleanOrphanCaches();
@@ -3086,6 +3183,8 @@
       return;
     }
     ensureBilingualHandle();
+    ptTelemetryReset();
+    ptTelemetrySubscribe();
     // 2026-08-30：用与 pretranslateAll 完全一致的 checkCached 路径计算「已缓存/待译」，
     // 避免 getTranslationCacheStats(按条目计数) 与逐段命中不一致导致「开始」按钮误禁用。
     const texts = bilingualHandle!.segmentTexts();
@@ -3095,14 +3194,92 @@
     const pending = Math.max(0, stats.count - cached);
     const estTokens = Math.max(0, Math.round(stats.chars / 4));
     ptStats = { total: stats.count, cached, pending, estTokens };
-    ptForm = { to: settingsStore.get().bilingualTarget || "zh", model: "", batchSize: 8, concurrency: 1, overwrite: false };
+    const ai = getAiSettings?.() || null;
+    ptForm = {
+      to: settingsStore.get().bilingualTarget || "zh",
+      model: "",
+      engine: "auto",
+      batchSize: 8,
+      concurrency: 1,
+      overwrite: false,
+      tencentLockWan: Math.max(0, Math.round((ai?.tencentCharsLock ?? 4_000_000) / 10_000)),
+    };
     ptProgress = { done: 0, total: stats.count, cached, pending, status: "idle", estTokens };
     ptOpen = true;
+  }
+
+  /** 预翻译弹窗：当前 AI 设置快照 */
+  function ptAiSettings(): AiSettings | null {
+    return getAiSettings?.() ?? null;
+  }
+
+  /** 预翻译弹窗：可用引擎选项（仅显示已配置/未锁定的） */
+  function ptEngineOptions(): { value: string; label: string; disabled?: boolean; hint?: string }[] {
+    const s = ptAiSettings();
+    if (!s) return [{ value: "auto", label: "自动（按优先级尝试）" }];
+    const cfg = {
+      ...s,
+      aiEnabled: s.enabled,
+      aiApiKey: s.apiKey,
+      aiModels: s.models,
+    };
+    const opts: { value: string; label: string; disabled?: boolean; hint?: string }[] = [
+      { value: "auto", label: "自动（按优先级尝试）" },
+    ];
+    const engines: { value: string; label: string }[] = [
+      { value: "tencent", label: "腾讯翻译" },
+      { value: "youdao", label: "有道翻译" },
+      { value: "baidu", label: "百度翻译" },
+      { value: "microsoft", label: "微软翻译" },
+      { value: "libretranslate", label: "LibreTranslate" },
+      { value: "ai", label: "AI 翻译" },
+    ];
+    for (const e of engines) {
+      const avail = isEngineAvailable(e.value, cfg);
+      if (avail) {
+        opts.push(e);
+      } else if (e.value === "tencent" && s.tencentEnabled && s.tencentSecretId && s.tencentSecretKey) {
+        // 已配置但达到用量锁：显示为禁用项并提示
+        const used = s.tencentCharsUsed ?? 0;
+        const lock = s.tencentCharsLock ?? 4_000_000;
+        opts.push({ value: e.value, label: e.label, disabled: true, hint: `已用尽 ${lock.toLocaleString()} 字符` });
+      }
+      // 未配置的引擎直接隐藏，不占用界面
+    }
+    return opts;
+  }
+
+  /** 预翻译弹窗：可用 AI 模型选项 */
+  function ptModelOptions(): { value: string; label: string }[] {
+    const s = ptAiSettings();
+    const models = (s?.models || []).filter((m) => typeof m === "string" && m.trim());
+    const current = s?.model?.trim();
+    if (current && !models.includes(current)) models.unshift(current);
+    return [{ value: "", label: "默认（沿用当前 AI 设置）" }, ...models.map((m) => ({ value: m, label: m }))];
+  }
+
+  /** 预翻译弹窗：是否显示腾讯用量锁行 */
+  function ptShowTencentLock(): boolean {
+    const s = ptAiSettings();
+    return !!(s?.tencentEnabled && s.tencentSecretId && s.tencentSecretKey);
+  }
+
+  /** 预翻译弹窗：是否显示模型选择（AI 可用且当前引擎会走 AI 时） */
+  function ptShowModelSelect(): boolean {
+    if (ptForm.engine !== "auto" && ptForm.engine !== "ai") return false;
+    const s = ptAiSettings();
+    return !!(s?.enabled && s.apiKey);
   }
 
   /** 进度回调（来自 bilingualHandle.pretranslateAll） */
   async function onPtProgress(p: PretranslateProgress) {
     ptProgress = p;
+    // 终态：取消 Telemetry 订阅
+    if (p.status === "done" || p.status === "cancelled" || p.status === "error") {
+      ptBackgrounded = false; // 终态：取消后台悬浮，避免残留
+      ptTelemetryUnsub?.();
+      ptTelemetryUnsub = null;
+    }
     if (p.status === "done") {
       ptRunning = false;
       ptAbort = null;
@@ -3132,6 +3309,11 @@
       return;
     }
     ensureBilingualHandle();
+    // 保存本次弹窗中设定的腾讯用量锁
+    if (ptShowTencentLock() && onSaveTencentLock) {
+      try { await onSaveTencentLock(Math.max(0, Math.round(ptForm.tencentLockWan * 10_000))); } catch { /* 忽略 */ }
+    }
+    ptTelemetryReset();
     ptAbort = new AbortController();
     ptRunning = true;
     ptBackgrounded = false;
@@ -3139,9 +3321,11 @@
     const opts: PretranslateOptions = {
       to: ptForm.to || undefined,
       model: ptForm.model || undefined,
+      engine: ptForm.engine || undefined,
       batchSize: ptForm.batchSize,
       concurrency: ptForm.concurrency,
       overwrite: ptForm.overwrite,
+      mode: (settingsStore.get().bilingualStyle || "default") as "default" | "concise",
       signal,
       onProgress: (p: PretranslateProgress) => { void onPtProgress(p); },
     };
@@ -5802,11 +5986,90 @@
   /** 双语整批失败 toast 冷却时间戳：避免滚动补译时反复弹 */
   let bilingualFailToastAt = 0;
 
+  /**
+   * 2026-08-31 Phase 3：段落级「用 AI 重译」。
+   *
+   * 走 `engine:"ai"` + `overwrite:true`：强制用 AI 重译这一段并覆盖缓存，
+   * 于是下次翻到该段读到的就是重译后的译文（translateBatch 内部会写回缓存）。
+   *
+   * 与「前文上下文」的关系：单段重译也带 ctxBefore，保证与前后文译法一致。
+   */
+  async function redoWithAI(wrapEl: Element, sourceText: string): Promise<void> {
+    if (!onTranslateBatch || !sourceText) return;
+    const btn = wrapEl.querySelector(".reword-bilingual-ai-redo") as HTMLButtonElement | null;
+    const textSpan = wrapEl.querySelector(".reword-bilingual-text");
+    const prevLabel = btn ? btn.textContent : "";
+    if (btn) {
+      btn.disabled = true;
+      btn.textContent = "重译中…";
+    }
+    try {
+      // 前文参考：取原文段落的前两个兄弟段落文本，保持译法一致
+      const srcEl = wrapEl.previousElementSibling;
+      const ctxParts: string[] = [];
+      let cur = srcEl?.previousElementSibling ?? null;
+      while (cur && ctxParts.length < 2) {
+        const t = (cur.textContent || "").trim();
+        if (t) ctxParts.unshift(t.length > 160 ? t.slice(0, 160) : t);
+        cur = cur.previousElementSibling;
+      }
+      const ctx = ctxParts.length ? ctxParts.join("\n") : null;
+
+      const res = await onTranslateBatch(
+        [sourceText],
+        "auto",
+        settingsStore.get().bilingualTarget || "zh",
+        [ctx],
+        {
+          title: meta?.title || title || undefined,
+          author: meta?.author || undefined,
+          language: meta?.language || undefined,
+        },
+        { engine: "ai", overwrite: true }
+      );
+      const tr = (res?.[0] || "").trim();
+      if (!tr) {
+        toast("AI 未返回译文，请稍后重试", 2400, "error" as any);
+        return;
+      }
+
+      // 更新译文 DOM（与 buildTranslationEl 同一套富文本规则）
+      if (textSpan) {
+        const { mdToHtml } = await import("../annotation/lute.ts");
+        const looksLikeMarkdown =
+          /^\s{0,3}[-*+]\s+\S/m.test(tr) ||
+          /^\s{0,3}\d+\.\s+\S/m.test(tr) ||
+          /\*\*[^*\n]+\*\*/.test(tr) ||
+          /\n[ \t]*\n/.test(tr);
+        if (looksLikeMarkdown) textSpan.innerHTML = mdToHtml(tr);
+        else textSpan.textContent = tr;
+      }
+
+    } catch (e) {
+      console.warn("[REword] 段落 AI 重译失败:", e);
+      toast("AI 重译失败，请检查 AI 配置或稍后重试", 2600, "error" as any);
+    } finally {
+      if (btn) {
+        btn.disabled = false;
+        btn.textContent = prevLabel || "✨ AI 重译";
+      }
+    }
+  }
+
   /** 懒创建双语注入句柄（仅一次） */
+  /** 2026-08-31：把本书隐藏译文集合持久化到设置（bilingualHidden: bookId → 指纹数组） */
+  function persistHidden(bid: string): void {
+    const map = { ...(settingsStore.get().bilingualHidden || {}) } as Record<string, string[]>;
+    map[bid] = [...bilingualHidden];
+    settingsStore.update({ bilingualHidden: map });
+  }
+
   function ensureBilingualHandle(): BilingualHandle {
     if (bilingualHandle) return bilingualHandle;
+    // 2026-08-31：载入本书已隐藏译文集合（关闭/重开双语后保持隐藏）
+    bilingualHidden = new Set(settingsStore.get().bilingualHidden?.[bookId] || []);
     const target = settingsStore.get().bilingualTarget || "zh";
-    bilingualHandle = createBilingual({
+    bilingualHandle = createBilingualV2({
       bookId,
       getContents: () => {
         try {
@@ -5833,29 +6096,26 @@
           return [];
         }
       },
-      translateBatch: (texts, from, to, _bookId, _ctx, _meta, extra) =>
-        onTranslateBatch ? onTranslateBatch(texts, from, to, extra) : Promise.resolve([]),
-      // 2026-08-30 透明化：详细翻译（回传 provider / fromCache）供来源徽标；未提供时回落 translateBatch
-      translateBatchDetailed: (texts, from, to, _bookId, _ctx, _meta, extra) =>
+      translateBatch: (texts, from, to, _bookId, ctx, meta, extra) =>
+        onTranslateBatch ? onTranslateBatch(texts, from, to, ctx, meta, extra) : Promise.resolve([]),
+      // 2026-08-30 详细翻译（回传 provider / fromCache）供成本与引擎统计；未提供时回落 translateBatch
+      // 2026-08-30 修复：ctxBefore / meta 透传（之前被丢弃，AI 拿不到前文语境 + 专有名词一致性失效）
+      translateBatchDetailed: (texts, from, to, _bookId, ctx, meta, extra) =>
         onTranslateBatchDetailed
-          ? onTranslateBatchDetailed(texts, from, to, extra)
-          : (onTranslateBatch ? onTranslateBatch(texts, from, to, extra).then((t) => ({
+          ? onTranslateBatchDetailed(texts, from, to, ctx, meta, extra)
+          : (onTranslateBatch ? onTranslateBatch(texts, from, to, ctx, meta, extra).then((t) => ({
               texts: t,
               providers: t.map(() => null as string | null),
               fromCache: t.map(() => false),
             })) : Promise.resolve({ texts: [], providers: [], fromCache: [] })),
-      // 2026-08-30 单段补救：用户修正库（钉选正确答案，持久化且不被清空缓存删除）
-      getFix: (text) => (onGetFix ? onGetFix(text) : Promise.resolve(null)),
-      setFix: (text, tr) => (onSetFix ? onSetFix(text, tr) : Promise.resolve()),
-      deleteFix: (text) => (onDeleteFix ? onDeleteFix(text) : Promise.resolve()),
-      deleteCacheOne: (text) => (onDeleteCacheOne ? onDeleteCacheOne(text) : Promise.resolve()),
-      // 2026-08-30 透明化开关（读设置，即时生效）
-      showProvider: () => settingsStore.get().bilingualShowProvider ?? true,
+      // 2026-08-30 调试开关（读设置，即时生效；默认关闭以精简界面）
       debug: () => settingsStore.get().bilingualDebug ?? false,
       // 2026-08-30：整书预翻译弹窗精确计算待译数（查缓存命中）
       checkCached: (texts) =>
         onCheckCache ? onCheckCache(texts) : Promise.resolve(new Array(texts.length).fill(false)),
       to: target,
+      // 2026-08-31 重新启用简洁版：译文风格（直译/简洁）实时读设置，下一轮注入即生效
+      getMode: () => (settingsStore.get().bilingualStyle || "default") as "default" | "concise",
       // 2026-08-30：书籍元数据（书名/作者/语言/目录）注入翻译 system prompt，
       // 提升专有名词与语境一致性；仅 Prompt 文本，零额外 AI 推理成本。
       bookMeta: () => ({
@@ -5869,6 +6129,19 @@
       }),
       // 2026-08-28：预取页数动态读设置（用户可在面板调 0~8；默认 2）
       getPrefetchPages: () => settingsStore.get().bilingualPrefetchPages ?? 2,
+      // 2026-08-31 Phase 3：段落级「✨ 用 AI 重译」入口。
+      // 仅在 AI 已配置时渲染按钮，否则用户点了也白点。
+      showAiRedo: !!onTranslateBatch,
+      onAiRedo: (wrapEl: Element, sourceText: string) => {
+        void redoWithAI(wrapEl, sourceText);
+      },
+      // 2026-08-31：段落级「删除此段译文」入口（默认关闭，由上层开启）
+      showHideSegment: !!onTranslateBatch,
+      isSegmentHidden: (h: string) => bilingualHidden.has(h),
+      onHideSegment: (bid: string, h: string) => {
+        bilingualHidden.add(h);
+        persistHidden(bid);
+      },
       // 2026-08-28：每批翻译成功入缓存后，回传「节」序号（1-based）+ 书名，刷新「第 X-Y 页」统计
       onSectionsCached: (bid: string, sections: number[]) => {
         recordCachedSections?.(bid, sections, meta?.title || title || "");
@@ -5938,24 +6211,44 @@
   }
 
   /** 顶栏「双语」按钮：切换并持久化到阅读设置 */
-  function toggleBilingual(): void {
+  async function toggleBilingual(): Promise<void> {
     console.log("[REword] 双语按钮点击, 当前状态:", bilingualOn);
     try {
       if (bilingualOn) {
         disableBilingual();
         settingsStore.update({ bilingual: false });
-      } else {
-        const configured = !isTranslationConfigured || isTranslationConfigured();
-        console.log("[REword] 双语: 开启检查, isTranslationConfigured=", configured);
-        if (configured) {
-          console.log("[REword] 双语: 调用 setEnabled(true)");
-          ensureBilingualHandle().setEnabled(true);
-          bilingualOn = true;
-          settingsStore.update({ bilingual: true });
-        } else {
-          toast("请先在「AI 设置 → AI 服务」中配置并启用 AI（翻译默认走 AI）", 3200, "info" as any);
-        }
+        return;
       }
+      const configured = !isTranslationConfigured || isTranslationConfigured();
+      console.log("[REword] 双语: 开启检查, isTranslationConfigured=", configured);
+      if (!configured) {
+        toast("请先在「AI 设置 → AI 服务」中配置并启用 AI（翻译默认走 AI）", 3200, "info" as any);
+        return;
+      }
+      // 2026-08-31 Phase 4：默认模式=ask → 弹窗询问；whole-book → 直接整书预翻译；progressive → 直接渐进式
+      const mode = settingsStore.get().bilingualDefaultMode;
+      // 2026-08-31 Task A：默认=ask 时，先查「本书是否已被记住的选法」。
+      // 已记住 → 直接套用（不再弹窗，符合「再次开同书不弹窗」）；未记住 → 弹窗询问。
+      if (mode === "ask") {
+        const remembered = getBilingualBookMode ? await getBilingualBookMode(bookId) : null;
+        if (remembered === "whole-book") {
+          enableBilingual();
+          openPretranslateDialog();
+          return;
+        }
+        if (remembered === "progressive") {
+          enableBilingual();
+          return;
+        }
+        askModeOpen = true;
+        return;
+      }
+      if (mode === "whole-book") {
+        enableBilingual();
+        openPretranslateDialog();
+        return;
+      }
+      enableBilingual();
     } catch (e) {
       // 2026-08-28 防御：任何异常都不应锁死按钮状态
       console.warn("[REword] 双语切换异常:", e);
@@ -5964,6 +6257,23 @@
       settingsStore.update({ bilingual: false });
       toast("双语功能异常，请重试或重启插件", 2500, "error" as any);
     }
+  }
+
+  /** 2026-08-31 Phase 4：询问弹窗 → 选「渐进式翻译」：直接开启双语（按需 + 窗口预取） */
+  function chooseProgressive(): void {
+    askModeOpen = false;
+    enableBilingual();
+    // 2026-08-31 Task A：记住本书选法，下次开同书不再弹窗
+    void setBilingualBookMode?.(bookId, "progressive");
+  }
+
+  /** 2026-08-31 Phase 4：询问弹窗 → 选「整书预翻译」：开启双语 + 后台整书预翻译 */
+  function chooseWholeBook(): void {
+    askModeOpen = false;
+    enableBilingual();
+    // 2026-08-31 Task A：记住本书选法，下次开同书不再弹窗
+    void setBilingualBookMode?.(bookId, "whole-book");
+    openPretranslateDialog();
   }
 
 
@@ -6409,6 +6719,24 @@
       await Promise.all([settingsStore.load(), fontStore.load()]);
       refreshFonts();
       applyContainerBg();
+      // 2026-08-31 Phase 2：恢复译文归档配置。
+      // SQLite 层持有模块级 docId，插件重启后需据此重新装配，否则归档不生效。
+      void (async () => {
+        try {
+          const { ensureTranslationArchiveDoc } = await import("../translate/sqlite-cache.ts");
+          const s = settingsStore.get();
+          if (s?.translationArchiveEnabled) {
+            await ensureTranslationArchiveDoc(
+              () => s.translationArchiveDocId || "",
+              async (id: string) => {
+                settings = settingsStore.update({ translationArchiveDocId: id });
+              }
+            );
+          }
+        } catch (__swallowErr) {
+          console.warn("[REword] 恢复译文归档配置失败:", __swallowErr);
+        }
+      })();
       await openBook();
       // 2026-08-28：打开书后刷新翻译缓存统计 + 有缓存的书籍列表（默认查看本书）
       refreshCacheStats(bookId);
@@ -6607,6 +6935,11 @@
             : "双语对照：在每段正文后注入译文（AI 翻译）"}
           on:click={toggleBilingual}
         >双语{bilingualProgress.active ? ` ${bilingualProgress.done}/${bilingualProgress.total}` : ""}{bilingualTokenUsage && !bilingualProgress.active ? ` · ${bilingualTokenUsage.totalTokens}T` : ""}</button>
+        <button
+          class="reader-btn reader-bilingual-settings-btn"
+          title="双语翻译设置（独立面板）"
+          on:click={() => onOpenBilingualSettingsTab?.()}
+        >⚙</button>
         <button
           class="reader-btn reader-settings-btn"
           title="设置"
@@ -7480,169 +7813,6 @@
       </details>
       {/if}
 
-      <!-- 2026-08-28：双语对照增强（译文字号独立调节 + 段落悬停高亮） -->
-      <details class="reader-setting-section">
-        <summary class="reader-setting-section-title">🌐 双语对照</summary>
-
-        <!-- 译文字号（em 倍数，相对正文；默认 0.78） -->
-        <div class="reader-setting-row">
-          <span class="reader-setting-label">译文字号</span>
-          <div class="reader-setting-control">
-            <button class="reader-mini-btn" on:click={() => setTranslationFontSize((settings.translationFontSize ?? 0.62) - 0.02)}>A-</button>
-            <span class="reader-setting-value">{Math.round((settings.translationFontSize ?? 0.62) * 100)}%</span>
-            <button class="reader-mini-btn" on:click={() => setTranslationFontSize((settings.translationFontSize ?? 0.62) + 0.02)}>A+</button>
-          </div>
-        </div>
-
-        <!-- 2026-08-30 透明化：来源徽标（缓存/AI/微软/Libre/已修正） -->
-        <div class="reader-setting-row reader-setting-toggle-row">
-          <span class="reader-setting-label" title="每段译文角标显示来源：缓存 / AI / 微软 / Libre / 已修正，让翻译过程可见、可追责">显示来源徽标</span>
-          <label class="reader-switch" title="译文块显示来源徽标（缓存 / AI / 微软 / Libre / 已修正）">
-            <input
-              type="checkbox"
-              checked={settings.bilingualShowProvider !== false}
-              on:change={setBilingualShowProvider}
-            />
-            <span class="reader-switch-track"></span>
-          </label>
-        </div>
-
-        <!-- 2026-08-30 透明化：调试信息（默认关；开启显示引擎与送译原文/前文参考） -->
-        <div class="reader-setting-row reader-setting-toggle-row">
-          <span class="reader-setting-label" title="开启后译文块悬停显示「送译原文 + 前文参考 + 所用引擎」，便于排查翻译质量问题">双语调试信息</span>
-          <label class="reader-switch" title="开启后译文块显示引擎名与送译原文 / 前文参考">
-            <input
-              type="checkbox"
-              checked={!!settings.bilingualDebug}
-              on:change={setBilingualDebug}
-            />
-            <span class="reader-switch-track"></span>
-          </label>
-        </div>
-
-        <!-- 段落悬停高亮（C2） -->
-        <div class="reader-setting-row reader-setting-toggle-row">
-          <span class="reader-setting-label">段落悬停高亮</span>
-          <label class="reader-switch" title="鼠标悬停段落时轻微底色，提升阅读定位感">
-            <input
-              type="checkbox"
-              checked={settings.paragraphHover !== false}
-              on:change={setParagraphHover}
-            />
-            <span class="reader-switch-track"></span>
-          </label>
-        </div>
-
-        <!-- 2026-08-28 新增：翻译预取页数（眼前屏 + 后续 N 面） -->
-        <div class="reader-setting-row">
-          <span class="reader-setting-label" title="当前屏之后额外预译并缓存的页数（默认 2 面）。页数越多翻页越无需等待，但首次翻译越费 token">翻译预取页数</span>
-          <div class="reader-setting-control">
-            <button class="reader-mini-btn" on:click={() => setBilingualPrefetchPages((settings.bilingualPrefetchPages ?? 2) - 1)}>-</button>
-            <span class="reader-setting-value">{(settings.bilingualPrefetchPages ?? 2)} 面</span>
-            <button class="reader-mini-btn" on:click={() => setBilingualPrefetchPages((settings.bilingualPrefetchPages ?? 2) + 1)}>+</button>
-          </div>
-        </div>
-        <div class="reader-setting-tip reader-setting-tip-warn">⚠️ 不要填太多：页数越多，首次翻译消耗的 AI Token 越多、也越慢。日常阅读 1–3 面足够。</div>
-
-        <!-- v1.3.0 本书上下文：手写背景/人物/译法，注入 AI 翻译 prompt（解决专有名词前后不一致） -->
-        {#if primerStore}
-          <div class="reader-setting-row reader-setting-toggle-row">
-            <span class="reader-setting-label" title="为本书手写背景/人物/译法对照，AI 翻译时自动参考（如 Sludge=斯拉奇）">本书上下文</span>
-            <button class="reader-mini-btn" on:click={togglePrimerEditor}>
-              {primerOpen ? "收起" : (primerChars > 0 ? `${primerChars} 字` : "编辑")}
-            </button>
-          </div>
-          {#if primerOpen}
-            <div class="reader-primer-box">
-              <div class="reader-primer-tip">仅对《{meta?.title || "本书"}》生效 · 支持思源排版（列表/加粗/表格）</div>
-              <div class="reader-primer-editor" bind:this={primerEditorEl}></div>
-              <div class="reader-primer-foot">
-                <span class="reader-primer-stats" class:reader-primer-warn={primerChars > PRIMER_WARN_CHARS}>
-                  {primerChars} 字 ≈ {primerTokens}T{primerChars > PRIMER_WARN_CHARS ? " · 过长费token" : " · 建议200~800字"}
-                </span>
-                <button class="reader-mini-btn" title="清除本书上下文" on:click={clearPrimer}>清除</button>
-              </div>
-            </div>
-          {/if}
-
-          <!-- 本书累计 Token + 生词本导出 -->
-          <div class="reader-setting-row reader-setting-toggle-row">
-            <span class="reader-setting-label" title="本书双语翻译累计消耗的 AI Token（跨批次累加）">本书 Token</span>
-            <div class="reader-setting-control">
-              <span class="reader-setting-value">{fmtTok(bookTokenTotal)}</span>
-              <button class="reader-mini-btn" title="重置本书累计" on:click={onResetBookTokens}>↺</button>
-            </div>
-          </div>
-          <div class="reader-setting-row reader-setting-toggle-row">
-            <span class="reader-setting-label" title="把已显示的双语对照导出为 Markdown 表格（复制到剪贴板，可粘贴进思源笔记）">生词本导出</span>
-            <button class="reader-mini-btn" on:click={exportBilingualNotes}>📋 复制</button>
-          </div>
-        {/if}
-
-        <!-- 2026-08-28 翻译缓存：按书落盘，重开书/翻页不消失；支持「选择书籍」+ 按页统计 -->
-        <div class="reader-cache-block">
-          <div class="reader-setting-row">
-            <span class="reader-setting-label" title="已翻译的段落释义保存在本地（按书），重开本书或翻页后命中缓存秒出，不重复消耗 token">翻译缓存</span>
-            {#if cacheBookList.length > 1}
-              <div class="reader-setting-control">
-                <select
-                  class="reader-select"
-                  value={selectedCacheBookId}
-                  on:change={onSelectCacheBook}
-                  title="选择要查看缓存的书籍"
-                >
-                  {#each cacheBookList as b}
-                    <option value={b.bookId}>{b.title || b.bookId}</option>
-                  {/each}
-                </select>
-              </div>
-            {/if}
-          </div>
-          <!-- 明确书名：当前查看书籍（默认本书，可在下拉切换） -->
-          <div class="reader-cache-book" title="当前查看缓存的书籍">
-            📖 《{selectedCacheBookId === bookId ? (meta?.title || title || "本书") : (cacheBookList.find((b) => b.bookId === selectedCacheBookId)?.title || "所选书籍")}》
-          </div>
-          <!-- 2026-08-30：整书预翻译（后台填充缓存，不注入 DOM；完成后命中缓存秒出） -->
-          <div class="reader-setting-row reader-setting-toggle-row">
-            <span class="reader-setting-label" title="后台把本书全部段落翻译并缓存到本地；完成后开启双语 / 翻页 / 重开本书都命中缓存秒出，不再消耗 AI Token">整书预翻译</span>
-            <div class="reader-setting-control">
-              {#if ptRunning}
-                <button class="reader-mini-btn" title="查看预翻译进度 / 后台运行" on:click={openPretranslateDialog}>
-                  预翻译中 {ptProgress.done}/{ptProgress.pending}
-                </button>
-              {:else}
-                <button class="reader-mini-btn" title="打开整书预翻译（细化选项）" on:click={openPretranslateDialog}>预翻译全书</button>
-              {/if}
-            </div>
-          </div>
-          <div class="reader-setting-row reader-setting-toggle-row">
-            <span class="reader-setting-label">已缓存</span>
-            <div class="reader-setting-control">
-              <span class="reader-setting-value">共 {bilingualCacheCount} 段 · {bilingualCachedPages} 页</span>
-              <button
-                class="reader-mini-btn"
-                title="清空所选书籍翻译缓存（之后翻页会重新翻译）"
-                on:click={onClearBilingualCache}
-                disabled={clearingCache || bilingualCacheCount === 0}
-              >清空</button>
-            </div>
-          </div>
-          <div class="reader-setting-row reader-setting-toggle-row">
-            <span class="reader-setting-label" title="删除书架中已不存在书籍对应的缓存文件，回收同一本实体书在历史随机 bookId / 删书未清缓存时遗留的多份缓存">缓存维护</span>
-            <div class="reader-setting-control">
-              <button
-                class="reader-mini-btn"
-                title="清理无效（孤儿）缓存：回收已不在书架中的书籍对应的翻译缓存文件"
-                on:click={onCleanOrphanCaches}
-                disabled={clearingOrphans}
-              >清理无效缓存</button>
-            </div>
-          </div>
-          <div class="reader-setting-tip">
-            共缓存 {bilingualCachedPages} 页，{bilingualPageRange} 缓存成功。已翻译释义保存在本地，重开书籍与翻页都不会消失；换书互不影响。
-          </div>
-        </div>
-      </details>
     </div>
   {/if}
 
@@ -7665,23 +7835,48 @@
 
         <div class="reword-pt-stats">
           <div class="reword-pt-stat"><span class="reword-pt-stat-label">总段数</span><span class="reword-pt-stat-num">{(ptProgress.total || ptStats.total)}</span></div>
-          <div class="reword-pt-stat"><span class="reword-pt-stat-label">已缓存</span><span class="reword-pt-stat-num reword-pt-ok">{(ptProgress.cached || 0) + (ptProgress.done || 0)}</span></div>
-          <div class="reword-pt-stat"><span class="reword-pt-stat-label">待译</span><span class="reword-pt-stat-num reword-pt-warn">{Math.max(0, (ptProgress.pending || 0) - (ptProgress.done || 0))}</span></div>
+          <div class="reword-pt-stat"><span class="reword-pt-stat-label">已缓存</span><span class="reword-pt-stat-num reword-pt-ok">{Math.max(ptProgress.cached || 0, ptProgress.done || 0)}</span></div>
+          <div class="reword-pt-stat"><span class="reword-pt-stat-label">待译</span><span class="reword-pt-stat-num reword-pt-warn">{Math.max(0, (ptProgress.total || 0) - (ptProgress.done || 0))}</span></div>
           <div class="reword-pt-stat"><span class="reword-pt-stat-label">预估 Token</span><span class="reword-pt-stat-num">{(ptStats.estTokens || 0).toLocaleString()}</span></div>
         </div>
 
         <div class="reword-pt-options" class:reword-pt-disabled={ptRunning}>
+          <div class="reword-pt-field reword-pt-pipeline" title="缓存命中优先；未命中时先使用设置中已启用的免费翻译引擎，全部失败后再使用下方 AI 模型">
+            <label>翻译顺序</label>
+            <div class="reword-pt-pipeline-flow">
+              <span class="reword-pt-pill">翻译引擎</span>
+              <span class="reword-pt-arrow">→</span>
+              <span class="reword-pt-pill reword-pt-pill-ai">AI 翻译</span>
+            </div>
+          </div>
           <div class="reword-pt-field">
-            <label>翻译模型</label>
-            <select bind:value={ptForm.model} disabled={ptRunning}>
-              <option value="">默认（沿用当前 AI 设置）</option>
-              <option value="deepseek-chat">DeepSeek / deepseek-chat</option>
-              <option value="deepseek-reasoner">DeepSeek / deepseek-reasoner</option>
-              <option value="gpt-4o-mini">OpenAI / gpt-4o-mini</option>
-              <option value="gpt-4o">OpenAI / gpt-4o</option>
-              <option value="claude-3-5-sonnet">Claude / claude-3-5-sonnet</option>
+            <label title="仅显示已启用且已配置的引擎；达到用量锁的引擎会被禁用">翻译引擎</label>
+            <select bind:value={ptForm.engine} disabled={ptRunning}>
+              {#each ptEngineOptions() as opt}
+                <option value={opt.value} disabled={opt.disabled}>{opt.label}{opt.hint ? ` (${opt.hint})` : ""}</option>
+              {/each}
             </select>
           </div>
+          {#if ptShowModelSelect()}
+            <div class="reword-pt-field">
+              <label title="仅显示当前 AI 设置中可用的模型">翻译模型</label>
+              <select bind:value={ptForm.model} disabled={ptRunning}>
+                {#each ptModelOptions() as opt}
+                  <option value={opt.value}>{opt.label}</option>
+                {/each}
+              </select>
+            </div>
+          {/if}
+          {#if ptShowTencentLock()}
+            <div class="reword-pt-field reword-pt-tencent-lock" title="腾讯翻译每月 500 万字符免费额度；达到设定上限后自动禁用">
+              <label>腾讯用量锁</label>
+              <div class="reword-pt-lock-input">
+                <input type="number" min="0" bind:value={ptForm.tencentLockWan} disabled={ptRunning} />
+                <span>万字符</span>
+              </div>
+              <span class="reword-pt-lock-used">已用 {(ptAiSettings()?.tencentCharsUsed ?? 0).toLocaleString()} / {(ptAiSettings()?.tencentCharsLock ?? 4_000_000).toLocaleString()}</span>
+            </div>
+          {/if}
           <div class="reword-pt-field">
             <label>目标语言</label>
             <select bind:value={ptForm.to} disabled={ptRunning}>
@@ -7710,7 +7905,7 @@
           <div class="reword-pt-progress">
             <div class="reword-pt-progress-top">
               <span>
-                {#if ptProgress.status === "running"}已翻译 {ptProgress.done}/{ptProgress.pending}
+                {#if ptProgress.status === "running"}已翻译 {ptProgress.done}/{ptProgress.total}
                 {:else if ptProgress.status === "done"}已完成（已缓存 {(ptProgress.cached || 0) + (ptProgress.done || 0)} 段）
                 {:else if ptProgress.status === "cancelled"}已停止（已缓存 {(ptProgress.cached || 0) + (ptProgress.done || 0)} 段）
                 {:else}翻译失败{/if}
@@ -7721,10 +7916,35 @@
             </div>
             <div class="reword-pt-bar">
               <div class="reword-pt-bar-fill"
-                style="width:{(ptProgress.pending > 0 ? Math.min(100, Math.round((ptProgress.done / ptProgress.pending) * 100)) : 100)}%"></div>
+                style="width:{(ptProgress.total > 0 ? Math.min(100, Math.round((ptProgress.done / ptProgress.total) * 100)) : 100)}%"></div>
             </div>
           </div>
         {/if}
+
+        <div class="reword-pt-telemetry">
+          <div class="reword-pt-telemetry-title">引擎状态 / 成本（实时）</div>
+          <div class="reword-pt-telemetry-grid">
+            <div class="reword-pt-tel-item">
+              <span class="reword-pt-tel-label">缓存节省</span>
+              <span class="reword-pt-tel-num reword-pt-ok">{ptTelemetry.cache.toLocaleString()} 段</span>
+            </div>
+            <div class="reword-pt-tel-item">
+              <span class="reword-pt-tel-label">腾讯字符</span>
+              <span class="reword-pt-tel-num">{ptTelemetry.tencentChars.toLocaleString()}</span>
+            </div>
+            <div class="reword-pt-tel-item">
+              <span class="reword-pt-tel-label">引擎失败</span>
+              <span class="reword-pt-tel-num" class:reword-pt-warn={ptTelemetry.errors > 0}>{ptTelemetry.errors}</span>
+            </div>
+          </div>
+          {#if Object.keys(ptTelemetry.engines).length}
+            <div class="reword-pt-tel-engines">
+              {#each Object.keys(ptTelemetry.engines) as eng}
+                <span class="reword-pt-tel-engine">{engineLabel(eng)} · {ptTelemetry.engines[eng].toLocaleString()} 段</span>
+              {/each}
+            </div>
+          {/if}
+        </div>
 
         <div class="reword-pt-footer">
           {#if ptProgress.status === "idle"}
@@ -7738,6 +7958,34 @@
           {/if}
         </div>
       </div>
+    </div>
+  {/if}
+
+  <!-- 2026-08-31 Phase 4：点击「双语」且默认模式=ask 时，弹窗询问翻译方式 -->
+  {#if askModeOpen}
+    <div class="reword-pt-overlay" on:click={() => (askModeOpen = false)} on:keydown={() => {}} tabindex="-1">
+      <div class="reword-pt-modal reword-glass" role="dialog" aria-modal="true" on:click|stopPropagation on:keydown={() => {}} style="max-width: 440px;">
+        <div class="reword-pt-title">选择翻译方式</div>
+        <p style="color:var(--b3-theme-on-surface,#777);font-size:12px;margin:6px 0 16px;">要如何翻译这本书？</p>
+        <div style="display:flex;gap:10px;">
+          <button class="reword-pt-btn reword-pt-btn-primary" on:click={chooseWholeBook}>整书预翻译</button>
+          <button class="reword-pt-btn" on:click={chooseProgressive}>渐进式翻译</button>
+        </div>
+        <p style="color:var(--b3-theme-on-surface,#999);font-size:11px;line-height:1.55;margin-top:14px;">
+          整书：后台翻译全书并写入缓存，翻页 / 重开秒出；渐进式：只译当前页 + 后续窗口，随读随译、更省额度。
+        </p>
+      </div>
+    </div>
+  {/if}
+
+  <!-- 2026-08-31：后台运行悬浮提示：点击重新打开预翻译弹窗查看实时进度 -->
+  {#if ptBackgrounded && ptRunning}
+    <div class="reword-pt-floating reword-glass" role="button" tabindex="0"
+      on:click={openPretranslateDialog}
+      on:keydown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); openPretranslateDialog(); } }}>
+      <span class="reword-pt-floating-spinner"></span>
+      <span class="reword-pt-floating-text">翻译中 {ptProgress.total > 0 ? Math.round((ptProgress.done / ptProgress.total) * 100) : 0}%</span>
+      <span class="reword-pt-floating-hint">点击查看进度</span>
     </div>
   {/if}
 
@@ -9994,6 +10242,57 @@
     color: var(--b3-theme-warning, #d97706);
     opacity: 1;
   }
+  /* 2026-08-31 v1.4.4 P2：小卡状态行（运行状态 + 6 个 chip） */
+  .reader-bl-status {
+    background: var(--b3-theme-surface, rgba(0, 0, 0, 0.02));
+    border: 1px solid var(--b3-border-color, rgba(0, 0, 0, 0.1));
+    border-radius: 8px;
+    padding: 8px 10px;
+    margin-bottom: 10px;
+  }
+  .reader-bl-status-line {
+    display: flex; align-items: center; gap: 8px; margin-bottom: 6px;
+  }
+  .reader-bl-status-dot {
+    width: 8px; height: 8px; border-radius: 50%;
+    background: var(--b3-theme-on-surface, #999);
+    flex-shrink: 0;
+  }
+  .reader-bl-status-dot.reader-bl-on {
+    background: var(--b3-theme-primary, #4285f4);
+    box-shadow: 0 0 0 3px rgba(66, 133, 244, 0.15);
+    animation: reader-bl-pulse 1.6s ease-in-out infinite;
+  }
+  @keyframes reader-bl-pulse {
+    0%, 100% { box-shadow: 0 0 0 3px rgba(66, 133, 244, 0.15); }
+    50%      { box-shadow: 0 0 0 6px rgba(66, 133, 244, 0.05); }
+  }
+  .reader-bl-status-text {
+    flex: 1; font-size: 12px; opacity: 0.85;
+  }
+  .reader-bl-detail-btn {
+    font-size: 11px; padding: 2px 8px;
+  }
+  .reader-bl-chips {
+    display: flex; flex-wrap: wrap; gap: 4px;
+  }
+  .reader-bl-chip {
+    font-size: 10.5px; padding: 1px 6px;
+    background: var(--b3-theme-surface, rgba(0, 0, 0, 0.03));
+    border: 1px solid var(--b3-border-color, rgba(0, 0, 0, 0.12));
+    border-radius: 999px;
+    opacity: 0.7;
+  }
+  .reader-bl-chip-on {
+    opacity: 1;
+    background: rgba(66, 133, 244, 0.1);
+    border-color: rgba(66, 133, 244, 0.3);
+    color: var(--b3-theme-primary, #4285f4);
+  }
+  .reader-mini-btn-warn {
+    color: var(--b3-theme-error, #d44c47);
+  }
+  .reader-mini-btn-warn:hover { background: rgba(212, 76, 71, 0.1); }
 
   .reader-setting-control {
     display: flex;
@@ -10214,6 +10513,65 @@
     max-width: 90px;
     text-align: center;
   }
+  .reword-pt-field select option:disabled {
+    opacity: 0.5;
+    font-style: italic;
+  }
+  .reword-pt-tencent-lock {
+    flex-wrap: wrap;
+    row-gap: 4px;
+  }
+  .reword-pt-tencent-lock label {
+    align-self: center;
+  }
+  .reword-pt-lock-input {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    flex: 1 1 auto;
+    justify-content: flex-end;
+  }
+  .reword-pt-lock-input input {
+    max-width: 80px;
+    text-align: right;
+  }
+  .reword-pt-lock-input span {
+    font-size: 11px;
+    opacity: 0.75;
+    white-space: nowrap;
+  }
+  .reword-pt-lock-used {
+    width: 100%;
+    text-align: right;
+    font-size: 11px;
+    opacity: 0.7;
+    margin-top: -2px;
+  }
+  .reword-pt-pipeline-flow {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex: 1 1 auto;
+    justify-content: flex-end;
+  }
+  .reword-pt-pill {
+    font-size: 11px;
+    font-weight: 500;
+    padding: 3px 10px;
+    border-radius: var(--reword-radius-sm);
+    background: var(--reword-glass-fill, rgba(255, 255, 255, 0.1));
+    border: 1px solid var(--reword-glass-border-strong, rgba(255, 255, 255, 0.24));
+    white-space: nowrap;
+  }
+  .reword-pt-pill-ai {
+    background: rgba(255, 255, 255, 0.18);
+    border-color: var(--b3-theme-primary, rgba(255, 255, 255, 0.45));
+  }
+  .reword-pt-arrow {
+    font-size: 13px;
+    opacity: 0.8;
+    line-height: 1;
+  }
   .reword-pt-overwrite {
     display: flex;
     align-items: center;
@@ -10227,6 +10585,51 @@
   }
   .reword-pt-progress {
     margin-bottom: var(--reword-space-3);
+  }
+  .reword-pt-telemetry {
+    margin-bottom: var(--reword-space-3);
+    padding: 10px 12px;
+    border-radius: var(--reword-radius-md);
+    background: var(--reword-glass-fill, rgba(255, 255, 255, 0.06));
+    border: 1px solid var(--reword-glass-border, rgba(255, 255, 255, 0.12));
+  }
+  .reword-pt-telemetry-title {
+    font-size: 12px;
+    font-weight: 600;
+    margin-bottom: 8px;
+    opacity: 0.85;
+  }
+  .reword-pt-telemetry-grid {
+    display: flex;
+    gap: 16px;
+    flex-wrap: wrap;
+  }
+  .reword-pt-tel-item {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+  .reword-pt-tel-label {
+    font-size: 11px;
+    opacity: 0.6;
+  }
+  .reword-pt-tel-num {
+    font-size: 14px;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+  }
+  .reword-pt-tel-engines {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    margin-top: 8px;
+  }
+  .reword-pt-tel-engine {
+    font-size: 11px;
+    padding: 2px 8px;
+    border-radius: var(--reword-radius-pill);
+    background: var(--reword-glass-fill-strong, rgba(255, 255, 255, 0.12));
+    opacity: 0.9;
   }
   .reword-pt-progress-top {
     display: flex;
@@ -10251,6 +10654,35 @@
     background: linear-gradient(90deg, var(--b3-theme-primary, #378add), #6aa6e6);
     transition: width var(--reword-dur-base) var(--reword-ease);
   }
+  /* 2026-08-31：后台运行悬浮提示（点击重开弹窗看进度） */
+  .reword-pt-floating {
+    position: fixed;
+    z-index: 61;
+    right: 20px;
+    bottom: 20px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 14px;
+    border-radius: var(--reword-radius-pill);
+    color: var(--reword-glass-fg, #fff);
+    cursor: pointer;
+    box-shadow: 0 6px 24px rgba(0, 0, 0, 0.28);
+    animation: reword-pt-fade var(--reword-dur-base) var(--reword-ease);
+    user-select: none;
+  }
+  .reword-pt-floating:hover { filter: brightness(1.08); }
+  .reword-pt-floating-spinner {
+    width: 12px;
+    height: 12px;
+    border: 2px solid rgba(255, 255, 255, 0.35);
+    border-top-color: #fff;
+    border-radius: 50%;
+    animation: reword-pt-spin 0.8s linear infinite;
+  }
+  @keyframes reword-pt-spin { to { transform: rotate(360deg); } }
+  .reword-pt-floating-text { font-size: 12px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .reword-pt-floating-hint { font-size: 11px; opacity: 0.65; }
   .reword-pt-footer {
     display: flex;
     align-items: center;

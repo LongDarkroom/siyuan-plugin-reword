@@ -172,16 +172,43 @@ export interface ReaderSettings {
   bilingual?: boolean;
   /** 双语目标语言（ISO-639-1，默认 "zh"） */
   bilingualTarget?: string;
+  /** 译文风格：直译(default) / 简洁版(concise)。简洁版译文更短、更像学习者笔记（2026-08-31 重新启用） */
+  bilingualStyle?: "default" | "concise";
+  /** 隐藏译文集合（2026-08-31）：bookId → 已隐藏段落指纹(segHash)数组，关闭/重开双语后保持隐藏 */
+  bilingualHidden?: Record<string, string[]>;
   /** 译文字号（em 倍数，相对正文；默认 0.70；思源 CJK 字体大，0.70≈书籍字体的 0.90；2026-08-28） */
   translationFontSize?: number;
   /** 双语预取页数：当前屏之后额外预译并缓存的「面」数（默认 2；值越大越省翻页等待但越费 token；2026-08-28 新增可调） */
   bilingualPrefetchPages?: number;
-  /** 双语译文显示来源徽标（缓存/AI/微软/Libre/已修正），默认开，解决「翻译不透明」痛点（2026-08-30） */
-  bilingualShowProvider?: boolean;
   /** 双语调试信息：译文块显示引擎与 Token 明细（默认关，替代原写死的 DEBUG_BILINGUAL 常量；2026-08-30） */
   bilingualDebug?: boolean;
+  /** 双语默认模式：点击「双语」时如何翻译
+   *  - "ask"        （默认）弹窗询问「整书预翻译 / 渐进式」
+   *  - "whole-book" 直接整书预翻译（后台填充缓存）
+   *  - "progressive" 直接渐进式（当前页 + N 页窗口，翻页自动补译）
+   *  2026-08-31 Phase 4：独立「双语翻译设置」Tab 的全局默认行为。 */
+  bilingualDefaultMode?: "ask" | "whole-book" | "progressive";
+  /** 双语源语言（ISO-639-1，默认 "en"；英文书为主，亦支持 "auto"/"ja"/"fr"/...） */
+  bilingualSourceLang?: string;
+  /** 渐进式：翻页自动补译当前窗口（默认 true） */
+  bilingualProgressiveAuto?: boolean;
+  /** 翻译时跳过已缓存段落（默认 true，避免重复消耗 token/额度） */
+  bilingualSkipCached?: boolean;
+  /** 整书预翻译：边译边显示译文（默认 true；关则纯后台缓存，不注入 DOM） */
+  bilingualRealtimePreview?: boolean;
+  /** 用量告警阈值（0~1，默认 0.8）：达到即黄，达 1.0 即红并触发停止/提示 */
+  bilingualAlertRatio?: number;
+  /* 2026-08-31：原 bilingualV2Enabled 开关已删除——v1（bilingual.ts）移除后，
+   * v2 兄弟节点渲染成为唯一实现，无需再灰度切换。 */
   /** 段落悬停高亮：鼠标悬停段落时轻微底色（默认开，2026-08-28 增强项） */
   paragraphHover?: boolean;
+  /* ---- 2026-08-31 Phase 2：译文归档到思源 SQLite ---- */
+  /** 是否把译文同步写进思源笔记（可搜索 / 可 SQL 查询 / 随思源同步）。
+   *  关闭时译文只存在插件自己的 JSON 缓存里。默认关闭——在用户思源里建文档是
+   *  写入操作，需用户明确启用。 */
+  translationArchiveEnabled?: boolean;
+  /** 译文归档文档 ID（由 ensureTranslationArchiveDoc 自动创建并回填，一般无需手改） */
+  translationArchiveDocId?: string;
   /* ---- 2026-08-29 PDF 显示设置（仅 PDF 书生效，对齐 Obsidian PDF++ 阅读菜单） ---- */
   /** PDF 视图模式：单页 / 双页 / 书籍（映射 foliate spread: none/both/portrait） */
   pdfViewMode?: "single" | "double" | "book";
@@ -219,11 +246,21 @@ export const READER_DEFAULT_SETTINGS: ReaderSettings = {
   focusMode: false,
   bilingual: false,
   bilingualTarget: "zh",
+  bilingualStyle: "default",
   translationFontSize: 0.62,
   bilingualPrefetchPages: 2,
-  bilingualShowProvider: true,
   bilingualDebug: false,
+  // 2026-08-31 Phase 4：双语「独立设置 Tab」全局默认行为
+  bilingualDefaultMode: "ask",
+  bilingualSourceLang: "en",
+  bilingualProgressiveAuto: true,
+  bilingualSkipCached: true,
+  bilingualRealtimePreview: true,
+  bilingualAlertRatio: 0.8,
   paragraphHover: true,
+  // 2026-08-31 Phase 2：译文归档默认关闭（会在用户思源里建文档，需明确启用）
+  translationArchiveEnabled: false,
+  translationArchiveDocId: "",
   pdfViewMode: "single",
   pdfScrollDir: "vertical",
   pdfInvert: false,

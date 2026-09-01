@@ -2,7 +2,7 @@
  * Apple Pencil 墨迹批注 · 数据类型
  * ----------------------------------------------------------------
  * 5 种笔刷 + 7 色 + 5 线型 = 35 组合 + 6 预设 + 橡皮
- * 沿用鲸鱼批注 (whale-manager) 的 7 色 × 5 线型设计
+ * 沿用批注模块 (whale-manager) 的 7 色 × 5 线型设计
  *
  * 笔触模型：每个 InkStroke 是连续的 pointer 路径（Catmull-Rom 拟合后）
  * 存储：SVG path 的 d 属性（d="M x0 y0 Q x1 y1 x2 y2 ..."）
@@ -13,7 +13,7 @@
 /** 笔刷类型（5 种 + 橡皮） */
 export type InkBrush = "ballpoint" | "pencil" | "marker" | "highlighter" | "fountain" | "eraser";
 
-/** 7 色调色板（沿用鲸鱼批注 WHALE_COLORS） */
+/** 7 色调色板（沿用批注模块 WHALE_COLORS） */
 export const INK_COLORS = [
   "#facc15", // 黄色 (默认)
   "#22c55e", // 绿色
@@ -25,7 +25,7 @@ export const INK_COLORS = [
 ] as const;
 export type InkColor = typeof INK_COLORS[number];
 
-/** 5 种线型（沿用鲸鱼批注 ANNOTATION_STYLES） */
+/** 5 种线型（沿用批注模块 ANNOTATION_STYLES） */
 export const INK_STYLES = ["solid", "dashed", "double", "wavy", "underline"] as const;
 export type InkStyle = typeof INK_STYLES[number];
 
@@ -66,7 +66,7 @@ export interface InkStroke {
   pageIndex: number;
 }
 
-/** 6 预设笔刷组合（沿用鲸鱼批注的 6 预设 + 高亮器） */
+/** 6 预设笔刷组合（沿用批注模块的 6 预设 + 高亮器） */
 export const INK_PRESETS: Array<{
   name: string;
   brush: InkBrush;

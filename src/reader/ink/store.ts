@@ -12,7 +12,7 @@ import { writable, derived, type Writable } from "svelte/store";
 import type { InkState, InkStroke, InkMode, InkBrush, InkColor, InkStyle } from "./types";
 import { INK_PRESETS } from "./types";
 
-/** 默认笔刷状态（沿用鲸鱼批注的第一个预设） */
+/** 默认笔刷状态（沿用批注模块的第一个预设） */
 const defaultState: InkState = {
   mode: "off",
   brush: "ballpoint",

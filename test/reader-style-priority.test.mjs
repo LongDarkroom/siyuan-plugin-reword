@@ -42,11 +42,15 @@ function mkSettings(overrides = {}) {
   };
 }
 
-test("body 主题 4 项均带 !important（bg/fg/line-height/padding）", () => {
+test("body 主题 3 项均带 !important（bg/fg/line-height）", () => {
   // 2026-08-23 修复：bodyStyles 不再含 font-family（由 fontFamilyStyles 单独输出）
+  // 2026-08-31 修正：padding 已从 bodyStyles 迁出，改由页面布局函数输出
+  //   `body { padding: T R B L !important }`（4 边距滑块 / 三档预设统一驱动，见
+  //   reader-style.ts 的 layoutStyles）。故此处不再断言 bodyStyles 含 padding，
+  //   避免与「padding 确实存在且带 !important」的事实冲突。
   const o = deriveStyleOutput(mkSettings(), lightPreset, normalLineWidth);
   const css = bodyStyles(o, mkSettings());
-  for (const prop of ["background", "color", "line-height", "padding"]) {
+  for (const prop of ["background", "color", "line-height"]) {
     // 找到 body { ... } 块
     const m = css.match(/body\s*\{([^}]*)\}/);
     assert.ok(m, "should have body block");
@@ -82,13 +86,21 @@ test("段落 p { margin: 0.6em 0 } 带 !important（核心段距修复）", () =
 test("内联覆盖 p span { font-size: inherit !important } 必须带 !important（否则覆盖不到内联 style）", () => {
   const css = inlineOverrideStyles();
   // inlineOverrideStyles 是多选择器单块（p span, p div, ...）共享同一组声明
-  // 验证整体输出含 p span 等关键选择器 + 4 个 inherit !important 声明
   for (const sel of ["p span", "p div", "p b", "p i"]) {
     assert.ok(css.includes(sel), `inlineOverrideStyles should include selector: ${sel}`);
   }
-  // 4 个 inherit !important（font-size / font-family / font-style / font-weight）
-  const inhs = css.match(/inherit\s*!important/g) || [];
-  assert.ok(inhs.length >= 4, `expected ≥ 4 inherit !important declarations, got ${inhs.length}: ${css}`);
+  // 2026-08-31 修正：原断言「≥4 个 inherit !important」（font-size / font-family /
+  // font-style / font-weight），但后两项被**有意移除**——
+  //   `p b { font-weight: inherit !important }` 会让书籍里的 <b>粗体</b>、<i>斜体</i>
+  //   失去语义（被强制拉平成正文字重）。实现只保留 font-size（防止字号乱），
+  //   font-family 则由 publisherFontOverrideStyles 按独立开关控制。
+  // 故此处断言「font-size 必须是 inherit !important」，且**断言不得**再覆盖 font-weight。
+  assert.match(css, /font-size:\s*inherit\s*!important/, "font-size 必须是 inherit !important");
+  assert.doesNotMatch(
+    css,
+    /font-weight:\s*inherit/,
+    "不应把 font-weight 拉平成 inherit（否则书籍粗体/斜体语义丢失）"
+  );
 });
 
 test("标题 h1-h6 字号 / 行高 / 边距均带 !important", () => {
@@ -104,9 +116,12 @@ test("标题 h1-h6 字号 / 行高 / 边距均带 !important", () => {
   const m = css.match(/h1,\s*h2,\s*h3,\s*h4,\s*h5,\s*h6\s*\{([^}]*)\}/);
   assert.ok(m, "should have shared h1-h6 block");
   const shared = m[1];
+  // 2026-08-31 修正：不再断言具体数值（1.3 / 1em 0 0.5em），排版调优会持续微调这些值
+  // （现值 line-height 1.28、margin 1.1em 0 0.55em）。真正要守住的是「带 !important」——
+  // 书籍常在 h1-h6 上写死行高/边距，不加 !important 就压不过。
   assert.match(shared, /font-weight:\s*600\s*!important/, "shared h block font-weight should have !important");
-  assert.match(shared, /line-height:\s*1\.3\s*!important/, "shared h block line-height should have !important");
-  assert.match(shared, /margin:\s*1em\s*0\s*0\.5em\s*!important/, "shared h block margin should have !important");
+  assert.match(shared, /line-height:\s*[\d.]+.*!important/, "shared h block line-height should have !important");
+  assert.match(shared, /margin:[^;]*!important/, "shared h block margin should have !important");
 });
 
 test("引用 blockquote 边距 / 内边距 / 边框 / 字体均带 !important", () => {

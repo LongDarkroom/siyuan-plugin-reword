@@ -52,9 +52,13 @@ test("reader-tab.ts 仍含 openBookTab 核心方法（未误删功能）", () =>
   assert.ok(src.includes("console.log"), "应保留 console.log 日志");
 });
 
-test("reader-tab.ts 文件总行数 < 175 行(诊断清理后从 174 减到 ~150)", () => {
+test("reader-tab.ts 行数在合理区间（粗略防膨胀护栏）", () => {
+  // 2026-08-31 调整：原断言 <175 行，但该文件是 props 桥接层，
+  // 功能增长（含 Phase 3 术语表等）后已达 ~390 行。
+  // 行数本身不是质量指标——把「文件短」当目标会阻碍正常开发（每次加功能都要
+  // 被迫拆文件）。这里只保留「防止无限膨胀」的粗略护栏，上限放宽到 600 行。
   const src = readReaderTab();
   const lineCount = src.split("\n").length;
-  assert.ok(lineCount < 175, `reader-tab.ts 仍有 ${lineCount} 行(>175),诊断可能未清干净`);
-  assert.ok(lineCount > 100, `reader-tab.ts 只有 ${lineCount} 行(<100),可能误删功能`);
+  assert.ok(lineCount < 600, `reader-tab.ts 已达 ${lineCount} 行(>600)，桥接层过度膨胀，建议拆分`);
+  assert.ok(lineCount > 100, `reader-tab.ts 只有 ${lineCount} 行(<100)，可能误删功能`);
 });
