@@ -148,9 +148,26 @@ export function createBilingualV2(opts: BilingualOptions): BilingualHandle {
         }
       }
     }
-    const pending: Pending[] = [...imm, ...prefetch];
+    // 2026-09-01 修复：跨文档去重。foliate 翻页/双页/预加载时，getContents() 会把
+    // 同一逻辑段落同时返回在多个内容文档里；各文档的 data-reword-translated 守卫互不通用，
+    // 导致同一段落被注入多份译文（用户观察到的「同一段落出现 3 段译文」）。
+    // 按段落文本指纹跨文档去重，保证每段只翻译/注入一次。
+    const seenSegHash = new Set<string>();
+    const dedupePending = (arr: Pending[]): Pending[] => {
+      const out: Pending[] = [];
+      for (const p of arr) {
+        const h = segHash(p.text);
+        if (seenSegHash.has(h)) continue;
+        seenSegHash.add(h);
+        out.push(p);
+      }
+      return out;
+    };
+    const immD = dedupePending(imm);
+    const prefetchD = dedupePending(prefetch);
+    const pending: Pending[] = [...immD, ...prefetchD];
     if (!pending.length) { injecting = false; return; }
-    const total = imm.length;
+    const total = immD.length;
     const ctxBefore = pending.map((p) => (p.prev && p.prev.trim() ? p.prev : null));
     const meta = opts.bookMeta ? opts.bookMeta() : null;
     try {
@@ -222,8 +239,8 @@ export function createBilingualV2(opts: BilingualOptions): BilingualHandle {
 
       if (!enabled) { injecting = false; return; } // 中断安全
       let done = 0;
-      for (let i = 0; i < imm.length; i++) {
-        const p = imm[i];
+      for (let i = 0; i < immD.length; i++) {
+        const p = immD[i];
         const tr = (translations[i] || "").trim();
         if (!p.el.isConnected) continue;
         if (p.el.hasAttribute("data-reword-translated") || isTranslatedPeer(p.el)) continue;
@@ -252,7 +269,7 @@ export function createBilingualV2(opts: BilingualOptions): BilingualHandle {
         }
         done++;
       }
-      if (done === 0 && imm.length > 0) {
+      if (done === 0 && immD.length > 0) {
         console.warn("[REword] 双语v2: 眼前屏 0 段注入成功（AI 返回空译文）");
       }
       opts.onProgress?.(done, total);
