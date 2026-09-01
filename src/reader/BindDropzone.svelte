@@ -93,7 +93,7 @@
     {#if docId}
       <span class="bind-status ok">已绑定：{docTitle || docId}</span>
     {:else}
-      <span class="bind-status none">未绑定（默认位置）</span>
+      <span class="bind-status none">未绑定</span>
     {/if}
   </div>
 
