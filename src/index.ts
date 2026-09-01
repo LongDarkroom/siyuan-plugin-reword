@@ -86,6 +86,7 @@ import { sessionStore, type AiSessionData } from "./ai/ai-session-store.ts";
 import { getBlockKramdownText as getBlockKramdown } from "./siyuan/api.ts";
 import { sqlQuery } from "./siyuan/attrs.ts";
 import { lsNotebooks, createDocWithMd, listDocsByPath } from "./siyuan/filetree.ts";
+import { getGlobalSettingsStore } from "./reader/reader-settings.ts";
 import "./index.less";
 import { PersistentStore } from "./core/persist.ts";
 import { getLogger } from "./core/logger.ts";
@@ -2063,6 +2064,18 @@ export default class RewordPlugin extends Plugin {
   /** 阅读器划词发送到设置笔记本（默认 REword/阅读摘录，可在 localStorage 配置） */
   public async sendReaderSelection(opts: { markdown: string; title: string }): Promise<string> {
     try {
+      // 2026-09-01：若已绑定阅读摘录目标文档，直接 append 到该文档
+      try {
+        const st = getGlobalSettingsStore()?.get?.();
+        const targetDocId = st?.excerptDocId?.trim();
+        if (targetDocId) {
+          const { appendBlock } = await import("./siyuan/api.ts");
+          await appendBlock("markdown", opts.markdown, targetDocId);
+          return targetDocId;
+        }
+      } catch (be) {
+        getLogger().warn("[REword] 发送摘录到绑定文档失败，回退默认:", { error: be });
+      }
       let notebookId = (typeof localStorage !== "undefined" && localStorage.getItem("hiword-reader-send-notebook")) || "";
       if (!notebookId) {
         const nbs = await this.listNotebooks();

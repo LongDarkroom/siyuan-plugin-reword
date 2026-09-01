@@ -7,6 +7,7 @@
    */
   import { onMount } from "svelte";
   import { DEFAULT_TRANSLATE_PROMPT, DEFAULT_TRANSLATE_PROMPT_NATURAL } from "../ai/ai-settings";
+  import { openDocPicker } from "./doc-picker";
 
   export let settingsStore: any; // ReaderSettingsStore（含 get/update/subscribe）
   export let getAiSettings: () => any;
@@ -263,6 +264,55 @@
       } catch {}
     }
     await loadCache();
+  }
+
+  // ----- 译文归档：一键关闭并清理（Phase 2 收尾优化） -----
+  // 关开关 + 清 docId（落盘）+ 重置模块级变量 + 把归档文档送回收站。
+  // 这样既能立即清理，又能防止插件重启后「归档文档复活」。
+  async function cleanArchive() {
+    const docId = (settingsStore.get()?.translationArchiveDocId || "").trim();
+    // ① 关开关 + 清 docId（ReaderSettingsStore.update 已带 300ms 防抖落盘）
+    settingsStore.update({ translationArchiveEnabled: false, translationArchiveDocId: "" });
+    // ② 重置模块级 archiveDocId，避免本次会话继续写 SQLite
+    try {
+      const { setTranslationArchiveDoc } = await import("../translate/sqlite-cache.ts");
+      setTranslationArchiveDoc("");
+    } catch {
+      /* 模块加载失败不应阻塞 UI */
+    }
+    // ③ 把归档文档送回收站（非永久删除，可恢复）
+    if (docId) {
+      try {
+        const { sql, removeDoc } = await import("../siyuan/api.ts");
+        const rows = await sql<{ box: string; path: string }>(
+          `select box, path from blocks where id='${docId.replace(/'/g, "''")}' and type='d'`
+        );
+        if (rows && rows.length) await removeDoc(rows[0].box, rows[0].path);
+        cacheMsg = "已关闭译文归档，归档文档已移入回收站；译文仅保留在本地 JSON 缓存。";
+      } catch (e) {
+        console.warn("[REword] 清理归档文档失败:", e);
+        cacheMsg = "已关闭译文归档（设置已保存）；但删除归档文档失败，请手动在文档列表删除「REword 译文归档」。";
+      }
+    } else {
+      cacheMsg = "已关闭译文归档；当前没有需要清理的归档文档。";
+    }
+    await loadCache();
+  }
+
+  // ----- 2026-09-01 笔记文档绑定：选择 / 清除目标文档 -----
+  async function pickExcerpt() {
+    const r = await openDocPicker({ title: "选择阅读摘录目标文档" });
+    if (r) settingsStore.update({ excerptDocId: r.docId, excerptDocTitle: r.title, excerptNotebookId: r.notebookId });
+  }
+  async function clearExcerpt() {
+    settingsStore.update({ excerptDocId: "", excerptDocTitle: "", excerptNotebookId: "" });
+  }
+  async function pickGraph() {
+    const r = await openDocPicker({ title: "选择书图谱目标文档" });
+    if (r) settingsStore.update({ bookGraphDocId: r.docId, bookGraphDocTitle: r.title, bookGraphNotebookId: r.notebookId });
+  }
+  async function clearGraph() {
+    settingsStore.update({ bookGraphDocId: "", bookGraphDocTitle: "", bookGraphNotebookId: "" });
   }
 
   // ----- 术语表（新增子页） -----
@@ -594,6 +644,46 @@
         <div class="bset-card">
           <div class="bset-card-title">翻译缓存管理</div>
           <p class="bset-desc">译文按书缓存于本地（JSON + 可选思源 SQLite）。删除缓存后再次翻译会重新消耗额度。</p>
+          <!-- 译文归档：一键关闭并清理 -->
+          <div style="margin:14px 0;padding:12px 14px;border:1px solid var(--b3-theme-surface-lighter,#e5e5e5);border-radius:8px;background:var(--b3-theme-background,#fafafa);">
+            <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:6px;">
+              <span style="font-weight:600;font-size:13px;">译文归档（思源 SQLite）</span>
+              {#if $settingsStore.translationArchiveEnabled}
+                <span style="font-size:12px;color:#d97706;background:rgba(217,119,6,.12);padding:2px 8px;border-radius:999px;">已开启</span>
+              {:else}
+                <span style="font-size:12px;color:#16a34a;background:rgba(22,163,74,.12);padding:2px 8px;border-radius:999px;">已关闭</span>
+              {/if}
+            </div>
+            <p class="bset-desc">开启后译文会额外写入思源文档「REword 译文归档」，可被搜索 / SQL 查询 / 同步；关闭后仅保留本地 JSON 缓存，书籍译文不受影响。</p>
+            {#if $settingsStore.translationArchiveEnabled || $settingsStore.translationArchiveDocId}
+              <button class="bset-btn bset-btn-danger" on:click={cleanArchive}>关闭并清理归档文档</button>
+            {:else}
+              <span style="font-size:12px;color:var(--b3-theme-on-surface,#999);">归档已关闭，无需清理</span>
+            {/if}
+          </div>
+
+          <!-- 2026-09-01 笔记文档绑定 -->
+          <div style="margin:14px 0;padding:12px 14px;border:1px solid var(--b3-theme-surface-lighter,#e5e5e5);border-radius:8px;background:var(--b3-theme-background,#fafafa);">
+            <div style="font-weight:600;font-size:13px;margin-bottom:6px;">笔记文档绑定</div>
+            <p class="bset-desc">将「阅读摘录」与「书图谱」发送到你指定的思源文档（替代默认 /REword 路径）。未绑定时仍使用默认位置。</p>
+            <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin:8px 0 4px;">
+              <span style="font-size:13px;">阅读摘录目标文档</span>
+              <span style="font-size:12px;color:var(--b3-theme-on-surface,#999);">{($settingsStore.excerptDocTitle || "未绑定（默认 /REword/阅读摘录）")}</span>
+            </div>
+            <div style="display:flex;gap:8px;margin-bottom:10px;">
+              <button class="bset-btn" on:click={pickExcerpt}>选择 / 更改</button>
+              {#if $settingsStore.excerptDocId}<button class="bset-btn" on:click={clearExcerpt}>清除绑定</button>{/if}
+            </div>
+            <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin:8px 0 4px;">
+              <span style="font-size:13px;">书图谱目标文档</span>
+              <span style="font-size:12px;color:var(--b3-theme-on-surface,#999);">{($settingsStore.bookGraphDocTitle || "未绑定（默认 /REword/书图谱）")}</span>
+            </div>
+            <div style="display:flex;gap:8px;">
+              <button class="bset-btn" on:click={pickGraph}>选择 / 更改</button>
+              {#if $settingsStore.bookGraphDocId}<button class="bset-btn" on:click={clearGraph}>清除绑定</button>{/if}
+            </div>
+          </div>
+
           <div class="bset-cache-summary">
             <span><b>{books.length}</b> 本</span>
             <span><b>{totalSegments}</b> 段</span>

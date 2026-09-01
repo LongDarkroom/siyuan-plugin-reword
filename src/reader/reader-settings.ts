@@ -1,4 +1,12 @@
 import { logSwallow } from "../core/safe.ts";
+import { lsNotebooks, createDocWithMd, listDocsByPath } from "../siyuan/filetree.ts";
+import { getIDsByHPath } from "../siyuan/api.ts";
+
+/** 阅读设置全局单例（供非 Svelte 模块如 graph.ts / index.ts 读取绑定文档 ID） */
+let _globalSettingsStore: any = null;
+export function getGlobalSettingsStore(): ReaderSettingsStore | null {
+  return _globalSettingsStore as ReaderSettingsStore | null;
+}
 /**
  * 阅读器 - 文本样式与阅读设置（持久化）
  * ---------------------------------------------------------------
@@ -209,6 +217,19 @@ export interface ReaderSettings {
   translationArchiveEnabled?: boolean;
   /** 译文归档文档 ID（由 ensureTranslationArchiveDoc 自动创建并回填，一般无需手改） */
   translationArchiveDocId?: string;
+  /* ---- 2026-09-01 笔记文档绑定：阅读摘录 / 书图谱 发送目标（替代写死的 /REword 路径） ---- */
+  /** 阅读摘录绑定目标文档 ID：发送摘录时 append 到此文档 */
+  excerptDocId?: string;
+  /** 阅读摘录绑定文档标题（仅展示用） */
+  excerptDocTitle?: string;
+  /** 阅读摘录绑定文档所在笔记本 ID */
+  excerptNotebookId?: string;
+  /** 书图谱绑定目标文档 ID：导出书图谱时按书名去重 append 到此文档 */
+  bookGraphDocId?: string;
+  /** 书图谱绑定文档标题（仅展示用） */
+  bookGraphDocTitle?: string;
+  /** 书图谱绑定文档所在笔记本 ID */
+  bookGraphNotebookId?: string;
   /* ---- 2026-08-29 PDF 显示设置（仅 PDF 书生效，对齐 Obsidian PDF++ 阅读菜单） ---- */
   /** PDF 视图模式：单页 / 双页 / 书籍（映射 foliate spread: none/both/portrait） */
   pdfViewMode?: "single" | "double" | "book";
@@ -261,6 +282,12 @@ export const READER_DEFAULT_SETTINGS: ReaderSettings = {
   // 2026-08-31 Phase 2：译文归档默认关闭（会在用户思源里建文档，需明确启用）
   translationArchiveEnabled: false,
   translationArchiveDocId: "",
+  excerptDocId: "",
+  excerptDocTitle: "",
+  excerptNotebookId: "",
+  bookGraphDocId: "",
+  bookGraphDocTitle: "",
+  bookGraphNotebookId: "",
   pdfViewMode: "single",
   pdfScrollDir: "vertical",
   pdfInvert: false,
@@ -544,6 +571,8 @@ export class ReaderSettingsStore {
 
   constructor(plugin: any) {
     this.plugin = plugin;
+    // 2026-09-01：注册为全局单例，供非 Svelte 模块读取绑定文档 ID
+    _globalSettingsStore = this;
   }
 
   /** 实现 Svelte store 契约：返回退订函数（支持 `$settingsStore` 自动订阅） */
@@ -572,9 +601,58 @@ export class ReaderSettingsStore {
         };
       }
     } catch (__swallowErr) { logSwallow(__swallowErr, "reader-settings.ts · load", "debug"); }
+    // 2026-09-01：首次加载时把旧 /REword/阅读摘录、/REword/书图谱 自动识别为绑定目标
+    try { await this.autoMigrateBindings(); } catch (__migErr) { logSwallow(__migErr, "reader-settings.ts · autoMigrate", "debug"); }
     this.loaded = true;
     // 加载完成后推送最新值 → 订阅者（含其它已开 Tab）立即生效
     this._store.set({ ...this.settings });
+  }
+
+  /** 2026-09-01：自动迁移旧版写死的 /REword 路径文档为绑定目标（仅当对应字段为空时） */
+  private async autoMigrateBindings(): Promise<void> {
+    const targets: Array<{ hpath: string; key: "excerpt" | "graph" }> = [];
+    if (!this.settings.excerptDocId) targets.push({ hpath: "/REword/阅读摘录", key: "excerpt" });
+    if (!this.settings.bookGraphDocId) targets.push({ hpath: "/REword/书图谱", key: "graph" });
+    if (!targets.length) return;
+    try {
+      const nbs = await lsNotebooks();
+      for (const nb of nbs) {
+        if (nb.closed) continue;
+        for (let i = targets.length - 1; i >= 0; i--) {
+          const t = targets[i];
+          try {
+            if (t.key === "excerpt") {
+              const ids = await getIDsByHPath(nb.id, t.hpath);
+              if (ids && ids.length) {
+                this.settings.excerptDocId = ids[0];
+                this.settings.excerptDocTitle = "阅读摘录";
+                this.settings.excerptNotebookId = nb.id;
+                targets.splice(i, 1);
+              }
+            } else {
+              // 书图谱旧结构是文件夹：取其下首个文档，否则在文件夹内新建「书图谱总览」文档
+              const kids = await listDocsByPath(nb.id, t.hpath);
+              const firstDoc = (kids || []).find((k: any) => k.type !== "node");
+              if (firstDoc) {
+                this.settings.bookGraphDocId = firstDoc.id;
+                this.settings.bookGraphDocTitle = firstDoc.name || "书图谱";
+                this.settings.bookGraphNotebookId = nb.id;
+                targets.splice(i, 1);
+              } else {
+                const newId = await createDocWithMd(nb.id, `${t.hpath}/书图谱总览`, "");
+                if (newId) {
+                  this.settings.bookGraphDocId = newId;
+                  this.settings.bookGraphDocTitle = "书图谱总览";
+                  this.settings.bookGraphNotebookId = nb.id;
+                  targets.splice(i, 1);
+                }
+              }
+            }
+          } catch { /* 单笔记本失败跳过，继续下一个 */ }
+        }
+        if (!targets.length) break;
+      }
+    } catch { /* 内核不可用则跳过迁移 */ }
   }
 
   get(): ReaderSettings {

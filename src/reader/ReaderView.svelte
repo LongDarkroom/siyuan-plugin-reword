@@ -3046,6 +3046,8 @@
   }
 
   let askModeOpen = false;
+  // 2026-09-01 P0：首次询问弹窗展示的本书缓存状态（total / cached / pending）
+  let askCacheStats: { total: number; cached: number; pending: number } | null = null;
   /* ================= 本书前提上下文（v1.3.0：lite Protyle 富文本编辑） ================= */
 
   let primerOpen = false;
@@ -3286,9 +3288,13 @@
       await refreshCacheStats(bookId);
       await refreshCacheBookList();
       toast(
-        p.pending === 0 ? "本书已无待译段落（缓存齐全）" : `整书预翻译完成，已缓存 ${p.cached + p.done} 段`,
-        2600, "info" as any
+        p.pending === 0
+          ? "本书已全部缓存，翻页 / 滚动时自动显示双语对照"
+          : `整书预翻译完成，已缓存 ${p.done} 段，当前页已显示译文`,
+        3000, "info" as any
       );
+      // 2026-09-01 P0：完成后主动把已缓存译文注入当前可视区域，用户立刻能看到对照
+      try { bilingualHandle?.refresh(); } catch { /* 注入失败不影响缓存结果 */ }
     } else if (p.status === "cancelled") {
       ptRunning = false;
       ptAbort = null;
@@ -6210,6 +6216,22 @@
     }
   }
 
+  /** 2026-09-01 P0：首次询问弹窗打开前，先计算本书缓存状态，供用户选择参考（无缓存时仍正常弹窗） */
+  async function openAskDialog(): Promise<void> {
+    askCacheStats = null;
+    try {
+      ensureBilingualHandle();
+      const texts = bilingualHandle!.segmentTexts();
+      const cachedFlags = onCheckCache ? await onCheckCache(texts) : new Array(texts.length).fill(false);
+      const total = texts.length;
+      const cached = cachedFlags.filter(Boolean).length;
+      askCacheStats = { total, cached, pending: Math.max(0, total - cached) };
+    } catch {
+      askCacheStats = null;
+    }
+    askModeOpen = true;
+  }
+
   /** 顶栏「双语」按钮：切换并持久化到阅读设置 */
   async function toggleBilingual(): Promise<void> {
     console.log("[REword] 双语按钮点击, 当前状态:", bilingualOn);
@@ -6240,7 +6262,7 @@
           enableBilingual();
           return;
         }
-        askModeOpen = true;
+        await openAskDialog();
         return;
       }
       if (mode === "whole-book") {
@@ -6939,7 +6961,7 @@
           class="reader-btn reader-bilingual-settings-btn"
           title="双语翻译设置（独立面板）"
           on:click={() => onOpenBilingualSettingsTab?.()}
-        >⚙</button>
+        >🌐</button>
         <button
           class="reader-btn reader-settings-btn"
           title="设置"
@@ -7946,6 +7968,9 @@
           {/if}
         </div>
 
+        {#if ptProgress.status === "idle" && !ptForm.overwrite && (ptStats.pending || 0) === 0}
+          <p style="color:var(--b3-theme-on-surface,#999);font-size:12px;margin:0 0 10px;">本书已全部缓存，勾选「覆盖已有缓存」可重新翻译</p>
+        {/if}
         <div class="reword-pt-footer">
           {#if ptProgress.status === "idle"}
             <button class="reword-pt-btn reword-pt-btn-ghost" on:click={closePretranslateDialog}>取消</button>
@@ -7967,6 +7992,11 @@
       <div class="reword-pt-modal reword-glass" role="dialog" aria-modal="true" on:click|stopPropagation on:keydown={() => {}} style="max-width: 440px;">
         <div class="reword-pt-title">选择翻译方式</div>
         <p style="color:var(--b3-theme-on-surface,#777);font-size:12px;margin:6px 0 16px;">要如何翻译这本书？</p>
+        {#if askCacheStats}
+          <p style="color:var(--b3-theme-primary,#3b82f6);font-size:12px;margin:0 0 14px;background:rgba(59,130,246,0.1);padding:8px 10px;border-radius:8px;">
+            本书已缓存 {askCacheStats.cached} / {askCacheStats.total} 段 · 剩余 {askCacheStats.pending} 段待译
+          </p>
+        {/if}
         <div style="display:flex;gap:10px;">
           <button class="reword-pt-btn reword-pt-btn-primary" on:click={chooseWholeBook}>整书预翻译</button>
           <button class="reword-pt-btn" on:click={chooseProgressive}>渐进式翻译</button>

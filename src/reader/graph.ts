@@ -10,6 +10,8 @@
 import type { BookMeta } from "./bookshelf-store";
 import type { AnnotationItem } from "../annotation/annotation-store";
 import { lsNotebooks, createDocWithMd } from "../siyuan/filetree";
+import { getGlobalSettingsStore } from "./reader-settings.ts";
+import { getDoc, updateBlock, appendBlock } from "../siyuan/api.ts";
 
 export const GRAPH_W = 600;
 export const GRAPH_H = 420;
@@ -156,6 +158,26 @@ function buildBookMarkdown(book: BookMeta, anns: AnnotationItem[]): string {
  * 复用阅读器发送的笔记本配置（localStorage hiword-reader-send-notebook / -path）。
  */
 export async function exportBookCanvasDoc(book: BookMeta, anns: AnnotationItem[]): Promise<string> {
+  const md = buildBookMarkdown(book, anns);
+  // 2026-09-01：若已绑定书图谱目标文档，按书名去重 append 到该文档
+  try {
+    const st = getGlobalSettingsStore()?.get?.();
+    const targetDocId = st?.bookGraphDocId?.trim();
+    if (targetDocId) {
+      const heading = `《${book.title}》`;
+      const html = await getDoc(targetDocId);
+      const foundId = findBookSectionId(html, heading);
+      if (foundId) {
+        await updateBlock("markdown", md, foundId);
+      } else {
+        await appendBlock("markdown", md, targetDocId);
+      }
+      return targetDocId;
+    }
+  } catch (e) {
+    console.warn("[REword] 导出书图谱到绑定文档失败，回退默认:", e);
+  }
+  // 原逻辑：按书名在 /REword/书图谱 下新建子文档
   let notebookId =
     (typeof localStorage !== "undefined" && localStorage.getItem("hiword-reader-send-notebook")) || "";
   if (!notebookId) {
@@ -169,6 +191,23 @@ export async function exportBookCanvasDoc(book: BookMeta, anns: AnnotationItem[]
     "/REword/阅读摘录";
   const base = path.replace(/\/[^/]+$/, "") || "/REword";
   const docPath = `${base}/书图谱/${safeTitle}`;
-  const md = buildBookMarkdown(book, anns);
   return await createDocWithMd(notebookId, docPath, md);
+}
+
+/** 在书图谱文档 HTML 中定位某本书章节块 ID（一级标题含书名），用于去重更新 */
+function findBookSectionId(html: string, heading: string): string | null {
+  try {
+    const doc = new DOMParser().parseFromString(html || "", "text/html");
+    const blocks = doc.querySelectorAll("[data-node-id],[data-id]");
+    for (const el of Array.from(blocks)) {
+      const id = (el as HTMLElement).getAttribute("data-node-id") || (el as HTMLElement).getAttribute("data-id");
+      const type = (el as HTMLElement).getAttribute("data-type");
+      if (id && type === "NodeHeading" && (el.textContent || "").includes(heading)) {
+        return id;
+      }
+    }
+  } catch {
+    /* 解析失败返回 null，回退 append */
+  }
+  return null;
 }
