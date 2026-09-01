@@ -5,6 +5,7 @@
    */
   import { onMount, createEventDispatcher } from "svelte";
   import { portal } from "../utils/portal";
+  import RWSection from "../ui/components/RWSection.svelte";
   import type { BookshelfStore } from "./bookshelf-store";
   import {
     computeReadingStats,
@@ -126,11 +127,7 @@
         </section>
 
         <!-- 日历热力图 -->
-        <section class="stats-section">
-          <div class="section-head">
-            <h3>近一年阅读热力</h3>
-            <span class="section-hint">每天</span>
-          </div>
+        <RWSection title="近一年阅读热力" hint="每天">
           <div class="chart-card calendar-card">
             <div class="calendar-scroll">
               <div class="calendar-inner" style="width:{weeks * (CELL + GAP)}px">
@@ -173,13 +170,10 @@
               <span>多</span>
             </div>
           </div>
-        </section>
+        </RWSection>
 
         <!-- 月度分布 -->
-        <section class="stats-section">
-          <div class="section-head">
-            <h3>近 12 个月分布</h3>
-          </div>
+        <RWSection title="近 12 个月分布">
           <div class="chart-card month-chart">
             {#each stats.monthly as m}
               <div class="month-col" title={m.month + (m.ms ? " · " + fmtDuration(m.ms) : "")}>
@@ -190,13 +184,10 @@
               </div>
             {/each}
           </div>
-        </section>
+        </RWSection>
 
         <!-- Top 书 -->
-        <section class="stats-section">
-          <div class="section-head">
-            <h3>阅读时长 Top {stats.topBooks.length}</h3>
-          </div>
+        <RWSection title={"阅读时长 Top " + stats.topBooks.length}>
           <div class="chart-card top-chart">
             {#each stats.topBooks as b, i}
               <div class="top-row">
@@ -212,7 +203,7 @@
               </div>
             {/each}
           </div>
-        </section>
+        </RWSection>
       </div>
     {:else}
       <div class="stats-loading">加载中…</div>
@@ -317,26 +308,6 @@
     font-size: 11px;
     color: var(--b3-theme-on-surface-light, #888);
     margin-top: 4px;
-  }
-  .stats-section {
-    display: flex;
-    flex-direction: column;
-    gap: 10px;
-  }
-  .section-head {
-    display: flex;
-    align-items: baseline;
-    justify-content: space-between;
-  }
-  .section-head h3 {
-    font-size: 13px;
-    font-weight: 600;
-    color: var(--b3-theme-on-background, #333);
-    margin: 0;
-  }
-  .section-hint {
-    font-size: 11px;
-    color: var(--b3-theme-on-surface-light, #999);
   }
   .chart-card {
     background: var(--b3-theme-background-light, rgba(0, 0, 0, 0.03));
