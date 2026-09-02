@@ -1,6 +1,6 @@
 {
   "name": "siyuan-plugin-reword",
-  "version": "1.5.2",
+  "version": "1.6.0",
   "description": "RE word - offline dictionary lookup and vocabulary review plugin for SiYuan",
   "scripts": {
     "dev": "vite build --watch",
