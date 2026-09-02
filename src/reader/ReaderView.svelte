@@ -911,9 +911,10 @@
     }
     // 同步容器兜底背景（深色模式切换时避免透出旧色/黑底闪屏）
     applyContainerBg();
-    // 分类字体：样式注入后再重写 EPUB 内联关键词
-    // （需等 --reword-* 变量真正落到内容文档，故推迟到下一帧）
-    if (settings.fontMode === "classified") {
+    // 字体关键词重写（接管书内 serif/sans-serif/monospace 关键词，覆盖 div/span 布局的正文）：
+    // 开启「强制覆盖书籍字体」且非系统模式时执行——分类、跟随思源、自定义模式都受益。
+    // 需等 --reword-* 变量真正落到内容文档，故推迟到下一帧（applyStyles 已把变量写入 :root）。
+    if (settings.fontMode !== "system" && settings.overridePublisherFont !== false) {
       requestAnimationFrame(() => applyFontKeywordRewrite());
     }
     // 2026-09-01 L0+L3：把内容 iframe 同步进 theme-bridge 注册表，
@@ -999,7 +1000,10 @@
    * @returns 被改写的规则条数（调试用）
    */
   function applyFontKeywordRewrite(): number {
-    if (settings.fontMode !== "classified") return 0;
+    // 仅系统模式跳过（系统模式不接管书籍字体，且未定义 --reword-* 变量）。
+    // 分类 / 跟随思源 / 自定义模式均执行：把书内通用族关键词重定向到 --reword-*（用户字体栈）。
+    if (settings.fontMode === "system") return 0;
+    if (settings.overridePublisherFont === false) return 0;
     if (!view?.renderer?.getContents) return 0;
     try {
       return rewriteFontKeywordsInAllContents(() => view.renderer.getContents());

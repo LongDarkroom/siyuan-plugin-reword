@@ -339,6 +339,27 @@ export function fontVariableStyles(lists: FontFamilyLists): string {
 }
 
 /**
+ * 跟随思源 / 自定义模式：用传入字体栈（宿主栈 + CJK 兜底）定义 --reword-* 三链变量。
+ *
+ * 2026-09-02 修复（Bug：跟随思源 + 强制覆盖书籍字体 对某些书无效）：
+ * 分类模式靠 applyFontKeywordRewrite() 把书内通用族关键词（serif/sans-serif/monospace）
+ * 重定向到 var(--reword-*)，从而覆盖「不在 p/li/blockquote 内、用 div/span 布局」的正文。
+ * 但该函数此前仅在 fontMode==="classified" 调用，--reword-* 也只在分类模式定义；
+ * 跟随思源 / 自定义模式既没调用、变量也未定义 → 这类书漏覆盖。
+ * 此处让非分类模式也能注入 --reword-*（与分类同源语义），配合 ReaderView 在开启
+ * overridePublisherFont 时同样跑关键词重写，使跟随思源与分类的覆盖能力一致。
+ * 等宽链补一个 monospace 兜底，避免代码块失去等宽特性。
+ */
+export function fontVariableStylesFromStack(stack: string): string {
+  const mono = stack ? `${stack}, monospace` : "monospace";
+  return `:root {
+  --reword-serif: ${stack};
+  --reword-sans-serif: ${stack};
+  --reword-monospace: ${mono};
+}`;
+}
+
+/**
  * 分类字体的应用段：body 走默认链，代码类元素走等宽链。
  *
  * 代码块选择器覆盖 EPUB 常见写法：原生 <pre>/<code>/<kbd>/<samp>/<tt>
@@ -387,10 +408,23 @@ export function buildReaderStyles(
         )
       : null;
 
-  // 字体段：分类模式输出「三条链变量 + body/代码块应用」，其余模式输出单一 body 栈
-  const fontSegments = lists
-    ? [fontVariableStyles(lists), classifiedFontStyles(settings.defaultFontFamily ?? "serif")]
-    : [fontFamilyStyles(fontFamilyStack)];
+  // 字体段：
+  // - 分类模式输出「三条链变量 + body/代码块应用」
+  // - 其余模式输出单一 body 栈；若开启「强制覆盖书籍字体」且非系统模式，再注入 --reword-*
+  //   变量，使 applyFontKeywordRewrite 能把书内 serif/sans-serif/monospace 关键词重定向到
+  //   用户字体栈，覆盖「不在 p/li/blockquote 内、用 div/span 布局」的正文（如《东方快车谋杀案》）。
+  let fontSegments: string[];
+  if (lists) {
+    fontSegments = [
+      fontVariableStyles(lists),
+      classifiedFontStyles(settings.defaultFontFamily ?? "serif"),
+    ];
+  } else {
+    fontSegments = [fontFamilyStyles(fontFamilyStack)];
+    if (settings.fontMode !== "system" && settings.overridePublisherFont !== false) {
+      fontSegments.push(fontVariableStylesFromStack(fontFamilyStack));
+    }
+  }
 
   // 译文字体栈：分类模式下用正文默认链，保证译文与正文视觉同源
   const translationStack = lists
