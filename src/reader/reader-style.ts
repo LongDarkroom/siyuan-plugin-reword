@@ -435,6 +435,7 @@ export function buildReaderStyles(
 
   const parts = [
     fontCss,
+    uniformBlockResetStyles(),
     paragraphStyles(o),
     colorSchemeStyles(o),
     fontSizeOverrideStyles(settings.fontSize, settings.overrideBookFontSize !== false),
@@ -625,6 +626,67 @@ p {
   text-align: justify !important;
   text-indent: 0 !important;
   text-rendering: optimizeLegibility !important;
+}`.trim();
+}
+
+/**
+ * 强制清零 EPUB 容器级横向 padding/margin（2026-09-02 绘本/图文混排版修复）。
+ *
+ * 问题：很多 EPUB（尤其绘本、固定版式童书）用 div/section 做左右栏或图文块，
+ * 外层容器带 padding-left/margin-left，导致同页文字列左缘参差不齐。
+ * 仅清零 <p> 不够，必须对容器本身动手。
+ *
+ * 策略：
+ * - 用 `html body ...` 高特异性选择器覆盖书籍类选择器；
+ * - 先统一归零，再为 blockquote/ul/ol/li/figure 恢复必要语义缩进；
+ * - 不碰上下边距和纵向排版，只清横向偏移。
+ */
+export function uniformBlockResetStyles(): string {
+  return `
+html body,
+html body > div,
+html body > section,
+html body > article,
+html body > main,
+html body > aside,
+html body div.text,
+html body div.body,
+html body div.story,
+html body div.page,
+html body div.spread,
+html body section.text,
+html body section.body,
+html body section.chapter,
+html body article.text,
+html body [class*="page"],
+html body [class*="spread"],
+html body [class*="chapter"] {
+  margin-left: 0 !important;
+  margin-right: 0 !important;
+  padding-left: 0 !important;
+  padding-right: 0 !important;
+}
+/* 恢复必须保留的语义缩进，避免误伤引用和列表 */
+html body blockquote,
+html body blockquote > div,
+html body blockquote > p {
+  margin-left: 1em !important;
+  padding-left: 0.75em !important;
+}
+html body ul,
+html body ol {
+  margin-left: 0 !important;
+  padding-left: 1.5em !important;
+}
+html body li {
+  margin-left: 0 !important;
+  padding-left: 0 !important;
+}
+/* 图片/题注保持居中，不被清零拉偏 */
+html body figure,
+html body figcaption {
+  margin-left: auto !important;
+  margin-right: auto !important;
 }`.trim();
 }
 
@@ -1081,6 +1143,6 @@ export function neutralizeBadFontFaces(css: string): string {
  */
 function _sanityCheckUnused(): void {
   // 占位，让 buildReaderStyles 引用所有子函数以避免 tree-shake 误删
-  const _x = [paragraphStyles, inlineOverrideStyles, headingStyles, quoteStyles, listStyles, figureStyles, bodyStyles, textStyles, paragraphLayoutStyles, layoutMarginStyles, linkStyles, codeStyles, colorSchemeStyles, wordWrapStyles, fontSizeOverrideStyles, focusModeStyles, bilingualStyles, paragraphHoverStyles, buildFontFamilyLists, fontVariableStyles, classifiedFontStyles, fontFamilyStyles];
+  const _x = [paragraphStyles, uniformBlockResetStyles, inlineOverrideStyles, headingStyles, quoteStyles, listStyles, figureStyles, bodyStyles, textStyles, paragraphLayoutStyles, layoutMarginStyles, linkStyles, codeStyles, colorSchemeStyles, wordWrapStyles, fontSizeOverrideStyles, focusModeStyles, bilingualStyles, paragraphHoverStyles, buildFontFamilyLists, fontVariableStyles, classifiedFontStyles, fontFamilyStyles];
   void _x;
 }
