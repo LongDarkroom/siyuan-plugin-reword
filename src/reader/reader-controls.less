@@ -1,0 +1,290 @@
+/* ============================================================================
+ * 阅读器控件样式基线（全局）
+ *
+ * 背景（2026-09-02 界面分流）：ReaderView.svelte 已按书籍格式拆出
+ *   - PdfToolbar.svelte    PDF 缩放 / 页码
+ *   - PdfSettings.svelte   PDF 显示设置
+ *   - PdfOverlay.svelte    墨迹层 + 墨迹工具栏
+ *   - BookToolbar.svelte   双语对照按钮组
+ * 这些组件的 DOM 不再写在 ReaderView 的模板里，而 Svelte 的 <style> 是
+ * 组件级 scoped（编译成 `.reader-btn.svelte-xxxx`），父组件的样式**命中不到**
+ * 子组件内部元素。因此把两边共用的控件样式提升为全局，避免拆完后控件变成裸样式。
+ *
+ * 与 ReaderView.svelte <style> 内同名规则的关系：
+ *   ReaderView 内保留的那份带 scope 后缀，特异性更高，在 ReaderView 自身范围内优先生效，
+ *   两边取值一致，不会造成视觉差异。真正只属于子组件、ReaderView 已不再使用的
+ *   （缩放组 / 页码组 / 双语态）则只保留在本文件，不再留死代码在 ReaderView。
+ * ========================================================================== */
+
+/* ---------- 通用按钮 ---------- */
+.reader-btn {
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-size: 13px;
+  line-height: 1;
+  padding: 5px 7px;
+  border-radius: var(--b3-border-radius-s, 6px);
+  color: var(--b3-theme-on-background, #333);
+  transition: background 150ms ease, color 150ms ease;
+}
+.reader-btn:hover {
+  background: var(--b3-theme-background-light, rgba(0, 0, 0, 0.06));
+}
+.reader-btn-active {
+  background: var(--b3-theme-primary-light, rgba(55, 138, 221, 0.18));
+  color: var(--b3-theme-primary, #378add);
+}
+/* 翻译进行中的忙碌态（BookToolbar 双语按钮） */
+.reader-btn-busy {
+  opacity: 0.85;
+}
+
+/* ---------- 图书界面：双语对照按钮 ---------- */
+/* 开启态用绿色强调（呼应译文色） */
+.reader-bilingual-btn.reader-btn-active {
+  background: rgba(47, 158, 68, 0.18);
+  color: #2f9e44;
+}
+
+/* ---------- PDF 界面：缩放工具栏 ---------- */
+.reader-zoom-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 0 4px;
+  border-left: 1px solid var(--b3-border-color, rgba(0, 0, 0, 0.1));
+  margin-left: 4px;
+}
+.reader-zoom-btn {
+  min-width: 28px;
+  padding: 4px 8px;
+  font-size: 14px;
+  font-weight: 500;
+}
+.reader-zoom-label {
+  min-width: 64px;
+  text-align: center;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--b3-theme-on-background, #333);
+  padding: 0 4px;
+  user-select: none;
+}
+
+/* ---------- PDF 界面：页码组（第 N/T 页 + 跳转框） ---------- */
+.reader-page-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 1px;
+  margin-left: 4px;
+  padding: 0 2px;
+  border-left: 1px solid var(--b3-border-color, rgba(0, 0, 0, 0.08));
+  height: 22px;
+}
+.reader-page-btn {
+  min-width: 22px;
+  height: 22px;
+  padding: 0 4px;
+  font-size: 12px;
+  color: var(--b3-theme-on-surface-light, #888);
+  border-radius: 4px;
+}
+.reader-page-btn:hover:not(:disabled) {
+  background: var(--b3-theme-primary-light, rgba(55, 138, 221, 0.14));
+  color: var(--b3-theme-primary, #378add);
+}
+.reader-page-btn:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+.reader-page-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  font-size: 11px;
+  color: var(--b3-theme-on-surface-light, #888);
+  padding: 0 4px;
+  font-variant-numeric: tabular-nums;
+}
+.reader-page-input {
+  width: 32px;
+  height: 18px;
+  padding: 0 2px;
+  font-size: 11px;
+  text-align: center;
+  background: var(--b3-theme-background, #fff);
+  border: 1px solid var(--b3-border-color, rgba(0, 0, 0, 0.15));
+  border-radius: 3px;
+  color: var(--b3-theme-on-background, #333);
+  font-variant-numeric: tabular-nums;
+  -moz-appearance: textfield;
+  appearance: textfield;
+  font-family: inherit;
+}
+.reader-page-input::-webkit-outer-spin-button,
+.reader-page-input::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+.reader-page-input:focus {
+  outline: none;
+  border-color: var(--b3-theme-primary, #378add);
+}
+.reader-page-sep {
+  color: var(--b3-theme-on-surface-light, #888);
+  opacity: 0.5;
+}
+.reader-page-total {
+  min-width: 28px;
+  text-align: right;
+}
+
+/* ---------- 设置面板：分组 / 行 / 标签 / 控件 ---------- */
+.reader-setting-section {
+  border: 1px solid var(--b3-border-color, rgba(0, 0, 0, 0.1));
+  border-radius: 6px;
+  padding: 0;
+  margin: 2px 0;
+}
+.reader-setting-section[open] {
+  background: var(--b3-theme-background-light, rgba(0, 0, 0, 0.02));
+}
+.reader-setting-section-title {
+  cursor: pointer;
+  padding: 5px 8px;
+  font-weight: 600;
+  font-size: 12.5px;
+  user-select: none;
+  list-style: none;
+  display: block;
+}
+.reader-setting-section-title::-webkit-details-marker { display: none; }
+.reader-setting-section > .reader-setting-row {
+  padding: 2px 8px;
+  min-height: 26px;
+}
+.reader-setting-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 12px;
+}
+.reader-setting-label {
+  font-size: 12px;
+  color: var(--b3-theme-on-surface, #666);
+  flex-shrink: 0;
+}
+.reader-setting-control {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.reader-setting-value {
+  font-size: 12px;
+  min-width: 34px;
+  text-align: center;
+  color: var(--b3-theme-on-background, #333);
+}
+.reader-setting-hint {
+  margin: -6px 0 8px;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--b3-theme-on-background, #555);
+  opacity: 0.72;
+}
+.reader-setting-toggle-row {
+  justify-content: space-between;
+}
+
+/* ---------- 设置面板：分段按钮 / 迷你按钮 ---------- */
+.reader-seg {
+  background: none;
+  border: 1px solid var(--b3-border-color, rgba(0, 0, 0, 0.15));
+  border-radius: 6px;
+  padding: 3px 9px;
+  font-size: 12px;
+  cursor: pointer;
+  color: var(--b3-theme-on-background, #333);
+}
+.reader-seg:hover {
+  background: var(--b3-theme-background-light, rgba(0, 0, 0, 0.06));
+}
+.reader-seg-active {
+  background: var(--b3-theme-primary, #378add);
+  border-color: transparent;
+  color: #fff;
+}
+.reader-mini-btn {
+  background: none;
+  border: 1px solid var(--b3-border-color, rgba(0, 0, 0, 0.15));
+  border-radius: 6px;
+  padding: 3px 8px;
+  font-size: 12px;
+  cursor: pointer;
+  color: var(--b3-theme-on-background, #333);
+}
+.reader-mini-btn:hover {
+  background: var(--b3-theme-background-light, rgba(0, 0, 0, 0.06));
+}
+
+/* ---------- 设置面板：开关 ---------- */
+.reader-switch {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.reader-switch input {
+  position: absolute;
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
+.reader-switch-track {
+  width: 36px;
+  height: 20px;
+  border-radius: 10px;
+  background: var(--b3-theme-background-light, rgba(0, 0, 0, 0.12));
+  transition: background 200ms ease-out;
+  position: relative;
+}
+.reader-switch-track::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.25);
+  transition: transform 200ms ease-out;
+}
+.reader-switch input:checked + .reader-switch-track {
+  background: var(--b3-theme-primary, #378add);
+}
+.reader-switch input:checked + .reader-switch-track::after {
+  transform: translateX(16px);
+}
+
+/* ---------- iPhone / Android 底部 sheet 模式下的放大规则 ---------- */
+/* .reader-toolbar-iphone 挂在 ReaderView 的工具栏上，而 zoom 元素在 PdfToolbar 内，
+   跨组件后代选择器只能写在全局层才命中得住。 */
+.reader-toolbar-iphone .reader-zoom-btn {
+  min-width: 44px;
+  min-height: 44px;
+  font-size: 18px;
+}
+.reader-toolbar-iphone .reader-zoom-label {
+  min-width: 56px;
+  font-size: 13px;
+}
+
+/* 触屏设备放大点按目标，避免误触（仅 coarse 指针生效） */
+@media (pointer: coarse) {
+  .reader-btn { min-height: 36px; padding: 8px 10px; }
+  .reader-mini-btn { min-height: 32px; min-width: 32px; }
+}

@@ -14,9 +14,15 @@
   import { isTouchDevice } from "../core/env.ts";
   // [REword patch 2026-08-29] 移动端 PDF 适配 Phase 1
   import { getDeviceClass, isSmallMobile, isLargeMobile } from "../core/env.ts";
-  // [REword patch 2026-08-29] Phase 3 Apple Pencil 墨迹批注
-  import InkLayer from "./ink/InkLayer.svelte";
-  import InkToolbar from "./ink/InkToolbar.svelte";
+  // [REword 2026-09-02] 界面分流：按书籍格式自动切换「图书界面 / PDF 界面」。
+  // 此前 PDF 与 EPUB 共用同一套模板、靠散落的 isPdfBook() 拼装控件，两类格式互相干扰。
+  // 现在 PDF 专属控件收进 PdfToolbar / PdfSettings / PdfOverlay，图书专属控件收进 BookToolbar，
+  // 本文件只负责按 readerMode 决定挂载哪一套。
+  import { resolveReaderMode, isPdfFormat, type ReaderMode } from "./reader-mode.ts";
+  import BookToolbar from "./BookToolbar.svelte";
+  import PdfToolbar from "./PdfToolbar.svelte";
+  import PdfSettings from "./PdfSettings.svelte";
+  import PdfOverlay from "./PdfOverlay.svelte";
   // [REword 2026-09-01] 笔记导出绑定拖拽框（阅读摘录 / 书图谱目标文档绑定）
   import BindDropzone from "./BindDropzone.svelte";
   import {
@@ -425,6 +431,8 @@
   };
 
   let meta: BookMeta | undefined;
+  /** [REword 2026-09-02] 当前界面模式：随 meta.format 自动切换，图书与 PDF 各用一套控件 */
+  $: readerMode = resolveReaderMode(meta?.format) as ReaderMode;
   let title = "";
   let chapterLabel = "";
   let bookAuthor = "";
@@ -2440,8 +2448,13 @@
   // iPhone / Android Phone 降级模式（强制 fit-width + 工具栏底部 sheet）
   let isIphoneMode = false;
 
+  /**
+   * 是否 PDF 书籍。
+   * [REword 2026-09-02] 改从 reader-mode 的唯一真源取值，避免这里与各处再散写
+   * `meta?.format === "pdf"`（此前新增格式分流时极易漏改某一处）。
+   */
   function isPdfBook(): boolean {
-    return meta?.format === "pdf";
+    return isPdfFormat(meta?.format);
   }
 
   // [REword patch 2026-08-29] 移动端 PDF 适配 Phase 1
@@ -7201,21 +7214,21 @@
     <div class="reader-toolbar-right">
       <span class="reader-progress" title="阅读进度">{progressText}</span>
       {#if !isIphoneMode}
-        <!-- [REword patch 2026-08-29] 桌面 / iPad 完整模式：双语 + 设置 + 搜索按钮 -->
-        <button
-          class="reader-btn reader-bilingual-btn"
-          class:reader-btn-active={bilingualOn}
-          class:reader-btn-busy={bilingualProgress.active}
-          title={bilingualTokenUsage
-            ? `双语对照 · AI Token: ${bilingualTokenUsage.totalTokens}（输入 ${bilingualTokenUsage.promptTokens} + 输出 ${bilingualTokenUsage.completionTokens}）`
-            : "双语对照：在每段正文后注入译文（AI 翻译）"}
-          on:click={toggleBilingual}
-        >双语{bilingualProgress.active ? ` ${bilingualProgress.done}/${bilingualProgress.total}` : ""}{bilingualTokenUsage && !bilingualProgress.active ? ` · ${bilingualTokenUsage.totalTokens}T` : ""}</button>
-        <button
-          class="reader-btn reader-bilingual-settings-btn"
-          title="双语翻译设置（独立面板）"
-          on:click={() => onOpenBilingualSettingsTab?.()}
-        >🌐</button>
+        <!-- [REword 2026-09-02] 图书界面专属：双语对照（PDF 画布无法注入译文，故不显示） -->
+        {#if readerMode !== "pdf"}
+          <BookToolbar
+            bilingualOn={bilingualOn}
+            bilingualActive={bilingualProgress.active}
+            bilingualDone={bilingualProgress.done}
+            bilingualTotal={bilingualProgress.total}
+            promptTokens={bilingualTokenUsage?.promptTokens ?? null}
+            completionTokens={bilingualTokenUsage?.completionTokens ?? null}
+            totalTokens={bilingualTokenUsage?.totalTokens ?? null}
+            onToggleBilingual={toggleBilingual}
+            onOpenBilingualSettings={onOpenBilingualSettingsTab}
+          />
+        {/if}
+        <!-- 图书与 PDF 共用：设置 + 搜索 -->
         <button
           class="reader-btn reader-settings-btn"
           title="设置"
@@ -7229,61 +7242,20 @@
           on:click={toggleSearch}
         >🔍</button>
       {/if}
-      {#if isPdfBook()}
-        <!-- [REword patch 2026-08-29] PDF 缩放工具栏（仅 PDF 显示） -->
-        <span class="reader-zoom-group" title="PDF 缩放：⌘/Ctrl + 滚轮（或触控板捏合）连续缩放；⌘/Ctrl + 1 / 2 / = / - 快捷档位；页面内双击切换适应宽度">
-          <button
-            class="reader-btn reader-zoom-btn"
-            title="缩小（⌘/Ctrl + -）"
-            on:click={zoomOut}
-          >−</button>
-          <span class="reader-zoom-label">{zoomPercentLabel()}</span>
-          <button
-            class="reader-btn reader-zoom-btn"
-            title="放大（⌘/Ctrl + =）"
-            on:click={zoomIn}
-          >+</button>
-          <button
-            class="reader-btn reader-zoom-btn"
-            title="适应宽度（⌘/Ctrl + 1）"
-            on:click={fitWidth}
-          >↔</button>
-          <button
-            class="reader-btn reader-zoom-btn"
-            title="适应整页（⌘/Ctrl + 2）"
-            on:click={fitPage}
-          >⊡</button>
-        </span>
-        <!-- [2026-09-01] Phase 1:PDF「第 N/T 页」+ 跳转输入框(对齐 Obsidian PDF++ Go to page) -->
-        <span class="reader-page-group" title="PDF 页码跳转：←/→ 翻页,数字框内回车跳转">
-          <button
-            class="reader-btn reader-page-btn"
-            title="上一页（←）"
-            disabled={!pdfTotalPages}
-            on:click={() => goPdfPage(Math.max(1, pdfCurrentPage - 1))}
-          >‹</button>
-          <span class="reader-page-label">
-            <input
-              class="reader-page-input"
-              type="number"
-              min="1"
-              max={pdfTotalPages || undefined}
-              placeholder="?"
-              value={pdfCurrentPage || ""}
-              disabled={!pdfTotalPages}
-              on:keydown={onPageInputKeydown}
-              on:change={onPageInputChange}
-            />
-            <span class="reader-page-sep">/</span>
-            <span class="reader-page-total">{pdfTotalPages || "?"}</span>
-          </span>
-          <button
-            class="reader-btn reader-page-btn"
-            title="下一页（→）"
-            disabled={!pdfTotalPages}
-            on:click={() => goPdfPage(Math.min(pdfTotalPages, pdfCurrentPage + 1))}
-          >›</button>
-        </span>
+      <!-- [REword 2026-09-02] PDF 界面专属：缩放 + 页码。iPhone 模式下也保留（缩放/翻页是刚需） -->
+      {#if readerMode === "pdf"}
+        <PdfToolbar
+          zoomLabel={zoomPercentLabel()}
+          pdfCurrentPage={pdfCurrentPage}
+          pdfTotalPages={pdfTotalPages}
+          onZoomIn={zoomIn}
+          onZoomOut={zoomOut}
+          onFitWidth={fitWidth}
+          onFitPage={fitPage}
+          onGoPage={goPdfPage}
+          onPageInputKeydown={onPageInputKeydown}
+          onPageInputChange={onPageInputChange}
+        />
       {/if}
     </div>
   </div>
@@ -7435,6 +7407,9 @@
 
       <!-- 2026-08-25：3 大分类（文本/段落/页面布局），折叠式分组 -->
       <!-- 1. 文本设置：字号（已有）+ 字重 + 字距 -->
+      <!-- [REword 2026-09-02] 文本 / 段落 / 朗读三项只对可重排文本生效，
+           PDF 是固定版式画布渲染，改这些毫无效果 → 归为图书界面专属，PDF 模式整段隐藏。 -->
+      {#if readerMode !== "pdf"}
       <details class="reader-setting-section">
         <summary class="reader-setting-section-title">📖 文本设置</summary>
         <div class="reader-setting-row">
@@ -7712,6 +7687,7 @@
           </select>
         </div>
       </details>
+      {/if}
 
       <!-- 2026-09-01 笔记导出绑定：从双语设置迁移至阅读器设置浮层，支持拖拽绑定 -->
       <details class="reader-setting-section">
@@ -8125,54 +8101,15 @@
         </div>
       </details>
 
-      <!-- 2026-08-29：PDF 显示设置（视图模式 / 滚动方向 / 反色），仅 PDF 书显示 -->
-      {#if isPdfBook()}
-      <details class="reader-setting-section">
-        <summary class="reader-setting-section-title">📄 PDF 显示</summary>
-
-        <!-- 视图模式：单页 / 双页 / 书籍（映射 foliate spread） -->
-        <div class="reader-setting-row">
-          <span class="reader-setting-label">视图模式</span>
-          <div class="reader-setting-control">
-            {#each [["single", "单页"], ["double", "双页"], ["book", "书籍"]] as [key, label]}
-              <button
-                class="reader-seg"
-                class:reader-seg-active={(settings.pdfViewMode ?? "single") === key}
-                on:click={() => onSetPdfViewMode(key)}
-              >{label}</button>
-            {/each}
-          </div>
-        </div>
-
-        <!-- 滚动方向：仅「滚动」模式生效（映射 foliate scroll-direction） -->
-        {#if settings.flow === "scrolled"}
-        <div class="reader-setting-row">
-          <span class="reader-setting-label">滚动方向</span>
-          <div class="reader-setting-control">
-            {#each [["vertical", "垂直"], ["horizontal", "水平"]] as [key, label]}
-              <button
-                class="reader-seg"
-                class:reader-seg-active={(settings.pdfScrollDir ?? "vertical") === key}
-                on:click={() => onSetPdfScrollDir(key)}
-              >{label}</button>
-            {/each}
-          </div>
-        </div>
-        {/if}
-
-        <!-- 反色 / 暗色：PDF 画布级 pageColors 反色，独立于阅读器通用主题 -->
-        <div class="reader-setting-row reader-setting-toggle-row">
-          <span class="reader-setting-label">反色 / 暗色</span>
-          <label class="reader-switch" title="PDF 画布级反色（黑底白字），独立于阅读器主题">
-            <input
-              type="checkbox"
-              checked={!!settings.pdfInvert}
-              on:change={setPdfInvert}
-            />
-            <span class="reader-switch-track"></span>
-          </label>
-        </div>
-      </details>
+      <!-- [REword 2026-09-02] PDF 界面专属设置（视图模式 / 滚动方向 / 反色），已拆为 PdfSettings 组件 -->
+      {#if readerMode === "pdf"}
+        <PdfSettings
+          settings={settings}
+          flow={settings.flow}
+          onSetPdfViewMode={onSetPdfViewMode}
+          onSetPdfScrollDir={onSetPdfScrollDir}
+          onSetPdfInvert={setPdfInvert}
+        />
       {/if}
 
     </div>
@@ -8361,13 +8298,9 @@
 
   <div class="reader-stage" bind:this={readerStageEl}>
     <div class="reader-container" bind:this={container}></div>
-    <!-- [REword patch 2026-08-29] Phase 3 Apple Pencil 墨迹批注 SVG 渲染层 -->
-    {#if opened && isPdfBook()}
-      <InkLayer pageWidth={800} pageHeight={1200} />
-    {/if}
-    <!-- [REword patch 2026-08-29] Phase 3 墨迹工具栏（浮动在 PDF 上） -->
-    {#if opened && isPdfBook()}
-      <InkToolbar />
+    <!-- [REword 2026-09-02] PDF 界面专属浮层：Apple Pencil 墨迹批注（SVG 层 + 工具栏） -->
+    {#if readerMode === "pdf"}
+      <PdfOverlay opened={opened} />
     {/if}
     {#if opened && !errorMsg}
       <div class="reader-side-tap" aria-hidden="false">
@@ -8904,14 +8837,9 @@
     background: var(--b3-theme-primary-light, rgba(55, 138, 221, 0.18));
     color: var(--b3-theme-primary, #378add);
   }
-  /* 双语按钮：开启态用绿色强调（呼应译文色），翻译进行中显示忙碌态 */
-  .reader-bilingual-btn.reader-btn-active {
-    background: rgba(47, 158, 68, 0.18);
-    color: #2f9e44;
-  }
-  .reader-btn-busy {
-    opacity: 0.85;
-  }
+  /* 双语按钮开启态、翻译忙碌态、PDF 缩放组 / 页码组样式已随界面分流迁至
+     全局 src/reader/reader-controls.less（2026-09-02）——这些 DOM 现在由
+     BookToolbar / PdfToolbar 渲染，Svelte scoped 样式命中不到子组件内部元素。 */
   .reader-title {
     font-size: 13px;
     font-weight: 500;
@@ -8924,97 +8852,6 @@
     color: var(--b3-theme-on-background, #333);
     user-select: auto;
     cursor: text;
-  }
-  /* [REword patch 2026-08-29] PDF 缩放工具栏（仅 PDF 显示） */
-  .reader-zoom-group {
-    display: inline-flex;
-    align-items: center;
-    gap: 2px;
-    padding: 0 4px;
-    border-left: 1px solid var(--b3-border-color, rgba(0, 0, 0, 0.1));
-    margin-left: 4px;
-  }
-  .reader-zoom-btn {
-    min-width: 28px;
-    padding: 4px 8px;
-    font-size: 14px;
-    font-weight: 500;
-  }
-  .reader-zoom-label {
-    min-width: 64px;
-    text-align: center;
-    font-size: 12px;
-    font-weight: 500;
-    color: var(--b3-theme-on-background, #333);
-    padding: 0 4px;
-    user-select: none;
-  }
-  /* [2026-09-01] Phase 1:PDF「第 N/T 页」+ 跳转输入框(对齐 Obsidian PDF++ Go to page) */
-  .reader-page-group {
-    display: inline-flex;
-    align-items: center;
-    gap: 1px;
-    margin-left: 4px;
-    padding: 0 2px;
-    border-left: 1px solid var(--b3-border-color, rgba(0, 0, 0, 0.08));
-    height: 22px;
-  }
-  .reader-page-btn {
-    min-width: 22px;
-    height: 22px;
-    padding: 0 4px;
-    font-size: 12px;
-    color: var(--b3-theme-on-surface-light, #888);
-    border-radius: 4px;
-  }
-  .reader-page-btn:hover:not(:disabled) {
-    background: var(--b3-theme-primary-light, rgba(55, 138, 221, 0.14));
-    color: var(--b3-theme-primary, #378add);
-  }
-  .reader-page-btn:disabled {
-    opacity: 0.35;
-    cursor: not-allowed;
-  }
-  .reader-page-label {
-    display: inline-flex;
-    align-items: center;
-    gap: 2px;
-    font-size: 11px;
-    color: var(--b3-theme-on-surface-light, #888);
-    padding: 0 4px;
-    font-variant-numeric: tabular-nums;
-  }
-  .reader-page-input {
-    width: 32px;
-    height: 18px;
-    padding: 0 2px;
-    font-size: 11px;
-    text-align: center;
-    background: var(--b3-theme-background, #fff);
-    border: 1px solid var(--b3-border-color, rgba(0, 0, 0, 0.15));
-    border-radius: 3px;
-    color: var(--b3-theme-on-background, #333);
-    font-variant-numeric: tabular-nums;
-    -moz-appearance: textfield;
-    appearance: textfield;
-    font-family: inherit;
-  }
-  .reader-page-input::-webkit-outer-spin-button,
-  .reader-page-input::-webkit-inner-spin-button {
-    -webkit-appearance: none;
-    margin: 0;
-  }
-  .reader-page-input:focus {
-    outline: none;
-    border-color: var(--b3-theme-primary, #378add);
-  }
-  .reader-page-sep {
-    color: var(--b3-theme-on-surface-light, #888);
-    opacity: 0.5;
-  }
-  .reader-page-total {
-    min-width: 28px;
-    text-align: right;
   }
   /* [REword patch 2026-08-29] 移动端 PDF 适配 Phase 1 · iPhone / Android Phone 降级模式
    * 工具栏改底部 sheet + 触摸区 ≥44px */
@@ -9034,15 +8871,9 @@
     padding: 10px 12px;
     font-size: 16px;
   }
-  .reader-toolbar-iphone .reader-zoom-btn {
-    min-width: 44px;
-    min-height: 44px;
-    font-size: 18px;
-  }
-  .reader-toolbar-iphone .reader-zoom-label {
-    min-width: 56px;
-    font-size: 13px;
-  }
+  /* iPhone 模式下 .reader-zoom-btn / .reader-zoom-label 的放大规则见
+     全局 src/reader/reader-controls.less（2026-09-02 界面分流后这两个元素
+     由 PdfToolbar 渲染，scoped 后代选择器命中不到）。 */
   /* iPhone 模式：标题简化（只保留标题，省略章节） */
   .reader-toolbar-iphone .reader-title {
     max-width: 40%;

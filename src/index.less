@@ -3,6 +3,11 @@
 /* 阅读器 UI 设计令牌与动效基线（详见 reader/reader-ui.less） */
 @import "./reader/reader-ui.less";
 
+/* 阅读器控件样式基线（全局）。
+   2026-09-02 界面分流后，PDF / 图书工具栏拆成了独立 Svelte 组件，
+   Svelte 的 scoped style 命中不到子组件内部元素，故共用控件样式必须放在全局层。 */
+@import "./reader/reader-controls.less";
+
 /* ===== 统一设计令牌（映射思源主题变量，供 whale-* 与 hiword-ai-* 引用） =====
    浅色 fallback 取思源默认亮色值；深色由 --b3-* 内层变量自动跟随。 */
 :root, .b3--fonts {
