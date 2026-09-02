@@ -40,6 +40,7 @@ const TESTS = [
   "test/online-dict.test.mjs",
   "test/online-cache-ttl.test.mjs",
   "test/ai-doc-ref.test.mjs",
+  "test/ai-refs.test.mjs",
   "test/clean-for-ai-doc-ref.test.mjs",
   "test/get-document-content.test.mjs",
   "test/ai-settings-normalize.test.mjs",

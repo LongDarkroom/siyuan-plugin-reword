@@ -52,6 +52,25 @@ import {
   type SaveToNoteDialogData,
 } from "./ai-dialogs.ts";
 import { logSwallow } from "../core/safe.ts";
+import {
+  blockRefBodyText,
+  docAnchorOf,
+  docHeaderOf,
+  docUnavailableNotice,
+  isDocAnchor,
+  looksLikeRefId,
+  refPlaceholderOf,
+  scanRefMarkers,
+  scanRefPlaceholders,
+  applyRefEdits,
+  shortRefId,
+  MAX_BLOCK_BODY,
+  MAX_BLOCK_TOTAL,
+  MAX_DOC_TOTAL,
+  type RefAttachment,
+  type RefEdit,
+  type RefKind,
+} from "./ai-refs.ts";
 
 /** 精读数据源（由插件从当前块/选区/本地文档取得） */
 export interface AiDeepReadSource {
@@ -227,20 +246,17 @@ export class AiPanel {
   private openOverlay: ((html: string) => void) | null = null;
   /** 最近一次 AI 结果消息渲染后的展示 HTML（落盘到会话，重载时 1:1 还原，避免裸显原始 JSON/markdown） */
   private lastResultHtml: string | null = null;
-  /** 块引用正文缓存（按 blockId）：同一会话内多次展开同一块时避免重复 fetchBlockText（P3-1） */
-  private blockTextCache = new Map<string, string>();
-  /** 2026-08-21 A 任务 v2：文档占位卡拉取的整篇正文缓存（会话内复用,避免多次发送重复拉取） */
-  private docTextCache = new Map<string, string>();
-  /** 2026-09-02：文档正文拉取的 in-flight Promise（按 docId 去重）。
-   *  修复「预取与发送并发 → 同一 docId 被查两次」；也让 insertDocRef 能同步验证正文可用性。 */
-  private docTextPending = new Map<string, Promise<string | null>>();
   /** 原始 markdown 按消息索引存储（替代 data-raw-md DOM 属性，降低 innerHTML 解析负担，P3-2） */
   private rawMdByIndex = new Map<number, string>();
-  /** 最近一次 getInputValue 序列化时从 DOM 缓存的块引用 id → 锚文本（供 cleanForAi 还原占位符给 UI 用） */
-  private lastDomRefs = new Map<string, string>();
-  /** 拖入块时通过内核 API（fetchBlockText）预取的完整 kramdown 正文：id → 正文。
-   *  发送时 AI 路径直接从这里拿块正文替换占位符，不依赖 Lute 序列化块引用，避免 anchor 中 { / 数字. 等字符导致截断 */
-  private refKramdownById = new Map<string, string>();
+  /**
+   * 2026-09-02 B 组：引用附件表（id → RefAttachment）。
+   * 统一取代旧的四张散表：lastDomRefs(锚文本) / refKramdownById(块正文) /
+   * blockTextCache / docTextCache。 「引用」从此是一等数据，占位符只是指向它的 ID 指针，
+   * 展开链路从「占位符 → 还原 kramdown → 正则匹配 → 拉正文」压缩为「占位符 → 查表 → 正文」。
+   */
+  private attachments = new Map<string, RefAttachment>();
+  /** 引用正文拉取的 in-flight Promise（按 id 去重）：预取与发送并发时共享同一次请求 */
+  private refPending = new Map<string, Promise<RefAttachment | null>>();
   constructor(private host: AiHost) {}
 
   render(dockElement: HTMLElement): void {
@@ -248,7 +264,7 @@ export class AiPanel {
     try {
       (window as any).__REWORD_BUILD_INFO__ = {
         buildTime: "2026-08-21T07:58:00+08:00",
-        features: ["refKramdownById-prefetch", "expandPlaceholdersAsync", "lute-primary-html-markdown-fallback", "ui-bubble-placeholder-restore", "fetchBlockText-md-sql", "user-msg-light-bg", "blockRef-regex-unclosed", "user-msg-render-cleanText"],
+        features: ["ref-attachments(B组一等数据)", "expandRefs-single-pass", "lute-primary-html-markdown-fallback", "fetchBlockText-md-sql", "user-msg-light-bg", "user-msg-render-cleanText"],
         expandBlockRefs: true,
         fetchBlockTextFallback: true,
       };
@@ -868,9 +884,6 @@ export class AiPanel {
   private async insertBlockRef(blockId: string, typeHint = ""): Promise<void> {
     const logger = getLogger();
     const kramdownBody = (await this.host.fetchBlockText(blockId)) || "";
-    // ★ 缓存内核 API 返回的完整 kramdown 正文到 refKramdownById，
-    //   发送时 AI 路径直接从这里拿正文替换占位符，避免 Lute 二次解析 block-ref 节点导致的 anchor 截断
-    if (kramdownBody) this.refKramdownById.set(blockId, kramdownBody);
     // 块类型：用于卡片差异化图标/颜色（段落 ¶ / 列表 ☰ / 标题 H / 代码 </> / 引用 "）
     // 误取/失败时不加修饰类，退化为默认段落样式，不影响功能
     // 2026-09-02：dragstart 已从 DOM 的 data-type 直接映射出类型 → 跳过一次 SQL 查询
@@ -886,6 +899,15 @@ export class AiPanel {
     const rawText = this.stripHtmlTags(anchor || fallbackAnchor).replace(/\n/g, " ").trim();
     const displayAnchor = rawText.slice(0, 6) + (rawText.length > 6 ? "…" : "");
     const safeAnchor = escapeHtml(displayAnchor || fallbackAnchor);
+    // B 组：登记为结构化附件（正文 + 卡片标题），占位符只作为指向它的 ID 指针，
+    // 发送时直接查表拿正文，不再依赖 Lute 序列化 block-ref 节点（避免 anchor 截断）
+    this.registerRef({
+      kind: "block",
+      id: blockId,
+      title: displayAnchor || fallbackAnchor,
+      body: kramdownBody || undefined,
+      status: kramdownBody ? "ready" : "failed",
+    });
     const card = `<span data-type="block-ref" data-id="${blockId}" data-subtype="s" class="hiword-ai-block-ref${typeClass}" data-block-type="${escapeHtml(blockType)}">${safeAnchor}</span>`;
     logger.debug("插入块 " + blockId, { operation: "拖块插入", data: { blockId } });
 
@@ -979,8 +1001,13 @@ export class AiPanel {
     };
 
     if (prefetched) {
-      this.docTextCache.set(docId, prefetched);
-      this.trimDocTextCache();
+      this.registerRef({
+        kind: "doc",
+        id: docId,
+        title: `📄 文档 ${shortId}`,
+        body: prefetched,
+        status: "ready",
+      });
     } else {
       // 后台补取（只可能发生在非 handleDrop 调用方）：prefetchDocText 内部按 docId 去重
       this.prefetchDocText(docId).then((text) => {
@@ -1015,43 +1042,111 @@ export class AiPanel {
     } catch (__swallowErr) { logSwallow(__swallowErr, "ai-panel.ts · showMessage 文档上下文", "debug"); }
   }
 
+  // ── 引用附件（B 组统一数据层）──────────────────────────────────────
+
   /**
-   * 2026-09-02：文档正文拉取 + 缓存，按 docId 去重。
-   * 旧实现在 insertDocRef 里直接 `host.fetchDocText().then()`，与发送时的
-   * expandDocRefs 各拉各的 → 同一 docId 被查两次（日志实证：同一 ID 两次 SQL）。
-   * 统一走这里后：预取与发送共享同一个 in-flight Promise，重复调用零额外请求。
+   * 登记/合并一个引用附件。
+   * 拖入（insertBlockRef / insertDocRef）与序列化（readInputValue）都会调用：
+   * 前者带上正文，后者只带 DOM 里的锚文本 → 两者互补，正文优先。
    */
-  private prefetchDocText(docId: string): Promise<string | null> {
-    if (!docId) return Promise.resolve(null);
-    const cached = this.docTextCache.get(docId);
-    if (cached !== undefined) return Promise.resolve(cached);
-    const pending = this.docTextPending.get(docId);
+  private registerRef(att: RefAttachment): void {
+    if (!att?.id) return;
+    const prev = this.attachments.get(att.id);
+    if (!prev) {
+      this.attachments.set(att.id, { ...att });
+      this.trimRefs();
+      return;
+    }
+    // 合并：kind 以「已有正文者」为准；title 取较新的非空值；body 只在有值时覆盖
+    const next: RefAttachment = {
+      kind: prev.body ? prev.kind : att.kind,
+      id: att.id,
+      title: att.title || prev.title,
+      body: att.body ?? prev.body,
+      status: att.status ?? prev.status,
+    };
+    this.attachments.set(att.id, next);
+    this.trimRefs();
+  }
+
+  /** 同步取正文（无正文返回 undefined，不触发网络请求） */
+  private peekRefBody(id: string): string | undefined {
+    const att = this.attachments.get(id);
+    return att?.body && att.body.trim() ? att.body : undefined;
+  }
+
+  /** 卡片显示标题：附件标题 → 兜底「块 xxxxxx」 */
+  private refTitleOf(id: string): string {
+    return (this.attachments.get(id)?.title || "").trim() || `块 ${shortRefId(id)}…`;
+  }
+
+  /**
+   * 确保引用正文已就绪（带缓存 + in-flight 去重）。
+   * 预取与发送的并发调用共享同一个 Promise → 同一 id 只会请求一次。
+   * 取正文失败不做负缓存（与旧行为一致），下次仍会重试。
+   */
+  private ensureRef(id: string, kindHint?: RefKind): Promise<RefAttachment | null> {
+    if (!id) return Promise.resolve(null);
+    const existing = this.attachments.get(id);
+    const kind: RefKind = existing?.kind ?? kindHint ?? "block";
+    if (!existing) {
+      this.registerRef({ kind, id, title: kind === "doc" ? docAnchorOf(id) : "", status: "pending" });
+    }
+    const ready = this.attachments.get(id);
+    if (ready?.body) return Promise.resolve(ready);
+
+    const pending = this.refPending.get(id);
     if (pending) return pending;
 
-    const p = this.host
-      .fetchDocText(docId)
+    // 延迟到微任务里再调用宿主接口：同步抛错也能被下面的 .catch 收住
+    const p = Promise.resolve()
+      .then(() => (kind === "doc" ? this.host.fetchDocText(id) : this.host.fetchBlockText(id)))
       .then((text) => {
-        if (text) {
-          this.docTextCache.set(docId, text);
-          this.trimDocTextCache();
-        }
-        this.docTextPending.delete(docId);
-        return text;
+        const body = (text || "").trim();
+        this.registerRef({
+          kind,
+          id,
+          title: kind === "doc" ? docAnchorOf(id) : (this.attachments.get(id)?.title || ""),
+          body: body || undefined,
+          status: body ? "ready" : "failed",
+        });
+        this.refPending.delete(id);
+        return this.attachments.get(id) ?? null;
       })
       .catch((e) => {
-        getLogger().warn("[REword] 文档正文拉取异常 docId=" + docId, { error: e as Error });
-        this.docTextPending.delete(docId);
-        return null;
+        getLogger().warn(`[REword] 引用正文拉取异常 kind=${kind} id=${id}`, { error: e as Error });
+        this.registerRef({ kind, id, title: this.attachments.get(id)?.title || "", status: "failed" });
+        this.refPending.delete(id);
+        return this.attachments.get(id) ?? null;
       });
-    this.docTextPending.set(docId, p);
+    this.refPending.set(id, p);
     return p;
   }
 
-  /** 简单 LRU：文档正文比块正文大得多，上限更保守（50 条） */
-  private trimDocTextCache(): void {
-    if (this.docTextCache.size <= 50) return;
-    const oldest = this.docTextCache.keys().next().value as string | undefined;
-    if (oldest) this.docTextCache.delete(oldest);
+  /** 文档正文预取（handleDrop / insertDocRef 用）：确保按 doc 种类登记后再取 */
+  private prefetchDocText(docId: string): Promise<string | null> {
+    if (!docId) return Promise.resolve(null);
+    this.registerRef({ kind: "doc", id: docId, title: docAnchorOf(docId) });
+    return this.ensureRef(docId, "doc").then((att) => att?.body || null);
+  }
+
+  /**
+   * 简单 LRU：Map 保序，首键即最旧。
+   * 文档正文体积远大于块正文 → 文档正文单独限 50 条，附件总数限 200 条。
+   */
+  private trimRefs(): void {
+    if (this.attachments.size > 200) {
+      const excess = this.attachments.size - 200;
+      const ids = Array.from(this.attachments.keys()).slice(0, excess);
+      for (const id of ids) this.attachments.delete(id);
+    }
+    const docIds: string[] = [];
+    for (const [id, att] of this.attachments) {
+      if (att.kind === "doc" && att.body) docIds.push(id);
+    }
+    if (docIds.length > 50) {
+      for (const id of docIds.slice(0, docIds.length - 50)) this.attachments.delete(id);
+    }
   }
 
   /** 直接向 wysiwyg DOM 写入块引用卡片（绕开思源 insertHTML 所有静默失败点） */
@@ -1297,73 +1392,23 @@ export class AiPanel {
   /**
    * 清洗待发送给 AI 的文本（同步，纯字符串操作）。
    * 去除思源内部标记，保留 AI 可理解的纯 Markdown 内容。
+   *
+   * 2026-09-02 B 组：只做纯清洗，不再碰「引用」。
+   * 旧版此处要先把 @@REWORD_REF_id@@ 占位符还原成 ((id 'anchor'))（step 0），
+   * 再每次调用全量扫一遍 wysiwyg DOM 修补各种「泄漏形态」（step 0 兜底 / 0b）。
+   * 现在引用是一等数据（RefAttachment）：占位符原样穿过本函数，
+   * UI 由 renderUserMessage 直接查表渲染卡片，AI 由 expandRefs 直接查表替换正文。
+   * 泄漏形态已不可能出现——readInputValue 在 Lute 序列化前就把所有 block-ref 节点
+   * 换成了占位符，Lute 无从泄漏 <span data-type="block-ref">。
    */
   private cleanForAi(raw: string): string {
     let s = raw;
 
-    // 0. 还原 getInputValue 的块引用占位符 → 标准 ((id 'anchor'))。
-    //    Lute 序列化时块引用被替换为 @@REWORD_REF_id@@（绕开 Lute 对复杂 anchor 的二次解析截断），
-    //    此处用序列化时缓存的真实锚文本还原为完整 kramdown，供 UI 渲染折叠卡片与 expandBlockRefs 展开正文。
-    s = s.replace(/@@REWORD_REF_([a-z0-9_-]{14,})@@/g, (_m, id: string) => {
-      if (!this.lastDomRefs.has(id)) return _m; // 防御：非插件生成的占位符原样保留
-      const anchor = (this.lastDomRefs.get(id) || '').replace(/'/g, '’');
-      return `((${id} '${anchor}'))`;
-    });
-
-    // 0a. （2026-08-21 v3 已移除）页签引用现为原生 block-ref（锚以「📄 文档 」开头），
-    //     由上面 step 0 统一还原为 ((id '📄 文档 XXXX'))，不再有 @@REWORD_DOC_ 占位符。
-
-    // 0. 兜底：修复任何残留的 kramdown 块引用泄漏形态。
-    //    主修复已在 getInputValue() 中完成：块引用走占位符旁路（@@REWORD_REF_id@@），
-    //    Lute 不会二次解析 anchor。此处仅作为二次兜底，处理历史会话/其他路径残留的截断形态。
-    const wysiwyg = this.protyle?.protyle?.wysiwyg?.element;
-    const domRefs = new Map<string, string>();
-    if (wysiwyg) {
-      wysiwyg.querySelectorAll('[data-type="block-ref"]').forEach((el) => {
-        const id = el.getAttribute('data-id') || '';
-        if (id && !domRefs.has(id)) domRefs.set(id, (el.textContent || '').trim());
-      });
-    }
-    if (domRefs.size > 0) {
-      // 长 id 优先，避免短 id 在长 id 子串上误替换
-      const sortedIds = Array.from(domRefs.keys()).sort((a, b) => b.length - a.length);
-      for (const id of sortedIds) {
-        const escapedId = id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-        const anchor = domRefs.get(id) || '';
-        const safeAnchor = anchor.replace(/'/g, '’');
-        // 统一修复任何残留的泄漏形态：((id 'anchor)) / ((id 'anchor) / ((id 'anchor / ((id)) / ((id) / ((id。
-        // 负向前瞻 (?!\s+'[^']*?'\)\)) 排除已完整闭合的 ((id 'anchor'))，
-        // 避免对占位符还原后的标准形态二次破坏（旧版 idOnlyRe 会把完整形态误拆导致重复 anchor）。
-        // 字符类内不含右括号，避开 TS/V8 解析 bug。
-        const fixRe = new RegExp(`\\(\\(${escapedId}(?!\\s+'[^']*?'\\)\\))(?:\\s+'[^']*?)?\\)?\\)?`, 'g');
-        s = s.replace(fixRe, `((${id} '${safeAnchor}'))`);
-      }
-    }
-
-    // 0b. 把泄漏的原始 HTML <span data-type="block-ref" data-id="X">anchor</span>
-    //    规整为 ((X 'anchor')) 语法，保留 data-id 供后续 expandBlockRefs 按块 ID 拉回
-    //    完整且带思源样式的正文。Lute 的 BlockDOM2Md 对部分手动插入的块引用卡片未能
-    //    转成 ((id))，会残留原始 span；若此处把 data-id 丢弃，expandBlockRefs 将无法识别，
-    //    只能把输入框里 40 字截断的锚文本发给 AI（已修复的缺陷）。
-    s = s.replace(
-      /<span\b[^>]*\bdata-type\s*=\s*["']?block-ref["'"]?[^>]*\bdata-id\s*=\s*["']?([a-z0-9_-]{14,})["']?[^>]*>([\s\S]*?)<\/span>/gi,
-      (_m, id: string, inner: string) => {
-        const anchor = inner.replace(/<[^>]+>/g, "").replace(/\n/g, " ").trim();
-        // 把 anchor 中的单引号替换为 Unicode 右单引号，避免与 kramdown 定界符冲突
-        return `((${id} '${anchor.replace(/'/g, "’")}'))`;
-      }
-    );
     // 1. 删除 Ideal/Pandoc 行内属性列表 {: ...}（可能跨多行）
     s = s.replace(/\{:[^}]*\}/gs, '');
-    // 2. 删除残留的裸 HTML 标签（BlockDOM2Md 未完全转换的），提取文本内容
-    //    但保留已正确转为 ((id)) 的块引用；极个别仍泄漏的块引用 span 也保住 data-id
-    s = s.replace(/<[^>]+>/g, (match) => {
-      // 仍有极个别泄漏的块引用 span（无 data-id 等异常情形）：保住 data-id 而非丢弃
-      const idMatch = match.match(/data-type\s*=\s*["']?block-ref["'"]?/i) &&
-        match.match(/data-id\s*=\s*["']?([a-z0-9_-]{14,})["']?/i);
-      if (idMatch) return `((${idMatch[1]}))`;
-      return '';
-    });
+    // 2. 删除残留的裸 HTML 标签（BlockDOM2Md 未完全转换的）
+    //    注：块引用节点已在序列化前被换成占位符，此处不会误伤引用语义
+    s = s.replace(/<[^>]+>/g, '');
     // 3. 删除零宽字符和特殊空白
     s = s.replace(/[\u200B\u200C\u200D\uFEFF\u00AD]/g, '');
     // 4. 删除 HTML 注释
@@ -1426,15 +1471,21 @@ export class AiPanel {
         //   发送场景下块引用走「占位符旁路」：列表块 anchor 常含 {、数字. 等 kramdown 语法字符，
         //   Lute 序列化时会二次解析 anchor 文本导致截断（((id '27. 泄漏）。
         //   把 block-ref 节点替换成 Lute 完全不认识的纯文本标记 @@REWORD_REF_id@@，
-        //   Lute 只会原样输出，绝无截断；后续 cleanForAi 再还原为标准 ((id 'anchor'))。
-        this.lastDomRefs.clear();
+        //   Lute 只会原样输出，绝无截断。
+        // B 组：占位符不再需要「还原成 ((id 'anchor')) 再正则匹配」——它只是一个 ID 指针，
+        //   此处的 DOM 扫描顺手把每个引用登记成 RefAttachment（种类由锚前缀判定），
+        //   后续 UI 渲染与 AI 展开都直接查表，零字符串往返。
         clone.querySelectorAll('[data-type="block-ref"]').forEach((el) => {
           const id = el.getAttribute('data-id') || '';
           if (!id) return;
           const anchor = (el.textContent || '').trim();
-          this.lastDomRefs.set(id, anchor);
+          this.registerRef({
+            kind: isDocAnchor(anchor) ? "doc" : "block",
+            id,
+            title: anchor,
+          });
           if (opts.replaceBlockRefs) {
-            el.replaceWith(document.createTextNode(`@@REWORD_REF_${id}@@`));
+            el.replaceWith(document.createTextNode(refPlaceholderOf(id)));
           }
         });
         // 2026-08-21 v3：页签引用已改为原生 block-ref（锚以「📄 文档 」开头），
@@ -1448,11 +1499,6 @@ export class AiPanel {
     if (!el) return "";
     if (el.classList.contains("hiword-ai-input--empty")) return "";
     return this.htmlToMarkdown(el.innerHTML).trim();
-  }
-
-  /** 读取输入框内容并清洗（用于发送给 AI）：序列化 + 去除 IAL/泄漏 HTML */
-  private getCleanInputValue(): string {
-    return this.cleanForAi(this.getInputValue());
   }
 
   /** 设置输入框内容：Protyle 模式用 Md2BlockDOM 渲染（同引擎）；回退用 markdownToHtml */
@@ -1661,64 +1707,30 @@ export class AiPanel {
     sel.addRange(r);
   }
 
+  /**
+   * 渲染用户消息气泡：引用渲染为可点击折叠卡片，其余走 Markdown。
+   *
+   * B 组：卡片直接从「占位符 → 附件表」一步拿到标题，不再需要
+   * cleanForAi 先把占位符还原成 ((id 'anchor')) 再正则匹配。
+   * 历史会话里的 ((id 'anchor')) 与残留 <span> 由 scanRefMarkers 一并兜住。
+   */
   private renderUserMessage(md: string): string {
-    // 预清洗：去除 IAL 属性标记和残留 HTML（防御 BlockDOM2Md 泄漏）
+    // 预清洗：去除 IAL 属性标记和残留 HTML（占位符原样穿过）
     md = this.cleanForAi(md);
 
-    // 块引用正则：((blockId 'anchor')) 或 ((blockId)) 或泄漏形态 ((blockId 'anchor))
-    // 注意：泄漏形态（缺闭合单引号）是思源 BlockDOM2Md 序列化列表块时偶发的，必须兼容，
-    // 否则 anchor 捕获组 ([^']*) 会贪婪吞掉结尾的 )) 导致整体匹配失败，块引用无法展开/渲染为卡片。
-    const refRe = /\(\(([^\s]+)(?:\s+'([^']*?)'?)?\)\)/g;
-    // 泄漏的 HTML 块引用正则：<span data-type="block-ref" data-id="xxx">anchor</span>
-    const htmlRefRe = /<span\s[^>]*data-type\s*=\s*["']?block-ref["'"]?\s[^>]*data-id\s*=\s*["']?([a-z0-9_-]{14,})["'"]?\s[^]*>([\s\S]*?)<\/span>/gi;
+    const markers = scanRefMarkers(md);
     const parts: string[] = [];
-    let lastEnd = 0;
-    let m: RegExpExecArray | null;
-
-    // 先处理 ((id 'anchor')) 格式的块引用
-    while ((m = refRe.exec(md)) !== null) {
-      if (m.index > lastEnd) {
-        const plain = md.slice(lastEnd, m.index).trim();
-        if (plain) parts.push(renderMarkdown(plain));
-      }
-      const blockId = m[1];
-      const anchor = m[2] || "";
-      const displayAnchor = anchor || `块 ${blockId.slice(0, 8)}…`;
-      parts.push(
-        `<span class="hiword-ref-card" data-block-id="${escapeHtml(blockId)}" title="点击展开预览（发送给 AI 时为完整内容）">` +
-          `<span class="hiword-ref-card__icon">📎</span>` +
-          `<span class="hiword-ref-card__anchor">${escapeHtml(displayAnchor)}</span>` +
-          `<span class="hiword-ref-card__chevron">▸</span>` +
-        `</span>`
-      );
-      lastEnd = m.index + m[0].length;
+    let cursor = 0;
+    for (const mk of markers) {
+      const plain = md.slice(cursor, mk.from).trim();
+      if (plain) parts.push(renderMarkdown(plain));
+      // 标题优先级：标记自带锚 > 附件表 > 「块 xxxxxx」兜底
+      const title = (mk.anchor || "").trim() || this.refTitleOf(mk.id);
+      parts.push(this.refCardHtml(mk.id, title));
+      cursor = mk.to;
     }
-
-    // 再处理泄漏的 <span data-type="block-ref"> HTML 格式
-    htmlRefRe.lastIndex = 0;
-    while ((m = htmlRefRe.exec(md)) !== null) {
-      if (m.index > lastEnd) {
-        const plain = md.slice(lastEnd, m.index).trim();
-        if (plain) parts.push(renderMarkdown(plain));
-      }
-      const blockId = m[1];
-      const rawAnchor = (m[2] || "").replace(/<[^>]+>/g, ""); // 去除锚文本内可能嵌套的标签
-      const displayAnchor = rawAnchor.trim() || `块 ${blockId.slice(0, 8)}…`;
-      parts.push(
-        `<span class="hiword-ref-card" data-block-id="${escapeHtml(blockId)}" title="点击展开预览">` +
-          `<span class="hiword-ref-card__icon">📎</span>` +
-          `<span class="hiword-ref-card__anchor">${escapeHtml(displayAnchor)}</span>` +
-          `<span class="hiword-ref-card__chevron">▸</span>` +
-        `</span>`
-      );
-      lastEnd = m.index + m[0].length;
-    }
-
-    // 尾部剩余文本
-    if (lastEnd < md.length) {
-      const tail = md.slice(lastEnd).trim();
-      if (tail) parts.push(renderMarkdown(tail));
-    }
+    const tail = md.slice(cursor).trim();
+    if (tail) parts.push(renderMarkdown(tail));
 
     let html = parts.join("") || '<span style="opacity:0.5">（空消息）</span>';
 
@@ -1730,201 +1742,144 @@ export class AiPanel {
       const text = match.replace(/<[^>]+>/g, "").trim();
       return text || "";
     });
-    // 兜底：去除任何独立的未闭合/残留 <span data-... 片段
-    html = html.replace(/<span\b[^>]*\bdata-\w+\b[^>]*>/gi, "");
+    // 兜底：去除任何独立的未闭合/残留 <span data-... 片段。
+    // ★ 必须排除我们自己渲染的 .hiword-ref-card（它带 data-block-id），
+    //   否则外层开标签被删掉 → closest(".hiword-ref-card") 失效 → 卡片点击展开不了。
+    html = html.replace(/<span\b(?![^>]*\bclass="[^"]*hiword-ref-card)[^>]*\bdata-\w+\b[^>]*>/gi, "");
 
     return html;
   }
 
-  /**
-   * 把 Markdown 中的 @@REWORD_REF_<id>@@ 占位符替换为拖入块时缓存的内核 API 完整 kramdown 正文。
-   * 这是新方案的核心：
-   *   - 拖入时（insertBlockRef）已 await fetchBlockText 把完整正文写入 refKramdownById，
-   *     发送时直接从 Map 拿，不再依赖 Lute 序列化 block-ref 节点，
-   *     彻底绕开「Lute 二次解析 anchor 文本」导致的截断（列表块 anchor 含 {、数字. 等字符）。
-   *   - AI 路径专用：UI 路径仍走 cleanForAi 把占位符 → ((id 'anchor')) 渲染折叠卡片。
-   *   - refMap 未命中（如拖入后 fetchBlockText 失败）→ 兜底异步拉取；仍为空则保留空串。
-   *   - 单块正文超过 8000 字符的硬上限，避免拖入/粘贴大量块时上下文爆炸。
-   */
-  private async expandPlaceholdersAsync(raw: string): Promise<string> {
-    const re = /@@REWORD_REF_([a-z0-9_-]{14,})@@/g;
-    const matches: RegExpExecArray[] = [];
-    let m: RegExpExecArray | null;
-    while ((m = re.exec(raw))) matches.push(m);
-    if (!matches.length) return raw;
-
-    const MAX_PER_BLOCK = 8000;
-    const edits = await Promise.all(matches.map(async (mm) => {
-      const id = mm[1];
-      const anchor = this.lastDomRefs.get(id) || "";
-      // 2026-08-21 v3：文档引用（锚以「📄 文档 」开头）不在此处展开正文，
-      // 转成 ((id '📄 文档 XXXX')) 交给 expandDocRefs 实时拉全文（复用 fetchDocText 路径）
-      if (/^📄 文档 /.test(anchor)) {
-        const shortId = id.replace(/-/g, "").slice(-6);
-        return { from: mm.index, to: mm.index + mm[0].length, text: `((${id} '📄 文档 ${shortId}'))` };
-      }
-      let body = this.refKramdownById.get(id);
-      if (!body) {
-        // refMap 缺失兜底（如用户从未通过拖入路径，而是其他来源触发的占位符）
-        body = (await this.host.fetchBlockText(id)) || "";
-        if (body) this.refKramdownById.set(id, body);
-      }
-      let text = body.trim();
-      if (text.length > MAX_PER_BLOCK) text = ""; // 超限静默丢弃，避免撑爆 AI 上下文
-      return { from: mm.index, to: mm.index + mm[0].length, text };
-    }));
-
-    // 按 from 倒序替换，避免位置偏移
-    edits.sort((a, b) => b.from - a.from);
-    let out = raw;
-    for (const e of edits) out = out.slice(0, e.from) + e.text + out.slice(e.to);
-    return out;
+  /** 引用折叠卡片 HTML（气泡内展示，点击异步展开完整正文预览） */
+  private refCardHtml(id: string, title: string): string {
+    return (
+      `<span class="hiword-ref-card" data-block-id="${escapeHtml(id)}" title="点击展开预览（发送给 AI 时为完整内容）">` +
+        `<span class="hiword-ref-card__icon">📎</span>` +
+        `<span class="hiword-ref-card__anchor">${escapeHtml(title)}</span>` +
+        `<span class="hiword-ref-card__chevron">▸</span>` +
+      `</span>`
+    );
   }
 
   /**
-   * 把 Markdown 中的块引用 ((blockId 'anchor')) 展开为真实 Kramdown 内容。
-   * 拖入/粘贴思源块时被序列化为该语法，发送前还原为正文，
-   * 避免 AI 收到无法解析的 ((id))。无块引用时原样返回。
+   * B 组主路径：把 @@REWORD_REF_<id>@@ 占位符一步展开为引用正文。
+   *
+   * 旧链路（4 步变形 + 双轨）：
+   *   占位符 → cleanForAi 还原 ((id 'anchor')) → expandBlockRefs/expandDocRefs 正则 → 拉正文
+   * 新链路（1 步查表）：
+   *   占位符 → attachments.get(id) → 正文
+   * 引用的 kind / 正文 / 标题都在拖入与序列化时登记好了，占位符只是一个 ID 指针，
+   * 因此这里既不需要还原语法，也不需要「按锚前缀猜种类」，更不会二次请求同一 id
+   * （ensureRef 带 in-flight 去重）。
+   *
+   * 体积约束沿用旧实测值：单块 8000 硬上限、块总量 8000、文档总量 12000，
+   * 超限时块退化为锚文本、文档只留标题，绝不把占位符/((id)) 原文发给 AI。
+   */
+  private async expandRefs(raw: string): Promise<string> {
+    const markers = scanRefPlaceholders(raw);
+    if (!markers.length) return raw;
+
+    const edits: RefEdit[] = [];
+    let blockTotal = 0;
+    let docTotal = 0;
+    for (const mk of markers) {
+      const att = await this.ensureRef(mk.id);
+      const from = mk.from;
+      const to = mk.to;
+
+      if (att?.kind === "doc") {
+        const body = (att.body || "").trim();
+        if (!body) {
+          edits.push({ from, to, text: docUnavailableNotice(mk.id) });
+          continue;
+        }
+        const header = docHeaderOf(mk.id);
+        if (docTotal + header.length + body.length > MAX_DOC_TOTAL) {
+          edits.push({ from, to, text: header }); // 已达上限：只保留标题
+          continue;
+        }
+        edits.push({ from, to, text: header + body });
+        docTotal += header.length + body.length;
+        continue;
+      }
+
+      // block：正文可用且不超预算 → 正文；否则退化为锚文本
+      const title = this.refTitleOf(mk.id);
+      const body = (att?.body || "").trim();
+      const wrapped = `\n\n${body}\n\n`;
+      if (body && body.length <= MAX_BLOCK_BODY && blockTotal + wrapped.length <= MAX_BLOCK_TOTAL) {
+        edits.push({ from, to, text: wrapped });
+        blockTotal += wrapped.length;
+      } else {
+        edits.push({ from, to, text: blockRefBodyText("", title) });
+      }
+    }
+    return applyRefEdits(raw, edits);
+  }
+
+  /**
+   * 兜底：把历史会话/手输的 ((blockId 'anchor')) 与残留 <span data-type="block-ref">
+   * 展开为真实正文。占位符形态已在 expandRefs 处理完毕，此处只收尾非占位符形态。
+   * 正文统一走 attachments 缓存（与拖入预取共享，零重复请求）。
    */
   private async expandBlockRefs(md: string): Promise<string> {
-    const edits: Array<{ from: number; to: number; text: string }> = [];
-    let m: RegExpExecArray | null;
-    // 展开正文总量上限（避免拖入/粘贴大量块引用时上下文爆炸，P3-1）
-    const MAX_EXPAND = 8000;
+    const edits: RefEdit[] = [];
     let expandedLen = 0;
-    // 带缓存的块正文拉取：同一会话内重复块只请求一次
-    const fetchCached = async (blockId: string): Promise<string | null> => {
-      const hit = this.blockTextCache.get(blockId);
-      if (hit !== undefined) return hit;
-      const k = await this.host.fetchBlockText(blockId);
-      if (k && k.trim()) {
-        this.blockTextCache.set(blockId, k);
-        // 简单 LRU：超过 200 条时淘汰最旧（Map 保序，首键即最旧）
-        if (this.blockTextCache.size > 200) {
-          const oldest = this.blockTextCache.keys().next().value as string | undefined;
-          if (oldest) this.blockTextCache.delete(oldest);
-        }
-        return k;
-      }
-      return k;
-    };
-    const tryExpand = async (blockId: string, from: number, to: number, anchorText?: string) => {
-      // 兜底文本：拉取失败 / 超限时用锚文本转 Markdown，绝不留 ((id 'anchor')) 原文给 AI
-      const fallback = (anchorText || "").trim();
-      const k = await fetchCached(blockId);
-      const body = k && k.trim() ? k.trim() : "";
-      if (body) {
-        if (expandedLen >= MAX_EXPAND) {
-          // 已达上限：不展开正文，退化为锚文本
-          edits.push({ from, to, text: fallback ? `\n\n${fallback}\n\n` : "" });
-          return;
-        }
-        const text = `\n\n${body}\n\n`;
-        if (expandedLen + text.length > MAX_EXPAND) {
-          // 单块即超限则跳过展开，退化为锚文本，避免撑爆
-          edits.push({ from, to, text: fallback ? `\n\n${fallback}\n\n` : "" });
-          return;
-        }
-        edits.push({ from, to, text });
+    for (const mk of scanRefMarkers(md)) {
+      // 文档引用（锚以「📄 文档 」开头）交给 expandDocRefs，
+      // 避免把文档根块当普通块用 fetchBlockText 拉取、抢在它之前
+      if (isDocAnchor(mk.anchor)) continue;
+      // 不是思源 ID（如数学式 ((a+b))）→ 按普通文本放过，不发无谓请求
+      if (!looksLikeRefId(mk.id)) continue;
+      const att = await this.ensureRef(mk.id, "block");
+      const title = (mk.anchor || "").trim() || this.refTitleOf(mk.id);
+      const body = (att?.body || "").trim();
+      let text = blockRefBodyText(body, title);
+      if (body && expandedLen + text.length > MAX_BLOCK_TOTAL) {
+        text = blockRefBodyText("", title); // 已达上限：退化为锚文本
+      } else if (body) {
         expandedLen += text.length;
-        return;
       }
-      // 拉取失败/内容为空：静默转 Markdown（锚文本）；无锚文本则移除该引用，避免残留 ((id))
-      edits.push({ from, to, text: fallback ? `\n\n${fallback}\n\n` : "" });
-    };
-    // 1) ((id 'anchor')) kramdown 形式（正常路径，兼容缺闭合单引号的泄漏形态 ((id 'anchor))
-    const re = /\(\(([^\s]+)(?:\s+'([^']*?)'?)?\)\)/g;
-    while ((m = re.exec(md))) {
-      // 2026-08-21 v3：文档引用（锚以「📄 文档 」开头）由 expandDocRefs 处理，
-      // 此处跳过，避免把文档根块当普通块用 fetchBlockText 拉取、抢在 expandDocRefs 之前
-      if (/^📄 文档 /.test(m[2] || "")) continue;
-      await tryExpand(m[1], m.index, m.index + m[0].length, m[2]);
-    }
-    // 2) 残留 <span data-type="block-ref" data-id="X">anchor</span> 形式
-    //    （cleanForAi 未兜住时的兜底：直接按 data-id 拉回完整且带样式的正文）
-    const htmlRefRe = /<span\b[^>]*\bdata-type\s*=\s*["']?block-ref["'"]?[^>]*\bdata-id\s*=\s*["']?([a-z0-9_-]{14,})["']?[^>]*>([\s\S]*?)<\/span>/gi;
-    while ((m = htmlRefRe.exec(md))) {
-      const innerAnchor = (m[2] || "").replace(/<[^>]+>/g, "").replace(/\n/g, " ").trim();
-      // 文档引用由 expandDocRefs 处理，跳过
-      if (/^📄 文档 /.test(innerAnchor)) continue;
-      await tryExpand(m[1], m.index, m.index + m[0].length, innerAnchor);
+      edits.push({ from: mk.from, to: mk.to, text });
     }
     if (!edits.length) return md;
-    // 按位置升序合并（两种形式可能交错出现）
-    edits.sort((a, b) => a.from - b.from);
-    let out = "";
-    let cursor = 0;
-    for (const e of edits) {
-      if (e.from < cursor) continue; // 跳过理论上的重叠
-      out += md.slice(cursor, e.from) + e.text;
-      cursor = e.to;
-    }
-    out += md.slice(cursor);
-    return out.replace(/\n{4,}/g, "\n\n\n").trim();
+    return applyRefEdits(md, edits);
   }
 
   /**
-   * 把 Markdown 中的文档占位符 ((docId '📄 文档 XXXXXX')) 展开为文档正文。
-   * 策略（2026-08-26 修复）：
-   *   - 拖入时 insertDocRef 已预取全文到 docTextCache → 发送时缓存优先（零网络延迟）
-   *   - 缓存未命中时实时拉取（兼容历史会话/预取失败场景）
+   * 兜底：把文档引用 ((docId '📄 文档 XXXXXX')) 展开为文档正文。
+   * 策略：
+   *   - 拖入时 insertDocRef 已预取全文 → 发送时缓存优先（零网络延迟）
+   *   - 缓存未命中时实时拉取（兼容历史会话/预取失败场景），按 docId 去重
    *   - 拉取失败 → 降级为明确提示文本（不再静默删掉导致 AI 看不到任何内容）
-   *   - 全文超 MAX (12k) → 截断并在末尾追加"已截断"提示
+   *   - 全文超 12k → 只保留标题
    */
   private async expandDocRefs(md: string): Promise<string> {
-    const MAX_EXPAND = 12000;
-    const edits: Array<{ from: number; to: number; text: string }> = [];
+    const edits: RefEdit[] = [];
     let expandedLen = 0;
-    let m: RegExpExecArray | null;
-    // 复用 expandBlockRefs 的同款正则：((id 'title'))（兼容缺闭合单引号泄漏形态）
-    const re = /\(\(([a-z0-9_-]{14,})(?:\s+'([^']*?)'?)?\)\)/g;
-    while ((m = re.exec(md))) {
-      // 只处理"doc 锚"(title 以 '📄 文档 ' 开头),跳过 block-ref 的 ((id 'anchor'))
-      const anchor = m[2] || "";
-      if (!/^📄 文档 /.test(anchor)) continue;
-      const docId = m[1];
-      // 2026-09-02：统一走 prefetchDocText（按 docId 去重，共享 in-flight Promise）。
-      // 旧实现「缓存命中就用，否则各拉各的」会在预取与发送并发时重复请求同一文档。
-      const cached = this.docTextCache.get(docId);
-      if (cached !== undefined) {
-        getLogger().info("[REword] expandDocRefs 缓存命中 docId=" + docId + " len=" + cached.length);
+    for (const mk of scanRefMarkers(md)) {
+      if (!isDocAnchor(mk.anchor)) continue;
+      const docId = mk.id;
+      if (this.peekRefBody(docId)) {
+        getLogger().info("[REword] expandDocRefs 缓存命中 docId=" + docId + " len=" + (this.peekRefBody(docId) as string).length);
       }
-      const text = await this.prefetchDocText(docId);
-      if (!text) {
+      const att = await this.ensureRef(docId, "doc");
+      const body = (att?.body || "").trim();
+      if (!body) {
         getLogger().warn("[REword] expandDocRefs 拉取结果为空 docId=" + docId + "（AI 将收到降级提示）");
+        edits.push({ from: mk.from, to: mk.to, text: docUnavailableNotice(docId) });
+        continue;
       }
-      if (text) {
-        const shortId = docId.replace(/-/g, "").slice(-6);
-        const header = `\n\n## 📄 文档 ${shortId}\n\n`;
-        if (expandedLen + header.length + text.length > MAX_EXPAND) {
-          // 已达上限:不展开正文,只保留占位标题（与 expandBlockRefs 降级一致）
-          edits.push({ from: m.index, to: m.index + m[0].length, text: header });
-        } else {
-          edits.push({ from: m.index, to: m.index + m[0].length, text: header + text });
-          expandedLen += header.length + text.length;
-        }
-      } else {
-        // ★ 降级：拉取失败时不再静默删除，而是给 AI 一个明确提示，
-        //   让 AI 知道用户引用了某个文档（即使内容不可用），避免 AI 说「看不到内容」
-        const shortId = docId.replace(/-/g, "").slice(-6);
-        edits.push({
-          from: m.index,
-          to: m.index + m[0].length,
-          text: `\n\n> ⚠️ 文档 ${shortId} 内容暂不可用（可能文档已被删除或权限不足），请用户重新拖入或粘贴正文。\n\n`,
-        });
+      const header = docHeaderOf(docId);
+      if (expandedLen + header.length + body.length > MAX_DOC_TOTAL) {
+        edits.push({ from: mk.from, to: mk.to, text: header });
+        continue;
       }
+      edits.push({ from: mk.from, to: mk.to, text: header + body });
+      expandedLen += header.length + body.length;
     }
     if (!edits.length) return md;
-    edits.sort((a, b) => a.from - b.from);
-    let out = "";
-    let cursor = 0;
-    for (const e of edits) {
-      if (e.from < cursor) continue;
-      out += md.slice(cursor, e.from) + e.text;
-      cursor = e.to;
-    }
-    out += md.slice(cursor);
-    return out.replace(/\n{4,}/g, "\n\n\n").trim();
+    return applyRefEdits(md, edits);
   }
 
   /** 跨平台快捷键文案 */
@@ -3246,15 +3201,13 @@ export class AiPanel {
         return;
       }
       // 2026-08-22 许可证已封存：原「requireLicense("ai-deep-read")」门禁已移除（恢复时在发送链路最前方加回）
-      // 发送链路分叉：
-      //   UI 路径：cleanForAi 把 @@REWORD_REF_id@@ 占位符 → ((id 'anchor')) → renderUserMessage 渲染折叠卡片。
-      //   AI 路径：expandPlaceholdersAsync 直接把占位符 → refKramdownById 中拖入时预取的完整 kramdown 正文。
-      //     不依赖 Lute 序列化 block-ref 节点，彻底绕开列表块 anchor 中 { / 数字. 等字符导致的截断。
-      //     历史会话中的 ((id 'anchor')) 仍由旧 expandBlockRefs 兜底展开。
+      // 2026-09-02 B 组：引用统一走「一等数据」链路，UI 与 AI 共用同一份 attachments
+      //   UI 路径：cleanForAi 只做纯清洗（占位符原样保留）→ renderUserMessage 查表渲染折叠卡片。
+      //   AI 路径：expandRefs 单步把占位符 → 附件正文（不再还原 ((id 'anchor')) 再正则匹配）。
+      //   历史会话里的 ((id 'anchor')) / 残留 span 由 expandBlockRefs + expandDocRefs 兜底。
       const cleanText = this.cleanForAi(text);
-      let expanded = await this.expandPlaceholdersAsync(text);
+      let expanded = await this.expandRefs(text);
       expanded = await this.expandBlockRefs(expanded);
-      // 2026-08-21 A 任务 v2：把占位卡 ((docId '📄 文档 XXXXXX')) 展开为思源 SQL 实时正文
       expanded = await this.expandDocRefs(expanded);
       // 标题直接取自源文档（不再有用户可编辑的输入框）；无源标题则不传
       const title = (this.host.getDeepReadSource() || {}).title?.trim() || undefined;
@@ -3305,9 +3258,17 @@ export class AiPanel {
             const previewEl = card.querySelector(".hiword-ref-card__preview") as HTMLElement | null;
             if (previewEl) {
               previewEl.innerHTML = '<span style="opacity:0.5">加载中…</span>';
-              const cached = this.blockTextCache.get(blockId);
+              const cached = this.peekRefBody(blockId);
               const fullText = cached !== undefined ? cached : (await this.host.fetchBlockText(blockId));
-              if (cached === undefined && fullText) this.blockTextCache.set(blockId, fullText);
+              if (cached === undefined && fullText) {
+                this.registerRef({
+                  kind: "block",
+                  id: blockId,
+                  title: this.refTitleOf(blockId),
+                  body: fullText,
+                  status: "ready",
+                });
+              }
               const contentEl = document.createElement("span");
               contentEl.className = "hiword-ref-card__preview__content";
               contentEl.textContent = fullText || "（无法读取内容）";

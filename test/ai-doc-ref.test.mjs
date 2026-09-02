@@ -1,4 +1,7 @@
 // 2026-08-21 A 任务 v2:文档占位卡 + 发送时展开测试
+// 2026-09-02 B 组更新:expandDocRefs 已降级为「兜底」——占位符形态改由 expandRefs 直接
+//   查 attachment 表一步展开,本文件锁定的 ((docId '📄 文档 XXXXXX')) 路径只服务
+//   历史会话 / 手动输入的引用。下列行为契约保持不变。
 // 覆盖 expandDocRefs 的核心契约:
 //   - ((docId '📄 文档 XXXXXX')) 占位符 → ## 📄 文档 XXXXXX + 真实正文
 //   - 拉取失败/为空 → 占位替换为空(不污染 prompt)
