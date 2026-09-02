@@ -273,6 +273,9 @@ export function createBilingualV2(opts: BilingualOptions): BilingualHandle {
         console.warn("[REword] 双语v2: 眼前屏 0 段注入成功（AI 返回空译文）");
       }
       opts.onProgress?.(done, total);
+      // 2026-09-01 Bug ② 方案 A：本轮有成功注入的译文（done>0）时，
+      // 通知上层强制重排，修复分页模式下页边缘段落译文被 overflow:hidden 裁掉的问题。
+      if (done > 0) opts.onAfterInject?.();
     } catch (e) {
       console.warn("[REword] 双语v2 注入失败:", e);
       telemetry.emit({ phase: "error", bookId: opts.bookId, error: String((e as Error)?.message || e), runId });
