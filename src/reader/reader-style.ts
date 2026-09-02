@@ -616,6 +616,11 @@ export function paragraphStyles(o: ReaderStyleOutput): string {
   return `
 p {
   margin: 0.6em 0 !important;
+  /* 强制清零 EPUB 书籍在段落上写的横向 padding/margin，避免同页内不同 p
+     左缘参差不齐（用户截图：图片下方段落与后续段落不在同一左边界）。
+     margin 简写已让左右 margin 为 0；padding-left/right 需显式覆盖。 */
+  padding-left: 0 !important;
+  padding-right: 0 !important;
   line-height: inherit !important;
   text-align: justify !important;
   text-indent: 0 !important;
