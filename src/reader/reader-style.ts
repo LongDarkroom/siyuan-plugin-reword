@@ -921,6 +921,7 @@ li > .reword-bilingual[cfi-inert][data-translation-mark] {
   padding: 2px;
   border-radius: 999px;
   /* 毛玻璃药丸：半透明背景 + 细边框 + 轻阴影，悬浮在译文之上不抢眼 */
+  background: var(--b3-theme-background, #fff);
   background: color-mix(in srgb, var(--b3-theme-background, #fff) 82%, transparent);
   border: 1px solid var(--b3-border-color, rgba(128, 128, 128, 0.3));
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.12);
