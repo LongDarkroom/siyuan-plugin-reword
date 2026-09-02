@@ -65,15 +65,6 @@ export interface BilingualOptions {
   onProgress?: (done: number, total: number) => void;
   /** Token 用量回调（每次翻译批次完成后调用；累计值跨批次累加） */
   onTokenUsage?: (usage: { promptTokens: number; completionTokens: number; totalTokens: number }) => void;
-  /**
-   * 2026-09-01 Bug ② 方案 A：注入后强制重排钩子。
-   * 分页模式下译文作为段落的兄弟节点（afterend）注入；若段落在页面底部，
-   * 译文会超出分栏固定高度被 overflow:hidden 裁掉而不显示。foliate 的
-   * ResizeObserver 只调 expand() 不触发重排，故注入后需主动触发一次重排。
-   * injectAll 在「本轮有成功注入（done>0）」时调用它；是否仅分页模式生效、
-   * 如何触发重排由上层实现决定（保持本层与 flow 解耦）。
-   */
-  onAfterInject?: () => void;
   /** 可视过滤开关（默认 true；测试可关掉以翻译全部段落） */
   visibleOnly?: boolean;
   /**

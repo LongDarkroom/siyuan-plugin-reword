@@ -6234,58 +6234,6 @@
     settingsStore.update({ bilingualHidden: map });
   }
 
-  /**
-   * 2026-09-01 Bug ② 方案 A：注入后强制 foliate 重排。
-   *
-   * 根因：默认 flow==="paginated"，foliate 用 CSS 多栏 + 固定页高 + overflow:hidden
-   * 渲染（paginator.js 的 columnize）。双语译文作为段落的兄弟节点（afterend）注入；
-   * 若段落在页面底部，译文超出分栏固定高度被 overflow:hidden 裁掉，永远不显示。
-   * foliate 的 ResizeObserver 仅调 expand()（不触发重排），注入不会自动重排。
-   *
-   * 修复：本轮有译文注入后，主动触发一次重排（render→columnize），让译文重新纳入
-   * 分栏布局、不再被裁。仅在分页模式生效（滚动模式 overflow:auto 无此问题）。
-   * 首选直接调 Paginator.render()（public，零视觉副作用）；不可用时回退「微扰 gap
-   * 触发 attributeChangedCallback→render→columnize、下一帧还原」。
-   */
-  let paginatedReflowScheduled = false;
-  function reflowPaginated(): void {
-    if ((settingsStore.get().flow ?? "paginated") !== "paginated") return;
-    const r = view?.renderer as any;
-    if (!r || typeof r.setAttribute !== "function") return;
-    // 同一帧内多次注入合并为一次重排，避免布局抖动
-    if (paginatedReflowScheduled) return;
-    paginatedReflowScheduled = true;
-    const run = (): void => {
-      paginatedReflowScheduled = false;
-      if ((settingsStore.get().flow ?? "paginated") !== "paginated") return;
-      try {
-        if (typeof r.render === "function") {
-          r.render(); // Paginator.render() → view.render(layout) → columnize()
-          return;
-        }
-      } catch (e) {
-        console.warn("[REword] 双语重排 render() 失败，回退 gap 微扰:", e);
-      }
-      // 兜底：微扰 gap 触发 attributeChangedCallback → render → columnize，下一帧还原
-      try {
-        const cur = r.getAttribute("gap");
-        const base = cur != null && cur !== "" && !Number.isNaN(parseFloat(cur)) ? parseFloat(cur) : 48;
-        r.setAttribute("gap", String(base + 0.01));
-        requestAnimationFrame(() => {
-          try {
-            r.setAttribute("gap", cur != null ? cur : "48");
-          } catch {
-            /* ignore */
-          }
-        });
-      } catch (e2) {
-        console.warn("[REword] 双语重排 gap 微扰失败（已忽略）:", e2);
-      }
-    };
-    // rAF 让重排发生在当前帧 DOM/样式稳定之后
-    requestAnimationFrame(run);
-  }
-
   function ensureBilingualHandle(): BilingualHandle {
     if (bilingualHandle) return bilingualHandle;
     // 2026-08-31：载入本书已隐藏译文集合（关闭/重开双语后保持隐藏）
@@ -6399,8 +6347,6 @@
       onTokenUsage: (usage) => {
         bilingualTokenUsage = { ...usage };
       },
-      // 2026-09-01 Bug ② 方案 A：注入后强制重排（修复分页模式页边缘段落译文被裁）
-      onAfterInject: () => reflowPaginated(),
     });
     return bilingualHandle;
   }
