@@ -7,6 +7,9 @@
  * v2: 支持拖拽文本块入面板 + 对话消息保留思源富文本样式（kramdown 子集）
  */
 
+/** 构建期由 vite `define` 注入（见 vite.config.mts）。单测直接 import 本文件时未定义 → 走 "dev"。 */
+declare const __REWORD_BUILD_TIME__: string;
+
 import type { AiSettings } from "./ai-settings.ts";
 import {
   prepareDeepReadInput,
@@ -272,7 +275,8 @@ export class AiPanel {
     // 构建版本标记：用于在 DevTools 确认当前加载的是否为最新构建产物
     try {
       (window as any).__REWORD_BUILD_INFO__ = {
-        buildTime: "2026-08-21T07:58:00+08:00",
+        buildTime:
+          typeof __REWORD_BUILD_TIME__ !== "undefined" ? __REWORD_BUILD_TIME__ : "dev",
         features: ["ref-attachments(B组一等数据)", "expandRefs-single-pass", "lute-primary-html-markdown-fallback", "fetchBlockText-md-sql", "user-msg-light-bg", "user-msg-render-cleanText"],
         expandBlockRefs: true,
         fetchBlockTextFallback: true,

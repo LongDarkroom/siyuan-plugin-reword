@@ -5,6 +5,12 @@ import { svelte } from "@sveltejs/vite-plugin-svelte";
 export default defineConfig({
   base: "./",
   plugins: [svelte()],
+  // 构建期注入真实时间戳，供 `window.__REWORD_BUILD_INFO__.buildTime` 在 DevTools 里
+  // 判断「当前加载的是不是最新产物」。此前该值是源码里硬编码的常量，永远不变，
+  // 反而会误导排查（以为加载了新包其实是旧的）。
+  define: {
+    __REWORD_BUILD_TIME__: JSON.stringify(new Date().toISOString()),
+  },
   build: {
     target: "esnext",
     outDir: "dist",
