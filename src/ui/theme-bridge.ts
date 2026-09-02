@@ -48,10 +48,6 @@ function computeThemeSig(): string {
     pick("--b3-theme-primary"),
     pick("--b3-theme-on-surface"),
     pick("--b3-border-color"),
-    // 2026-09-02：跟随思源「字号 / 代码字体」也纳入签名，
-    // 用户在思源「设置→外观」改字号或代码字体时，阅读器实时跟随重刷。
-    pick("--b3-font-size"),
-    pick("--b3-font-family-code"),
   ].join("|");
 }
 
