@@ -3897,12 +3897,6 @@
     return kb >= 1024 ? `${(kb / 1024).toFixed(1)} MB` : `${Math.round(kb)} KB`;
   }
 
-  const LINE_HEIGHT_STEPS = [
-    { label: "紧凑", value: 1.5 },
-    { label: "标准", value: 1.7 },
-    { label: "宽松", value: 2.0 },
-  ];
-
   /* ================= 进度条 ================= */
 
   function onProgressInput(e: Event) {
@@ -7492,7 +7486,7 @@
           <div class="reader-setting-control">
             <input
               type="range"
-              min="0" max="2" step="0.1"
+              min="0" max="2" step="0.05"
               value={settings.paragraph.paragraphSpacing}
               on:input={(e) => setParagraphSpacing(+e.currentTarget.value)}
               class="reader-slider"
@@ -7505,7 +7499,7 @@
           <div class="reader-setting-control">
             <input
               type="range"
-              min="0" max="4" step="0.5"
+              min="0" max="4" step="0.1"
               value={settings.paragraph.textIndent}
               on:input={(e) => setTextIndent(+e.currentTarget.value)}
               class="reader-slider"
