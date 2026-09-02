@@ -20,22 +20,35 @@ type ThemeChangeCb = () => void;
 const subscribers = new Set<ThemeChangeCb>();
 let observer: MutationObserver | null = null;
 let rafScheduled = false;
-let lastMode = "";
-let lastDarkClass = "";
+// 2026-09-02 修复「阅读器不变色」：
+// 旧实现只 diff data-theme-mode / theme--dark 类，而思源换主题（同模式切主题、换强调色、
+// 或仅替换 <head> 里的主题 <style>/<link>）往往不动这些属性 → 观察者静默、阅读器不重刷。
+// 改为「盯实际令牌值」：组合若干关键 --b3-* 计算值 + 主题模式类作为签名，
+// 任何可见外观变化都会改签名 → 必触发重刷。
+let lastSig = "";
 
-function currentMode(): string {
-  const mode = document.documentElement.getAttribute("data-theme-mode");
-  return mode === "dark" ? "dark" : "light";
-}
-
-function currentDarkClass(): string {
+/** 读取思源当前外观签名：关键令牌计算值 + 主题模式类（多版本兼容，任一变化即视为换主题） */
+function computeThemeSig(): string {
+  let cs: CSSStyleDeclaration | null = null;
+  try {
+    cs = getComputedStyle(document.documentElement);
+  } catch {
+    cs = null;
+  }
+  const pick = (n: string) => (cs ? (cs.getPropertyValue(n) || "").trim() : "");
+  const mode = document.documentElement.getAttribute("data-theme-mode") || "";
   const htmlClass = document.documentElement.className || "";
-  if (htmlClass.includes("theme--dark")) return "dark";
-  if (htmlClass.includes("theme--light")) return "light";
   const bodyClass = document.body?.className || "";
-  if (bodyClass.includes("theme--dark")) return "dark";
-  if (bodyClass.includes("theme--light")) return "light";
-  return "";
+  return [
+    mode,
+    htmlClass,
+    bodyClass,
+    pick("--b3-theme-background"),
+    pick("--b3-theme-on-background"),
+    pick("--b3-theme-primary"),
+    pick("--b3-theme-on-surface"),
+    pick("--b3-border-color"),
+  ].join("|");
 }
 
 function scheduleNotify(): void {
@@ -46,11 +59,9 @@ function scheduleNotify(): void {
   requestAnimationFrame(() => {
     setTimeout(() => {
       rafScheduled = false;
-      const mode = currentMode();
-      const dark = currentDarkClass();
-      if (mode === lastMode && dark === lastDarkClass) return;
-      lastMode = mode;
-      lastDarkClass = dark;
+      const sig = computeThemeSig();
+      if (sig === lastSig) return;
+      lastSig = sig;
       for (const cb of subscribers) {
         try {
           cb();
@@ -68,13 +79,14 @@ function scheduleNotify(): void {
 /** 初始化全局主题监听（幂等，多次调用只建一个 observer） */
 export function initThemeBridge(): void {
   if (observer) return;
-  lastMode = currentMode();
-  lastDarkClass = currentDarkClass();
+  lastSig = computeThemeSig();
   observer = new MutationObserver(scheduleNotify);
+  // 1) <html> 属性变化（data-theme-mode / class，覆盖切换浅色↔深色）
   observer.observe(document.documentElement, {
     attributes: true,
     attributeFilter: ["data-theme-mode", "class"],
   });
+  // 2) <body> 类变化（部分版本在 body 上加/去 theme--dark）
   const observeBody = () => {
     if (document.body && observer) {
       observer.observe(document.body, { attributes: true, attributeFilter: ["class"] });
@@ -82,6 +94,11 @@ export function initThemeBridge(): void {
   };
   if (document.body) observeBody();
   else document.addEventListener("DOMContentLoaded", observeBody, { once: true });
+  // 3) <head> 子节点增删（思源换主题常表现为替换/插入主题 <style> 或 <link data-type="theme">，
+  //    此时不触发 <html>/<body> 属性变化，必须靠这里兜住；配合 computeThemeSig 的值 diff 去抖）。
+  if (document.head) {
+    observer.observe(document.head, { childList: true, subtree: true });
+  }
 }
 
 /** 订阅思源主题切换，返回取消订阅函数（onDestroy 时调用） */
