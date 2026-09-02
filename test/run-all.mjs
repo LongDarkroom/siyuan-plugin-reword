@@ -75,6 +75,7 @@ const TESTS = [
   "test/reader-shortcuts.test.mjs",
   "test/vocab-store-load-guard.test.mjs",
   "test/console-filter.test.mjs",
+  "test/logger-perf.test.mjs",
   "test/reader-tab-diagnostic-cleanup.test.mjs",
   "test/reader-epub-style-override.test.mjs",
   "test/reader-cjk-font-stack.test.mjs",

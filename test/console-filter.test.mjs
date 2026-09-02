@@ -271,7 +271,7 @@ test("installConsoleFilter 幂等:console.warn 也只包装一次", () => {
 //     且 console 替换全局副作用大）。现有 14 个测试覆盖父窗口 console.error/warn
 //     路径；P6 复用相同 SUPPRESSED_PATTERNS，仅扩展到 iframe.contentWindow。
 
-test("P6: 跨 frame 钩子源码合约（MutationObserver + srcdoc + WeakSet 防重）", () => {
+test("P6: 跨 frame 钩子源码合约（按需作用域观察 + srcdoc + WeakSet 防重）", () => {
   const src = readFileSync(
     resolve(__dirname, "../src/core/console-filter.ts"),
     "utf-8"
@@ -285,8 +285,12 @@ test("P6: 跨 frame 钩子源码合约（MutationObserver + srcdoc + WeakSet 防
   assert.match(src, /winAny\.console/);
   // 跨域拒绝：try/catch + return false
   assert.match(src, /catch[\s\S]*?return false/);
-  // installConsoleFilter 末尾应调用 installIframeObserver
-  assert.match(src, /installIframeObserver\(\)/);
-  // bodyWatcher 兜底：DOM 未就绪时启动
-  assert.match(src, /bodyWatcher/);
+  // 2026-09-02 性能修复：改为「按需作用域观察」API，由阅读器挂载时传入容器根
+  assert.match(src, /export function setConsoleFilterRoot\(/);
+  assert.match(src, /iframeObserver\.observe\(root/);
+  // ★ 回归防线：绝不能再对 document.body 挂常驻 subtree 观察器。
+  //   那会让思源每一次 DOM 变动都进入 mutation 队列，是全局性能负担。
+  assert.doesNotMatch(src, /obs\.observe\(document\.body/);
+  // 旧的 bodyWatcher 兜底（等 body 就绪后观察全文档）已随之上移除
+  assert.doesNotMatch(src, /bodyWatcher/);
 });

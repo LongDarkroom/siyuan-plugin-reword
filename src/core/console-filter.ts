@@ -124,21 +124,58 @@ function installIframeConsoleHook(iframe: HTMLIFrameElement): boolean {
   }
 }
 
-/** 全局挂一个 srcdoc iframe 监听器（绑定在 document.body 即可捕获 foliate 创建的 iframe） */
-function installIframeObserver(): void {
-  if (typeof document === "undefined" || !document.body) return;
-  const obs = new MutationObserver((muts) => {
-    for (const m of muts) {
-      for (const node of m.addedNodes) {
-        // foliate 注入的 iframe 是 srcdoc 类型（paginator.js:716）
-        if (node instanceof HTMLIFrameElement && (node as any).srcdoc) {
-          // load 事件触发后再装钩子（contentWindow 才可用）
-          node.addEventListener("load", () => installIframeConsoleHook(node), { once: true });
+/* --------------------------------------------------------------------
+ * 2026-09-02 性能修复：**不再**对 document.body 挂 subtree 观察器。
+ *
+ * 原实现对整个 document.body 挂 { childList: true, subtree: true }，
+ * 意味着思源主文档里每一次 DOM 增删（打字、块渲染、侧边栏刷新、
+ * 各种 UI 反馈）都会被记录进 mutation 队列并触发本回调遍历。
+ * 该观察器是插件 onload 时无条件安装的**常驻全局监听**，
+ * 而其收益仅仅是给 foliate 的 srcdoc iframe 装 console 钩子
+ * （用途：屏蔽几条 Chrome sandbox 警告，纯控制台观感）。
+ * 为一个边缘收益让整个应用承担常驻开销，是明显的收益/代价倒挂。
+ *
+ * 现改为**按需作用域观察**：只有阅读器打开时，才由 ReaderView 传入
+ * 阅读器容器作为观察根；关闭时 disconnect，日常使用思源零开销。
+ * -------------------------------------------------------------------- */
+let iframeObserver: MutationObserver | null = null;
+let iframeObserverRoot: HTMLElement | null = null;
+
+/**
+ * 在指定根元素内监听 srcdoc iframe 创建（foliate 的阅读内容 iframe 都在容器内）。
+ * @param root 观察根；传 null 表示停止观察并释放
+ */
+export function setConsoleFilterRoot(root: HTMLElement | null): void {
+  if (iframeObserver) {
+    iframeObserver.disconnect();
+    iframeObserver = null;
+    iframeObserverRoot = null;
+  }
+  if (!root) return;
+  if (typeof document === "undefined" || typeof MutationObserver === "undefined") return;
+  try {
+    iframeObserver = new MutationObserver((muts) => {
+      for (const m of muts) {
+        for (const node of m.addedNodes) {
+          // foliate 注入的 iframe 是 srcdoc 类型（paginator.js:716）
+          if (node instanceof HTMLIFrameElement && (node as any).srcdoc) {
+            // load 事件触发后再装钩子（contentWindow 才可用）
+            node.addEventListener("load", () => installIframeConsoleHook(node), { once: true });
+          }
         }
       }
-    }
-  });
-  obs.observe(document.body, { childList: true, subtree: true });
+    });
+    iframeObserver.observe(root, { childList: true, subtree: true });
+    iframeObserverRoot = root;
+  } catch {
+    iframeObserver = null;
+    iframeObserverRoot = null;
+  }
+}
+
+/** 测试/运维：当前观察根（便于断言作用域已收窄） */
+export function __getConsoleFilterRoot(): HTMLElement | null {
+  return iframeObserverRoot;
 }
 
 /**
@@ -196,28 +233,13 @@ export function installConsoleFilter(): void {
 
   // 4) 2026-08-31 P6：跨 frame 拦截
   //    foliate 创建的 srcdoc iframe 内 console 派发，父窗口钩子拦不到
-  //    通过 MutationObserver 监听新加的 srcdoc iframe，load 后注入 console 钩子
-  //    注：等 document.body 可用（onload 时通常已可用；用 MutationObserver 兜底）
-  //    重要：try/catch 保护，Node 测试环境无 document，应安全 noop
-  try {
-    const tryStartObserver = () => {
-      try { installIframeObserver(); } catch { /* DOM 异常时静默 */ }
-    };
-    if (document.body) {
-      tryStartObserver();
-    } else {
-      // DOM 还没就绪：等 body 可用后启动
-      const bodyWatcher = new MutationObserver(() => {
-        if (document.body) {
-          bodyWatcher.disconnect();
-          tryStartObserver();
-        }
-      });
-      bodyWatcher.observe(document.documentElement, { childList: true });
-    }
-  } catch {
-    // Node 测试环境 / DOM 异常：跨 frame 钩子跳过，不阻断主流程
-  }
+  //    通过 MutationObserver 监听新加的 srcdoc iframe，load 后注入 console 钩子。
+  //
+  //    2026-09-02 变更：**此处不再自动观察 document.body**。
+  //    全局 body subtree 观察会让思源每一次 DOM 变动都进入 mutation 队列，
+  //    属常驻全局开销，与其收益（屏蔽几条 sandbox 警告）严重不匹配。
+  //    改为按需：由阅读器打开时调用 setConsoleFilterRoot(容器) 启用，
+  //    关闭时 setConsoleFilterRoot(null) 释放。日常使用思源零开销。
 }
 
 /** 测试/运维:重置安装标志(用于单测隔离) */

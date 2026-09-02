@@ -107,6 +107,9 @@
   } from "../reader/reader-style";
   // 2026-09-01 接口化第一阶段（L0/L3）：思源令牌注入 + 全局主题同步总线
   import { subscribeThemeChange, registerIframe, unregisterIframe } from "../ui/theme-bridge.ts";
+  // 2026-09-02 性能修复：跨 frame console 钩子改为「阅读器打开时才观察本容器」，
+  // 不再由插件在 document.body 上常驻全局 MutationObserver。
+  import { setConsoleFilterRoot } from "../core/console-filter.ts";
   // 2026-08-28 分类字体：EPUB 内联 serif/sans-serif/monospace 关键词 → CSS 变量（Readest 同款）
   import {
     rewriteFontKeywordsInAllContents,
@@ -7059,6 +7062,10 @@
     });
     // 2026-08-28：初始化连续朗读控制器
     ensureTtsController();
+    // 2026-09-02 性能修复：跨 frame console 钩子改为按需作用域观察。
+    // 只在阅读器挂载期间观察本组件容器，卸载即释放；避免插件在 document.body
+    // 上常驻 subtree MutationObserver 拖累整个思源的 DOM 性能。
+    setConsoleFilterRoot(readerViewEl ?? null);
   });
 
   /**
@@ -7159,6 +7166,8 @@
     // 2026-08-28：朗读控制器清理（停止朗读 + 移除临时高亮，零残留）
     try { ttsController?.dispose(); } catch (__swallowErr) { logSwallow(__swallowErr, "ReaderView.svelte · ttsController.dispose", "debug"); }
     ttsController = null;
+    // 2026-09-02：释放跨 frame console 钩子的观察器（与 onMount 的 setConsoleFilterRoot 对称）
+    try { setConsoleFilterRoot(null); } catch (__swallowErr) { logSwallow(__swallowErr, "ReaderView.svelte · setConsoleFilterRoot(null)", "debug"); }
     view = null;
   });
 </script>

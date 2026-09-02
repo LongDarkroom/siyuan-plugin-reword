@@ -9789,6 +9789,9 @@ export default class RewordPlugin extends Plugin {
     void this.persistAnnotationLabels.flush();
     void this.persistAiPresets.flush();
     void this.persistAiPrompts.flush();
+    // 2026-09-02：日志已改为缓冲异步落盘，卸载时必须同步刷一次，
+    // 否则最后 1 秒内的日志（含上面这几条「插件卸载」）会随渲染进程退出而丢失。
+    try { getLogger().flushSync(); } catch { /* 落盘失败不阻断卸载 */ }
   }
 
   /** 从词典结果提取单词元数据(音标/词性/释义摘要),用于填充词库记录。

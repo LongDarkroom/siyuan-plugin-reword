@@ -114,6 +114,22 @@ export class Logger {
   private jsonlPath = "";
   private globalInstalled = false;
 
+  /* ----- 落盘缓冲（2026-09-02 性能修复）-----
+   * 原实现在每条日志上直接 fs.appendFileSync ×2，属同步磁盘 I/O，会整个阻塞
+   * Electron 渲染进程主线程。实测单日 14643 条日志 = 29286 次同步写盘，
+   * 是思源「一卡就动不了界面」的主因之一（与 ResizeObserver 错误风暴叠加后
+   * 更形成自我强化的死循环：写盘阻塞 → 布局延迟 → 更多 ResizeObserver 告警）。
+   * 现改为：内存缓冲 + 定时/阈值异步批量落盘，主线程零同步 I/O。
+   */
+  private pendingText: string[] = [];
+  private pendingJsonl: string[] = [];
+  private flushTimer: ReturnType<typeof setTimeout> | null = null;
+  private flushing = false;
+  /** 定时 flush 间隔（ms） */
+  private static readonly FLUSH_MS = 1000;
+  /** 缓冲条数阈值：达到即立即异步 flush，避免峰值时内存膨胀 */
+  private static readonly FLUSH_MAX = 256;
+
   /** 初始化日志目录与落盘路径（插件 onload 时调用） */
   configure(opts: { baseDir: string; max?: number; enabled?: boolean }): void {
     this.baseDir = opts.baseDir;
@@ -159,14 +175,80 @@ export class Logger {
     if (this.entries.length > this.max) this.entries.shift();
   }
 
+  /**
+   * 入缓冲（同步部分只做字符串拼接，绝不触碰磁盘）。
+   * 真正的写盘在 scheduleFlush/flushAsync/flushSync 中完成。
+   */
   private appendFile(entry: LogEntry): void {
     if (!this.enabled || !this.baseDir) return;
     try {
+      this.pendingJsonl.push(JSON.stringify(entry) + "\n");
+      this.pendingText.push(this.formatText(entry) + "\n");
+      this.scheduleFlush();
+    } catch {
+      /* 入缓冲失败不影响主流程 */
+    }
+  }
+
+  /** 排程异步落盘：缓冲达阈值立即刷，否则最多延迟 FLUSH_MS */
+  private scheduleFlush(): void {
+    if (this.pendingText.length >= Logger.FLUSH_MAX) {
+      if (this.flushTimer) {
+        clearTimeout(this.flushTimer);
+        this.flushTimer = null;
+      }
+      void this.flushAsync();
+      return;
+    }
+    if (this.flushTimer) return;
+    this.flushTimer = setTimeout(() => {
+      this.flushTimer = null;
+      void this.flushAsync();
+    }, Logger.FLUSH_MS);
+  }
+
+  /**
+   * 异步批量落盘（不阻塞主线程）。
+   * 用 flushing 串行化，避免并发 append 造成内容交错；
+   * 刷完若缓冲又攒了新日志，自动再排一次。
+   */
+  private async flushAsync(): Promise<void> {
+    if (this.flushing) return;
+    if (this.pendingText.length === 0 && this.pendingJsonl.length === 0) return;
+    this.flushing = true;
+    try {
       this.rotateIfNeeded();
-      const jsonl = JSON.stringify(entry) + "\n";
-      const text = this.formatText(entry) + "\n";
-      if (this.jsonlPath) fs.appendFileSync(this.jsonlPath, jsonl, "utf-8");
-      if (this.textPath) fs.appendFileSync(this.textPath, text, "utf-8");
+      const text = this.pendingText.join("");
+      const jsonl = this.pendingJsonl.join("");
+      this.pendingText = [];
+      this.pendingJsonl = [];
+      try {
+        if (this.jsonlPath && jsonl) await fs.promises.appendFile(this.jsonlPath, jsonl, "utf-8");
+        if (this.textPath && text) await fs.promises.appendFile(this.textPath, text, "utf-8");
+      } catch {
+        /* 落盘失败不影响主流程 */
+      }
+    } finally {
+      this.flushing = false;
+    }
+    if (this.pendingText.length || this.pendingJsonl.length) this.scheduleFlush();
+  }
+
+  /**
+   * 同步落盘（仅用于导出/卸载等必须确保数据已写入的时刻）。
+   * 日常运行请勿调用——它会在主线程做同步 I/O。
+   */
+  public flushSync(): void {
+    if (!this.enabled || !this.baseDir) return;
+    if (this.pendingText.length === 0 && this.pendingJsonl.length === 0) return;
+    try {
+      this.rotateIfNeeded();
+      const text = this.pendingText.join("");
+      const jsonl = this.pendingJsonl.join("");
+      this.pendingText = [];
+      this.pendingJsonl = [];
+      if (this.jsonlPath && jsonl) fs.appendFileSync(this.jsonlPath, jsonl, "utf-8");
+      if (this.textPath && text) fs.appendFileSync(this.textPath, text, "utf-8");
     } catch {
       /* 落盘失败不影响主流程 */
     }
@@ -393,6 +475,8 @@ export class Logger {
    */
   async writeExport(): Promise<{ textPath: string; jsonPath: string }> {
     this.rotateIfNeeded();
+    // 导出前强制同步刷盘：把尚未落地的缓冲日志一并写入，保证导出内容与磁盘一致
+    this.flushSync();
     const ts = new Date().toISOString().replace(/[:.]/g, "-");
     const textPath = path.join(this.baseDir, `reword-log-export-${ts}.log`);
     const jsonPath = path.join(this.baseDir, `reword-log-export-${ts}.json`);
@@ -444,6 +528,49 @@ export class Logger {
       rec.count += 1;
       return rec.count > THROTTLE_MAX;
     };
+
+    /* ------------------------------------------------------------------
+     * 2026-09-02 性能修复：浏览器已知良性循环的**聚合并极低频记录**。
+     *
+     * 背景：思源（含其内核与第三方插件）存在 ResizeObserver 循环，持续抛出
+     *   "ResizeObserver loop completed with undelivered notifications"。
+     *   该异常经 addEventListener("error") 通道到达本处理器 —— 注意它**不走**
+     *   window.onerror 赋值通道，因此 console-filter.ts 的降级逻辑对此无效
+     *   （实测：console-filter 只拦到 104 条，本通道却记录了 14116 条）。
+     *
+     * 危害：即便有「1 秒 3 条」的节流，仍达 180 条/分钟（≈3 条/秒 × 2 次写盘
+     *   + console.error），实测单日 14643 条日志中 14116 条来自此处。
+     *   更糟的是会形成自我强化的死循环：
+     *     写盘/console 阻塞主线程 → 布局延迟 → ResizeObserver 更容易
+     *     "undelivered notifications" → 抛出更多告警 → 继续阻塞。
+     *   这正是「一卡就动不了思源界面」的直接成因。
+     *
+     * 处理：命中良性模式后只累加计数，每 5 分钟合并成一条 debug 记录，
+     *   完全不进 error 通道（不写 error 级日志、不 console.error）。
+     * ------------------------------------------------------------------ */
+    const BENIGN_PATTERNS: readonly string[] = [
+      "ResizeObserver loop",
+      "ResizeObserver loop limit exceeded",
+      "Script error", // 跨域脚本的无信息错误，无法定位，无记录价值
+    ];
+    const benignCount = new Map<string, number>();
+    const benignLastTs = new Map<string, number>();
+    const BENIGN_INTERVAL_MS = 5 * 60 * 1000; // 5 分钟合并一次
+    const recordBenign = (key: string, msg: string, src?: string): void => {
+      const n = (benignCount.get(key) ?? 0) + 1;
+      benignCount.set(key, n);
+      const now = Date.now();
+      const last = benignLastTs.get(key) ?? 0;
+      if (now - last < BENIGN_INTERVAL_MS) return;
+      benignLastTs.set(key, now);
+      benignCount.set(key, 0);
+      this.emit(
+        "debug",
+        "log",
+        label("window.onerror") + `（浏览器良性循环，本周期共忽略 ${n} 次）: ${msg}`,
+        { source: src }
+      );
+    };
     w.addEventListener?.(
       "error",
       (ev: any) => {
@@ -454,7 +581,13 @@ export class Logger {
         const msg = err instanceof Error
           ? err.message
           : String(ev?.message || (err && (err as { message?: unknown }).message) || "未知错误");
-        // 思源内核自身的布局崩溃（插件无法修复）降级为 debug，不记 ERROR、不刷屏。
+        // ① 浏览器已知良性循环：聚合计数后极低频记录，不进 error 通道
+        const benignKey = BENIGN_PATTERNS.find((p) => msg.includes(p));
+        if (benignKey) {
+          recordBenign(benignKey, msg, src);
+          return;
+        }
+        // ② 思源内核自身的布局崩溃（插件无法修复）降级为 debug，不记 ERROR、不刷屏。
         // 注意：不能携带 error 字段，否则 emit 会强制提升为 error 级
         if (src?.startsWith("common.") && msg.includes("getBoundingClientRect")) {
           this.emit("debug", "log", label("window.onerror") + "（内核布局）: " + msg, { source: src });
@@ -479,6 +612,18 @@ export class Logger {
       "unhandledrejection",
       (ev: any) => {
         const reason = ev?.reason;
+        const msg =
+          reason instanceof Error
+            ? reason.message
+            : String((reason && (reason as { message?: unknown }).message) || reason || "未知错误");
+        // 与 error 通道一致：良性循环只做聚合，不进 error 通道
+        const benignKey = BENIGN_PATTERNS.find((p) => msg.includes(p));
+        if (benignKey) {
+          recordBenign(benignKey, msg);
+          return;
+        }
+        // 同源限流（该通道此前完全没有限流，异常风暴时会无上限刷 error 日志）
+        if (throttled(`rejection|${msg}`)) return;
         this.emit("error", "log", label("Promise 未捕获拒绝"), {
           error: reason instanceof Error ? reason : new Error(String(reason)),
         });
