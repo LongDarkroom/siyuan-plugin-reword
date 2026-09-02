@@ -2128,7 +2128,7 @@
   .bookshelf-header {
     display: flex;
     align-items: center;
-    gap: 8px;
+    gap: 10px;
     padding: 8px 10px;
     border-bottom: 1px solid var(--b3-border-color, rgba(0, 0, 0, 0.1));
     flex-shrink: 0;
@@ -2808,7 +2808,12 @@
     background: var(--b3-theme-primary, #378add);
     color: #fff;
     font-weight: 500;
+    width: auto;
+    min-width: 26px;
+    height: 26px;
     padding: 0 10px;
+    gap: 4px;
+    white-space: nowrap;
   }
   .shelf-icon-btn.primary:hover {
     background: var(--b3-theme-primary, #357abd);
