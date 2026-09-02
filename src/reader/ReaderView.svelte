@@ -97,6 +97,7 @@
     getDefaultCjkFontStack,
     buildFontFamilyLists,
     captureSiyuanThemeVars,
+    neutralizeBadFontFaces,
   } from "../reader/reader-style";
   // 2026-09-01 接口化第一阶段（L0/L3）：思源令牌注入 + 全局主题同步总线
   import { subscribeThemeChange, registerIframe, unregisterIframe } from "../ui/theme-bridge.ts";
@@ -310,6 +311,8 @@
   let readerViewEl: HTMLDivElement;  // 2026-08-23 新增：.reader-view 容器 ref（用于浮层 offset 与全局 mousedown 监听）
   let readerStageEl: HTMLDivElement;  // 2026-08-25 新增：.reader-stage 内容区 ref（浮层上下避让判定改用内容区坐标系，避免工具栏贴顶导航栏/越界）
   let view: any = null;
+  // 2026-09-02：记录已挂接过 @font-face 中和监听的 transformTarget，避免重复注册
+  let lastTransformTarget: any = null;
   // 2026-08-28：连续朗读控制器状态
   let ttsController: ReaderTtsController | null = null;
   let ttsState: TtsState = "idle";
@@ -909,6 +912,22 @@
         view.renderer.setStyles(buildStyles());
       } catch (__swallowErr) { logSwallow(__swallowErr, "ReaderView.svelte · applyStyles", "debug"); }
     }
+    // 2026-09-02 修复：注入样式后主动触发一次重排，确保首次打开即按我们的 CSS 对齐。
+    // foliate 的 setStyles 依赖 fontsReady().then(expand) 重排；若书籍内嵌字体用了
+    // 思源/electron 无法加载的 scheme（如 tt001a.ttf → ERR_UNKNOWN_URL_SCHEME），
+    // document.fonts.ready 可能迟迟不触发，导致首次排版仍按书内原样式（段落左缘不齐），
+    // 直到窗口缩放 / 打开 DevTools 触发 ResizeObserver→expand 才对齐。
+    // 这里直接调用公开的 Paginator.render() 强制重排，不依赖字体就绪。render() 内部
+    // 自带 #views 空值守卫，open 过早时安全空转；用 rAF 等 <style> 文本被解析后再重排。
+    const forceRelayout = () => {
+      try {
+        const r = view?.renderer as any;
+        if (r?.render) r.render();
+      } catch (__e) { logSwallow(__e, "ReaderView.svelte · applyStyles forceRelayout", "debug"); }
+    };
+    requestAnimationFrame(forceRelayout);
+    // 兜底：首次开书时 #views 可能尚未就绪导致 render() 空转，延迟再补一次确保对齐。
+    setTimeout(forceRelayout, 120);
     // 同步容器兜底背景（深色模式切换时避免透出旧色/黑底闪屏）
     applyContainerBg();
     // 字体关键词重写（接管书内 serif/sans-serif/monospace 关键词，覆盖 div/span 布局的正文）：
@@ -1669,6 +1688,21 @@
       } else {
         await view.open(file);
       }
+      // 2026-09-02：中和书内 @font-face 的非法 scheme src（如 tt001a.ttf →
+      // ERR_UNKNOWN_URL_SCHEME），避免浏览器请求坏字体报 console 错，并让
+      // document.fonts.ready 干净解析。挂在 foliate 的书内 CSS 转换钩子
+      // transformTarget 上，仅对同一 target 注册一次。
+      try {
+        const bt = (view.book as any)?.transformTarget;
+        if (bt && bt !== lastTransformTarget) {
+          lastTransformTarget = bt;
+          bt.addEventListener("data", (ev: any) => {
+            if (ev?.detail?.type !== "text/css") return;
+            ev.detail.data = Promise.resolve(ev.detail.data).then((css: string) =>
+              neutralizeBadFontFaces(css));
+          });
+        }
+      } catch (__e) { logSwallow(__e, "openBook fontFaceNeutralize", "debug"); }
       console.log("[REword] openBook view.open 完成");
       const saved = store.getProgress(bookId);
       if (saved?.fraction) {
@@ -7036,7 +7070,6 @@
     if (attachTimer2) clearTimeout(attachTimer2);
     if (turnTimer) clearTimeout(turnTimer);
     if (turnInterval) clearInterval(turnInterval);
-    if (annotatePressTimer) clearTimeout(annotatePressTimer);
     if (toastTimer) clearTimeout(toastTimer);
     if (undoTimer) clearTimeout(undoTimer);
     if (hoverHideTimer) clearTimeout(hoverHideTimer);

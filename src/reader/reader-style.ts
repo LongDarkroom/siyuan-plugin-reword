@@ -1046,6 +1046,33 @@ export function paragraphHoverStyles(enabled: boolean): string {
 }`.trim();
 }
 
+/**
+ * 中和书内 @font-face 中使用了非法 URL scheme 的 src（如某些 EPUB 把字体写成
+ * `url(ms-appx://...)` / `url(chrome://...)` 或自定义 scheme），否则浏览器会报
+ * `net::ERR_UNKNOWN_URL_SCHEME` 且可能让 `document.fonts.ready` 迟迟不解析。
+ * 仅删除「含显式非法 scheme」的 @font-face 块；相对路径（无 scheme）与
+ * http/https/blob/data 等合法 scheme 一律保留，避免误伤正常内嵌字体的书籍。
+ * 在 foliate 的书内 CSS 转换钩子（book.transformTarget）上调用本函数。
+ */
+export function neutralizeBadFontFaces(css: string): string {
+  if (typeof css !== "string" || !css) return css;
+  const BAD_SCHEMES = new Set(["http", "https", "blob", "data"]);
+  return css.replace(/@font-face\s*\{[^}]*\}/g, (block) => {
+    const urls = block.match(/url\(\s*([^)]*?)\s*\)/g) || [];
+    const hasBad = urls.some((u) => {
+      const inner = u
+        .replace(/^url\(\s*/i, "")
+        .replace(/\s*\)$/i, "")
+        .trim()
+        .replace(/^['"]|['"]$/g, "");
+      const m = inner.match(/^([a-zA-Z][a-zA-Z0-9+.-]*):/);
+      if (!m) return false; // 相对路径（无 scheme）→ 保留
+      return !BAD_SCHEMES.has(m[1].toLowerCase());
+    });
+    return hasBad ? "" : block;
+  });
+}
+
 /* ================= 内部辅助（不导出，避免外部误用） ================= */
 
 /**
