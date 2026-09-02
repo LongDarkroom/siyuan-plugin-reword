@@ -25,6 +25,8 @@ export const REWORD_BILINGUAL_FAILED_TEXT = "reword-bilingual-failed-text";
 export const REWORD_BILINGUAL_AI_REDO = "reword-bilingual-ai-redo";
 /** 2026-08-31：段落级「删除此段译文」按钮（hover 译文块时显形，隐藏该段译文） */
 export const REWORD_BILINGUAL_HIDE = "reword-bilingual-hide";
+/** 2026-09-02：段落级操作工具条（AI 重译 + 删除译文 合并为右上角玻璃药丸） */
+export const REWORD_BILINGUAL_ACTIONS = "reword-bilingual-actions";
 
 /** 该原文元素是否已通过「兄弟节点」注入译文（幂等判定） */
 export function isTranslatedPeer(el: Element): boolean {
@@ -86,6 +88,14 @@ export function buildTranslationEl(
   }
   div.appendChild(span);
 
+  // 2026-09-02：两个操作按钮合并进右上角工具条（.reword-bilingual-actions），
+  // 彻底离开左侧竖线区域，避免 hover 左缘时误触「删除译文」。工具条随译文块 hover 淡入，
+  // 内部按钮保持普通 flex 子项（不再各自绝对定位）。
+  const actions = doc.createElement("div");
+  actions.className = REWORD_BILINGUAL_ACTIONS;
+  actions.setAttribute("data-translation-mark", "1");
+  actions.setAttribute("cfi-inert", "");
+
   // 2026-08-31 Phase 3：段落级「用 AI 重译」。
   // 默认不显示（靠 CSS hover 译文块时显形），点击走 doc 级事件委托。
   if (opts?.showAiRedo) {
@@ -97,7 +107,7 @@ export function buildTranslationEl(
     btn.type = "button";
     btn.textContent = "✨ AI 重译";
     btn.title = "用 AI 重新翻译本段（覆盖缓存）";
-    div.appendChild(btn);
+    actions.appendChild(btn);
   }
 
   // 2026-08-31：段落级「删除此段译文」。hover 译文块时显形，点击隐藏该段译文
@@ -111,8 +121,10 @@ export function buildTranslationEl(
     hbtn.type = "button";
     hbtn.textContent = "✕ 删除译文";
     hbtn.title = "隐藏本段译文（重新开启双语可恢复）";
-    div.appendChild(hbtn);
+    actions.appendChild(hbtn);
   }
+
+  if (actions.childElementCount > 0) div.appendChild(actions);
   return div;
 }
 

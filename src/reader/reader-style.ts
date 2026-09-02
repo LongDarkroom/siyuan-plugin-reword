@@ -908,66 +908,64 @@ li > .reword-bilingual[cfi-inert][data-translation-mark] {
   background: var(--b3-theme-surface-light, rgba(128, 128, 128, 0.06));
 }
 
-/* 2026-08-31 Phase 3：段落级「✨ 用 AI 重译」按钮。
-   默认完全隐藏，只在 hover 译文块时显形——避免常驻按钮干扰阅读。 */
-.reword-bilingual-ai-redo {
+/* 2026-09-02：段落级操作工具条（AI 重译 + 删除译文 合并为右上角玻璃药丸）。
+   默认完全隐藏，hover 译文块时整体淡入；整体绝对定位于译文块右上角、离开左侧竖线，
+   鼠标贴近左缘阅读/滑过不再误触「删除译文」。内部按钮为普通 flex 子项。 */
+.reword-bilingual-actions {
   position: absolute;
-  top: 0;
-  right: 0;
+  top: 4px;
+  right: 4px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px;
+  border-radius: 999px;
+  /* 毛玻璃药丸：半透明背景 + 细边框 + 轻阴影，悬浮在译文之上不抢眼 */
+  background: color-mix(in srgb, var(--b3-theme-background, #fff) 82%, transparent);
+  border: 1px solid var(--b3-border-color, rgba(128, 128, 128, 0.3));
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.12);
   opacity: 0;
   pointer-events: none;
   transition: opacity 0.15s ease;
-  font-family: -apple-system, "PingFang SC", "Microsoft YaHei", system-ui, sans-serif !important;
-  font-size: ${Math.max(0.72, fs * 1.15)}em;
-  line-height: 1;
-  padding: 3px 8px;
-  border-radius: 999px;
-  border: 1px solid var(--b3-border-color, rgba(128, 128, 128, 0.3));
-  background: var(--b3-theme-background, #fff);
-  color: var(--b3-theme-on-background, ${fg});
-  cursor: pointer;
-  white-space: nowrap;
+  z-index: 2;
 }
-.reword-bilingual[cfi-inert][data-translation-mark]:hover > .reword-bilingual-ai-redo {
-  opacity: 0.85;
+.reword-bilingual[cfi-inert][data-translation-mark]:hover > .reword-bilingual-actions {
+  opacity: 1;
   pointer-events: auto;
 }
+
+/* 工具条内按钮（✨ AI 重译 / ✕ 删除译文）：圆角小药丸，去掉各自绝对定位 */
+.reword-bilingual-ai-redo,
+.reword-bilingual-hide {
+  font-family: -apple-system, "PingFang SC", "Microsoft YaHei", system-ui, sans-serif !important;
+  font-size: ${Math.max(0.7, fs * 1.1)}em;
+  line-height: 1;
+  padding: 3px 9px;
+  border-radius: 999px;
+  border: 1px solid transparent;
+  background: transparent;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.12s ease, color 0.12s ease, border-color 0.12s ease;
+}
+.reword-bilingual-ai-redo {
+  color: var(--b3-theme-primary, #357abd);
+}
 .reword-bilingual-ai-redo:hover {
-  opacity: 1;
+  background: color-mix(in srgb, var(--b3-theme-primary, #357abd) 14%, transparent);
 }
 .reword-bilingual-ai-redo:disabled {
   opacity: 0.5;
   cursor: default;
 }
-
-/* 2026-08-31：段落级「✕ 删除此段译文」按钮。
-   与 AI 重译按钮同构，默认隐藏、hover 显形；放在译文块左上角避免与右上角重译按钮重叠。 */
 .reword-bilingual-hide {
-  position: absolute;
-  top: 0;
-  left: 0;
-  opacity: 0;
-  pointer-events: none;
-  transition: opacity 0.15s ease;
-  font-family: -apple-system, "PingFang SC", "Microsoft YaHei", system-ui, sans-serif !important;
-  font-size: 0.72em;
-  line-height: 1;
-  padding: 3px 8px;
-  border-radius: 999px;
-  border: 1px solid var(--b3-border-color, rgba(128, 128, 128, 0.3));
-  background: var(--b3-theme-background, #fff);
   color: var(--b3-theme-on-background, #555);
-  cursor: pointer;
-  white-space: nowrap;
 }
-.reword-bilingual[cfi-inert][data-translation-mark]:hover > .reword-bilingual-hide {
-  opacity: 0.85;
-  pointer-events: auto;
-}
+/* ✕ 删除：平时低调灰色（置于工具条最右端，远离左侧），hover 才显红警示 */
 .reword-bilingual-hide:hover {
-  opacity: 1;
   color: var(--b3-theme-error, #d9534f);
-  border-color: var(--b3-theme-error, #d9534f);
+  background: color-mix(in srgb, var(--b3-theme-error, #d9534f) 14%, transparent);
+  border-color: color-mix(in srgb, var(--b3-theme-error, #d9534f) 40%, transparent);
 }
 
 /* 翻译失败块：静默灰色占位，不抢眼（无重试按钮）。
