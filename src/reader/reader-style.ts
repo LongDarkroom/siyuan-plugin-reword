@@ -151,6 +151,17 @@ export interface SiyuanThemeVars {
   searchHighlight: string;
   /** 错误色（思源 --b3-theme-error，用于翻译失败占位 / 批注错误等） */
   error: string;
+  /**
+   * 思源「设置→外观→字号」对应的 `--b3-font-size`（如 14px）。
+   * 跟随思源模式下用它覆盖阅读器字号，使阅读器与思源编辑区同字号；
+   * 0 表示未取到（调用方不覆盖，走阅读器自身字号滑块）。
+   */
+  fontSize: number;
+  /**
+   * 思源代码字体族 `--b3-font-family-code`（如 JetBrainsMono / Consolas 等）。
+   * 跟随思源模式下把它喂给等宽链 `--reword-monospace`，使代码块与思源编辑器同字体。
+   */
+  monoFont: string;
 }
 
 /**
@@ -188,6 +199,10 @@ export function captureSiyuanThemeVars(
     searchHighlight: hexToRgba(primary, 0.7),
     // 错误色：思源 --b3-theme-error
     error: get("--b3-theme-error", "#d44c47"),
+    // 字号：思源「设置→外观→字号」对应的 --b3-font-size（如 "14px"）→ 数值 px
+    fontSize: parseFloat(get("--b3-font-size", "14px")) || 0,
+    // 等宽字体族：思源代码字体（JetBrainsMono / Consolas 等），跟随思源时代码块同源
+    monoFont: (get("--b3-font-family-code", "") || "").trim(),
   };
 }
 
@@ -349,9 +364,18 @@ export function fontVariableStyles(lists: FontFamilyLists): string {
  * 此处让非分类模式也能注入 --reword-*（与分类同源语义），配合 ReaderView 在开启
  * overridePublisherFont 时同样跑关键词重写，使跟随思源与分类的覆盖能力一致。
  * 等宽链补一个 monospace 兜底，避免代码块失去等宽特性。
+ *
+ * @param stack 正文/无衬线/衬线共用字体栈（宿主栈 + CJK 兜底）
+ * @param monoOverride 等宽链覆盖（跟随思源时传思源 `--b3-font-family-code`）。
+ *   提供则用「思源代码字体, 正文栈, monospace」作为等宽链，使代码块跟随思源编辑器字体；
+ *   不提供则等宽链 = 正文栈 + monospace（沿用旧行为）。
  */
-export function fontVariableStylesFromStack(stack: string): string {
-  const mono = stack ? `${stack}, monospace` : "monospace";
+export function fontVariableStylesFromStack(stack: string, monoOverride?: string): string {
+  const mono = monoOverride && monoOverride.trim()
+    ? `${monoOverride.trim()}, ${stack}, monospace`
+    : stack
+    ? `${stack}, monospace`
+    : "monospace";
   return `:root {
   --reword-serif: ${stack};
   --reword-sans-serif: ${stack};
@@ -385,6 +409,9 @@ pre, code, kbd, samp, tt,
  * @param lineWidthPreset 行宽预设 {padding}
  * @param fontCss 来自 fontCss() 的 @font-face 段（不含 body { font-family }，避免与 fontFamilyStack 冲突）
  * @param fontFamilyStack 完整 font-family 栈（由 ReaderView 组装，含用户字体 + CJK fallback）
+ * @param siyuanVars 思源调色板（跟随思源主题时传入；含 bg/fg/链接/代码/译文色 + 字号 + 等宽字体族）
+ * @param siyuanMonoFont 跟随思源时传入思源代码字体族（--b3-font-family-code），
+ *   用于覆盖等宽链，使代码块与思源编辑器同源；非跟随思源模式传 undefined。
  * @returns 完整 CSS 字符串（可传入 foliate view.renderer.setStyles()）
  */
 export function buildReaderStyles(
@@ -393,7 +420,8 @@ export function buildReaderStyles(
   lineWidthPreset: { padding: string },
   fontCss: string,
   fontFamilyStack: string,
-  siyuanVars?: SiyuanThemeVars
+  siyuanVars?: SiyuanThemeVars,
+  siyuanMonoFont?: string
 ): string {
   const o = deriveStyleOutput(settings, preset, lineWidthPreset);
 
@@ -422,7 +450,8 @@ export function buildReaderStyles(
   } else {
     fontSegments = [fontFamilyStyles(fontFamilyStack)];
     if (settings.fontMode !== "system" && settings.overridePublisherFont !== false) {
-      fontSegments.push(fontVariableStylesFromStack(fontFamilyStack));
+      // 跟随思源时把思源代码字体族喂进等宽链；其它模式沿用正文栈 + monospace
+      fontSegments.push(fontVariableStylesFromStack(fontFamilyStack, siyuanMonoFont));
     }
   }
 

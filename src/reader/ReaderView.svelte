@@ -891,13 +891,33 @@
     // 2026-08-30 思源化：在父文档抓取思源调色板，经 :root 桥接注入阅读器 iframe，
     // 使 link/code/quote/译文块等样式能跟随思源外观（CSS 变量不跨 iframe 继承，必须显式抓取+注入）。
     const siyuanVars = captureSiyuanThemeVars(getSiyuanVar);
+    // 2026-09-02：跟随思源扩展——把思源「字号 / 段距 / 行高」套用为阅读器排版参数。
+    // 仅本次构建生效，不写回设置 store（避免覆盖用户自有滑块值、关闭开关即恢复）。
+    let eff: ReaderSettings = settings;
+    if (settings.fontMode === "follow-siyuan") {
+      const overrides: Partial<ReaderSettings> = {};
+      // 1) 字号：思源「设置→外观→字号」(--b3-font-size) 直接驱动阅读器字号
+      if (siyuanVars.fontSize > 0) overrides.fontSize = siyuanVars.fontSize;
+      // 2) 段距/行高（可选、脆弱）：抓取宿主 .protyle-wysiwyg p 计算样式
+      if (settings.layout.followSiyuanParagraph) {
+        const para = captureSiyuanParagraphTypography();
+        if (para) {
+          if (para.paragraphSpacing > 0) {
+            overrides.paragraph = { ...settings.paragraph, paragraphSpacing: para.paragraphSpacing };
+          }
+          if (para.lineHeight > 0) overrides.lineHeight = para.lineHeight;
+        }
+      }
+      if (Object.keys(overrides).length) eff = { ...settings, ...overrides };
+    }
     return buildReaderStyles(
-      settings,
+      eff,
       t,
       lw,
       fontFaceCss,
       fontFamilyStack,
-      siyuanVars
+      siyuanVars,
+      settings.fontMode === "follow-siyuan" ? siyuanVars.monoFont : undefined
     );
   }
 
@@ -3078,6 +3098,43 @@
   function setFollowSiyuanMargin(e: Event) {
     settings = settingsStore.update({
       layout: { ...settings.layout, followSiyuanMargin: (e.target as HTMLInputElement).checked },
+    });
+    applyStyles();
+  }
+
+  /** 跟随思源段距/行高：抓取宿主 .protyle-wysiwyg p 的计算 margin / line-height，折算成阅读器可用单位。
+   *  - 段距：取 (margin-top + margin-bottom)/2，按本段 font-size 折算为 em（匹配 paragraphLayoutStyles 的 em 单位，范围 0-2）
+   *  - 行高：px → 折算 ratio（px/fs）；无单位数字直接用；normal / 越界则跳过（范围 1.4-2.2）
+   *  思源未把段距/行高暴露成 CSS 变量，此处只能抓实时 DOM（脆弱，依赖内部选择器），故仅在
+   *  layout.followSiyuanParagraph 开启时调用。返回 null 表示抓不到有效值（调用方不覆盖）。 */
+  function captureSiyuanParagraphTypography(): { paragraphSpacing: number; lineHeight: number } | null {
+    try {
+      const doc = (typeof window !== "undefined" && (window.top?.document ?? window.document)) || null;
+      if (!doc) return null;
+      const host: Element | null =
+        doc.querySelector(".protyle-wysiwyg p") || doc.querySelector(".protyle-content p");
+      if (!host) return null;
+      const cs = getComputedStyle(host);
+      const fs = parseFloat(cs.fontSize) || 0;
+      const mt = parseFloat(cs.marginTop) || 0;
+      const mb = parseFloat(cs.marginBottom) || 0;
+      const spacingEm = fs > 0 ? (mt + mb) / 2 / fs : 0;
+      let lh = 0;
+      const raw = (cs.lineHeight || "").trim();
+      if (raw && raw !== "normal") {
+        const px = parseFloat(raw);
+        if (!isNaN(px)) lh = raw.endsWith("px") && fs > 0 ? px / fs : px;
+      }
+      const paragraphSpacing = spacingEm > 0 ? Math.min(2, Math.max(0, spacingEm)) : 0;
+      const lineHeight = lh >= 1.4 && lh <= 2.2 ? lh : 0;
+      if (paragraphSpacing <= 0 && lineHeight <= 0) return null;
+      return { paragraphSpacing, lineHeight };
+    } catch (__e) { logSwallow(__e, "ReaderView.svelte · captureSiyuanParagraphTypography", "debug"); return null; }
+  }
+
+  function setFollowSiyuanParagraph(e: Event) {
+    settings = settingsStore.update({
+      layout: { ...settings.layout, followSiyuanParagraph: (e.target as HTMLInputElement).checked },
     });
     applyStyles();
   }
@@ -7899,6 +7956,20 @@
             <span class="reader-switch-track"></span>
           </label>
         </div>
+
+        {#if settings.fontMode === "follow-siyuan"}
+          <div class="reader-setting-row reader-setting-toggle-row">
+            <span class="reader-setting-label">跟随思源段距/行高</span>
+            <label class="reader-switch" title="抓取思源文档段落的段距与行高套用到阅读器（仅跟随思源模式生效）。⚠️ 思源未把段距/行高做成变量，只能抓实时 DOM，依赖内部样式、且思源段距偏密，可能拥挤。">
+              <input
+                type="checkbox"
+                checked={!!settings.layout.followSiyuanParagraph}
+                on:change={setFollowSiyuanParagraph}
+              />
+              <span class="reader-switch-track"></span>
+            </label>
+          </div>
+        {/if}
 
         {#if settings.fontMode === "classified"}
           <div class="reader-setting-row">

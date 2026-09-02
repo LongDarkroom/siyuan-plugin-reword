@@ -99,6 +99,9 @@ export interface ReaderLayoutSettings {
   use24Hour: boolean;
   /** 跟随思源文档边距：用宿主 .protyle-wysiwyg 的水平 padding 作为阅读器左右边距（默认 false，2026-08-29） */
   followSiyuanMargin?: boolean;
+  /** 跟随思源段距/行高：抓取宿主 .protyle-wysiwyg p 的计算 margin / line-height 套用为阅读器段距/行高（默认 false，2026-09-02）。
+   *  ⚠️ 脆弱：思源未把段距/行高暴露成 CSS 变量，只能抓实时 DOM；且思源文档段距偏密，照搬可能拥挤。故默认关、界面标注风险。 */
+  followSiyuanParagraph?: boolean;
   /** 重启思源后自动恢复上次打开的阅读 Tab（默认 true；思源不会自动恢复自定义插件 Tab） */
   restoreTabsOnLaunch?: boolean;
 }
@@ -312,6 +315,7 @@ export const READER_DEFAULT_SETTINGS: ReaderSettings = {
     showCurrentTime: false,
     use24Hour: false,
     followSiyuanMargin: false,
+    followSiyuanParagraph: false,
     restoreTabsOnLaunch: true,
   },
   note: {
