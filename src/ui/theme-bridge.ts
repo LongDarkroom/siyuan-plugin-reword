@@ -94,11 +94,9 @@ export function initThemeBridge(): void {
   };
   if (document.body) observeBody();
   else document.addEventListener("DOMContentLoaded", observeBody, { once: true });
-  // 3) <head> 子节点增删（思源换主题常表现为替换/插入主题 <style> 或 <link data-type="theme">，
-  //    此时不触发 <html>/<body> 属性变化，必须靠这里兜住；配合 computeThemeSig 的值 diff 去抖）。
-  if (document.head) {
-    observer.observe(document.head, { childList: true, subtree: true });
-  }
+  // 3) <head> 子节点增删观察已移除（2026-09-02）：思源运行时会频繁向 <head> 注入/移除 <style>，
+  //    导致该观察器高频触发 scheduleNotify → 阅读器 iframe 反复 setStyles，引发严重卡顿。
+  //    主题色跟随仍由 <html>/<body> 属性变化兜住；若只换主题色卡（不换明暗模式），需手动刷新阅读器。
 }
 
 /** 订阅思源主题切换，返回取消订阅函数（onDestroy 时调用） */
