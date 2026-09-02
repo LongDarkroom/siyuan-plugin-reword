@@ -41,6 +41,7 @@ const TESTS = [
   "test/online-cache-ttl.test.mjs",
   "test/ai-doc-ref.test.mjs",
   "test/ai-refs.test.mjs",
+  "test/ai-refs-panel.test.mjs",
   "test/clean-for-ai-doc-ref.test.mjs",
   "test/get-document-content.test.mjs",
   "test/ai-settings-normalize.test.mjs",

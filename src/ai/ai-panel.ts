@@ -257,7 +257,16 @@ export class AiPanel {
   private attachments = new Map<string, RefAttachment>();
   /** 引用正文拉取的 in-flight Promise（按 id 去重）：预取与发送并发时共享同一次请求 */
   private refPending = new Map<string, Promise<RefAttachment | null>>();
-  constructor(private host: AiHost) {}
+  /**
+   * 宿主能力注入。
+   * 注：刻意不用 TS 参数属性（`constructor(private host: AiHost)`）——
+   * node --experimental-strip-types 在 strip-only 模式下不支持参数属性，
+   * 会导致整个模块无法被测试 import。保持普通字段赋值即可让 ai-panel 可被单测直接加载。
+   */
+  private host: AiHost;
+  constructor(host: AiHost) {
+    this.host = host;
+  }
 
   render(dockElement: HTMLElement): void {
     // 构建版本标记：用于在 DevTools 确认当前加载的是否为最新构建产物
