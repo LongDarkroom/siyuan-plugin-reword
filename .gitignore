@@ -10,11 +10,8 @@ qa-reports/
 .workbuddy/
 package-lock.json
 
-# 测试书籍与封面（不进公共仓库，避免体积膨胀）
-books/*.epub
-books/*.pdf
-books/covers/*.jpeg
-books/covers/*.jpg
+# 测试书籍与封面(只本地 dev 用,完整排除以免仓库膨胀)
+books/
 # 上架素材生成脚本（本地使用，不进库）
 scripts/gen_assets.py
 # 离线词典数据（77MB，本地使用，不进公共仓库）
