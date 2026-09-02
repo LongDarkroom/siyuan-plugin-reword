@@ -13,6 +13,10 @@
 //   .reader-popover-title { position: sticky; top: 0; }
 //   .reader-toc-item { font-size: 13px; line-height: 1.7; padding: 8px 10px; }
 //
+// 2026-08-30 抽屉改造：.reader-toc 与 .reader-bookmarks / .reader-annots
+// 合并为同一条分组选择器规则（跨行书写），宽度改为 width:280px + min-width:240px。
+// 本文件的 getBlock() 已支持分组选择器，勿退回 `\.sel\s*\{` 形式的正则。
+//
 // 不依赖：foliate / siyuan SDK
 
 import { test } from "node:test";
@@ -27,11 +31,34 @@ const readerViewPath = join(__dirname, "..", "src", "reader", "ReaderView.svelte
 
 const readerViewSrc = readFileSync(readerViewPath, "utf-8");
 
-/** 抽取单个 CSS 块 */
+/**
+ * 抽取单个 CSS 块的【内容】（不含首尾花括号）。
+ *
+ * 必须支持多行分组选择器：抽屉改造后 .reader-toc 与 .reader-bookmarks /
+ * .reader-annots 共享同一条规则，且选择器列表跨行书写：
+ *     .reader-toc,
+ *     .reader-bookmarks,
+ *     .reader-annots { ... }
+ * 旧正则 `\.reader-toc\s*\{` 要求选择器名后紧跟 `{`，命中不到分组选择器，
+ * 静默取回空串，导致依赖它的断言全部误判为「样式丢失」—— 实际上样式一直在。
+ *
+ * 做法：先定位 `.选择器名`，再向后扫到第一个 `{`（中间允许逗号与其他选择器、
+ * 允许换行），然后用花括号配对取完整块，兼顾嵌套（如 @media / @keyframes）。
+ */
 function getBlock(sel) {
-  const re = new RegExp(`\\.${sel}\\s*\\{([\\s\\S]*?)\\}`, "m");
-  const m = readerViewSrc.match(re);
-  return m ? m[1] : "";
+  const idx = readerViewSrc.indexOf("." + sel);
+  if (idx < 0) return "";
+  const open = readerViewSrc.indexOf("{", idx);
+  if (open < 0) return "";
+  let depth = 0;
+  for (let i = open; i < readerViewSrc.length; i++) {
+    if (readerViewSrc[i] === "{") depth++;
+    else if (readerViewSrc[i] === "}") {
+      depth--;
+      if (depth === 0) return readerViewSrc.slice(open + 1, i);
+    }
+  }
+  return "";
 }
 
 const toc = getBlock("reader-toc");
@@ -84,8 +111,10 @@ test(".reader-toc-item 长章节名截断（white-space: nowrap + text-overflow:
   assert.match(item, /text-overflow\s*:\s*ellipsis/);
 });
 
-test(".reader-toc 宽度 220px 起步", () => {
-  assert.match(toc, /min-width\s*:\s*220px/, `.reader-toc should have min-width: 220px, got: ${toc}`);
+test(".reader-toc 最小宽度 240px（抽屉统一宽度）", () => {
+  // 2026-08-30 抽屉改造：目录 / 书签 / 摘录三个抽屉共享同一条规则，
+  // 宽度约束为 width: 280px + min-width: 240px（原 220px 随改造上调）。
+  assert.match(toc, /min-width\s*:\s*240px/, `.reader-toc should have min-width: 240px, got: ${toc}`);
 });
 
 test("[回归] 目录 popover 不会撑破视口", () => {

@@ -32,40 +32,57 @@ const __dirname = dirname(__filename);
 const readerViewPath = join(__dirname, "..", "src", "reader", "ReaderView.svelte");
 const src = readFileSync(readerViewPath, "utf-8");
 
-/** 抽 onMount 完整函数体（处理嵌套花括号） */
-function extractOnMountBody(src) {
-  const sig = "onMount(() => {";
-  const idx = src.indexOf(sig);
+/**
+ * 按花括号配对抽取函数体（含首尾花括号）。
+ *
+ * 为什么不用 `/function xxx[^{]*\{([\s\S]*?)\n\s*\}/` 这类正则：
+ * 它在函数体里第一个「行首 }」处就会截断 —— 只要函数内出现任何内嵌块
+ * （如 `if (...) { ... }`），取到的就只是前半截，后续断言全部误判。
+ * 本文件的 onContainerMouseDown 正是栽在这里：函数开头有一处
+ * `if (dictPopupSource === "hover" ...) { ... }` 早退块，旧正则在此收尾，
+ * 导致完全读不到后半段的 .reader-popover / .reader-toolbar 判断。
+ *
+ * 起点用 `{\n`（紧跟换行）定位函数体左花括号，可跳过签名里的内联类型
+ * （如 `(_e: MouseEvent)`），避免切到类型注解上。
+ */
+function bodyOf(src, name, from = 0) {
+  const idx = src.indexOf(name, from);
   if (idx < 0) return null;
-  const start = src.indexOf("{", idx);
-  if (start < 0) return null;
+  let open = -1;
+  for (let i = idx; i < src.length - 1; i++) {
+    if (src[i] === "{" && (src[i + 1] === "\n" || src[i + 1] === "\r")) {
+      open = i;
+      break;
+    }
+  }
+  if (open < 0) return null;
   let depth = 0;
-  for (let i = start; i < src.length; i++) {
+  for (let i = open; i < src.length; i++) {
     if (src[i] === "{") depth++;
     else if (src[i] === "}") {
       depth--;
-      if (depth === 0) return src.substring(start, i + 1);
+      if (depth === 0) return src.slice(open, i + 1);
     }
   }
   return null;
 }
 
-/** 抽 onDestroy 完整函数体 */
-function extractOnDestroyBody(src) {
-  const sig = "onDestroy(() => {";
-  const idx = src.indexOf(sig);
-  if (idx < 0) return null;
-  const start = src.indexOf("{", idx);
-  if (start < 0) return null;
-  let depth = 0;
-  for (let i = start; i < src.length; i++) {
-    if (src[i] === "{") depth++;
-    else if (src[i] === "}") {
-      depth--;
-      if (depth === 0) return src.substring(start, i + 1);
-    }
+/**
+ * 抽取文件里【所有】同名生命周期块。
+ * ReaderView.svelte 现有两处 onDestroy（一处处清理定时器、一处处解绑监听），
+ * 只取第一个会漏掉真正注销 mousedown 的那一个，故必须遍历全部。
+ */
+function allBodiesOf(src, name) {
+  const out = [];
+  let from = 0;
+  for (;;) {
+    const idx = src.indexOf(name, from);
+    if (idx < 0) break;
+    const body = bodyOf(src, name, idx);
+    if (body) out.push(body);
+    from = idx + name.length;
   }
-  return null;
+  return out;
 }
 
 test("ReaderView 含 onContainerMouseDown 函数定义", () => {
@@ -81,18 +98,16 @@ test("ReaderView 含 closeAllPopovers 函数定义（统一关闭入口）", () 
 });
 
 test("closeAllPopovers 关闭 showToc / showSettings / showSearch 三个 popover", () => {
-  const m = src.match(/function\s+closeAllPopovers\s*\(\)\s*\{([\s\S]*?)\n\s*\}/);
-  assert.ok(m, "closeAllPopovers function should exist");
-  const body = m[1];
+  const body = bodyOf(src, "function closeAllPopovers");
+  assert.ok(body, "closeAllPopovers function should exist");
   assert.match(body, /showToc\s*=\s*false/, "should close showToc");
   assert.match(body, /showSettings\s*=\s*false/, "should close showSettings");
   assert.match(body, /showSearch\s*=\s*false/, "should close showSearch");
 });
 
 test("onContainerMouseDown 优先跳过 .reader-popover（点击 popover 内不关闭）", () => {
-  const m = src.match(/function\s+onContainerMouseDown\s*\([^)]*\)\s*\{([\s\S]*?)\n\s*\}/);
-  assert.ok(m, "onContainerMouseDown function should exist");
-  const body = m[1];
+  const body = bodyOf(src, "function onContainerMouseDown");
+  assert.ok(body, "onContainerMouseDown function should exist");
   assert.match(body, /closest\??\.\s*\(\s*['"]\.reader-popover['"]\s*\)/, "should use closest('.reader-popover') (with optional chaining)");
   const popoverIdx = body.indexOf(".reader-popover");
   const toolbarIdx = body.indexOf(".reader-toolbar");
@@ -103,9 +118,8 @@ test("onContainerMouseDown 优先跳过 .reader-popover（点击 popover 内不�
 });
 
 test("onContainerMouseDown 跳过 .reader-toolbar（让 click 自行 toggle）", () => {
-  const m = src.match(/function\s+onContainerMouseDown\s*\([^)]*\)\s*\{([\s\S]*?)\n\s*\}/);
-  assert.ok(m);
-  const body = m[1];
+  const body = bodyOf(src, "function onContainerMouseDown");
+  assert.ok(body);
   assert.match(body, /closest\??\.\s*\(\s*['"]\.reader-toolbar['"]\s*\)/, "should use closest('.reader-toolbar')");
   const toolbarIdx = body.indexOf(".reader-toolbar");
   const toolbarLine = body.substring(toolbarIdx, body.indexOf("\n", toolbarIdx));
@@ -113,14 +127,13 @@ test("onContainerMouseDown 跳过 .reader-toolbar（让 click 自行 toggle）",
 });
 
 test("onContainerMouseDown 在 popover + toolbar 之外调用 closeAllPopovers", () => {
-  const m = src.match(/function\s+onContainerMouseDown\s*\([^)]*\)\s*\{([\s\S]*?)\n\s*\}/);
-  assert.ok(m);
-  const body = m[1];
+  const body = bodyOf(src, "function onContainerMouseDown");
+  assert.ok(body);
   assert.match(body, /closeAllPopovers\s*\(\)/, "should call closeAllPopovers() in fallback branch");
 });
 
 test("onMount 注册 readerViewEl mousedown 监听（限定在阅读器容器内）", () => {
-  const onMountBody = extractOnMountBody(src);
+  const onMountBody = bodyOf(src, "onMount(() => {");
   assert.ok(onMountBody, "onMount body should extract");
   assert.match(
     onMountBody,
@@ -135,12 +148,14 @@ test("onMount 注册 readerViewEl mousedown 监听（限定在阅读器容器内
 });
 
 test("onDestroy 从 readerViewEl 移除 mousedown 监听（防内存泄漏 + 多 Tab 残留）", () => {
-  const onDestroyBody = extractOnDestroyBody(src);
-  assert.ok(onDestroyBody, "onDestroy body should extract");
+  // ReaderView 有多个 onDestroy 块，注销监听的可能是其中任意一个，故合并后判断。
+  const onDestroyBodies = allBodiesOf(src, "onDestroy(() => {");
+  assert.ok(onDestroyBodies.length > 0, "onDestroy body should extract");
+  const onDestroyBody = onDestroyBodies.join("\n");
   assert.match(
     onDestroyBody,
     /readerViewEl\.removeEventListener\s*\(\s*['"]mousedown['"]\s*,\s*onContainerMouseDown/,
-    "should remove mousedown from readerViewEl",
+    "should remove mousedown from readerViewEl (checked across all onDestroy blocks)",
   );
   assert.doesNotMatch(
     onDestroyBody,
@@ -150,23 +165,24 @@ test("onDestroy 从 readerViewEl 移除 mousedown 监听（防内存泄漏 + 多
 });
 
 test("[回归] 修复后用户点击 book 内容区自动关闭 popover（无需点 toolbar 按钮）", () => {
-  const m = src.match(/function\s+onContainerMouseDown\s*\([^)]*\)\s*\{([\s\S]*?)\n\s*\}/);
-  assert.ok(m);
-  const body = m[1];
-  const closeIdx = body.indexOf("closeAllPopovers");
+  const body = bodyOf(src, "function onContainerMouseDown");
+  assert.ok(body);
+  // 函数内现有两处 closeAllPopovers()：一处是「点 foliate 正文空白」的即时收起分支
+  // （位于若干 return 之前），另一处是函数末尾的兜底。本用例守护的是「兜底路径必须在
+  // 所有早退之后」，因此取【最后一次】出现来比较，而不是第一次。
+  const closeIdx = body.lastIndexOf("closeAllPopovers");
   const returnIdxs = [];
   const re = /return\s*;/g;
   let mm;
   while ((mm = re.exec(body)) !== null) returnIdxs.push(mm.index);
   if (returnIdxs.length > 0) {
-    assert.ok(closeIdx > returnIdxs[returnIdxs.length - 1], `closeAllPopovers should be AFTER all early returns. Found closeIdx=${closeIdx}, returns=${returnIdxs.join(",")}`);
+    assert.ok(closeIdx > returnIdxs[returnIdxs.length - 1], `fallback closeAllPopovers should be AFTER all early returns. Found lastCloseIdx=${closeIdx}, returns=${returnIdxs.join(",")}`);
   }
 });
 
 test("[回归] 修复后保留原有 toggle 行为（点 toolbar 按钮不立即关闭）", () => {
-  const m = src.match(/function\s+onContainerMouseDown\s*\([^)]*\)\s*\{([\s\S]*?)\n\s*\}/);
-  assert.ok(m);
-  const body = m[1];
+  const body = bodyOf(src, "function onContainerMouseDown");
+  assert.ok(body);
   const toolbarIdx = body.indexOf(".reader-toolbar");
   const toolbarLine = body.substring(toolbarIdx, body.indexOf("\n", toolbarIdx));
   assert.match(toolbarLine, /\)\s*\)?\s*return/, "toolbar mousedown must return early (do NOT close) so toolbar button click can toggle");
