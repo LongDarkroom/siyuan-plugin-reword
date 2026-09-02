@@ -682,11 +682,30 @@ html body li {
   margin-left: 0 !important;
   padding-left: 0 !important;
 }
+/* 强制统一文本对齐：覆盖书籍用高特异性类把段落设为 text-align:center */
+html body p,
+html body div,
+html body section,
+html body article,
+html body li,
+html body blockquote {
+  text-align: justify !important;
+}
 /* 图片/题注保持居中，不被清零拉偏 */
 html body figure,
 html body figcaption {
   margin-left: auto !important;
   margin-right: auto !important;
+  text-align: center !important;
+}
+/* 标题默认居中 */
+html body h1,
+html body h2,
+html body h3,
+html body h4,
+html body h5,
+html body h6 {
+  text-align: center !important;
 }`.trim();
 }
 
