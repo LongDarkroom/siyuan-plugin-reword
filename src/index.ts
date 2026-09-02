@@ -81,7 +81,11 @@ import type { DeepReadWord, DeepReadSentence } from "./ai/ai-orchestrator.ts";
 import { AiPresetStore, type AiPreset } from "./ai/ai-preset.ts";
 import { PromptTemplateStore, type AiPromptTemplate } from "./ai/ai-prompt-templates.ts";
 import { searchDocs as searchAiDocs, getDocText as getAiDocText, type AiDocSearchResult } from "./ai/ai-doc-search.ts";
-import { extractDocIdFromDrag } from "./ai/drag-doc-id.ts";
+import {
+  extractDocIdFromDrag,
+  resolveDocIdFromDragSource,
+  blockTypeFromDomType,
+} from "./ai/drag-doc-id.ts";
 import { sessionStore, type AiSessionData } from "./ai/ai-session-store.ts";
 import { getBlockKramdownText as getBlockKramdown } from "./siyuan/api.ts";
 import { sqlQuery } from "./siyuan/attrs.ts";
@@ -406,8 +410,15 @@ export default class RewordPlugin extends Plugin {
   private whaleSearchKw = "";
   /** 2026-09-01 P2：已绑定 loadMore 委托的 contentEl（WeakSet 自动回收，dock 重建后自动重绑） */
   private whaleLoadMoreBound = new WeakSet<HTMLElement>();
-  /** v4：全局 dragstart 记录的源块 ID（拖入 AI 面板用，60s 内有效、消费即清） */
-  private draggingBlockId: { id: string; ts: number } | null = null;
+  /** v4：全局 dragstart 记录的源块 ID（拖入 AI 面板用，60s 内有效、消费即清）
+   *  2026-09-02：附带 DOM 解析出的块类型，省掉一次 SQL 查询（仅为卡片图标） */
+  private draggingBlockId: { id: string; ts: number; type?: string } | null = null;
+  /**
+   * 2026-09-02 P0：全局 dragstart 记录的**源文档 ID**（页签 / 文档树拖入）。
+   * 必须在 dragstart 解析——drop 的 e.target 是放置目标，反推不出来源。
+   * 与 draggingBlockId 互斥：源在文档正文内记块，否则记文档。
+   */
+  private draggingDocId: { id: string; ts: number } | null = null;
   /** v5：dragstart 时记录的选中文本（作为块 ID 检测失败时的回退内容） */
   private draggingBlockText: string | null = null;
   /** v6：最近一次有效选区缓存（仅文档 .protyle-wysiwyg 内非空选中）。
@@ -643,14 +654,29 @@ export default class RewordPlugin extends Plugin {
     // 思源 Protyle 拖拽文本块时可能 stopPropagation，故用 capture 阶段拦截
     // 同时记录 dataTransfer.types 以便 drop 时回溯
     this.disposables.addEventListener(document, "dragstart", (e) => {
-      const el = (e.target as HTMLElement | null)?.closest?.("[data-node-id]") as HTMLElement | null;
+      const srcEl = (e.target as HTMLElement | null) ?? null;
+      const el = srcEl?.closest?.("[data-node-id]") as HTMLElement | null;
       const id = el?.dataset?.nodeId;
+      // 源是否位于文档正文内（.protyle-wysiwyg）：是 → 块拖拽；否 → 可能是页签/文档树
+      const srcInWysiwyg = !!el?.closest?.(".protyle-wysiwyg");
+      // 2026-09-02 P0：页签 / 文档树必须在 dragstart 解析 ——
+      // drop 时 e.target 已是放置目标（AI 面板自身），反推会误抓 dock 面板 UUID。
+      const docCandidate = srcInWysiwyg ? null : resolveDocIdFromDragSource(srcEl);
       // 思源块 ID 格式：YYYYMMDDHHmmss-xxxxxx，保留原始连字符（思源 API 不识别去连字符格式）
-      if (id && /^[a-z0-9-]{14,}$/i.test(id)) {
-        this.draggingBlockId = { id, ts: Date.now() };
-        getLogger().info("[REword] dragstart 捕获块 ID:" + id);
+      const validBlockId = !!id && /^[a-z0-9-]{14,}$/i.test(id);
+      if (docCandidate) {
+        this.draggingBlockId = null;
+        this.draggingDocId = { id: docCandidate, ts: Date.now() };
+        getLogger().info("[REword] dragstart 捕获文档 ID:" + docCandidate);
+      } else if (validBlockId) {
+        // 块类型直接从 DOM 的 data-type 映射，省掉一次 SQL（仅为卡片图标）
+        const domType = blockTypeFromDomType(el?.dataset?.type);
+        this.draggingBlockId = { id, ts: Date.now(), type: domType || undefined };
+        this.draggingDocId = null;
+        getLogger().info("[REword] dragstart 捕获块 ID:" + id + " type=" + (domType || "(未知)"));
       } else {
         this.draggingBlockId = null;
+        this.draggingDocId = null;
       }
       // 始终记录选中文本作为回退（无论是否找到块 ID）
       const selection = window.getSelection();
@@ -670,6 +696,7 @@ export default class RewordPlugin extends Plugin {
     this.disposables.addEventListener(document, "dragend", () => {
       getLogger().info("[REword] dragend，清理拖拽状态");
       this.draggingBlockId = null;
+      this.draggingDocId = null;
       this.draggingBlockText = null;
     }, true);
 
@@ -2494,12 +2521,19 @@ export default class RewordPlugin extends Plugin {
     try {
       const target = e.target as HTMLElement | null;
       const dragEl = target?.closest("[data-node-id]") as HTMLElement | null;
-      if (dragEl) {
+      // 2026-09-02 P0：与文档解析同源的坑 —— drop 的 e.target 是**放置目标**。
+      // 顺着 AI 面板往上找很可能命中 REword 自己的输入框块，必须排除，
+      // 否则拖入外部纯文本会被当成"拖了输入框自身这个块"，无限自我引用。
+      const isOwnInput = !!dragEl?.closest?.(".hiword-ai-protyle");
+      if (dragEl && !isOwnInput) {
         const nodeId = dragEl.dataset.nodeId || "";
         // 保留原始连字符（思源 API 不识别去连字符格式，否则列表块等拉不到正文）
         if (/^[a-z0-9-]{14,}$/i.test(nodeId)) { getLogger().debug("[REword] ✅ 策略3命中(目标元素nodeId): " + nodeId); return nodeId; }
       }
-    } catch (__swallowErr) { logSwallow(__swallowErr, "index.ts · try { const target = e.target as HTMLElement | null; const drag…", "debug"); }
+      if (isOwnInput) {
+        getLogger().debug("[REword] 策略3跳过：命中的是 REword 输入框自身的块（drop 的 e.target 是放置目标）");
+      }
+    } catch (__swallowErr) { logSwallow(__swallowErr, "index.ts · resolveDragBlockId 策略3", "debug"); }
 
     getLogger().info("[REword] 所有策略均未命中，返回 null");
     return null;
@@ -2570,38 +2604,40 @@ export default class RewordPlugin extends Plugin {
   resolveDragDocId(e: DragEvent): string | null {
     if (!e.dataTransfer) return null;
     getLogger().info("[REword] resolveDragDocId types:" + [...e.dataTransfer.types]);
+    // 策略 0（2026-09-02 P0）：dragstart 记录的源文档 ID（本拖拽 60s 内有效，消费即清）
+    const src = this.draggingDocId;
+    if (src && Date.now() - src.ts < 60_000) {
+      this.draggingDocId = null; // 一次性消费，防跨面板污染
+      getLogger().info("[REword] ✅ resolveDragDocId 策略0命中（dragstart 记录）: " + src.id);
+      return src.id;
+    }
     const id = extractDocIdFromDrag(e);
     if (id) getLogger().info("[REword] ✅ resolveDragDocId 命中: " + id);
     return id;
   }
 
   /**
-   * 读取整篇文档正文（拼装 markdown，截断 12k）。
-   * A 任务：页签拖入时使用。
+   * 2026-09-02：拖拽源块的类型提示（dragstart 时从 DOM 的 data-type 映射）。
+   * 命中即可省掉一次 `SELECT type FROM blocks` 查询（该类型仅用于卡片图标）。
+   * 注意：必须在 resolveDragBlockId 之前调用（后者消费即清 draggingBlockId）。
+   */
+  resolveDragBlockType(_e: DragEvent): string | null {
+    const src = this.draggingBlockId;
+    return src?.type || null;
+  }
+
+  /**
+   * 读取整篇文档正文（markdown，截断 12k）。
+   * A 任务：页签 / 文档树拖入时使用。
    *
-   * 2026-08-21 P0 修复：先做 SQL 探针看 docId 在思源里到底是什么角色（根/子块/不存在）,
-   * 然后再调 getDocText;同时让 getDocText 抛错而非静默。
+   * 2026-09-02 简化：原来先跑一次 SQL 探针（SELECT id,type,root_id,markdown,content）
+   * 再把 5 个字段全丢弃、只为打日志，纯属浪费一次内核往返。
+   * 正文改由内核 `/api/export/exportMdContent` 一次导出（正确处理块引用 / 嵌入块 /
+   * IAL，并白送 hPath 标题），见 ai-doc-search.ts 的 getDocText。
    */
   async fetchDocText(docId: string): Promise<string | null> {
     if (!docId) return null;
     try {
-      // SQL 探针:看 docId 在 blocks 表里是否真的有这一行
-      try {
-        const { sqlQuery } = await import("./siyuan/attrs.ts");
-        const probe = await sqlQuery<{ id: string; type: string; root_id: string; markdown: string; content: string }>(
-          `SELECT id, type, root_id, markdown, content FROM blocks WHERE id='${docId}' LIMIT 1`
-        );
-        if (probe && probe.length > 0) {
-          const r = probe[0];
-          getLogger().info(
-            `[REword] fetchDocText 探针: docId=${docId} type=${r.type} root_id=${r.root_id} content_len=${(r.content || "").length} markdown_len=${(r.markdown || "").length}`
-          );
-        } else {
-          getLogger().warn(`[REword] fetchDocText 探针: docId=${docId} 在 blocks 表中 0 行（页签 data-id 可能不是块 ID）`);
-        }
-      } catch (probeErr) {
-        getLogger().warn(`[REword] fetchDocText 探针失败: ${(probeErr as Error)?.message || probeErr}`);
-      }
       const { getDocText } = await import("./ai/ai-doc-search.ts");
       const text = await getDocText(docId);
       if (!text) {

@@ -84,6 +84,12 @@ export interface AiHost {
   resolveDragBlockId(e: DragEvent): string | null;
   /** 从拖拽事件中解析文档 ID（识别思源页签 / 文档树节点），返回 docId 或 null */
   resolveDragDocId(e: DragEvent): string | null;
+  /**
+   * 2026-09-02：拖拽源块的类型提示（dragstart 时从 DOM data-type 映射，零 API）。
+   * 命中即可省掉一次 `SELECT type FROM blocks`（该类型只用于卡片图标）。
+   * 可选方法：宿主未实现时回退到 fetchBlockType 查询。
+   */
+  resolveDragBlockType?(e: DragEvent): string | null;
   /** 从 HTML 片段（text/html）中按文档顺序解析所有思源块 ID（data-node-id），去重返回 */
   resolveBlockIdsFromHtml(html: string): string[];
   /** 拖拽回退：无法识别块 ID 时提取纯文本（dragstart 记录的选中文本） */
@@ -225,6 +231,9 @@ export class AiPanel {
   private blockTextCache = new Map<string, string>();
   /** 2026-08-21 A 任务 v2：文档占位卡拉取的整篇正文缓存（会话内复用,避免多次发送重复拉取） */
   private docTextCache = new Map<string, string>();
+  /** 2026-09-02：文档正文拉取的 in-flight Promise（按 docId 去重）。
+   *  修复「预取与发送并发 → 同一 docId 被查两次」；也让 insertDocRef 能同步验证正文可用性。 */
+  private docTextPending = new Map<string, Promise<string | null>>();
   /** 原始 markdown 按消息索引存储（替代 data-raw-md DOM 属性，降低 innerHTML 解析负担，P3-2） */
   private rawMdByIndex = new Map<number, string>();
   /** 最近一次 getInputValue 序列化时从 DOM 缓存的块引用 id → 锚文本（供 cleanForAi 还原占位符给 UI 用） */
@@ -714,21 +723,12 @@ export class AiPanel {
       return;
     }
 
-    // 2) 思源页签 / 文档树节点（2026-08-21 v2:插入占位卡,发送时再实时拉取）
-    const docId = this.host.resolveDragDocId(e);
-    if (docId && docId.length >= 14) {
-      e.preventDefault();
-      e.stopPropagation();
-      try {
-        await this.insertDocRef(docId);   // 异步：插入卡片 + 预取文档全文缓存
-        logger.info("页签拖入占位成功", { operation: "页签拖入", data: { docId } });
-      } catch (err) {
-        logger.error("页签拖入失败", { operation: "页签拖入", error: err, data: { docId } });
-      }
-      return;
-    }
-
-    // 3) 思源块：优先 dragstart 记录，其次从 text/html 解析（跨窗口拖拽时 dragstart 不触发）
+    // ── 2) 思源块（2026-09-02 提到文档之前）──────────────────────────────
+    // 顺序很重要：旧版先判文档，而文档解析的 DOM 猜测路径会误抓 dock 面板自身 UUID 并恒命中，
+    // 导致「拖文本块」被当成「拖页签」，真块 ID 被丢弃、AI 收不到正文。
+    // 块拖拽更常见，且 dragstart 记录的是高可信 ID，故优先判定。
+    // 类型提示必须在 resolveDragBlockId 之前取（后者消费即清 dragstart 记录）
+    const blockTypeHint = this.host.resolveDragBlockType?.(e) || "";
     let blockId = this.host.resolveDragBlockId(e);
     if (!blockId && dt) {
       const htmlData = dt.getData("text/html") || "";
@@ -741,7 +741,7 @@ export class AiPanel {
       e.preventDefault();
       e.stopPropagation();
       try {
-        await this.insertBlockRef(blockId);
+        await this.insertBlockRef(blockId, blockTypeHint);
         logger.info("块引用插入成功", { operation: "拖块插入", data: { blockId } });
       } catch (err) {
         logger.error("块引用插入失败", { operation: "拖块插入", error: err, data: { blockId } });
@@ -749,8 +749,35 @@ export class AiPanel {
       return;
     }
 
-    // 3) 纯文本 / 外部富文本
-    if (this.protyle) {
+    // ── 3) 思源页签 / 文档树节点 ────────────────────────────────────────
+    // 先验证正文真的能取到，取不到就不插那张"注定失败"的卡片，继续走后面的纯文本兜底。
+    const docId = this.host.resolveDragDocId(e);
+    // 已 preventDefault 但没插成卡片：原生管线不会再处理，后续必须自己兜底，
+    // 否则用户会看到"拖了但什么都没发生"。
+    let docConsumed = false;
+    if (docId && docId.length >= 14) {
+      e.preventDefault();
+      e.stopPropagation();
+      docConsumed = true;
+      try {
+        const text = await this.prefetchDocText(docId);
+        if (text) {
+          await this.insertDocRef(docId, text);
+          logger.info("页签拖入成功", { operation: "页签拖入", data: { docId, len: text.length } });
+          return;
+        }
+        logger.warn("页签拖入：正文为空，不插入卡片并回退到纯文本", {
+          operation: "页签拖入",
+          data: { docId },
+        });
+      } catch (err) {
+        logger.error("页签拖入失败", { operation: "页签拖入", error: err, data: { docId } });
+      }
+      // 文档路径不通：不 return，继续走纯文本 / 富文本兜底
+    }
+
+    // 4) 纯文本 / 外部富文本
+    if (this.protyle && !docConsumed) {
       // Protyle 模式：交给原生管线处理（同引擎零转换，保留加粗 / 代码 / 颜色 / 链接等）
       return;
     }
@@ -838,7 +865,7 @@ export class AiPanel {
    *   ② 验证 block-ref 是否出现，未出现则直接 DOM 插入；
    *   ③ 强制刷新 --empty 态防占位符遮挡。
    */
-  private async insertBlockRef(blockId: string): Promise<void> {
+  private async insertBlockRef(blockId: string, typeHint = ""): Promise<void> {
     const logger = getLogger();
     const kramdownBody = (await this.host.fetchBlockText(blockId)) || "";
     // ★ 缓存内核 API 返回的完整 kramdown 正文到 refKramdownById，
@@ -846,7 +873,8 @@ export class AiPanel {
     if (kramdownBody) this.refKramdownById.set(blockId, kramdownBody);
     // 块类型：用于卡片差异化图标/颜色（段落 ¶ / 列表 ☰ / 标题 H / 代码 </> / 引用 "）
     // 误取/失败时不加修饰类，退化为默认段落样式，不影响功能
-    const blockType = (await this.host.fetchBlockType(blockId)) || "";
+    // 2026-09-02：dragstart 已从 DOM 的 data-type 直接映射出类型 → 跳过一次 SQL 查询
+    const blockType = typeHint || (await this.host.fetchBlockType(blockId)) || "";
     const typeClass = blockType ? ` hiword-ai-block-ref--${blockType}` : "";
     // anchor 用作输入框折叠卡片显示（取正文前 6 字预览）
     const anchor = kramdownBody;
@@ -921,19 +949,22 @@ export class AiPanel {
    *     都能识别；发送时由 expandDocRefs 按「📄 文档 」锚前缀识别为文档引用，
    *     调 host.fetchDocText 实时拉取全文，复用既有逻辑，且文档被改也能拿到最新版。
    */
-  private async insertDocRef(docId: string): Promise<void> {
+  private async insertDocRef(docId: string, prefetched?: string | null): Promise<void> {
     const logger = getLogger();
     logger.info("页签/文档树拖入,插入文档引用卡片 docId=" + docId, { operation: "页签拖入" });
 
     const shortId = docId.replace(/-/g, "").slice(-6);
-    // 静态锚（data-subtype="s"）：保留我们手填的「📄 文档 XXXXXX」，不随块正文变化
-    const anchor = `📄 文档 ${shortId}`;
     // 属性值转义：防 XSS / 引号截断
     const safeId = docId.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    // prefetched 已在 handleDrop 阶段取到 → 直接 ready；否则先插 loading 卡再后台补
+    const initialStatus = prefetched ? "ready" : "loading";
+    const initialTitle = prefetched
+      ? "文档全文已就绪，发送时一并提交"
+      : "正在载入文档全文…（发送时一并提交）";
     const card =
       `<span data-type="block-ref" data-id="${safeId}" ` +
-      `data-subtype="s" class="hiword-ai-doc-ref" data-doc-status="loading" ` +
-      `title="正在载入文档全文…（发送时一并提交）">📄 文档 ${escapeHtml(shortId)}</span>`;
+      `data-subtype="s" class="hiword-ai-doc-ref" data-doc-status="${initialStatus}" ` +
+      `title="${initialTitle}">📄 文档 ${escapeHtml(shortId)}</span>`;
 
     // 预取完成后更新卡片状态角标（loading → ready / failed）
     const updateDocCardStatus = (status: "ready" | "failed") => {
@@ -947,21 +978,24 @@ export class AiPanel {
       }
     };
 
-    // ★ 预取文档全文并缓存（与 insertBlockRef 的 refKramdownById 对齐），
-    //   发送时 expandDocRefs 优先用缓存，避免发送时实时拉取失败导致 AI 收不到内容
-    this.host.fetchDocText(docId).then((text) => {
-      if (text) {
-        this.docTextCache.set(docId, text);
-        logger.info("文档预取成功", { operation: "页签拖入", data: { docId, len: text.length } });
-        updateDocCardStatus("ready");
-      } else {
-        logger.warn("文档预取为空，发送时将重试", { operation: "页签拖入", data: { docId } });
+    if (prefetched) {
+      this.docTextCache.set(docId, prefetched);
+      this.trimDocTextCache();
+    } else {
+      // 后台补取（只可能发生在非 handleDrop 调用方）：prefetchDocText 内部按 docId 去重
+      this.prefetchDocText(docId).then((text) => {
+        if (text) {
+          logger.info("文档预取成功", { operation: "页签拖入", data: { docId, len: text.length } });
+          updateDocCardStatus("ready");
+        } else {
+          logger.warn("文档预取为空，发送时将重试", { operation: "页签拖入", data: { docId } });
+          updateDocCardStatus("failed");
+        }
+      }).catch((e) => {
+        logger.warn("文档预取异常，发送时将重试", { operation: "页签拖入", data: { docId }, error: e });
         updateDocCardStatus("failed");
-      }
-    }).catch((e) => {
-      logger.warn("文档预取异常，发送时将重试", { operation: "页签拖入", data: { docId }, error: e });
-      updateDocCardStatus("failed");
-    });
+      });
+    }
 
     if (this.protyle) {
       const wysiwyg = this.protyle.protyle?.wysiwyg?.element;
@@ -973,8 +1007,51 @@ export class AiPanel {
     }
     logger.info("页签拖入文档引用卡片已插入", { operation: "页签拖入", data: { docId, shortId } });
     try {
-      (window as any).siyuan?.showMessage?.(`已添加文档上下文(发送时实时拉取)`, 2000, "info");
-    } catch (__swallowErr) { logSwallow(__swallowErr, "ai-panel.ts · try { (window as any).siyuan?.showMessage?.(`已添加文档上下文(发送时实时拉取)`…", "debug"); }
+      (window as any).siyuan?.showMessage?.(
+        prefetched ? `已添加文档上下文（${prefetched.length} 字）` : `已添加文档上下文(发送时实时拉取)`,
+        2000,
+        "info"
+      );
+    } catch (__swallowErr) { logSwallow(__swallowErr, "ai-panel.ts · showMessage 文档上下文", "debug"); }
+  }
+
+  /**
+   * 2026-09-02：文档正文拉取 + 缓存，按 docId 去重。
+   * 旧实现在 insertDocRef 里直接 `host.fetchDocText().then()`，与发送时的
+   * expandDocRefs 各拉各的 → 同一 docId 被查两次（日志实证：同一 ID 两次 SQL）。
+   * 统一走这里后：预取与发送共享同一个 in-flight Promise，重复调用零额外请求。
+   */
+  private prefetchDocText(docId: string): Promise<string | null> {
+    if (!docId) return Promise.resolve(null);
+    const cached = this.docTextCache.get(docId);
+    if (cached !== undefined) return Promise.resolve(cached);
+    const pending = this.docTextPending.get(docId);
+    if (pending) return pending;
+
+    const p = this.host
+      .fetchDocText(docId)
+      .then((text) => {
+        if (text) {
+          this.docTextCache.set(docId, text);
+          this.trimDocTextCache();
+        }
+        this.docTextPending.delete(docId);
+        return text;
+      })
+      .catch((e) => {
+        getLogger().warn("[REword] 文档正文拉取异常 docId=" + docId, { error: e as Error });
+        this.docTextPending.delete(docId);
+        return null;
+      });
+    this.docTextPending.set(docId, p);
+    return p;
+  }
+
+  /** 简单 LRU：文档正文比块正文大得多，上限更保守（50 条） */
+  private trimDocTextCache(): void {
+    if (this.docTextCache.size <= 50) return;
+    const oldest = this.docTextCache.keys().next().value as string | undefined;
+    if (oldest) this.docTextCache.delete(oldest);
   }
 
   /** 直接向 wysiwyg DOM 写入块引用卡片（绕开思源 insertHTML 所有静默失败点） */
@@ -1806,29 +1883,15 @@ export class AiPanel {
       const anchor = m[2] || "";
       if (!/^📄 文档 /.test(anchor)) continue;
       const docId = m[1];
-      let text: string | undefined = this.docTextCache.get(docId);
-      if (text !== undefined) {
-        getLogger().info("[REword] expandDocRefs 缓存命中 docId=" + docId + " len=" + text.length);
-      } else {
-        // 缓存未命中：实时拉取（历史会话 / 预取失败时的兜底）
-        getLogger().info("[REword] expandDocRefs 缓存未命中，实时拉取 docId=" + docId);
-        let fetched: string | null = null;
-        try {
-          fetched = await this.host.fetchDocText(docId);
-        } catch (e) {
-          getLogger().warn("[REword] expandDocRefs 拉取失败 docId=" + docId, { error: e as Error });
-        }
-        if (fetched) {
-          this.docTextCache.set(docId, fetched);
-          // 简单 LRU：超过 50 条时淘汰最旧（文档比块大,上限更保守）
-          if (this.docTextCache.size > 50) {
-            const oldest = this.docTextCache.keys().next().value as string | undefined;
-            if (oldest) this.docTextCache.delete(oldest);
-          }
-          text = fetched;
-        } else {
-          getLogger().warn("[REword] expandDocRefs 拉取结果为空 docId=" + docId + "（AI 将收到降级提示）");
-        }
+      // 2026-09-02：统一走 prefetchDocText（按 docId 去重，共享 in-flight Promise）。
+      // 旧实现「缓存命中就用，否则各拉各的」会在预取与发送并发时重复请求同一文档。
+      const cached = this.docTextCache.get(docId);
+      if (cached !== undefined) {
+        getLogger().info("[REword] expandDocRefs 缓存命中 docId=" + docId + " len=" + cached.length);
+      }
+      const text = await this.prefetchDocText(docId);
+      if (!text) {
+        getLogger().warn("[REword] expandDocRefs 拉取结果为空 docId=" + docId + "（AI 将收到降级提示）");
       }
       if (text) {
         const shortId = docId.replace(/-/g, "").slice(-6);

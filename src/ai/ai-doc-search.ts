@@ -13,6 +13,7 @@ import {
   searchDocuments,
   listDocuments,
   getDocumentContent,
+  exportMdContent,
 } from "../siyuan/api.ts";
 
 /** 文档搜索结果项 */
@@ -47,17 +48,42 @@ export async function searchDocs(
 }
 
 /**
- * 读取文档正文（拼装文档下所有块的 markdown，超出 maxLen 截断）。
+ * 读取文档正文（markdown，超出 maxLen 截断）。
  * @param docId  文档根块 ID
  * @param maxLen 最大字符数，默认 12000
  *
- * P0 修复（2026-08-21）：错误不再静默,改为 throw,让上游 fetchDocText 能打到具体原因。
- * 旧版 try/catch return "" 会让任何 SQL 错误/0 行匹配都"假装成功",用户拖页签毫无反应。
+ * 2026-09-02 简化：改走内核 `/api/export/exportMdContent`（一次调用）。
+ * 相比原先「手写 SQL 按 sort,id 排序再自己 join」有三个好处：
+ *   1) 块引用 / 嵌入块 / IAL 由内核正确处理，不再出现拼装错乱；
+ *   2) 顺带拿到 hPath 文档标题（旧路径拿不到，docTitleHint 只能返回 undefined）；
+ *   3) 少一次内核往返（原来还要先跑一次纯诊断的 SQL 探针）。
+ *
+ * 错误不静默：一律 throw，让上游 fetchDocText 记录具体原因。
+ * 旧版 try/catch return "" 会让任何错误都"假装成功"，用户拖页签毫无反应。
  */
 export async function getDocText(docId: string, maxLen = 12000): Promise<string> {
-  const raw = await getDocumentContent(docId, true);
-  if (!raw) {
-    throw new Error(`getDocumentContent 返回空:docId=${docId} 长度=${docId.length}(思源 v3.x 文档 ID 是 UUID 36 位)`);
+  let raw = "";
+  try {
+    const res = await exportMdContent(docId);
+    raw = res?.content || "";
+  } catch (e) {
+    // 内核导出失败（如 docId 不是文档根）→ 兜底走 SQL 拼装，不让整条链路断掉
+    const fallback = await getDocumentContent(docId, true);
+    if (!fallback) {
+      throw new Error(
+        `文档正文读取失败:docId=${docId} 长度=${docId.length};` +
+        `exportMdContent 异常=${(e as Error)?.message || e};SQL 兜底也为空`
+      );
+    }
+    raw = fallback;
+  }
+  if (!raw.trim()) {
+    // exportMdContent 成功但内容为空 → 再试一次 SQL 兜底
+    const fallback = await getDocumentContent(docId, true);
+    if (fallback) raw = fallback;
+  }
+  if (!raw.trim()) {
+    throw new Error(`文档正文为空:docId=${docId} 长度=${docId.length}（该 ID 可能不是文档根块）`);
   }
   return raw.length > maxLen ? raw.slice(0, maxLen) + "\n…（已截断）" : raw;
 }
