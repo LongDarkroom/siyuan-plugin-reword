@@ -2382,7 +2382,7 @@
   /* ================= 设置操作 ================= */
 
   function changeFont(delta: number) {
-    settings = settingsStore.update({ fontSize: Math.min(28, Math.max(12, settings.fontSize + delta)) });
+    settings = settingsStore.update({ fontSize: Math.min(36, Math.max(10, settings.fontSize + delta)) });
     applyStyles();
   }
 
@@ -3016,9 +3016,16 @@
 
   // 2026-08-29 Phase 1：双指捏合缩放——实时改字号（不立即持久化，松手即落盘由 store 自行处理）
   function setFontSizeLive(n: number) {
-    const clamped = Math.min(40, Math.max(12, Math.round(n)));
+    const clamped = Math.min(36, Math.max(10, Math.round(n)));
     if (clamped === settings.fontSize) return;
     settings = settingsStore.update({ fontSize: clamped });
+    applyStyles();
+  }
+
+  /** 字号连续滑块（step 0.5，不取整，对齐 Readest 细粒度） */
+  function onFontSizeInput(e: Event) {
+    const v = clamp(+(e.currentTarget as HTMLInputElement).value, 10, 36);
+    settings = settingsStore.update({ fontSize: v });
     applyStyles();
   }
 
@@ -3697,7 +3704,7 @@
 
   /* 文本设置 */
   function setTextWeight(v: number) {
-    settings = settingsStore.update({ text: { ...settings.text, fontWeight: clamp(Math.round(v / 100) * 100, 100, 900) } });
+    settings = settingsStore.update({ text: { ...settings.text, fontWeight: clamp(Math.round(v / 10) * 10, 100, 900) } });
     applyStyles();
   }
   function setLetterSpacing(v: number) {
@@ -7411,6 +7418,19 @@
             <button class="reader-mini-btn" on:click={() => changeFont(1)}>A+</button>
           </div>
         </div>
+        <div class="reader-setting-row">
+          <span class="reader-setting-label"></span>
+          <div class="reader-setting-control" style="flex:1">
+            <input
+              type="range"
+              min="10" max="36" step="0.5"
+              value={settings.fontSize}
+              on:input={(e) => onFontSizeInput(e)}
+              class="reader-slider"
+              style="width:100%"
+            />
+          </div>
+        </div>
         <div class="reader-setting-row reader-setting-toggle-row">
           <span class="reader-setting-label">统一正文字号</span>
           <label class="reader-switch" title="压平书籍自带字号（如 font-size: medium），让字号 A+/A- 全局生效；关闭则保留原书字号">
@@ -7427,10 +7447,11 @@
           <div class="reader-setting-control">
             <input
               type="range"
-              min="100" max="900" step="100"
+              min="100" max="900" step="10"
               value={settings.text.fontWeight}
               on:input={(e) => setTextWeight(+e.currentTarget.value)}
               class="reader-slider"
+              title="仅可变字体（如 LXGW WenKai）生效；静态字体只渲染 100 的倍数"
             />
             <span class="reader-setting-value">{settings.text.fontWeight}</span>
           </div>
@@ -7440,7 +7461,7 @@
           <div class="reader-setting-control">
             <input
               type="range"
-              min="-2" max="8" step="0.5"
+              min="-2" max="8" step="0.1"
               value={settings.text.letterSpacing}
               on:input={(e) => setLetterSpacing(+e.currentTarget.value)}
               class="reader-slider"
@@ -7456,13 +7477,14 @@
         <div class="reader-setting-row">
           <span class="reader-setting-label">行距</span>
           <div class="reader-setting-control">
-            {#each LINE_HEIGHT_STEPS as step}
-              <button
-                class="reader-seg"
-                class:reader-seg-active={Math.abs(settings.lineHeight - step.value) < 0.01}
-                on:click={() => setLineHeight(step.value)}
-              >{step.label}</button>
-            {/each}
+            <input
+              type="range"
+              min="1.2" max="2.5" step="0.05"
+              value={settings.lineHeight}
+              on:input={(e) => setLineHeight(+e.currentTarget.value)}
+              class="reader-slider"
+            />
+            <span class="reader-setting-value">{settings.lineHeight.toFixed(2)}</span>
           </div>
         </div>
         <div class="reader-setting-row">
