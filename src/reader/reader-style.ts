@@ -865,7 +865,10 @@ export function bilingualStyles(fontFamilyStack: string, fg: string, translation
   /* 段落块化：与上一段（原文）留 0.25em、与下一段原文留 0.7em，形成呼吸单元。
      margin-left 由 injectSibling（render.ts）按英文段 paddingLeft+textIndent 动态计算，
      使译文文字左缘精确对齐英文文字左缘（齐平）；此处 0 仅作兜底初值（会被 inline 覆盖）。 */
-  margin: 0.25em 0 0.7em 0 !important;
+  /* 2026-09-02 紧凑双语排版：译文块作为「原文段下的辅助条」紧跟英文，
+     不再用 0.7em 大段距把页面切成两条平行轨道。数值与正文段距（默认 0.8em）
+     配合，形成「原文 + 译文」一个呼吸单元，整体节奏更连贯。 */
+  margin: 0.1em 0 0.35em 0 !important;
   text-indent: 0 !important;
   /* Task B（2026-08-31）：强制译文文字左对齐。
      EPUB 容器常自带 text-align:center，且 injectSibling 只清了 margin/padding，
@@ -875,8 +878,14 @@ export function bilingualStyles(fontFamilyStack: string, fg: string, translation
   text-align: left !important;
   /* 思源引述块风格：左侧竖线 + 浅底色 + 圆角。
      竖线颜色随思源主题边框色 --b3-border-color；
-     padding-left 给文本与竖线之间留出呼吸空间。 */
-  padding: 0.35em 0.6em 0.35em 0.7em !important;
+     注意：padding-left 必须保持 0，译文文字左对齐由 injectSibling 动态计算 margin-left 实现
+     （公式：marginLeft = 原文 paddingLeft + 原文 textIndent - borderLeft）。
+     若在这里给 padding-left，即使 injectSibling 用内联 !important 覆盖，简写 padding 的 !important
+     在某些渲染路径下仍会生效，导致译文整体向右偏移、与原文不齐平。 */
+  padding-top: 0.1em !important;
+  padding-right: 0.6em !important;
+  padding-bottom: 0.1em !important;
+  padding-left: 0 !important;
   border-left: 2.5px solid var(--b3-border-color, rgba(128, 128, 128, 0.22)) !important;
   border-radius: 0 6px 6px 0;
   background: var(--b3-theme-surface-light, rgba(128, 128, 128, 0.06));
