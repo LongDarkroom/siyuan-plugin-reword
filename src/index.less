@@ -4849,46 +4849,6 @@ body.hiword-dragging {
   border-color: var(--b3-theme-primary, #4f6ef7);
 }
 
-/* ---- 2026-09-03 新增：空态快捷卡片 ---- */
-.hiword-ai-quick {
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: center;
-  gap: 8px;
-  margin-top: 4px;
-  max-width: 420px;
-}
-.hiword-ai-quick-card {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 2px;
-  width: 118px;
-  padding: 9px 10px;
-  border: 1px solid var(--b3-theme-divider);
-  border-radius: 10px;
-  background: var(--b3-theme-surface, #fff);
-  cursor: pointer;
-  text-align: left;
-  transition: all 0.18s ease;
-}
-.hiword-ai-quick-card:hover {
-  border-color: var(--b3-theme-primary, #4f6ef7);
-  background: color-mix(in srgb, var(--b3-theme-primary, #4f6ef7) 8%, transparent);
-  transform: translateY(-1px);
-}
-.hiword-ai-quick-icon { font-size: 16px; line-height: 1; }
-.hiword-ai-quick-title {
-  font-size: 12.5px;
-  font-weight: 600;
-  color: var(--b3-theme-on-surface, #37352f);
-}
-.hiword-ai-quick-desc {
-  font-size: 11px;
-  color: var(--b3-theme-on-surface-light, #888);
-  line-height: 1.35;
-}
-
 /* ---- 2026-09-03 新增：上翻时浮出的「↓ 有新内容」 ----
    sticky bottom：贴在滚动视口底部，随滚动保持可见。
    ★ 不用负 margin-top 去「省高度」——在 flex 列布局里那会把最后一条消息底部
@@ -5782,9 +5742,10 @@ body.hiword-dragging {
     .protyle-wysiwyg {
       background: transparent !important;
       font-size: var(--hiword-ai-input-font-size, 13px);
-      /* 2026-09-03：line-height 1.5 → 1.75，13px 文字行高从 19.5px 升到 22.75px，
-         视觉密度更接近 Lark/Notion 风格，多行不挤。 */
-      line-height: 1.75;
+      /* 2026-09-03：line-height 1.5 → 1.8，13px 文字行高从 19.5px 升到 23.4px，
+         视觉密度更接近 Lark/Notion 风格，多行不挤；0.01em 字间距让中文更透气。 */
+      line-height: 1.8;
+      letter-spacing: 0.01em;
       font-family: var(--b3-font-family, inherit);
       color: var(--b3-theme-on-background);
       min-height: 0;
@@ -5808,11 +5769,11 @@ body.hiword-dragging {
         padding: 0 !important;
         margin: 0 !important;
       }
-      /* 2026-09-03：相邻段落之间增加 6px 段间距（仅多段落时生效，单段不受影响）。
+      /* 2026-09-03：相邻段落之间增加 8px 段间距（仅多段落时生效，单段不受影响）。
          用 :not(:last-child) 选择器避免最后一段加底部空白。 */
       .p + .p,
       div[data-type="NodeParagraph"] + div[data-type="NodeParagraph"] {
-        margin-top: 6px !important;
+        margin-top: 8px !important;
       }
     }
   }
@@ -5868,6 +5829,37 @@ body.hiword-dragging {
     svg {
       display: none !important;
     }
+  }
+}
+
+/* contenteditable 兜底模式（默认路径）的文本排版优化。
+   直接对 #hiword-ai-protyle[contenteditable="true"] 本身设置排版参数，
+   让中文更透气、段落之间有明显呼吸感，且与上方 Protyle 模式视觉一致。 */
+.hiword-ai-protyle[contenteditable="true"] {
+  font-size: var(--hiword-ai-input-font-size, 13px);
+  line-height: 1.8;
+  letter-spacing: 0.01em;
+  font-family: var(--b3-font-family, inherit);
+  color: var(--b3-theme-on-background);
+  padding: 8px 6px 8px 6px;
+  outline: none;
+  cursor: text;
+  white-space: pre-wrap;
+  word-break: break-word;
+  /* 作为可滚动编辑区，需要覆盖父容器 .hiword-ai-protyle 的 overflow:hidden */
+  overflow-y: auto;
+
+  &::-webkit-scrollbar { width: 4px; }
+  &::-webkit-scrollbar-thumb { background: var(--b3-theme-background-hover); border-radius: 2px; }
+
+  /* 浏览器在 contenteditable 中按 Enter 生成的 div/p 段落：清零默认边距 */
+  > div, > p {
+    margin: 0;
+    padding: 0;
+  }
+  /* 相邻段落之间 8px 呼吸间距 */
+  > div + div, > p + p {
+    margin-top: 8px;
   }
 }
 

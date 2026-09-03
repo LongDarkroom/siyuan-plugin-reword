@@ -103,6 +103,11 @@ export interface AiHost {
   fetchDocText(docId: string): Promise<string | null>;
   /** 从拖拽事件中解析块 ID（可能返回 null 表示非块拖拽） */
   resolveDragBlockId(e: DragEvent): string | null;
+  /**
+   * 2026-09-03 批量版：一次拖入可能携带多个块（拖块标多选 / 框选多块 / 复制多段）。
+   * 返回按文档顺序去重后的块 ID 列表；非块拖拽时为空数组。
+   */
+  resolveDragBlockIds(e: DragEvent): string[];
   /** 从拖拽事件中解析文档 ID（识别思源页签 / 文档树节点），返回 docId 或 null */
   resolveDragDocId(e: DragEvent): string | null;
   /**
@@ -225,6 +230,13 @@ export function isAiStreaming(): boolean {
   return aiStreaming;
 }
 
+/**
+ * 输入框禁用态看门狗时限：超过这个时长仍处于禁用，无条件自动解锁。
+ * 取值需明显大于一次正常长回复的首字延迟（复杂长文精读可能几十秒），
+ * 否则会在正常生成途中误解锁。
+ */
+const INPUT_DISABLE_WATCHDOG_MS = 120_000;
+
 export class AiPanel {
   private disposables = new Disposables();
   /** 当前激活预设（其 systemPrompt / temperature 覆盖本次精读） */
@@ -253,6 +265,10 @@ export class AiPanel {
   private emptyObserver: MutationObserver | null = null;
   /** 输入框 token 估算节流定时器：每次估算都要跑一次 Lute 全量序列化，逐字符触发会卡 */
   private inputTokenTimer: number | null = null;
+  /** 输入框禁用态看门狗：超过 INPUT_DISABLE_WATCHDOG_MS 无条件解锁（防禁用态永久残留） */
+  private inputDisabledTimer: number | null = null;
+  /** 输入框可编辑性自检定时器（挂载完成后复查一次，失败则强制兜底） */
+  private inputEditableCheckTimer: number | null = null;
   /** AI 生成中标记：true 时发送按钮切换为「停止生成」 */
   private aiBusy = false;
   /** 进入生成态的时间戳，用于 aiBusy 卡死自愈（避免提示词加载等场景下按钮无反应） */
@@ -308,6 +324,13 @@ export class AiPanel {
     const contentEl = dockElement.querySelector("#hiword-dock-content") as HTMLElement;
     if (!contentEl) return;
     this.contentEl = contentEl;
+
+    // 2026-09-03 P0 修复：render 时无条件复位输入框禁用态。
+    // 即使 aiStreaming 因卡死残留为 true、新 inputEl 也不能带 .hiword-ai-input--disabled
+    // （否则 .pointer-events: none 让用户永远点不进去输入框）。
+    // 必须在 destroyInput 之前调用：老 inputEl 上的 class 立即清掉，
+    // 后续 contentEl.innerHTML = '...' 重置整个 DOM 时，残留彻底消失。
+    this.setInputDisabled(false);
 
     // 2026-09-03：全局 hover 浮动预览层（事件委托到 document，处理 input/msg 两类卡片）
     //   内部已带 `__hoverPreviewInstalled` 守卫，重复 render 安全。
@@ -373,26 +396,6 @@ export class AiPanel {
               </svg>
             </div>
             <p class="hiword-ai-welcome-text">开始与 AI 对话吧！</p>
-            <!-- 2026-09-03：空态从「一行说明文字」改为可点击的快捷卡片。
-                 纯文字描述要求用户自己摸索，且会再次暴露「点哪个按钮」的困惑；
-                 可点击示例让首屏零输入成本就能理解产品用途。 -->
-            <div class="hiword-ai-quick" id="hiword-ai-quick">
-              <button class="hiword-ai-quick-card" data-quick="deep">
-                <span class="hiword-ai-quick-icon">📄</span>
-                <span class="hiword-ai-quick-title">精读当前块</span>
-                <span class="hiword-ai-quick-desc">读取光标所在段落并精读</span>
-              </button>
-              <button class="hiword-ai-quick-card" data-quick="explain">
-                <span class="hiword-ai-quick-icon">💬</span>
-                <span class="hiword-ai-quick-title">解释这段话</span>
-                <span class="hiword-ai-quick-desc">逐句翻译 + 讲清难点</span>
-              </button>
-              <button class="hiword-ai-quick-card" data-quick="vocab">
-                <span class="hiword-ai-quick-icon">🔤</span>
-                <span class="hiword-ai-quick-title">提炼生词</span>
-                <span class="hiword-ai-quick-desc">音标 · 释义 · 原句</span>
-              </button>
-            </div>
             <p class="hiword-ai-welcome-hint">也可以直接在下方输入，或把文档/块拖进输入框。</p>
           </div>
           <!-- 对话消息区（动态填充） -->
@@ -622,6 +625,8 @@ export class AiPanel {
     try { this.emptyObserver?.disconnect(); } catch (__swallowErr) { logSwallow(__swallowErr, "ai-panel.ts · destroyInput", "debug"); }
     this.emptyObserver = null;
     if (this.inputTokenTimer !== null) { clearTimeout(this.inputTokenTimer); this.inputTokenTimer = null; }
+    if (this.inputDisabledTimer !== null) { clearTimeout(this.inputDisabledTimer); this.inputDisabledTimer = null; }
+    if (this.inputEditableCheckTimer !== null) { clearTimeout(this.inputEditableCheckTimer); this.inputEditableCheckTimer = null; }
     this.teardownMountRetryObserver();
     try { this.protyle?.destroy(); } catch (__swallowErr) { logSwallow(__swallowErr, "ai-panel.ts · destroyInput", "debug"); }
     // 无论 destroy 是否异常，强制移除容器内残留的 Protyle DOM——
@@ -632,6 +637,56 @@ export class AiPanel {
     this.mountAttempts = 0;
     this.pendingPrefill = null;
     this.inputEl = null;
+    // 2026-09-03 P0 修复：destroyInput 标志生命周期结束，必须清空 module 级 aiStreaming
+    // 与实例级 aiBusy/_busySince，否则下次 mountProtyle 时：
+    //   ① `if (!aiStreaming) setInputDisabled(false)` 被短路 → 新 inputEl 永远带 disabled class
+    //   ② `aiBusy=true` 时 runBtn 显示「停止」态，用户无法重新发送
+    // render() 的 setInputDisabled(false) 兜底只解了 (1)，(2) 仍需 destroyInput 兜底。
+    aiStreaming = false;
+    this.aiBusy = false;
+    this._busySince = null;
+    this.aiAbort = null;
+  }
+
+  /**
+   * 热重建输入框（2026-09-03 P0 配套）：设置里切换「Protyle 输入框」开关后即时生效，
+   * 无需重载思源。先彻底清理旧实例/监听器，再按当前设置重新挂载
+   * （contenteditable 兜底 或 Protyle，取决于 AiSettings.useProtyleInput）。
+   */
+  public remountInput(): void {
+    if (!this.contentEl || !this.contentEl.isConnected) return;
+    try { this.destroyInput(); } catch (__swallowErr) { logSwallow(__swallowErr, "ai-panel.ts · remountInput", "debug"); }
+    try { this.mountProtyle(this.contentEl); } catch (__swallowErr) { logSwallow(__swallowErr, "ai-panel.ts · remountInput", "debug"); }
+  }
+
+  /**
+   * 输入框可编辑性自检（2026-09-03 P0）。
+   * 挂载链路上有多个静默失败分支：容器持续零尺寸、Protyle 构造抛错被外层吞掉、
+   * 内核把 wysiwyg 的 contenteditable 置为 false 却没恢复……
+   * 任何一条命中，都会让 #hiword-ai-protyle 变成「看得见、点下去连光标都没有」的空壳。
+   * 挂载流程结束后复查一次，把这些情况统一兜住。
+   */
+  private scheduleInputEditableCheck(): void {
+    if (this.inputEditableCheckTimer !== null) clearTimeout(this.inputEditableCheckTimer);
+    this.inputEditableCheckTimer = window.setTimeout(() => {
+      this.inputEditableCheckTimer = null;
+      const el = this.inputEl;
+      if (!el || !el.isConnected) return;
+      const wysiwyg = el.querySelector(".protyle-wysiwyg") as HTMLElement | null;
+      if (wysiwyg) {
+        // 有 Protyle：只要编辑区没被内核锁成不可编辑就算通过
+        if (wysiwyg.getAttribute("contenteditable") !== "false") return;
+        getLogger().warn("[REword] 输入框编辑区被置为不可编辑，强制恢复", { operation: "输入框自检" });
+        wysiwyg.setAttribute("contenteditable", "true");
+        return;
+      }
+      if (el.getAttribute("contenteditable") === "true") return;
+      getLogger().warn("[REword] 输入框既未挂载 Protyle 也不可编辑，强制回退 contenteditable", {
+        operation: "输入框自检",
+        data: { height: el.getBoundingClientRect().height, cls: el.className },
+      });
+      this.fallbackToContentEditable();
+    }, 900);
   }
 
   /** 停止 Protyle 延迟挂载的尺寸监听（destroyInput / 真正回退 contenteditable 时调用） */
@@ -652,6 +707,19 @@ export class AiPanel {
     if (!inputEl) { getLogger().warn("[REword] mountProtyle 失败: #hiword-ai-protyle 不存在"); return; }
     this.inputEl = inputEl;
 
+    // 2026-09-03 P0 根因修复：SiYuan 内核 Protyle 在内部以 requestAnimationFrame /
+    // setTimeout / MutationObserver 异步完成初始化，若容器状态不达标会抛出
+    // "Cannot read properties of undefined (reading 'classList')" /
+    // "Cannot read properties of null (reading 'getAttribute')" 等未捕获异常，
+    // 这些异常逃逸出下方 new Protyle() 的 try/catch，冒泡到 window.onerror，
+    // 并把输入区留在「半成品 Protyle」状态 → 用户点进去连光标都没有、无法输入。
+    // 因此默认走稳定的 contenteditable 输入框（富文本粘贴转 Markdown、块引用卡/拖块仍支持），
+    // Protyle 富文本输入框仅作为实验性选项（设置 → AI → 通用 → 启用 Protyle 输入框）。
+    if (!this.host.getAiSettings().useProtyleInput) {
+      this.fallbackToContentEditable();
+      return;
+    }
+
     // 延迟挂载：等待元素进入布局且具备尺寸，避免 lite Protyle 在 detached/零尺寸容器上崩溃
     const attempt = () => {
       if (!this.inputEl || this.protyle) return;
@@ -662,16 +730,29 @@ export class AiPanel {
         return;
       }
       if (el.getBoundingClientRect().height < 2) {
-        // 容器尚未就绪（dock 隐藏 / 零尺寸）：不直接回退 contenteditable，
-        // 先短期 rAF 重试；若 60 帧内仍无尺寸，交给 ResizeObserver 在元素获得尺寸（dock 展开）时补挂载
         if (this.mountAttempts++ < 60) {
           requestAnimationFrame(attempt);
+          return;
         }
+        // 60 帧仍无尺寸：这里绝不能静默 return。
+        // 那会让 #hiword-ai-protyle 永远停留在「空 div」——没有 Protyle、也没有
+        // contenteditable，用户点上去连光标都出不来；而 ResizeObserver 只监听尺寸变化，
+        // 尺寸一直是 0 就再也不会触发，等于永久卡死。
+        // 先落 contenteditable 兜底保证能打字；日后 dock 展开获得尺寸时，
+        // ResizeObserver 仍会补挂载 Protyle（attempt 开头会清掉 contenteditable）。
+        getLogger().warn("[REword] 输入框容器持续零尺寸，回退 contenteditable 以保证可输入", {
+          operation: "挂载AI输入框",
+          data: { height: el.getBoundingClientRect().height, connected: el.isConnected },
+        });
+        this.fallbackToContentEditable();
         return;
       }
       try {
         // 挂载前清理容器内可能残留的旧 Protyle DOM（半成品/失效实例），避免重复挂载
         el.querySelector(".protyle")?.remove();
+        // 清掉兜底阶段加在容器上的 contenteditable：Protyle 的编辑区是内部
+        // .protyle-wysiwyg，容器自身若同时可编辑会形成双模式叠加（光标错位、输入吞字）
+        el.removeAttribute("contenteditable");
         this.protyle = new Protyle(this.host.app, el, {
           lite: true,
           blockId: "",
@@ -728,6 +809,10 @@ export class AiPanel {
           // 光标落入占位段落，后续 insert 在此段落插入
           this.protyle.focus();
         }
+        // 2026-09-03：Protyle 每次重新挂载都复位禁用态。旧实例残留的
+        // .hiword-ai-input--disabled 会挂在新实例上（pointer-events:none → 打不了字）。
+        // 流式进行中不复位，避免打断正在生成的回复。
+        if (!aiStreaming) this.setInputDisabled(false);
         // 原生 Protyle 负责粘贴（零转换保样式）；拖放由我们接管文件/块，纯文本交原生
         // dragover 捕获阶段拦截：preventDefault 允许 drop，stopPropagation 阻止事件到达
         // 容器内思源内核 dragover 处理器（避免失效实例 contentElement=null 崩溃）
@@ -767,6 +852,13 @@ export class AiPanel {
         // 2026-09-03：input-row 点击委托。用户在 input-row padding 区域点击时
         // 主动 focus Protyle wysiwyg，否则光标不可见。
         this.setupInputRowFocusDelegate();
+        // 点击落点兜底：无论 Protyle 是否已接管，点下去都必须有光标。
+        // 放在冒泡阶段且延后一拍执行，不干扰 Protyle 自己的焦点定位逻辑。
+        el.addEventListener("mousedown", () => {
+          window.setTimeout(() => this.focusInput(), 0);
+        });
+        // 可编辑性自检：挂载链路任一环静默失败，都会把输入区留在「空 div」状态
+        this.scheduleInputEditableCheck();
         // Protyle 挂载完成，写入延迟的预填内容
         if (this.pendingPrefill) { this.setInputMarkdown(this.pendingPrefill); this.pendingPrefill = null; }
       } catch (e) {
@@ -802,6 +894,9 @@ export class AiPanel {
     // 再启用 contenteditable，杜绝双模式叠加
     try { inputEl.querySelector(".protyle")?.remove(); } catch (__swallowErr) { logSwallow(__swallowErr, "ai-panel.ts · fallbackToContentEditable", "debug"); }
     inputEl.setAttribute("contenteditable", "true");
+    // 2026-09-03：兜底路径同样清掉可能残留的禁用 class —— 它的 pointer-events:none
+    // 会让 contenteditable 元素点都点不中，等于还是不能输入
+    if (!aiStreaming) this.setInputDisabled(false);
     inputEl.classList.add("hiword-ai-input--empty");
     const refreshEmpty = () => {
       const empty = (inputEl.textContent?.trim() || "") === "" && !inputEl.querySelector("[data-type='block-ref']");
@@ -886,25 +981,31 @@ export class AiPanel {
     // 顺序很重要：旧版先判文档，而文档解析的 DOM 猜测路径会误抓 dock 面板自身 UUID 并恒命中，
     // 导致「拖文本块」被当成「拖页签」，真块 ID 被丢弃、AI 收不到正文。
     // 块拖拽更常见，且 dragstart 记录的是高可信 ID，故优先判定。
-    // 类型提示必须在 resolveDragBlockId 之前取（后者消费即清 dragstart 记录）
+    // 类型提示必须在解析块 ID 之前取（后者消费即清 dragstart 记录）
     const blockTypeHint = this.host.resolveDragBlockType?.(e) || "";
-    let blockId = this.host.resolveDragBlockId(e);
-    if (!blockId && dt) {
-      const htmlData = dt.getData("text/html") || "";
-      const ids = htmlData ? this.host.resolveBlockIdsFromHtml(htmlData) : [];
-      if (ids.length) blockId = ids[0];
-    }
+    // 2026-09-03：一次拖入可能携带多个块（gutter 多选 / 框选多块 / 多段 HTML）
+    const blockIds = this.host.resolveDragBlockIds(e);
     // 思源块 ID 格式：时间戳(14位数字)+随机字母数字串，如 202608131290w-8cx7o5g
     // 不限制字符集（ID 可能含 w/x/y/z 等非十六进制字母），仅校验长度与基本结构
-    if (blockId && blockId.length >= 14) {
+    if (blockIds.length) {
       e.preventDefault();
       e.stopPropagation();
-      try {
-        await this.insertBlockRef(blockId, blockTypeHint, { x: e.clientX, y: e.clientY });
-        logger.info("块引用插入成功", { operation: "拖块插入", data: { blockId } });
-      } catch (err) {
-        logger.error("块引用插入失败", { operation: "拖块插入", error: err, data: { blockId } });
+      const dropPoint = { x: e.clientX, y: e.clientY };
+      // 多块时各自查类型（混合段落/标题也能拿到正确图标）；单块沿用 dragstart 提示，零查询
+      const typeHint = blockIds.length > 1 ? "" : blockTypeHint;
+      let inserted = 0;
+      for (let i = 0; i < blockIds.length; i++) {
+        const blockId = blockIds[i];
+        try {
+          // 落点只在第一块用：定位一次光标，后续块顺次接在后面，避免每块都重设光标
+          await this.insertBlockRef(blockId, typeHint, i === 0 ? dropPoint : undefined);
+          inserted++;
+        } catch (err) {
+          logger.error("块引用插入失败", { operation: "拖块插入", error: err, data: { blockId } });
+        }
       }
+      logger.info("块引用插入完成", { operation: "拖块插入", data: { total: blockIds.length, inserted } });
+      if (inserted > 1) showMessage(`已插入 ${inserted} 个块引用`, 2000);
       return;
     }
 
@@ -2031,10 +2132,38 @@ export class AiPanel {
     el.innerHTML = this.markdownToHtml(md);
   }
 
-  /** 切换输入框可编辑状态（加载中禁用） */
+  /**
+   * 切换输入框可编辑状态（加载中禁用）
+   *
+   * 2026-09-03：禁用态一旦残留，输入框就**永久打不了字** —— `.hiword-ai-input--disabled`
+   * 带 `pointer-events: none`（点不进去）叠加 `protyle.disable()`（键盘无效）。
+   * 原解锁路径只有三条：发送流程 finally、外层 catch、以及「点击发送按钮且卡死超 30s」的自愈分支。
+   * 只要流程没走到（dock 关闭 / 请求挂起 / 面板被重建），输入框就再也没人解锁。
+   * 故加看门狗：超时无条件解锁，保证最坏情况下输入框也能自己恢复。
+   */
   private setInputDisabled(disabled: boolean): void {
+    if (this.inputDisabledTimer !== null) {
+      clearTimeout(this.inputDisabledTimer);
+      this.inputDisabledTimer = null;
+    }
+    if (disabled) {
+      this.inputDisabledTimer = window.setTimeout(() => {
+        this.inputDisabledTimer = null;
+        getLogger().warn("输入框禁用超过看门狗时限，自动解锁（防禁用态残留导致无法输入）");
+        this.setInputDisabled(false);
+        // 确实没有流式活动却仍在 busy = 发送流程已死，一并复位，否则解锁了也发不出去。
+        // 正常长回复期间 aiStreaming 为 true，不会误伤。
+        if (!aiStreaming && this.aiBusy) {
+          this.aiBusy = false;
+          this._busySince = null;
+          this.aiAbort = null;
+        }
+      }, INPUT_DISABLE_WATCHDOG_MS);
+    }
     if (this.protyle) {
-      if (disabled) this.protyle.disable(); else this.protyle.enable();
+      // 单独 try：protyle.disable/enable 抛错也不能阻断下面的 CSS class 复位
+      try { if (disabled) this.protyle.disable(); else this.protyle.enable(); }
+      catch (err) { logSwallow(err, "ai-panel.ts · setInputDisabled protyle disable/enable", "debug"); }
     }
     if (this.inputEl) this.inputEl.classList.toggle("hiword-ai-input--disabled", disabled);
   }
@@ -2045,33 +2174,6 @@ export class AiPanel {
     const s = sessionStore.create();
     this.currentSessionId = s.id;
     return s.id;
-  }
-
-  /**
-   * 空态快捷卡片：读取当前块/选区 → 套用指令 → 直接发送。
-   * 没有定位到内容时只把指令放进输入框（不发送），并提示用户粘贴或导入。
-   * @param kind deep=纯精读（不加指令） / explain=逐句解释 / vocab=提炼生词
-   */
-  private async quickStart(kind: string): Promise<void> {
-    const instruction =
-      kind === "explain" ? "请用中文逐句解释下面这段英文，指出语法难点与惯用法。"
-      : kind === "vocab" ? "请提取下面这段英文的生词与短语，逐条给出音标、中文释义和所在原句。"
-      : "";
-    const src = this.host.getDeepReadSource();
-    let text = src?.text ?? "";
-    if (!text && src?.blockId) text = (await this.host.fetchBlockText(src.blockId)) || "";
-    const statusEl = this.contentEl?.querySelector("#hiword-ai-status") as HTMLElement | null;
-    if (text) {
-      this.setInputMarkdown(instruction ? `${instruction}\n\n${text}` : text);
-      this.runBtnEl?.click(); // 复用既有发送链路（含预设/引用展开/流式渲染）
-      return;
-    }
-    if (instruction) this.setInputMarkdown(instruction);
-    if (statusEl) {
-      statusEl.textContent = instruction
-        ? "已放入指令，粘贴或导入英文内容后点「AI 精读」。"
-        : "未定位到当前块/选区，请先在文档中点选。";
-    }
   }
 
   /**
@@ -2537,10 +2639,6 @@ export class AiPanel {
     };
     // 模式条「切换」→ 直达 AI 角色面板（复用预设按钮的既有绑定）
     contentEl.querySelector("#hiword-ai-mode-switch")?.addEventListener("click", () => presetsBtn?.click());
-    // 空态快捷卡片：读取当前块/选区 + 套用指令（有内容直接发，无内容只填指令）
-    contentEl.querySelectorAll<HTMLElement>(".hiword-ai-quick-card").forEach((card) => {
-      card.addEventListener("click", () => { void this.quickStart(card.dataset.quick || ""); });
-    });
     const tokenRing = contentEl.querySelector("#hiword-ai-token-ring") as HTMLButtonElement;
     const tokenRingText = tokenRing?.querySelector(".hiword-ai-token-ring__text") as HTMLElement | null;
     const tokenRingProgress = tokenRing?.querySelector(".hiword-ai-token-ring__progress") as SVGCircleElement | null;

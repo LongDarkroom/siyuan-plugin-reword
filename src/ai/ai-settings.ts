@@ -27,6 +27,15 @@ export interface AiSettings {
   /** 显示与操作 */
   fontSize: number;       // 消息字体大小（px），默认 12（与思源 Copilot 插件的 messageFontSize 默认一致）
   inputFontSize: number;  // 输入框字体大小（px），默认 13
+  /**
+   * 2026-09-03 P0 修复：AI 输入框实现选择。
+   * - false（默认）：使用稳定的 contenteditable 纯文本框，富文本粘贴转 Markdown、
+   *   块引用卡 / 拖块仍支持，且彻底规避 SiYuan 内核 Protyle 异步初始化失败
+   *   （"Cannot read properties of undefined (reading 'classList')" /
+   *   "null (reading 'getAttribute')"）导致输入框无法出光标 / 无法输入的问题。
+   * - true：启用 SiYuan 原生 Protyle 富文本输入框（块引用卡片等原生能力），实验性。
+   */
+  useProtyleInput?: boolean;
   /** 对话导出 */
   exportNotebookId: string; // 导出目标笔记本 ID（空=收集箱）
   exportSavePath: string;    // 全局保存文档路径（sprig 语法）
@@ -222,6 +231,8 @@ export const DEFAULT_AI_SETTINGS: AiSettings = {
   // 显示与操作
   fontSize: 12,
   inputFontSize: 13,
+  // 2026-09-03 P0：AI 输入框默认走 contenteditable（稳定），Protyle 仅实验性可开启
+  useProtyleInput: false,
   // 对话导出
   exportNotebookId: "",
   exportSavePath: "",
@@ -332,6 +343,8 @@ export function normalizeAiSettings(raw: any): AiSettings {
     // 显示与操作
     fontSize: Math.round(num(r.fontSize, 12, 10, 24)),
     inputFontSize: Math.round(num(r.inputFontSize, 13, 10, 24)),
+    // 2026-09-03 P0：AI 输入框模式（默认 contenteditable，Protyle 实验性）
+    useProtyleInput: bool(r.useProtyleInput, false),
     // 对话导出
     exportNotebookId: str(r.exportNotebookId, ""),
     exportSavePath: str(r.exportSavePath, ""),

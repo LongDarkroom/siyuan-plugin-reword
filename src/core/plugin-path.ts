@@ -117,6 +117,20 @@ export function resolvePluginPathWithFs(
   // 在测试/某些运行时下 cwd 恰好是插件目录时会误判（isPluginRoot(".") 为真）。
   const isPluginRoot = (dir: string): boolean => isPluginRootWithFs(dir, PLUGIN_NAME, fsOps);
 
+  // 0. 2026-09-03 修复：思源运行时把 workspaceDir / dataDir 注入到
+  //    window.siyuan.config.system（不依赖 fs 探测，跨平台一致；
+  //    Windows 安装版 fs 探测会失败，因为 __dirname 落在 electron.asar/renderer）。
+  //    workspaceDir = 用户工作空间根（如 C:\Users\xxx\Documents\SiYuan），
+  //    拼出 data/plugins/<plugin-name> 即为本插件根（安装版 / 源码版一致）。
+  try {
+    const sys = (globalThis as any)?.window?.siyuan?.config?.system;
+    const wsDir: string | undefined = sys?.workspaceDir || sys?.dataDir;
+    if (wsDir && !isAsarPath(wsDir)) {
+      const fromWs = path.join(wsDir, "data", "plugins", PLUGIN_NAME);
+      if (isPluginRoot(fromWs)) return fromWs;
+    }
+  } catch { /* 沙箱环境可能拿不到 window.siyuan，吞掉继续走 fs 探测 */ }
+
   const candidates: string[] = [];
   const pushCand = (p?: string) => {
     if (!p) return;

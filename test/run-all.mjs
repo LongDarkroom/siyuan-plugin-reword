@@ -27,6 +27,8 @@ const TESTS = [
   "test/ai-client.test.mjs",
   "test/ai-text.test.mjs",
   "test/ai-drag-doc-id.test.mjs",
+  "test/ai-drag-block-ids.test.mjs",
+  "test/ai-drag-drop-batch.test.mjs",
   "test/ai-orchestrator.test.mjs",
   "test/anno-ai-dialog.test.mjs",
   "test/whale-prompt.test.mjs",

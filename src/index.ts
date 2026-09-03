@@ -86,8 +86,13 @@ import {
   resolveDocIdFromDragSource,
   blockTypeFromDomType,
 } from "./ai/drag-doc-id.ts";
+import {
+  collectDragBlockIds,
+  MAX_BLOCK_IDS,
+  SIYUAN_DROP_BLOCK_REF,
+} from "./ai/drag-block-ids.ts";
 import { sessionStore, type AiSessionData } from "./ai/ai-session-store.ts";
-import { getBlockKramdownText as getBlockKramdown } from "./siyuan/api.ts";
+import { getBlockKramdownText as getBlockKramdown, putFile } from "./siyuan/api.ts";
 import { sqlQuery } from "./siyuan/attrs.ts";
 import { lsNotebooks, createDocWithMd, listDocsByPath } from "./siyuan/filetree.ts";
 import { getGlobalSettingsStore } from "./reader/reader-settings.ts";
@@ -414,8 +419,10 @@ export default class RewordPlugin extends Plugin {
   /** 2026-09-01 P2：已绑定 loadMore 委托的 contentEl（WeakSet 自动回收，dock 重建后自动重绑） */
   private whaleLoadMoreBound = new WeakSet<HTMLElement>();
   /** v4：全局 dragstart 记录的源块 ID（拖入 AI 面板用，60s 内有效、消费即清）
-   *  2026-09-02：附带 DOM 解析出的块类型，省掉一次 SQL 查询（仅为卡片图标） */
-  private draggingBlockId: { id: string; ts: number; type?: string } | null = null;
+   *  2026-09-02：附带 DOM 解析出的块类型，省掉一次 SQL 查询（仅为卡片图标）
+   *  2026-09-03：`ids` 为本次拖拽涉及的**全部**块 ID（框选多块 / 拖块标多选），
+   *              `id` 恒等于 ids[0]，保证单块路径零改动。 */
+  private draggingBlockId: { id: string; ts: number; type?: string; ids?: string[] } | null = null;
   /**
    * 2026-09-02 P0：全局 dragstart 记录的**源文档 ID**（页签 / 文档树拖入）。
    * 必须在 dragstart 解析——drop 的 e.target 是放置目标，反推不出来源。
@@ -678,9 +685,21 @@ export default class RewordPlugin extends Plugin {
       } else if (validBlockId) {
         // 块类型直接从 DOM 的 data-type 映射，省掉一次 SQL（仅为卡片图标）
         const domType = blockTypeFromDomType(el?.dataset?.type);
-        this.draggingBlockId = { id, ts: Date.now(), type: domType || undefined };
+        // 2026-09-03 批量拖入：思源框选多块时被选块带 .protyle-wysiwyg--select。
+        // 仅当「被拖的那一块自身也在选中集合内」才认定是多块拖拽，
+        // 否则（例如文档里残留旧选区、拖的是别的块）保持单块，避免误扩。
+        const multiIds = this.collectSelectedBlockIds(el, id);
+        this.draggingBlockId = {
+          id,
+          ts: Date.now(),
+          type: domType || undefined,
+          ids: multiIds.length > 1 ? multiIds : undefined,
+        };
         this.draggingDocId = null;
-        getLogger().info("[REword] dragstart 捕获块 ID:" + id + " type=" + (domType || "(未知)"));
+        getLogger().info(
+          "[REword] dragstart 捕获块 ID:" + id + " type=" + (domType || "(未知)") +
+          (multiIds.length > 1 ? " 多选=" + multiIds.length : "")
+        );
       } else {
         this.draggingBlockId = null;
         this.draggingDocId = null;
@@ -2545,6 +2564,80 @@ export default class RewordPlugin extends Plugin {
 
     getLogger().info("[REword] 所有策略均未命中，返回 null");
     return null;
+  }
+
+  /**
+   * 2026-09-03 批量拖入：采集同编辑器内被多选的块 ID（按文档顺序）。
+   *
+   * 思源框选 / 多选后被选中的块带 `.protyle-wysiwyg--select`。
+   * 安全边界（防误扩）：
+   *   - 选中态少于 2 个 → 不是多选拖拽，返回空；
+   *   - 被拖的那一块必须自身也在选中集合内，否则说明是残留旧选区，返回空。
+   */
+  private collectSelectedBlockIds(el: HTMLElement | null, draggedId: string): string[] {
+    if (!el || !draggedId) return [];
+    try {
+      const wysiwyg = el.closest?.(".protyle-wysiwyg") as HTMLElement | null;
+      if (!wysiwyg?.querySelectorAll) return [];
+      const marks = wysiwyg.querySelectorAll(".protyle-wysiwyg--select");
+      if (marks.length < 2) return [];
+      const ids: string[] = [];
+      const seen = new Set<string>();
+      marks.forEach((n) => {
+        const nid = (n as HTMLElement).dataset?.nodeId || "";
+        if (/^[a-z0-9-]{14,}$/i.test(nid) && !seen.has(nid)) {
+          seen.add(nid);
+          ids.push(nid);
+        }
+      });
+      if (!ids.includes(draggedId)) return [];
+      return ids.slice(0, MAX_BLOCK_IDS);
+    } catch (e) {
+      logSwallow(e, "index.ts · collectSelectedBlockIds", "debug");
+      return [];
+    }
+  }
+
+  /**
+   * 批量版 resolveDragBlockId：一次拖入可能携带多个块
+   *（思源拖块标多选 / 框选多块后拖拽 / 复制多段 HTML）。
+   *
+   * 通道优先级由 `collectDragBlockIds` 决定：
+   *   ① 官方 gutter 通道（dt.types 里 `application/siyuan-gutter…`，多 ID 逗号分隔）
+   *   ② 官方 block-ref 通道（getData 拿到 JSON {ids:[…]}）
+   *   ③ dragstart 记录（含 DOM 多选采集结果）
+   *   ④ text/html 中的 data-node-id 列表
+   *
+   * 与 resolveDragBlockId 的约定一致：**命中才消费** draggingBlockId，
+   * 未命中不清理，后续文档 / 纯文本路径不受影响。
+   */
+  resolveDragBlockIds(e: DragEvent): string[] {
+    const dt = e.dataTransfer;
+    if (!dt) return [];
+    const src = this.draggingBlockId;
+    const fresh = src && Date.now() - src.ts < 60_000 ? src : null;
+    const dragstartIds = fresh ? (fresh.ids?.length ? fresh.ids : [fresh.id]) : [];
+    const types = [...dt.types];
+    let blockRefRaw: string | null = null;
+    try {
+      if (types.includes(SIYUAN_DROP_BLOCK_REF)) blockRefRaw = dt.getData(SIYUAN_DROP_BLOCK_REF);
+    } catch (err) {
+      logSwallow(err, "index.ts · resolveDragBlockIds 读 block-ref", "debug");
+    }
+    // 先试三个高可信通道，命中就不必解析 text/html（省一次 DOMParser）
+    let ids = collectDragBlockIds({ types, blockRefRaw, dragstartIds });
+    if (!ids.length) {
+      try {
+        const html = dt.getData("text/html") || "";
+        if (html) ids = collectDragBlockIds({ htmlIds: this.resolveBlockIdsFromHtml(html) });
+      } catch (err) {
+        logSwallow(err, "index.ts · resolveDragBlockIds 读 text/html", "debug");
+      }
+    }
+    if (!ids.length) return [];
+    if (fresh) this.draggingBlockId = null; // 一次性消费，防跨面板污染
+    getLogger().info("[REword] ✅ resolveDragBlockIds 命中 " + ids.length + " 个块: " + ids.join(","));
+    return ids;
   }
 
   /**
@@ -5553,6 +5646,23 @@ export default class RewordPlugin extends Plugin {
           }
           if (!d.id) {
             d.id = "dict-" + Math.random().toString(36).slice(2, 8);
+            migrated = true;
+          }
+        }
+        // 迁移：旧导入路径只写 active、漏写 actives，于是 initDictionary 的
+        // `actives.length ? actives : [active]` 会完全忽略 active
+        // —— 现象即「导入成功、重启后词典不生效」。这里把 active 补回 actives，
+        // 并沿用「同语种组单选」规则（与 enableDictSingle 一致）。
+        const groupOf = (d: DictMeta) => (d.lang === "zh" ? "zh" : "en");
+        if (m.active && Array.isArray(m.actives) && !m.actives.includes(m.active)) {
+          const am = (m.dicts as DictMeta[]).find((d) => d.id === m.active);
+          if (am) {
+            const g = groupOf(am);
+            m.actives = (m.actives as string[]).filter((aid) => {
+              const pm = (m.dicts as DictMeta[]).find((d) => d.id === aid);
+              return pm ? groupOf(pm) !== g : false;
+            });
+            m.actives.push(m.active);
             migrated = true;
           }
         }
@@ -8695,6 +8805,8 @@ export default class RewordPlugin extends Plugin {
     if ((host as HTMLElement).dataset.rendered === "1" && onClose == null) return;
     (host as HTMLElement).dataset.rendered = "1";
     const s = this.aiSettings;
+    // 2026-09-03 P0：记录打开设置时的输入框模式，便于「取消」时还原
+    const originalUseProtyle = !!s.useProtyleInput;
     const dlg = host;
     dlg.innerHTML = `
         <div class="hiword-ai-settings-panel">
@@ -8838,6 +8950,21 @@ export default class RewordPlugin extends Plugin {
                 </div>
                 <div class="hiword-ai-field">
                   <input id="ais-input-fontsize" class="hiword-ai-input" type="number" min="10" max="24" step="1" value="${s.inputFontSize}" />
+                </div>
+              </div>
+              <!-- 2026-09-03 P0：AI 输入框实现选择。默认关闭（contenteditable 稳定路径），
+                   开启为实验性 Protyle 富文本输入框。切换即时重建输入框，无需重载思源。 -->
+              <div class="hiword-ai-setting-group">
+                <div class="hiword-ai-setting-label">
+                  <span class="hiword-ai-setting-name">启用 Protyle 富文本输入框</span>
+                  <span class="hiword-ai-setting-desc">关闭（默认）使用更稳定的纯文本框，规避 SiYuan 内核 Protyle 初始化失败导致输入框无法输入；开启可获得块引用卡片等原生富文本能力（实验性）</span>
+                </div>
+                <div class="hiword-ai-setting-row">
+                  <label class="hiword-ai-switch">
+                    <input type="checkbox" id="ais-use-protyle-input" ${s.useProtyleInput ? "checked" : ""} />
+                    <span class="hiword-ai-switch-track"></span>
+                  </label>
+                  <span>启用 Protyle 输入框（实验性）</span>
                 </div>
               </div>
             </section>
@@ -9139,7 +9266,21 @@ export default class RewordPlugin extends Plugin {
         showMessage("AI 设置已保存", 2000, "success" as any);
       });
       dlg.querySelector("#ais-cancel")?.addEventListener("click", () => {
+        // 2026-09-03 P0：撤销未保存的输入框模式热切换（若切过则按已保存设置重建）
+        if ((!!this.aiSettings.useProtyleInput) !== originalUseProtyle) {
+          this.aiSettings.useProtyleInput = originalUseProtyle;
+          this.aiPanel?.remountInput?.();
+        }
         onClose?.();
+      });
+
+      // 2026-09-03 P0：通用 Tab 中切换「Protyle 输入框」即时热重建，无需重载思源
+      const useProtyleInputCb = dlg.querySelector("#ais-use-protyle-input") as HTMLInputElement | null;
+      useProtyleInputCb?.addEventListener("change", () => {
+        const on = !!useProtyleInputCb.checked;
+        if (on === (!!this.aiSettings.useProtyleInput)) return;
+        this.aiSettings.useProtyleInput = on;
+        this.aiPanel?.remountInput?.();
       });
   }
 
@@ -9188,6 +9329,8 @@ export default class RewordPlugin extends Plugin {
       // 显示与操作
       fontSize: parseInt(inputVal("fontsize"), 10) || DEFAULT_AI_SETTINGS.fontSize,
       inputFontSize: parseInt(inputVal("input-fontsize"), 10) || DEFAULT_AI_SETTINGS.inputFontSize,
+      // 2026-09-03 P0：AI 输入框模式（默认 contenteditable，Protyle 实验性）
+      useProtyleInput: checkboxVal("use-protyle-input"),
       // 2026-08-21 精简：sendShortcut 已删除(用思源约定 Ctrl/⌘+Enter)
       // 对话导出
       exportNotebookId: selectVal("export-nb"),
@@ -9476,13 +9619,30 @@ export default class RewordPlugin extends Plugin {
 
     showMessage(`正在导入「${name}」(.mdx 原包)...`, 3000, "info");
 
-    // 1) 将 .mdx 原包直接写入插件 dict 目录（node:fs 直写，零转换、无需手动）
+    // 1) 将 .mdx 原包写入工作空间下的插件 dict 目录。
+    // 2026-09-03 修复：之前用 node:fs.writeFileSync 在 Windows 安装版上会失败
+    // （webview 的 __dirname 落在 electron.asar/renderer，asar 路径被 isAsarPath
+    // 拒绝 → resolvePluginPath 返回空串 → 写入失败但 manifest 已登记 → 词典
+    // 永远 MISSING）。改用思源官方 putFile 走主进程权限写到工作空间，
+    // fs 探测回退作为兜底（macOS 等可用 fs 的环境）。
     let savedToDisk = false;
     try {
       const buf = Buffer.from(await file.arrayBuffer());
-      fs.mkdirSync(this.resolveDictPath("dict"), { recursive: true });
-      fs.writeFileSync(this.resolveDictPath(meta.file), buf);
-      savedToDisk = true;
+      const blob = new Blob([buf]);
+      // putFile 路径是工作空间下的相对路径：/data/plugins/<plugin-name>/dict/<id>.mdx
+      const wsRelPath = `/data/plugins/siyuan-plugin-reword/dict/${id}.mdx`;
+      const putOk = await putFile(wsRelPath, false, blob);
+      if (putOk != null) {
+        savedToDisk = true;
+      } else {
+        // 兜底：fs 直写（macOS 等能解析插件目录的环境）
+        const fsDir = this.resolveDictPath("dict");
+        if (fsDir) {
+          fs.mkdirSync(fsDir, { recursive: true });
+          fs.writeFileSync(this.resolveDictPath(meta.file), buf);
+          savedToDisk = true;
+        }
+      }
     } catch (err) {
       getLogger().warn("[REword] 写入词典文件失败:", { error: err });
       showMessage("自动写入失败，请检查插件目录写权限后重试", 6000, "error" as any);
@@ -9490,7 +9650,11 @@ export default class RewordPlugin extends Plugin {
 
     // 2) 无论是否写入磁盘，都先登记到清单（便于后续刷新加载）
     this.dictManifest.dicts.push(meta);
-    this.dictManifest.active = id;
+    // 2026-09-03 修复：必须维护 actives，不能只写 active。
+    // initDictionary() 启动时是 `actives.length ? actives : [active]` —— 只要 actives
+    // 非空就完全忽略 active。只写 active 的后果：导入当次能查（这里直接调了 loadDictFile），
+    // 重启思源后该词典再也不被加载，表现为「导入了却用不了」。
+    this.enableDictSingle(id);
     await this.saveData("hiword-dicts.json", this.dictManifest);
 
     // 3) 若已写入磁盘则立即加载并启用
@@ -9544,9 +9708,20 @@ export default class RewordPlugin extends Plugin {
       const destPath = `dict/${id}${ext}`;
       try {
         const buf = Buffer.from(await file.arrayBuffer());
-        fs.mkdirSync(this.resolveDictPath("dict"), { recursive: true });
-        fs.writeFileSync(this.resolveDictPath(destPath), buf);
-        return destPath;
+        const blob = new Blob([buf]);
+        // 2026-09-03 修复：改用 putFile 写到工作空间（绕开 webview fs 沙箱，
+        // Windows 安装版 fs 写插件目录会失败）。fs 直写作为兜底。
+        const wsRelPath = `/data/plugins/siyuan-plugin-reword/dict/${id}${ext}`;
+        const putOk = await putFile(wsRelPath, false, blob);
+        if (putOk != null) return destPath;
+        // 兜底
+        const fsDir = this.resolveDictPath("dict");
+        if (fsDir) {
+          fs.mkdirSync(fsDir, { recursive: true });
+          fs.writeFileSync(this.resolveDictPath(destPath), buf);
+          return destPath;
+        }
+        return null;
       } catch (err) {
         getLogger().warn("[REword] 写入 ${file.name} 失败:", { error: err });
         return null;
@@ -9582,7 +9757,9 @@ export default class RewordPlugin extends Plugin {
 
     // 登记到清单
     this.dictManifest.dicts.push(meta);
-    this.dictManifest.active = id;
+    // 2026-09-03 修复：同 MDX 导入，必须走 enableDictSingle 维护 actives，
+    // 否则重启后 actives 里没有它，StarDict 变成「导入了却不加载」。
+    this.enableDictSingle(id);
     await this.saveData("hiword-dicts.json", this.dictManifest);
 
     // 尝试加载
