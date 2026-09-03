@@ -3,7 +3,6 @@ import assert from "node:assert/strict";
 import {
   AiPresetStore,
   normalizePreset,
-  buildDefaultPresets,
 } from "../src/ai/ai-preset.ts";
 
 function makeStore() {
@@ -64,10 +63,4 @@ test("remove + setActive", async () => {
   await store.remove(b.id);
   assert.equal(store.list().length, 0);
   assert.equal(store.getActive(), undefined, "删完所有预设后 active 归空");
-});
-
-test("buildDefaultPresets: 仍可作为工厂函数调用（即便 load 不再自动播种）", () => {
-  const presets = buildDefaultPresets();
-  assert.ok(presets.length >= 1);
-  assert.ok(presets[0].name);
 });

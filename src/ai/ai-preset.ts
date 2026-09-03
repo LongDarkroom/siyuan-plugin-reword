@@ -59,22 +59,6 @@ export function normalizePreset(raw: any, fallbackId?: string): AiPreset {
   };
 }
 
-/** 默认预设：REword 英语生词精读（开箱即用，learning 型，约束自由对话为结构化精读） */
-export function buildDefaultPresets(): AiPreset[] {
-  const p = normalizePreset({
-    id: genId(),
-    name: "英语生词精读",
-    templateType: "learning",
-    contextMessages: -1,
-    temperature: 0.3,
-    temperatureEnabled: false,
-    systemPrompt: "",
-    autoCollectWords: true,
-    autoAnnotateSentences: true,
-  });
-  return [p];
-}
-
 export class AiPresetStore {
   private data: AiPresetStoreData = { presets: [], activeId: "" };
   private onChange?: () => void | Promise<void>;

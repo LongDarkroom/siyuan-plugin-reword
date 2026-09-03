@@ -52,7 +52,6 @@ import {
   renderMessageToolbar,
   renderSaveToNoteDialog,
   renderSaveToNoteTree,
-  type SaveToNoteDialogData,
 } from "./ai-dialogs.ts";
 import { logSwallow } from "../core/safe.ts";
 import {
@@ -923,15 +922,6 @@ export class AiPanel {
     this.insertTextAtCaret(plain);
   }
 
-  /** 向输入框追加文本（按钮场景：先读后写，整体重建） */
-  private appendInput(text: string): void {
-    if (!text) return;
-    // 预填充场景必须保留 block-ref 等思源原生语法，避免被展成占位符文本
-    const current = this.getInputMarkdownForPrefill();
-    const newMd = current ? current + "\n\n" + text : text;
-    this.setInputMarkdown(newMd);
-  }
-
   /**
    * 拖入/粘贴思源块 -> 插入原生块引用节点（data-type="block-ref"，同引擎渲染）。
    * 锚文本取自块正文；发送时由 getInputValue 反序列化为 ((id 'anchor')) 再展开为完整正文。
@@ -1518,18 +1508,6 @@ export class AiPanel {
       return el;
     }
     return null;
-  }
-
-  /** 光标置于元素内容末尾（不再插入 <br> 占位，避免多出空行盒） */
-  private placeCaretAtEnd(el: HTMLElement): void {
-    try {
-      const range = document.createRange();
-      range.selectNodeContents(el);
-      range.collapse(false);
-      const sel = window.getSelection();
-      sel?.removeAllRanges();
-      sel?.addRange(range);
-    } catch (__swallowErr) { logSwallow(__swallowErr, "ai-panel.ts · placeCaretAtEnd", "debug"); }
   }
 
   /**
@@ -4030,11 +4008,6 @@ export class AiPanel {
       const themeId = activeTheme?.dataset.theme || undefined;
       this.collectCheckedWords(sel, bookId, themeId, resultEl, blockId);
     });
-
-    // 目标书变化时联动（保留）
-    bar.querySelector('[data-field="book"]')?.addEventListener("change", () => {
-      // 由 openVocabTargetPicker 在弹层内按 bookId 重建主题下拉；此处不做强约束。
-    });
   }
 
   /** 把选中词写入词库（同步上下文例句 / 标记 #未掌握 / 继承主题标签） */
@@ -4066,83 +4039,6 @@ export class AiPanel {
         c.checked = false;
         c.disabled = true;
       }
-    });
-  }
-
-  /** 批量入库：逐词选目标本 + 自动关联（例句 / #未掌握 / 文档主题标签） */
-  private openVocabTargetPicker(words: DeepReadWord[], _all: DeepReadWord[], blockId?: string): void {
-    const targets = this.host.getVocabTargets();
-    const books = targets.books;
-    const contentEl = document.querySelector("#hiword-dock-content") as HTMLElement;
-    if (!contentEl) return;
-    let overlay = contentEl.querySelector(".hiword-ai-overlay") as HTMLElement | null;
-    if (!overlay) {
-      overlay = document.createElement("div");
-      overlay.className = "hiword-ai-overlay";
-      overlay.style.display = "none";
-      contentEl.appendChild(overlay);
-    }
-    const rows = words.map((w, i) => {
-      const bookOpts = books.map((b) => `<option value="${escapeHtml(b.id)}">${escapeHtml(b.name)}</option>`).join("");
-      const themeOpts = (books[0]?.themes || []).map((t) => `<option value="${escapeHtml(t.id)}">${escapeHtml(t.name)}</option>`).join("");
-      return `<div class="hiword-ai-vrow" data-idx="${i}">` +
-        `<span class="hiword-ai-vrow-word">${escapeHtml(w.word)}</span>` +
-        `<select class="hiword-ai-vrow-book" data-field="book">${bookOpts}</select>` +
-        `<select class="hiword-ai-vrow-theme" data-field="theme">${themeOpts}</select>` +
-      `</div>`;
-    }).join("");
-
-    overlay.innerHTML = `<div class="hiword-ai-overlay-mask" data-act="close"></div>` +
-      `<div class="hiword-ai-overlay-panel hiword-ai-vocab-picker">` +
-        `<div class="hiword-ai-overlay-title">批量加入词库（${words.length} 词）</div>` +
-        `<div class="hiword-ai-vrows">${rows}</div>` +
-        `<label class="hiword-ai-vassoc"><input type="checkbox" data-assoc="example" checked /> 同步上下文例句</label>` +
-        `<label class="hiword-ai-vassoc"><input type="checkbox" data-assoc="unmastered" checked /> 自动标记 #未掌握</label>` +
-        `<label class="hiword-ai-vassoc"><input type="checkbox" data-assoc="theme" checked /> 继承文档主题标签</label>` +
-        `<div class="hiword-ai-vocab-actions">` +
-          `<button class="hiword-ai-btn hiword-ai-btn--ghost" data-act="cancel">取消</button>` +
-          `<button class="hiword-ai-btn hiword-ai-btn--primary" data-act="confirm">确认入库</button>` +
-        `</div>` +
-      `</div>`;
-    overlay.style.display = "";
-
-    overlay.querySelectorAll<HTMLElement>(".hiword-ai-vrow").forEach((row) => {
-      const bookSel = row.querySelector('[data-field="book"]') as HTMLSelectElement;
-      const themeSel = row.querySelector('[data-field="theme"]') as HTMLSelectElement;
-      bookSel?.addEventListener("change", () => {
-        const b = books.find((bk) => bk.id === bookSel.value);
-        themeSel.innerHTML = (b?.themes || []).map((t) => `<option value="${escapeHtml(t.id)}">${escapeHtml(t.name)}</option>`).join("");
-      });
-    });
-
-    overlay.querySelector('[data-act="cancel"]')?.addEventListener("click", () => {
-      overlay!.style.display = "none";
-      overlay!.innerHTML = "";
-    });
-    overlay.querySelector('[data-act="confirm"]')?.addEventListener("click", async () => {
-      const btn = overlay!.querySelector('[data-act="confirm"]') as HTMLButtonElement;
-      btn.disabled = true;
-      btn.textContent = "入库中…";
-      const exampleOn = (overlay!.querySelector('[data-assoc="example"]') as HTMLInputElement)?.checked;
-      const unmasteredOn = (overlay!.querySelector('[data-assoc="unmastered"]') as HTMLInputElement)?.checked;
-      const themeOn = (overlay!.querySelector('[data-assoc="theme"]') as HTMLInputElement)?.checked;
-      let added = 0;
-      for (const row of Array.from(overlay!.querySelectorAll<HTMLElement>(".hiword-ai-vrow"))) {
-        const idx = parseInt(row.dataset.idx || "0", 10);
-        const w = words[idx];
-        if (!w) continue;
-        const bookId = (row.querySelector('[data-field="book"]') as HTMLSelectElement)?.value || undefined;
-        const themeId = (row.querySelector('[data-field="theme"]') as HTMLSelectElement)?.value || undefined;
-        const example = exampleOn ? w.context : undefined;
-        try {
-          const r = await this.host.collectWord(w, bookId, themeId, { example, markUnmastered: unmasteredOn, inheritThemeTags: themeOn });
-          if (r.added) added++;
-        } catch (__swallowErr) { logSwallow(__swallowErr, "ai-panel.ts · try { const r = await this.host.collectWord(w, bookId, themeId,…", "debug"); }
-      }
-      overlay!.style.display = "none";
-      overlay!.innerHTML = "";
-      const statusEl = document.querySelector("#hiword-ai-status") as HTMLElement | null;
-      if (statusEl) statusEl.textContent = `批量入库完成：新增 ${added} 个单词`;
     });
   }
 

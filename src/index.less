@@ -11138,18 +11138,6 @@ body.hiword-resizing {
   background: #e5484d; color: #fff; border-color: #e5484d;
 }
 
-/* 批量入库目标选择 */
-.hiword-ai-vocab-picker { display: flex; flex-direction: column; gap: 12px; }
-.hiword-ai-vocab-empty { padding: 20px 0; text-align: center; font-size: 13px; color: var(--b3-theme-on-surface-light, #888); }
-.hiword-ai-vocab-field { display: flex; flex-direction: column; gap: 6px; }
-.hiword-ai-vocab-field label { font-size: 12px; color: var(--b3-theme-on-surface-light, #666); }
-.hiword-ai-vocab-field select {
-  padding: 8px 12px; border-radius: 8px; font-size: 13px;
-  border: 1px solid var(--b3-theme-divider, rgba(0,0,0,.14));
-  background: var(--b3-theme-background, #fff);
-  color: var(--b3-theme-on-surface, #37352f);
-}
-.hiword-ai-vocab-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 4px; }
 .hiword-ai-textarea--sm { min-height: 60px; }
 
 /* ============ AI 精读 · Token 用量圆环 + tooltip（P1，对标 Copilot 白色圆环） ============ */
@@ -12838,8 +12826,7 @@ body.hiword-resizing {
      折算为 calc(100vw - 16px)，这里只处理内部 padding */
   .b3-dialog__container .hiword-unified-panel,
   .b3-dialog__container .hiword-up-panel,
-  .b3-dialog__container .hiword-dict-mgr,
-  .b3-dialog__container .hiword-ai-vocab-picker {
+  .b3-dialog__container .hiword-dict-mgr {
     padding: 12px;
   }
   /* 设置 dialog 左侧导航：在 phone 上默认横向排，避免被压成竖条 */

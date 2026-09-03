@@ -208,30 +208,6 @@ export function renderDocSearchItems(
     </div>`).join("");
 }
 
-/** 批量入库目标选择（单词本/主题两级） */
-export function renderVocabTargetPicker(
-  books: { id: string; name: string; themes: { id: string; name: string }[] }[]
-): string {
-  if (!books.length) {
-    return `<div class="hiword-ai-vocab-empty">词库尚未创建单词本，请先在词库面板创建。</div>`;
-  }
-  const bookOpts = books.map((b) => `<option value="${escapeHtml(b.id)}">${escapeHtml(b.name)}</option>`).join("");
-  const themeOpts = (books[0]?.themes || [])
-    .map((t) => `<option value="${escapeHtml(t.id)}">${escapeHtml(t.name)}</option>`)
-    .join("");
-  return `
-    <div class="hiword-ai-vocab-picker">
-      <div class="hiword-ai-vocab-field">
-        <label>单词本</label>
-        <select data-field="book">${bookOpts}</select>
-      </div>
-      <div class="hiword-ai-vocab-field">
-        <label>主题</label>
-        <select data-field="theme">${themeOpts}</select>
-      </div>
-    </div>`;
-}
-
 /** 消息下方工具栏（复制 Markdown / TXT、保存、编辑、重试） */
 export function renderMessageToolbar(role: "user" | "assistant"): string {
   const isUser = role === "user";
