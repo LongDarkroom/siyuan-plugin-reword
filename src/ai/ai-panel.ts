@@ -815,7 +815,7 @@ export class AiPanel {
       e.preventDefault();
       e.stopPropagation();
       try {
-        await this.insertBlockRef(blockId, blockTypeHint);
+        await this.insertBlockRef(blockId, blockTypeHint, { x: e.clientX, y: e.clientY });
         logger.info("块引用插入成功", { operation: "拖块插入", data: { blockId } });
       } catch (err) {
         logger.error("块引用插入失败", { operation: "拖块插入", error: err, data: { blockId } });
@@ -836,7 +836,7 @@ export class AiPanel {
       try {
         const text = await this.prefetchDocText(docId);
         if (text) {
-          await this.insertDocRef(docId, text);
+          await this.insertDocRef(docId, text, { x: e.clientX, y: e.clientY });
           logger.info("页签拖入成功", { operation: "页签拖入", data: { docId, len: text.length } });
           return;
         }
@@ -858,6 +858,8 @@ export class AiPanel {
     // 回退 contenteditable：自行插入
     e.preventDefault();
     e.stopPropagation();
+    // 落点跟随：把光标移到真实拖放坐标，使文本/富文本插在落点而非末尾
+    this.setCaretAtDropPoint(e.clientX, e.clientY);
     const fallbackText = this.host.resolveDragFallbackText(e);
     if (fallbackText) {
       logger.info("拖入文本(选中记录)", { operation: "拖块插入", data: { len: fallbackText.length } });
@@ -939,7 +941,7 @@ export class AiPanel {
    *   ② 验证 block-ref 是否出现，未出现则直接 DOM 插入；
    *   ③ 强制刷新 --empty 态防占位符遮挡。
    */
-  private async insertBlockRef(blockId: string, typeHint = ""): Promise<void> {
+  private async insertBlockRef(blockId: string, typeHint = "", dropPoint?: { x: number; y: number }): Promise<void> {
     const logger = getLogger();
     const kramdownBody = (await this.host.fetchBlockText(blockId)) || "";
     // 块类型：用于卡片差异化图标/颜色（段落 ¶ / 列表 ☰ / 标题 H / 代码 </> / 引用 "）
@@ -971,6 +973,8 @@ export class AiPanel {
 
     if (this.protyle) {
       const wysiwyg = this.protyle.protyle?.wysiwyg?.element;
+      // 落点跟随：拖放时把光标移到真实坐标，再 insert（避免恒插在最后光标位）
+      if (dropPoint) this.setCaretAtDropPoint(dropPoint.x, dropPoint.y);
       // ── 保障①：原生 protyle.insert() ──
       this.protyle.focus();
       let nativeOk = false;
@@ -1012,6 +1016,7 @@ export class AiPanel {
       return;
     }
     // contenteditable 兜底模式
+    if (dropPoint) this.setCaretAtDropPoint(dropPoint.x, dropPoint.y);
     this.insertHtmlAtCaret(card);
   }
 
@@ -1030,7 +1035,7 @@ export class AiPanel {
    *     都能识别；发送时由 expandDocRefs 按「📄 文档 」锚前缀识别为文档引用，
    *     调 host.fetchDocText 实时拉取全文，复用既有逻辑，且文档被改也能拿到最新版。
    */
-  private async insertDocRef(docId: string, prefetched?: string | null): Promise<void> {
+  private async insertDocRef(docId: string, prefetched?: string | null, dropPoint?: { x: number; y: number }): Promise<void> {
     const logger = getLogger();
     logger.info("页签/文档树拖入,插入文档引用卡片 docId=" + docId, { operation: "页签拖入" });
 
@@ -1085,10 +1090,13 @@ export class AiPanel {
 
     if (this.protyle) {
       const wysiwyg = this.protyle.protyle?.wysiwyg?.element;
+      // 落点跟随：拖放时把光标移到真实坐标，再 insert（避免恒插在最后光标位）
+      if (dropPoint) this.setCaretAtDropPoint(dropPoint.x, dropPoint.y);
       this.directInsertCard(card, wysiwyg, docId);
       this.refreshInputEmptyState();
     } else {
       // contenteditable 兜底路径：无 Lute 重渲染，直接插入即可
+      if (dropPoint) this.setCaretAtDropPoint(dropPoint.x, dropPoint.y);
       this.insertHtmlAtCaret(card);
     }
     logger.info("页签拖入文档引用卡片已插入", { operation: "页签拖入", data: { docId, shortId } });
@@ -1636,6 +1644,57 @@ export class AiPanel {
     }
     const html = escapeHtml(text).replace(/\r\n|\r|\n/g, "<br>");
     this.insertHtmlAtCaret(html);
+  }
+
+  /**
+   * 跨浏览器取 (clientX, clientY) 处的落点 Range。
+   * Chrome/Safari 用 document.caretRangeFromPoint；Firefox 用 caretPositionFromPoint 再构造。
+   */
+  private caretRangeAt(x: number, y: number): Range | null {
+    try {
+      const anyDoc = document as any;
+      if (typeof anyDoc.caretRangeFromPoint === "function") {
+        return (anyDoc.caretRangeFromPoint(x, y) as Range | null) ?? null;
+      }
+      if (typeof anyDoc.caretPositionFromPoint === "function") {
+        const pos = anyDoc.caretPositionFromPoint(x, y) as any;
+        if (pos && pos.offsetNode) {
+          const r = document.createRange();
+          r.setStart(pos.offsetNode, pos.offset);
+          r.collapse(true);
+          return r;
+        }
+      }
+    } catch {
+      return null;
+    }
+    return null;
+  }
+
+  /**
+   * 把光标定位到拖放落点 (clientX, clientY)，使其落在输入框内。
+   * - Protyle 模式：同步到 protyle.range（protyle.insert 按此插入），并同步 window 选区；
+   * - 兜底 contenteditable 模式：同步到 window 选区（insertHtmlAtCaret 按此插入）。
+   * 仅当落点确实在输入框内才生效，返回是否成功定位。
+   * 用于修复「拖入块恒插在最后光标位而非真实落点」的问题。
+   */
+  private setCaretAtDropPoint(x: number, y: number): boolean {
+    const protyle = this.protyle;
+    const wysiwyg = (protyle?.protyle?.wysiwyg?.element as HTMLElement | undefined) ?? undefined;
+    const target = wysiwyg ?? this.inputEl;
+    if (!target) return false;
+    const range = this.caretRangeAt(x, y);
+    if (!range || !target.contains(range.startContainer)) return false;
+    if (wysiwyg && protyle) {
+      // 运行时 Protyle 实例自带 range 字段（d.ts 未暴露），insert 按此插入
+      (protyle as any).range = range;
+    }
+    const sel = window.getSelection();
+    if (sel) {
+      sel.removeAllRanges();
+      sel.addRange(range);
+    }
+    return true;
   }
 
   /** 聚焦输入框 */
