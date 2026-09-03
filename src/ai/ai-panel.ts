@@ -3714,7 +3714,8 @@ export class AiPanel {
           this.liveThinkingText += chunk;
           if (this.liveThinkingEl) {
             this.liveThinkingEl.style.display = "";
-            this.liveThinkingEl.textContent = this.liveThinkingText;
+            // P2-4：thinking 区支持 markdown（粗体/列表/代码等），而非裸文本
+            this.liveThinkingEl.innerHTML = renderMarkdown(this.liveThinkingText);
             // 自动滚动到最新 thinking 内容
             bodyEl.scrollTop = bodyEl.scrollHeight;
           }
@@ -3753,7 +3754,7 @@ export class AiPanel {
             loadingMsg.classList.remove("hiword-ai-msg--loading");
             loadingMsg.classList.add("hiword-ai-msg--result");
             const thinkHtml = this.liveThinkingText
-              ? `<details class="hiword-ai-think" open><summary class="hiword-ai-think-sum">AI 思考过程（点击收起）</summary><div class="hiword-ai-think-body">${escapeHtml(this.liveThinkingText)}</div></details>`
+              ? `<details class="hiword-ai-think" open><summary class="hiword-ai-think-sum">AI 思考过程（点击收起）</summary><div class="hiword-ai-think-body">${renderMarkdown(this.liveThinkingText)}</div></details>`
               : "";
             loadingMsg.innerHTML = `
               <div class="hiword-ai-msg-avatar">AI</div>

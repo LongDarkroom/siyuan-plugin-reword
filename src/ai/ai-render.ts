@@ -472,7 +472,7 @@ function renderThinking(thinking?: string): string {
   return (
     `<details class="hiword-ai-think" open>` +
       `<summary class="hiword-ai-think-sum">AI 思考过程（点击收起）</summary>` +
-      `<div class="hiword-ai-think-body">${escapeHtml(thinking)}</div>` +
+      `<div class="hiword-ai-think-body">${renderMarkdown(thinking)}</div>` +
     `</details>`
   );
 }
