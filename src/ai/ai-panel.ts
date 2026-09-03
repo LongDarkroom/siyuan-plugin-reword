@@ -3746,6 +3746,10 @@ export class AiPanel {
               cntEl.style.display = "";
               cntEl.textContent = `AI 正在生成结构化分析…（已生成 ${liveRaw.length} 字）`;
             }
+            // P2-5：中间态渲染——生成已在进行，隐藏加载动画小圆点，
+            // 让「思考面板 + 进度行」构成干净的中间态（与 chat 模式观感一致，不再像卡在加载）
+            const dots = loadingMsg.querySelector(".hiword-ai-msg-loading") as HTMLElement | null;
+            if (dots) dots.style.display = "none";
             return;
           }
           if (!liveStarted) {
