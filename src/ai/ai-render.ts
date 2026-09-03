@@ -3,7 +3,8 @@ import { logSwallow } from "../core/safe.ts";
  * REword · AI 结果渲染
  * ------------------------------------------------------------------
  * 把 DeepReadResult 渲染为 dock 面板 HTML：
- *  - 结构化（isJson=true）：重点词卡片（带「收藏」）、逐句讲解（带「批注」）、小结。
+ *  - 结构化（isJson=true）：重点词卡片（带「收藏」）、逐句讲解（可复制句子）、小结。
+ *    注：逐句讲解当前无「批注」按钮（仅单词行有「＋收藏」）；如需句子级批注属新增功能，不在当前绑定范围。
  *  - 直出 markdown（isJson=false）：极简 markdown→HTML 渲染。
  * 渲染层只产出 HTML 字符串 + data-* 钩子，交互（收藏/批注）由 ai-panel 绑定。
  */

@@ -4238,7 +4238,11 @@ export class AiPanel {
 
   /** 打开「保存到笔记」对话框 */
   private async openSaveToNoteDialog(markdown: string): Promise<void> {
-    if (!this.openOverlay) return;
+    if (!this.openOverlay) {
+      // P3-2：overlay 未初始化时不再静默 return，给出反馈避免「点保存无反应」
+      showMessage("保存面板尚未就绪，请稍候重试", 3000, "error");
+      return;
+    }
     const notebooks = await this.host.listNotebooks();
     if (!notebooks.length) {
       showMessage("未找到可用笔记本", 3000, "error");
