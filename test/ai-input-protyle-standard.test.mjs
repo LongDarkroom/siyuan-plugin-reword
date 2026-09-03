@@ -50,6 +50,7 @@ const blockHasContent = bodyOf("private blockHasContent(");
 const syncNativePlaceholder = bodyOf("private syncNativePlaceholder(");
 const lastEditableInner = bodyOf("private lastEditableInner(");
 const directInsertCard = bodyOf("private directInsertCard(");
+const ensureCaretAfterCard = bodyOf("private ensureCaretAfterCard(");
 
 // ============ A. 标准空段四件套（Copilot 对齐） ============
 
@@ -125,9 +126,9 @@ test("C3: directInsertCard 兜底路径不再插 <br>（关键：br 会让卡片
   assert.match(directInsertCard, /insertAdjacentHTML\("beforeend",\s*cardHtml\)/, "只应 inline 追加卡片本身");
 });
 
-test("C4: 兜底后用 placeCaretAtEnd 定位光标（collapse(false) 到末尾）", () => {
-  assert.match(directInsertCard, /this\.placeCaretAtEnd\(inner\)/, "应把光标置于卡片之后");
-  assert.match(src, /range\.collapse\(false\)/, "placeCaretAtEnd 应 collapse 到末尾");
+test("C4: 兜底/原生路径都用 ensureCaretAfterCard 把光标放到卡片后", () => {
+  assert.match(directInsertCard, /this\.ensureCaretAfterCard\(wysiwyg,\s*blockId\)/, "应调用 ensureCaretAfterCard 定位光标");
+  assert.match(ensureCaretAfterCard, /setStartAfter\(textNode\)/, "应在卡片后的 ZWSP 节点后定位光标");
 });
 
 test("C5: lastEditableInner 跳过 protyle-attr 与代码块", () => {

@@ -938,7 +938,7 @@ export class AiPanel {
       body: kramdownBody || undefined,
       status: kramdownBody ? "ready" : "failed",
     });
-    const card = `<span data-type="block-ref" data-id="${blockId}" data-subtype="s" class="hiword-ai-block-ref${typeClass}" data-block-type="${escapeHtml(blockType)}">${safeAnchor}</span>`;
+    const card = `<span data-type="block-ref" data-id="${blockId}" data-subtype="s" class="hiword-ai-block-ref${typeClass}" data-block-type="${escapeHtml(blockType)}">${safeAnchor}</span>${ZWSP}`;
     logger.debug("插入块 " + blockId, { operation: "拖块插入", data: { blockId } });
 
     if (this.protyle) {
@@ -968,6 +968,7 @@ export class AiPanel {
         const refAfterInsert = wysiwyg?.querySelector(`[data-type="block-ref"][data-id="${CSS.escape(blockId)}"]`);
         if (refAfterInsert) {
           logger.debug("块引用插入成功（原生路径）", { operation: "拖块插入", data: { blockId } });
+          this.ensureCaretAfterCard(wysiwyg, blockId);
         } else {
           // 原生路径静默失败（未插入节点）→ DOM 直插兜底（带去重保护）
           logger.debug("protyle.insert() 未生效，启用 DOM 直插兜底", { operation: "拖块插入", data: { blockId } });
@@ -1016,7 +1017,7 @@ export class AiPanel {
     const card =
       `<span data-type="block-ref" data-id="${safeId}" ` +
       `data-subtype="s" class="hiword-ai-doc-ref" data-doc-status="${initialStatus}" ` +
-      `title="${initialTitle}">📄 文档 ${escapeHtml(shortId)}</span>`;
+      `title="${initialTitle}">📄 文档 ${escapeHtml(shortId)}</span>${ZWSP}`;
 
     // 预取完成后更新卡片状态角标（loading → ready / failed）
     const updateDocCardStatus = (status: "ready" | "failed") => {
@@ -1494,6 +1495,32 @@ export class AiPanel {
   }
 
   /**
+   * 确保光标落在卡片之后（而不是卡内 anchor 文本里）。
+   * 在卡片后插一个 ZWSP 文本节点作为可编辑位点；若已有 ZWSP 则直接用。
+   * 解决「拖入后只能在卡片内输入」的问题。
+   */
+  private ensureCaretAfterCard(wysiwyg: HTMLElement | undefined, blockId?: string): void {
+    if (!wysiwyg || !blockId) return;
+    const card = wysiwyg.querySelector(`[data-type="block-ref"][data-id="${CSS.escape(blockId)}"]`) as HTMLElement | null;
+    if (!card) return;
+    const parent = card.parentNode;
+    if (!parent) return;
+    let textNode = card.nextSibling as Text | null;
+    if (!textNode || textNode.nodeType !== Node.TEXT_NODE || !textNode.data.includes(ZWSP)) {
+      textNode = document.createTextNode(ZWSP);
+      parent.insertBefore(textNode, card.nextSibling);
+    }
+    try {
+      const range = document.createRange();
+      range.setStartAfter(textNode);
+      range.collapse(true);
+      const sel = window.getSelection();
+      sel?.removeAllRanges();
+      sel?.addRange(range);
+    } catch (__swallowErr) { logSwallow(__swallowErr, "ai-panel.ts · ensureCaretAfterCard", "debug"); }
+  }
+
+  /**
    * 向 wysiwyg 插入引用卡片（2026-09-03 v3：回归 Protyle 原生）。
    *
    * 旧版在卡片后追加一个带自定义标记的 `<br>` 作为光标锚点 —— br 会产生换行行盒，
@@ -1506,18 +1533,24 @@ export class AiPanel {
     // 去重保护：原生路径已插入同名块引用（校验时序导致的误判）时，跳过避免重复卡片
     const exists = () =>
       !!(blockId && wysiwyg.querySelector(`[data-type="block-ref"][data-id="${CSS.escape(blockId)}"]`));
-    if (exists()) return;
+    if (exists()) {
+      this.ensureCaretAfterCard(wysiwyg, blockId);
+      return;
+    }
     try {
       this.protyle?.focus();
       this.protyle?.insert(cardHtml, false);
-      if (exists() || !blockId) return; // 无 blockId 时无法校验，按原生成功处理
+      if (exists()) {
+        this.ensureCaretAfterCard(wysiwyg, blockId);
+        return;
+      }
     } catch (err) {
       getLogger().debug("protyle.insert() 异常，走 DOM 兜底", { operation: "引用卡插入", error: err as Error });
     }
     const inner = this.lastEditableInner(wysiwyg);
     if (!inner) return;
     inner.insertAdjacentHTML("beforeend", cardHtml);
-    this.placeCaretAtEnd(inner);
+    this.ensureCaretAfterCard(wysiwyg, blockId);
   }
 
   /** 强制刷新输入框 empty 态（移除 --empty 类，防止伪元素遮挡已插入的内容） */

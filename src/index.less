@@ -5670,7 +5670,7 @@ body.hiword-dragging {
   /* 块引用节点（覆盖思源原生药丸样式，改为美观的内容卡片） */
   .protyle-wysiwyg [data-type="block-ref"] {
     cursor: pointer;
-    display: inline-flex;
+    display: inline-flex !important; /* 防止思源默认 display 覆盖成 block */
     align-items: center;
     gap: 6px;
     padding: 5px 10px;
@@ -5686,6 +5686,15 @@ body.hiword-dragging {
     text-decoration: none !important;
     box-shadow: none !important;
     transition: background 0.15s, border-color 0.15s;
+
+    /* 思源内部子元素（如 .protyle-inline-block-ref__text）若带 flex:1/width:100%
+       会把 inline-flex 容器撑满整行；强制收缩到内容宽度。 */
+    > * {
+      flex: 0 0 auto !important;
+      width: auto !important;
+      max-width: none !important;
+      display: inline !important;
+    }
 
     /* 覆盖思源原生样式：去掉虚线边框、✖图标、截断 */
     &::before {
