@@ -2087,7 +2087,13 @@ export class AiPanel {
     let s = md.replace(/\(\(\s*([0-9a-f]{16,})\s*(?:'((?:[^'\\]|\\.)*)')?\s*\)\)/gi, (_m, id: string, anchor?: string) => {
       const a = (anchor || "").replace(/\\'/g, "'");
       const safe = escapeHtml(a);
-      const ref = `<span class="hiword-ref" contenteditable="false" data-type="block-ref" data-id="${id}" data-anchor="${safe}">${safe || "块引用"}</span>`;
+      // P2-3：与拖入路径统一类名（不再用无名 hiword-ref，否则 prefill 卡片裸样式且不被 hover 识别）。
+      // 文档引用（锚以「📄 文档」开头）用 hiword-ai-doc-ref，否则 hiword-ai-block-ref；
+      // data-subtype="s" 与原生拖入卡一致，防止思源重渲染吞掉手填锚文本。
+      const isDoc = /^📄\s*文档/.test(a);
+      const cls = isDoc ? "hiword-ai-doc-ref" : "hiword-ai-block-ref";
+      const extra = isDoc ? ` data-doc-status="ready"` : "";
+      const ref = `<span class="${cls}"${extra} data-subtype="s" contenteditable="false" data-type="block-ref" data-id="${id}" data-anchor="${safe}">${safe || "块引用"}</span>`;
       refs.push(ref);
       return `@@REF${refs.length - 1}@@`;
     });
