@@ -4808,6 +4808,118 @@ body.hiword-dragging {
   line-height: 1.55;
 }
 
+/* ---- 2026-09-03 新增：模式条（常驻显示当前模式 + 一键切换角色） ---- */
+.hiword-ai-modebar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border-bottom: 1px solid var(--b3-theme-divider);
+  background: var(--b3-theme-background);
+  flex-shrink: 0;
+  font-size: 12px;
+  color: var(--b3-theme-on-surface-light, #888);
+}
+.hiword-ai-mode-icon { font-size: 12px; line-height: 1; }
+.hiword-ai-mode-text {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* 结构化精读态：用主色点出「当前不是普通聊天」 */
+.hiword-ai-modebar--structured .hiword-ai-mode-text {
+  color: var(--b3-theme-primary, #4f6ef7);
+  font-weight: 500;
+}
+.hiword-ai-mode-switch {
+  border: 1px solid var(--b3-theme-divider);
+  background: transparent;
+  color: var(--b3-theme-on-surface-light, #888);
+  border-radius: 999px;
+  padding: 1px 8px;
+  font-size: 11px;
+  cursor: pointer;
+  line-height: 16px;
+  transition: all 0.18s ease;
+  white-space: nowrap;
+}
+.hiword-ai-mode-switch:hover {
+  color: var(--b3-theme-primary, #4f6ef7);
+  border-color: var(--b3-theme-primary, #4f6ef7);
+}
+
+/* ---- 2026-09-03 新增：空态快捷卡片 ---- */
+.hiword-ai-quick {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px;
+  margin-top: 4px;
+  max-width: 420px;
+}
+.hiword-ai-quick-card {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  width: 118px;
+  padding: 9px 10px;
+  border: 1px solid var(--b3-theme-divider);
+  border-radius: 10px;
+  background: var(--b3-theme-surface, #fff);
+  cursor: pointer;
+  text-align: left;
+  transition: all 0.18s ease;
+}
+.hiword-ai-quick-card:hover {
+  border-color: var(--b3-theme-primary, #4f6ef7);
+  background: color-mix(in srgb, var(--b3-theme-primary, #4f6ef7) 8%, transparent);
+  transform: translateY(-1px);
+}
+.hiword-ai-quick-icon { font-size: 16px; line-height: 1; }
+.hiword-ai-quick-title {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--b3-theme-on-surface, #37352f);
+}
+.hiword-ai-quick-desc {
+  font-size: 11px;
+  color: var(--b3-theme-on-surface-light, #888);
+  line-height: 1.35;
+}
+
+/* ---- 2026-09-03 新增：上翻时浮出的「↓ 有新内容」 ----
+   sticky bottom：贴在滚动视口底部，随滚动保持可见。
+   ★ 不用负 margin-top 去「省高度」——在 flex 列布局里那会把最后一条消息底部
+     压掉一段且这段再也滚不到；隐藏时多留 6px 底部空隙，视觉上等同 padding，无害。 */
+.hiword-ai-jump {
+  position: sticky;
+  bottom: 10px;
+  align-self: flex-end;
+  margin: 0 12px 6px auto;
+  z-index: 6;
+  padding: 4px 10px;
+  border: 1px solid var(--b3-theme-primary, #4f6ef7);
+  border-radius: 999px;
+  background: var(--b3-theme-primary, #4f6ef7);
+  color: #fff;
+  font-size: 11.5px;
+  line-height: 16px;
+  cursor: pointer;
+  white-space: nowrap;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+  opacity: 0;
+  visibility: hidden;
+  transform: translateY(6px);
+  transition: opacity 0.18s ease, visibility 0.18s ease, transform 0.18s ease;
+}
+.hiword-ai-jump--visible {
+  opacity: 1;
+  visibility: visible;
+  transform: translateY(0);
+}
+
 /* 对话消息区 */
 .hiword-ai-messages {
   display: flex;
@@ -5042,7 +5154,9 @@ body.hiword-dragging {
   }
 }
 
-/* 2026-08-21 A 任务 v2：文档占位卡样式（拖入页签/文档树时插入） */
+/* 2026-08-21 A 任务 v2：文档占位卡样式（拖入页签/文档树时插入）
+   2026-09-03 修复：加 max-width: fit-content !important; width: fit-content !important;
+   防止 Protyle 父容器 + 思源内核 CSS 强制撑满整行（特异性 (0,1,1) vs (0,1,0) 输掉） */
 .hiword-ai-doc-ref {
   display: inline-flex;
   align-items: center;
@@ -5058,6 +5172,8 @@ body.hiword-dragging {
   user-select: none;
   vertical-align: baseline;
   white-space: nowrap;
+  max-width: fit-content !important;
+  width: fit-content !important;
   transition: background 0.15s ease, color 0.15s ease;
 
   &:hover {
@@ -5081,6 +5197,8 @@ body.hiword-dragging {
   user-select: none;
   vertical-align: baseline;
   white-space: nowrap;
+  max-width: fit-content !important;
+  width: fit-content !important;
   border-left: 3px solid var(--b3-theme-on-surface, #888);
 }
 /* 块类型差异化图标（::before 不进入 DOM，故不影响序列化到 ((id 'anchor')) ） */
@@ -5150,48 +5268,53 @@ body.hiword-dragging {
   cursor: pointer;
 }
 
-/* 引用卡 hover 浮动预览层（document.body 下唯一一份，
-   在 ai-panel.ts · setupHoverPreviewLayer 中创建） */
-.hiword-ref-hover-preview {
-  position: fixed;
-  z-index: 9999;
-  max-width: 360px;
-  max-height: 220px;
-  overflow: auto;
-  padding: 8px 10px;
-  border-radius: var(--hw-radius-sm, 6px);
-  background: var(--b3-theme-surface, #ffffff);
-  color: var(--b3-theme-on-background, #1f2329);
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.18), 0 1px 3px rgba(0, 0, 0, 0.1);
-  border: 1px solid var(--hw-border, rgba(128, 128, 128, 0.25));
-  font-size: 12px;
-  line-height: 1.55;
-  white-space: pre-wrap;
-  word-break: break-word;
-  /* 进入时不抢鼠标焦点 */
-  pointer-events: auto;
+/* 2026-09-03：移除 .hiword-ref-hover-preview 浮动预览层相关 CSS。
+   用户反馈「鼠标悬浮预览」与 Hypr 风格静态视觉冲突。
+   ai-panel.ts 中 setupHoverPreviewLayer() 调用已注释（保留方法待恢复）。
+   如需恢复，把下面整块 .hiword-ref-hover-preview 规则解除注释即可。 */
 
-  &::-webkit-scrollbar { width: 4px; }
-  &::-webkit-scrollbar-thumb {
-    background: rgba(128, 128, 128, 0.4);
-    border-radius: 2px;
-  }
-
-  .hiword-ref-hover-preview__loading {
-    opacity: 0.55;
-    font-style: italic;
-  }
-  .hiword-ref-hover-preview__body {
-    white-space: pre-wrap;
-    word-break: break-word;
-  }
-}
-/* 深色主题适配 */
-.b3-theme--dark .hiword-ref-hover-preview {
-  background: var(--b3-theme-surface, #2a2a2a);
-  color: var(--b3-theme-on-surface, #d4d4d4);
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5), 0 1px 3px rgba(0, 0, 0, 0.3);
-}
+// /* 引用卡 hover 浮动预览层（document.body 下唯一一份，
+//    在 ai-panel.ts · setupHoverPreviewLayer 中创建） */
+// .hiword-ref-hover-preview {
+//   position: fixed;
+//   z-index: 9999;
+//   max-width: 360px;
+//   max-height: 220px;
+//   overflow: auto;
+//   padding: 8px 10px;
+//   border-radius: var(--hw-radius-sm, 6px);
+//   background: var(--b3-theme-surface, #ffffff);
+//   color: var(--b3-theme-on-background, #1f2329);
+//   box-shadow: 0 4px 16px rgba(0, 0, 0, 0.18), 0 1px 3px rgba(0, 0, 0, 0.1);
+//   border: 1px solid var(--hw-border, rgba(128, 128, 128, 0.25));
+//   font-size: 12px;
+//   line-height: 1.55;
+//   white-space: pre-wrap;
+//   word-break: break-word;
+//   /* 进入时不抢鼠标焦点 */
+//   pointer-events: auto;
+// 
+//   &::-webkit-scrollbar { width: 4px; }
+//   &::-webkit-scrollbar-thumb {
+//     background: rgba(128, 128, 128, 0.4);
+//     border-radius: 2px;
+//   }
+// 
+//   .hiword-ref-hover-preview__loading {
+//     opacity: 0.55;
+//     font-style: italic;
+//   }
+//   .hiword-ref-hover-preview__body {
+//     white-space: pre-wrap;
+//     word-break: break-word;
+//   }
+// }
+// /* 深色主题适配 */
+// .b3-theme--dark .hiword-ref-hover-preview {
+//   background: var(--b3-theme-surface, #2a2a2a);
+//   color: var(--b3-theme-on-surface, #d4d4d4);
+//   box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5), 0 1px 3px rgba(0, 0, 0, 0.3);
+// }
 
 /* 加载动画：三点跳动 */
 .hiword-ai-msg-loading {
@@ -5245,7 +5368,10 @@ body.hiword-dragging {
   border-top: 1px solid var(--b3-theme-divider);
   /* 使用与 body 一致的背景色，消除滚动时的视觉断层 */
   background: var(--b3-theme-background);
-  padding: 4px 8px 6px;
+  /* 2026-09-03 方案 B：原 padding 4px 8px 6px 太紧。
+     改为 8px 10px 10px，让工具栏上方和输入框下方都有充足呼吸空间，
+     配合 toolbar margin-bottom 6px 整体视觉重心向下沉、输入区更突出。 */
+  padding: 8px 10px 10px;
   /* 确保 footer 不受 body 滚动影响 —— 锚定在面板底部 */
   position: relative;
   z-index: 5;
@@ -5569,7 +5695,10 @@ body.hiword-dragging {
   padding: 10px 16px 14px;
   border-top: 1px solid var(--b3-theme-divider);
 }
-/* 输入行：文本框 + 发送按钮 */
+/* 输入行：文本框 + 发送按钮
+   2026-09-03 方案 B 翻新：1.5px 实色 border + 14px 圆角 + 4px focus ring。
+   border 改用 --hw-border-strong（与主题 on-surface 关联），
+   确保暗色下对比度足够，回应用户「边界模糊」反馈。 */
 .hiword-ai-input-row {
   display: flex;
   align-items: stretch;
@@ -5579,20 +5708,32 @@ body.hiword-dragging {
   /* 与 .hiword-ai-panel 保持一致，仅依赖主题背景变量；
      不要回退到文字色 --b3-theme-on-background（缺失时输入框背景会变近黑/近白，与面板割裂） */
   background: var(--b3-theme-background);
-  /* 暗色主题下原 1.5px divider 边框与背景对比过低、几乎不可见；
-     提升为 2px，并用 divider 70% + on-surface 30% 混合提高对比度。 */
-  border: 2px solid color-mix(in srgb, var(--b3-theme-divider) 70%, var(--b3-theme-on-surface) 30%);
-  border-radius: 10px;
-  padding: 3px 5px 3px 4px;
-  transition: border-color 0.2s, box-shadow 0.2s, background 0.2s;
-  /* 微妙的内阴影增加深度感 */
-  box-shadow: inset 0 1px 3px rgba(0,0,0,.04);
+  /* 方案 B：1.5px 实色 border，与主题 on-surface 关联确保对比度；
+     fallback 到 #c8ccd3 / #404249 处理暗色主题缺失变量的兜底。 */
+  border: 1.5px solid var(--hw-border-strong, color-mix(in srgb, var(--b3-theme-on-surface) 35%, var(--b3-theme-divider)));
+  border-radius: 14px;
+  /* 2026-09-03：原 padding 3px/5px/3px/4px 让输入框"贴得太紧"——
+     文本与边框几乎挨在一起，多行时尤其显得局促。
+     加大到 6px 8px，让文字与边框之间有清晰的呼吸空间。 */
+  padding: 6px 8px 6px 8px;
+  transition: border-color 0.18s ease, box-shadow 0.18s ease, background 0.18s ease;
+  /* 1px 微亮高光 + 微阴影，模拟 Hypr 风格「悬浮卡片」感 */
+  box-shadow:
+    inset 0 0.5px 0 rgba(255, 255, 255, 0.6),
+    0 1px 2px rgba(0, 0, 0, 0.04);
 }
 .hiword-ai-input-row:focus-within {
   border-color: var(--b3-theme-primary, var(--b3-theme-primary));
-  /* 边框加粗到 2px + 主色描边，确保暗色下聚焦态清晰可辨 */
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--b3-theme-primary) 18%, transparent), inset 0 1px 3px rgba(0,0,0,.02);
-  background: var(--b3-theme-surface-lighter, var(--b3-theme-background));
+  /* 方案 B：4px 主色 ring（而非 3px）让聚焦态更「锋利」 */
+  box-shadow:
+    0 0 0 4px color-mix(in srgb, var(--b3-theme-primary) 18%, transparent),
+    inset 0 0.5px 0 rgba(255, 255, 255, 0.6),
+    0 2px 8px rgba(0, 0, 0, 0.06);
+  /* 2026-09-03 修复：原 var(--b3-theme-surface-lighter, ...) 变量在思源主题里
+     不存在，fallback 到 background，focus 看不到任何背景变化。
+     改用 color-mix 在原 background 上混合 4% 主色 + 4% 白色（暗色下混合 -3% 黑），
+     主题无关，亮/暗都看得出"聚焦亮一档"。 */
+  background: color-mix(in srgb, var(--b3-theme-background) 96%, var(--b3-theme-primary) 4%);
 }
 
 /* AI 输入框：挂载共享 Lute 引擎的原生 Protyle（lite 模式）容器。
@@ -5627,8 +5768,9 @@ body.hiword-dragging {
       /* 2026-08-21：跟随 footer 高度,不锁 200px */
       max-height: 60vh;
       overflow-y: auto;
-      /* 左侧尽量贴边，充分利用输入框空间；其余方向也保持紧凑 */
-      padding: 1px 4px 2px 2px;
+      /* 2026-09-03：原 padding 1px 4px 2px 2px 让文本几乎贴住边框，
+         多行时尤其挤。加大到 8px 6px 8px 6px 给文字呼吸空间。 */
+      padding: 8px 6px 8px 6px;
       box-sizing: border-box;
 
       &::-webkit-scrollbar { width: 4px; }
@@ -5640,7 +5782,9 @@ body.hiword-dragging {
     .protyle-wysiwyg {
       background: transparent !important;
       font-size: var(--hiword-ai-input-font-size, 13px);
-      line-height: 1.5;
+      /* 2026-09-03：line-height 1.5 → 1.75，13px 文字行高从 19.5px 升到 22.75px，
+         视觉密度更接近 Lark/Notion 风格，多行不挤。 */
+      line-height: 1.75;
       font-family: var(--b3-font-family, inherit);
       color: var(--b3-theme-on-background);
       min-height: 0;
@@ -5664,13 +5808,21 @@ body.hiword-dragging {
         padding: 0 !important;
         margin: 0 !important;
       }
+      /* 2026-09-03：相邻段落之间增加 6px 段间距（仅多段落时生效，单段不受影响）。
+         用 :not(:last-child) 选择器避免最后一段加底部空白。 */
+      .p + .p,
+      div[data-type="NodeParagraph"] + div[data-type="NodeParagraph"] {
+        margin-top: 6px !important;
+      }
     }
   }
 
   /* 占位提示已移除：用户反馈光标落入后 placeholder 仍显示，直接删掉避免兼容麻烦。 */
 
-  /* 块引用节点（覆盖思源原生药丸样式，改为美观的内容卡片） */
-  .protyle-wysiwyg [data-type="block-ref"] {
+  /* 块引用节点（覆盖思源原生药丸样式，改为美观的内容卡片）
+     2026-09-03 修复：把 hiword-ai-block-ref / hiword-ai-doc-ref 排除掉，
+     否则通用规则的 max-width: calc(100% - 16px) 会把紧凑的 chip 撑满整行。 */
+  .protyle-wysiwyg [data-type="block-ref"]:not(.hiword-ai-block-ref):not(.hiword-ai-doc-ref) {
     cursor: pointer;
     display: inline-flex !important; /* 防止思源默认 display 覆盖成 block */
     align-items: center;
@@ -6652,11 +6804,12 @@ body.hiword-dragging {
   justify-content: center;
   pointer-events: none;
 }
+/* 2026-09-03：原为单字母 M / T，不悬停完全看不出含义。改为 MD / TXT 自解释缩写。 */
 .hiword-ai-msg-tool-icon--md,
 .hiword-ai-msg-tool-icon--txt {
-  font-size: 14px;
-  font-weight: 600;
-  letter-spacing: -0.2px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: -0.3px;
 }
 
 /* AI 消息就地编辑器 */
@@ -10563,9 +10716,14 @@ body.hiword-resizing {
   align-items: center;
   flex-wrap: wrap;
   gap: 2px;
-  padding: 4px 6px;
+  /* 2026-09-03 方案 B：去掉 border-bottom，让 toolbar 与下方 input-row
+     视觉上完全独立成两块（input-row 用 1.5px 实色 border 自带边界）。
+     上下 padding 从 4px 增到 6px，配合 footer padding 形成 12-14px 视觉间距。 */
+  padding: 6px 6px;
   background: transparent;
-  border-bottom: 1px solid var(--b3-theme-divider);
+  /* 工具栏与输入框之间用 6px 间隙替代 1px divider，
+     比一条线更"轻"、与 input-row 14px 圆角更协调。 */
+  margin-bottom: 6px;
   min-height: 36px;
   position: relative;
   z-index: 4;

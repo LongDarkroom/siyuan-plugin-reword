@@ -38,7 +38,7 @@ export function renderPromptPanel(templates: AiPromptTemplate[]): string {
             <button class="hiword-ai-tpl-btn" data-act="del" title="删除">🗑</button>
           </div>
         </div>`).join("")
-    : `<div class="hiword-ai-tpl-empty">暂无提示词模板，点击下方「新建」添加。</div>`;
+    : `<div class="hiword-ai-tpl-empty">暂无快捷指令，点击下方「新建」添加。</div>`;
   return `
     <div class="hiword-ai-tpl-list">${items}</div>
     <div class="hiword-ai-tpl-new-row">
@@ -85,16 +85,16 @@ export function renderPresetListView(presets: AiPreset[], activeId: string, opts
       }).join("")
     : `<div class="hiword-ai-preset-empty">${
         presets.length === 0
-          ? "还没有预设，点击「＋ 新建预设」创建你的第一个预设"
-          : "没有匹配「" + escapeHtml(opts?.keyword || "") + "」的预设"
+          ? "还没有 AI 角色，点击「＋ 新建角色」创建你的第一个角色"
+          : "没有匹配「" + escapeHtml(opts?.keyword || "") + "」的 AI 角色"
       }</div>`;
 
   return `
     <div class="hiword-ai-preset-list-view">
-      ${renderOverlayTitlebar("预设设置")}
+      ${renderOverlayTitlebar("AI 角色")}
       <div class="hiword-ai-preset-list-body">
-        <button class="hiword-ai-preset-new" data-act="new">＋ 新建预设</button>
-        <input class="hiword-ai-preset-search" data-field="keyword" placeholder="搜索预设" value="${escapeHtml(opts?.keyword || "")}" />
+        <button class="hiword-ai-preset-new" data-act="new">＋ 新建角色</button>
+        <input class="hiword-ai-preset-search" data-field="keyword" placeholder="搜索 AI 角色" value="${escapeHtml(opts?.keyword || "")}" />
         <div class="hiword-ai-preset-list" data-field="list">${cards}</div>
       </div>
     </div>`;
@@ -103,20 +103,20 @@ export function renderPresetListView(presets: AiPreset[], activeId: string, opts
 /** 预设编辑面板（保留原编辑器逻辑，外层加 titlebar 统一风格） */
 export function renderPresetPanel(preset: AiPreset, opts?: { activeId?: string; isNew?: boolean }): string {
   const isActive = opts?.activeId === preset.id && !!opts?.activeId;
-  const title = opts?.isNew ? "新建预设" : "编辑预设";
+  const title = opts?.isNew ? "新建 AI 角色" : "编辑 AI 角色";
   return `
     <div class="hiword-ai-preset-panel">
       ${renderOverlayTitlebar(title)}
       <div class="hiword-ai-preset-panel-subbar">
-        <button class="hiword-ai-btn hiword-ai-btn--ghost" data-act="preset-list" title="返回预设列表">� 预设列表</button>
+        <button class="hiword-ai-btn hiword-ai-btn--ghost" data-act="preset-list" title="返回 AI 角色列表">� 角色列表</button>
         <div class="hiword-ai-preset-top-actions">
-          ${isActive ? `<button class="hiword-ai-btn hiword-ai-btn--ghost" data-act="close-preset" title="关闭预设，恢复自由对话">✕ 关闭预设</button>` : ""}
+          ${isActive ? `<button class="hiword-ai-btn hiword-ai-btn--ghost" data-act="close-preset" title="关闭角色，恢复自由对话">✕ 关闭角色</button>` : ""}
           <button class="hiword-ai-btn hiword-ai-btn--primary" data-act="save-preset">保存</button>
         </div>
       </div>
       <div class="hiword-ai-preset-form" data-preset-id="${escapeHtml(preset.id)}">
         <div class="hiword-ai-preset-field">
-          <label class="hiword-ai-preset-label">预设名称</label>
+          <label class="hiword-ai-preset-label">角色名称</label>
           <input class="hiword-ai-preset-input" data-field="name" value="${escapeHtml(preset.name)}" />
         </div>
 
@@ -170,7 +170,7 @@ export function renderPresetPanel(preset: AiPreset, opts?: { activeId?: string; 
         </div>
 
         <div class="hiword-ai-preset-field hiword-ai-preset-danger">
-          <button class="hiword-ai-btn hiword-ai-btn--danger" data-act="delete-preset">🗑 删除此预设</button>
+          <button class="hiword-ai-btn hiword-ai-btn--danger" data-act="delete-preset">🗑 删除此角色</button>
         </div>
       </div>
     </div>`;
@@ -213,11 +213,11 @@ export function renderMessageToolbar(role: "user" | "assistant"): string {
   const isUser = role === "user";
   return `
     <div class="hiword-ai-msg-toolbar" data-role="${role}">
-      <button class="hiword-ai-msg-tool" data-act="copy-md" title="复制 Markdown"><span class="hiword-ai-msg-tool-icon hiword-ai-msg-tool-icon--md">M</span></button>
-      <button class="hiword-ai-msg-tool" data-act="copy-txt" title="复制纯文本"><span class="hiword-ai-msg-tool-icon hiword-ai-msg-tool-icon--txt">T</span></button>
-      <button class="hiword-ai-msg-tool" data-act="save-note" title="保存到笔记"><span class="hiword-ai-msg-tool-icon">⬇</span></button>
-      <button class="hiword-ai-msg-tool" data-act="edit" title="编辑"><span class="hiword-ai-msg-tool-icon">✎</span></button>
-      ${isUser ? "" : `<button class="hiword-ai-msg-tool" data-act="retry" title="重新生成"><span class="hiword-ai-msg-tool-icon">↻</span></button>`}
+      <button class="hiword-ai-msg-tool" data-act="copy-md" title="复制 Markdown" aria-label="复制 Markdown"><span class="hiword-ai-msg-tool-icon hiword-ai-msg-tool-icon--md">MD</span></button>
+      <button class="hiword-ai-msg-tool" data-act="copy-txt" title="复制纯文本" aria-label="复制纯文本"><span class="hiword-ai-msg-tool-icon hiword-ai-msg-tool-icon--txt">TXT</span></button>
+      <button class="hiword-ai-msg-tool" data-act="save-note" title="保存到笔记" aria-label="保存到笔记"><span class="hiword-ai-msg-tool-icon">💾</span></button>
+      <button class="hiword-ai-msg-tool" data-act="edit" title="编辑" aria-label="编辑"><span class="hiword-ai-msg-tool-icon">✏️</span></button>
+      ${isUser ? "" : `<button class="hiword-ai-msg-tool" data-act="retry" title="重新生成" aria-label="重新生成"><span class="hiword-ai-msg-tool-icon">🔄</span></button>`}
     </div>`;
 }
 

@@ -15,6 +15,7 @@ import assert from "node:assert/strict";
 import {
   hasKramdownSyntax,
   findStableBoundary,
+  findForcedBoundary,
   createIncrementalRenderer,
   renderKramdown,
   renderWithLute,
@@ -301,4 +302,53 @@ test("E2. 大段代码块内增量：稳定边界不应切到代码块内", () =
   // 围栏闭合且后面有 \n\n → "after" 块应被纳入
   // 注：兜底 renderMarkdown 不真正处理代码块语法，测试仅保证不崩
   assert.ok(final.length > 0);
+});
+
+/* ============================================================
+ * F. 无空行内容兜底切分（2026-09-03，对应「AI 输出时思源卡死」修复）
+ * ------------------------------------------------------------
+ * findStableBoundary 只在围栏外空行处推进边界。AI 常输出紧凑 JSON 或
+ * 大段不换行正文 → boundary 恒为 0 → tail 吞下全文 → 每 tick 全量 Lute
+ * 解析，增量优化完全失效。以下用例锁定兜底切分行为，防止再退化。
+ * ============================================================ */
+
+test("F1. findForcedBoundary：按句末标点 / 换行找切分点", () => {
+  assert.ok(findForcedBoundary("第一句。第二句。第三句。", 0) > 0, "中文句末标点应可切分");
+  assert.ok(findForcedBoundary("line one\nline two\nline three", 0) > 0, "换行应可切分");
+  assert.equal(findForcedBoundary("abcdefg", 0), -1, "无切分点时应返回 -1");
+  // minPos 之后的切分点才会被采纳（保证 tail 被压到阈值内）
+  const md = "第一句。第二句。第三句。";
+  const pos = md.indexOf("。") + 1;
+  assert.ok(findForcedBoundary(md, pos) > pos, "应返回 minPos 之后的切分点");
+});
+
+test("F2. 无空行超长内容：增量渲染不退化，且产物完整", () => {
+  const long = "这是一段没有空行的连续中文文本内容。".repeat(200); // ~3600 字
+  // 前提确认：这段内容对 findStableBoundary 而言确实没有稳定边界
+  assert.equal(findStableBoundary(long), 0, "无空行内容应无稳定边界（兜底切分的前提）");
+  const r = createIncrementalRenderer();
+  let acc = "";
+  const t0 = Date.now();
+  for (let i = 0; i < long.length; i += 16) {
+    acc = long.slice(0, i + 16);
+    r.push(acc);
+  }
+  const final = r.flush();
+  const ms = Date.now() - t0;
+  assert.ok(final.length > 0);
+  // 兜底切分绝不能吞掉内容
+  assert.ok(final.includes("连续中文文本内容"), "最终产物应包含正文内容");
+  // 性能护栏：退化成「每 tick 全量渲染」时，Node 下耗时可达数秒，远超此阈值
+  assert.ok(ms < 2000, `超长无空行内容流式渲染应在 2s 内完成，实际 ${ms}ms`);
+});
+
+test("F3. 短内容不被强制切分：逐字 push 产物 === 一次性 flush 产物", () => {
+  const short = "## 标题\n\n这是一段正常内容。\n\n- 项目一\n- 项目二\n";
+  const r1 = createIncrementalRenderer();
+  let o1 = "";
+  for (let i = 1; i <= short.length; i++) o1 = r1.push(short.slice(0, i));
+  o1 = r1.flush();
+  const r2 = createIncrementalRenderer();
+  const o2 = r2.flush(short);
+  assert.equal(o1, o2, "短内容不应被强制切分改变渲染产物");
 });

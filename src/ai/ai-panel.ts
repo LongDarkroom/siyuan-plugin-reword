@@ -211,6 +211,20 @@ const ZWSP = "\u200b";
 /** 零宽/不可见字符：判定段落是否有真实内容前需剥除（不然空段的 ZWSP 会被当成内容） */
 const ZERO_WIDTH_RE = /[\u200b\u200c\u200d\ufeff\u00ad]/g;
 
+/**
+ * AI 是否正在流式生成（2026-09-03 新增，跨模块只读标志）
+ * ------------------------------------------------------------------
+ * 背景：index.ts 的文档标记观察器监听 `.layout__center` 的整棵子树（childList），
+ * AI 每 100ms 重写一次气泡 innerHTML 会持续产生成批 mutation，观察器回调必须
+ * 同步遍历全部节点做 isSiYuanBlockUi 判定 —— 与流式渲染争抢主线程。
+ * 流式期间该扫描本就毫无意义（AI 面板不是用户正在编辑的文档），直接跳过。
+ */
+let aiStreaming = false;
+/** 供插件其他模块查询「AI 是否正在流式生成」 */
+export function isAiStreaming(): boolean {
+  return aiStreaming;
+}
+
 export class AiPanel {
   private disposables = new Disposables();
   /** 当前激活预设（其 systemPrompt / temperature 覆盖本次精读） */
@@ -237,6 +251,8 @@ export class AiPanel {
   private contentEl: HTMLElement | null = null;
   /** 监听 wysiwyg DOM 变化以刷新 empty 态（防止程序化写入遗留 --empty 导致占位符残留） */
   private emptyObserver: MutationObserver | null = null;
+  /** 输入框 token 估算节流定时器：每次估算都要跑一次 Lute 全量序列化，逐字符触发会卡 */
+  private inputTokenTimer: number | null = null;
   /** AI 生成中标记：true 时发送按钮切换为「停止生成」 */
   private aiBusy = false;
   /** 进入生成态的时间戳，用于 aiBusy 卡死自愈（避免提示词加载等场景下按钮无反应） */
@@ -295,7 +311,9 @@ export class AiPanel {
 
     // 2026-09-03：全局 hover 浮动预览层（事件委托到 document，处理 input/msg 两类卡片）
     //   内部已带 `__hoverPreviewInstalled` 守卫，重复 render 安全。
-    this.setupHoverPreviewLayer();
+    // 2026-09-03 用户反馈：悬浮预览「鼠标悬浮预览」感太强，与 Hypr 风格静态视觉冲突，
+    //   暂时禁用。方法本身保留在类中，将来如需恢复，把下行注释打开即可。
+    // this.setupHoverPreviewLayer();
 
     // 2026-08-26 修复：不再在 render() 中自动把选区文本预填进输入框。
     // 旧逻辑无论用户是否已输入，每次切回 AI 精读（重渲染）都会把「先前选中文本」灌入输入框，
@@ -305,11 +323,14 @@ export class AiPanel {
         <!-- 顶部工具栏 -->
         <div class="hiword-ai-header">
           <div class="hiword-ai-header-left">
-            <button class="hiword-ai-btn" id="hiword-ai-read" title="读取当前块/选区">
-              <span class="hiword-ai-btn-icon">📄</span>
-              <span>读取</span>
+            <!-- 2026-09-03 上手优化：原先「读取」+「AI 精读」两个实心按钮并列，用户第一反应是
+                 「点哪个」，且「读取」完全无法提示「填入输入框」的含义。
+                 改为：主 CTA 唯一（AI 精读），导入降级为 ghost 次按钮并改名为「导入选区」。 -->
+            <button class="hiword-ai-btn hiword-ai-btn--ghost" id="hiword-ai-read" title="把当前块/选区导入输入框（不发送）">
+              <span class="hiword-ai-btn-icon">📥</span>
+              <span>导入选区</span>
             </button>
-            <button class="hiword-ai-btn hiword-ai-btn--primary" id="hiword-ai-run" title="AI 精读">
+            <button class="hiword-ai-btn hiword-ai-btn--primary" id="hiword-ai-run" title="导入选区并立即开始精读">
               <span class="hiword-ai-btn-icon">✨</span>
               <span>AI 精读</span>
             </button>
@@ -328,9 +349,18 @@ export class AiPanel {
             </div>
             <button class="hiword-ai-btn hiword-ai-btn--ghost" id="hiword-ai-new-session" title="新建会话">＋</button>
             <button class="hiword-ai-btn hiword-ai-btn--ghost" id="hiword-ai-sessions" title="会话历史">💬</button>
-            <button class="hiword-ai-btn hiword-ai-btn--ghost" id="hiword-ai-copyall" title="复制全文">复制</button>
+            <button class="hiword-ai-btn hiword-ai-btn--ghost" id="hiword-ai-copyall" title="复制全部对话内容（Markdown）" aria-label="复制全部对话内容">⧉</button>
             <button class="hiword-ai-btn hiword-ai-btn--ghost" id="hiword-ai-settings" title="AI 设置">⚙</button>
           </div>
+        </div>
+
+        <!-- 2026-09-03 新增：模式条。结构化精读 vs 自由对话决定 AI 的整个行为，
+             原先只在「AI 角色」按钮的副标题小字里显示，自由对话时该处为空 →
+             用户发完才知道用了哪种模式。改为常驻可见 + 一键切换。 -->
+        <div class="hiword-ai-modebar" id="hiword-ai-modebar">
+          <span class="hiword-ai-mode-icon" id="hiword-ai-mode-icon">💬</span>
+          <span class="hiword-ai-mode-text" id="hiword-ai-mode-text">自由对话</span>
+          <button class="hiword-ai-mode-switch" id="hiword-ai-mode-switch" title="切换 AI 角色（决定 AI 是谁）">切换</button>
         </div>
 
         <!-- 中间内容区（可滚动） -->
@@ -343,10 +373,33 @@ export class AiPanel {
               </svg>
             </div>
             <p class="hiword-ai-welcome-text">开始与 AI 对话吧！</p>
-            <p class="hiword-ai-welcome-hint">在文档中选中英文文字 → 点「读取」或「AI 精读」即可分析；也可直接粘贴</p>
+            <!-- 2026-09-03：空态从「一行说明文字」改为可点击的快捷卡片。
+                 纯文字描述要求用户自己摸索，且会再次暴露「点哪个按钮」的困惑；
+                 可点击示例让首屏零输入成本就能理解产品用途。 -->
+            <div class="hiword-ai-quick" id="hiword-ai-quick">
+              <button class="hiword-ai-quick-card" data-quick="deep">
+                <span class="hiword-ai-quick-icon">📄</span>
+                <span class="hiword-ai-quick-title">精读当前块</span>
+                <span class="hiword-ai-quick-desc">读取光标所在段落并精读</span>
+              </button>
+              <button class="hiword-ai-quick-card" data-quick="explain">
+                <span class="hiword-ai-quick-icon">💬</span>
+                <span class="hiword-ai-quick-title">解释这段话</span>
+                <span class="hiword-ai-quick-desc">逐句翻译 + 讲清难点</span>
+              </button>
+              <button class="hiword-ai-quick-card" data-quick="vocab">
+                <span class="hiword-ai-quick-icon">🔤</span>
+                <span class="hiword-ai-quick-title">提炼生词</span>
+                <span class="hiword-ai-quick-desc">音标 · 释义 · 原句</span>
+              </button>
+            </div>
+            <p class="hiword-ai-welcome-hint">也可以直接在下方输入，或把文档/块拖进输入框。</p>
           </div>
           <!-- 对话消息区（动态填充） -->
           <div class="hiword-ai-messages" id="hiword-ai-messages"></div>
+          <!-- 2026-09-03：上翻阅读历史时，流式生成的新内容在视口外且没有任何提示，
+               用户会以为卡住了。浮出「↓ 有新内容」一键回到底部。 -->
+          <button class="hiword-ai-jump" id="hiword-ai-jump" type="button" title="回到底部查看最新内容">↓ 有新内容</button>
         </div>
 
         <!-- 批注查询侧滑面板（默认隐藏） -->
@@ -413,21 +466,23 @@ export class AiPanel {
             </button>
             <span class="hiword-ai-toolbar-divider"></span>
             <!-- 右组：提示词 / 配置 -->
-            <button class="hiword-ai-tool-btn" id="hiword-ai-templates" title="提示词模板：插入到输入框，不改 AI 角色">
+            <!-- 2026-09-03 改名：「模板」→「快捷指令」。原「模板」与「预设」中文近乎同义，
+                 实为两个维度：模板=这次说什么（插入提示词文本），预设=AI 是谁（角色/温度/输出形态）。 -->
+            <button class="hiword-ai-tool-btn" id="hiword-ai-templates" title="快捷指令：把一段提示词插入输入框（不改变 AI 角色）">
               <svg class="hiword-ai-tool-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
                 <rect x="4" y="3" width="16" height="18" rx="2"/>
                 <path d="M8 8h8"/>
                 <path d="M8 12h8"/>
                 <path d="M8 16h5"/>
               </svg>
-              <span class="hiword-ai-tool-label">模板</span>
+              <span class="hiword-ai-tool-label">快捷指令</span>
             </button>
-            <button class="hiword-ai-tool-btn" id="hiword-ai-presets" title="预设：切换 AI 角色/温度（点击管理）">
+            <button class="hiword-ai-tool-btn" id="hiword-ai-presets" title="AI 角色：决定 AI 是谁（语气/温度/输出形态），点击管理">
               <svg class="hiword-ai-tool-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
                 <circle cx="12" cy="12" r="3.2"/>
                 <path d="M12 2.5v3M12 18.5v3M2.5 12h3M18.5 12h3M4.9 4.9l2.1 2.1M16.9 16.9l2.1 2.1M19.1 4.9l-2.1 2.1M7.1 16.9l-2.1 2.1"/>
               </svg>
-              <span class="hiword-ai-tool-label">预设</span>
+              <span class="hiword-ai-tool-label">AI 角色</span>
               <span class="hiword-ai-tool-sub" id="hiword-ai-preset-name"></span>
             </button>
             <span class="hiword-ai-toolbar-spacer"></span>
@@ -436,7 +491,7 @@ export class AiPanel {
           <div class="hiword-ai-input-row">
             <div class="hiword-ai-protyle" id="hiword-ai-protyle" spellcheck="false"></div>
             <div class="hiword-ai-send-wrap">
-              <button class="hiword-ai-token-ring" id="hiword-ai-token-ring" title="Token 用量" aria-label="Token 用量">
+              <button class="hiword-ai-token-ring" id="hiword-ai-token-ring" title="上下文用量 · 点击查看明细" aria-label="上下文用量，点击查看明细">
                 <svg class="hiword-ai-token-ring__svg" width="24" height="24" viewBox="0 0 24 24" fill="none">
                   <circle class="hiword-ai-token-ring__track" cx="12" cy="12" r="10" fill="none" stroke="currentColor" stroke-width="2.2" opacity="0.25"/>
                   <circle class="hiword-ai-token-ring__progress" cx="12" cy="12" r="10" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" transform="rotate(-90 12 12)" stroke-dasharray="62.83" stroke-dashoffset="62.83"/>
@@ -490,6 +545,7 @@ export class AiPanel {
   private renderTokenRing(): void {
     const contentEl = this.contentEl;
     if (!contentEl) return;
+    const tokenRing = contentEl.querySelector("#hiword-ai-token-ring") as HTMLButtonElement | null;
     const tokenRingText = contentEl.querySelector(".hiword-ai-token-ring__text") as HTMLElement | null;
     const tokenRingProgress = contentEl.querySelector(".hiword-ai-token-ring__progress") as SVGCircleElement | null;
     if (!tokenRingText) return;
@@ -503,6 +559,18 @@ export class AiPanel {
       const circumference = 62.83; // 2 * PI * 10
       tokenRingProgress.style.strokeDashoffset = String(circumference * (1 - ratio));
       tokenRingProgress.style.opacity = ratio > 0.9 ? "1" : ratio > 0.7 ? "0.85" : "0.65";
+      // 2026-09-03：阈值变色 + 明说「可点击」。原先圆环既是按钮又没有任何可点提示，
+      // 用量再高也只是一个灰圈，用户不会想到点开看详情。
+      tokenRingProgress.style.stroke = ratio >= 0.95
+        ? "var(--b3-theme-error, #d23f31)"
+        : ratio >= 0.8
+          ? "#e8a33d"
+          : "";
+      if (tokenRing) {
+        tokenRing.title = ratio >= 0.8
+          ? `上下文用量 ${Math.round(ratio * 100)}%，点击查看明细`
+          : "上下文用量 · 点击查看明细";
+      }
     }
   }
 
@@ -553,6 +621,7 @@ export class AiPanel {
   private destroyInput(): void {
     try { this.emptyObserver?.disconnect(); } catch (__swallowErr) { logSwallow(__swallowErr, "ai-panel.ts · destroyInput", "debug"); }
     this.emptyObserver = null;
+    if (this.inputTokenTimer !== null) { clearTimeout(this.inputTokenTimer); this.inputTokenTimer = null; }
     this.teardownMountRetryObserver();
     try { this.protyle?.destroy(); } catch (__swallowErr) { logSwallow(__swallowErr, "ai-panel.ts · destroyInput", "debug"); }
     // 无论 destroy 是否异常，强制移除容器内残留的 Protyle DOM——
@@ -634,12 +703,26 @@ export class AiPanel {
             this.inputTokenEstimate = this.estimateInputTokens();
             this.renderTokenRing();
           };
-          wysiwyg.addEventListener("input", () => { refreshEmpty(); refreshInputTokens(); });
-          // 双重保险：程序化写入（setInputMarkdown / insertBlockRef / 内核内部块创建）不会触发 input 事件，
-          // 用 MutationObserver 兜底刷新 empty 态与 token 估算
+          // 2026-09-03 性能：token 估算 = readInputValue() → Lute 全量序列化，耗时随内容长度
+          // 线性增长（O(n)/次）。原先 input 事件与 MutationObserver 两条路径都会逐字符触发它，
+          // 每敲一个字跑两遍 → 拖入长文档后打字明显卡顿。
+          // 改为统一 200ms 节流：圆环只是估算展示，晚 200ms 无感；真正发送时的取值为
+          // sendText() 内直接调 getInputValue()，不受影响。
+          const scheduleInputTokens = () => {
+            if (this.inputTokenTimer !== null) clearTimeout(this.inputTokenTimer);
+            this.inputTokenTimer = window.setTimeout(() => {
+              this.inputTokenTimer = null;
+              refreshInputTokens();
+            }, 200);
+          };
+          // 用户输入：input 事件覆盖
+          wysiwyg.addEventListener("input", () => { refreshEmpty(); scheduleInputTokens(); });
+          // 程序化写入（setInputMarkdown / insertBlockRef / 内核内部块创建）不会触发 input 事件，
+          // 用 MutationObserver 兜底。★ 去掉 characterData：它与 input 事件完全重复，
+          // 是「每次按键跑两遍序列化」的直接原因；程序化写入一律改 DOM 结构，childList 足够。
           this.emptyObserver?.disconnect();
-          this.emptyObserver = new MutationObserver(() => { refreshEmpty(); refreshInputTokens(); });
-          this.emptyObserver.observe(wysiwyg, { childList: true, subtree: true, characterData: true });
+          this.emptyObserver = new MutationObserver(() => { refreshEmpty(); scheduleInputTokens(); });
+          this.emptyObserver.observe(wysiwyg, { childList: true, subtree: true });
           refreshEmpty();
           refreshInputTokens();
           // 光标落入占位段落，后续 insert 在此段落插入
@@ -681,6 +764,9 @@ export class AiPanel {
             }
           }
         }, true);
+        // 2026-09-03：input-row 点击委托。用户在 input-row padding 区域点击时
+        // 主动 focus Protyle wysiwyg，否则光标不可见。
+        this.setupInputRowFocusDelegate();
         // Protyle 挂载完成，写入延迟的预填内容
         if (this.pendingPrefill) { this.setInputMarkdown(this.pendingPrefill); this.pendingPrefill = null; }
       } catch (e) {
@@ -1456,6 +1542,31 @@ export class AiPanel {
     return b;
   }
 
+  /**
+   * input-row 点击焦点委托。
+   * 2026-09-03 新增：用户在 input-row 的 padding 区域点击时，click 不会冒泡到
+   * Protyle wysiwyg，导致 wysiwyg 没获得焦点、看不到光标。
+   * 在 input-row 上做 mousedown 委托：未命中卡片/按钮/wysiwyg 时，主动 focusInput。
+   * 用 mousedown 而非 click，能在 Protyle 自己的 focus 监听之前抢占焦点位置。
+   * 带 `__inputRowFocusInstalled` 守卫，重复挂载安全。
+   */
+  private setupInputRowFocusDelegate(): void {
+    if ((this as any).__inputRowFocusInstalled) return;
+    (this as any).__inputRowFocusInstalled = true;
+    const inputRow = (this as any).contentEl?.querySelector?.(".hiword-ai-input-row") as HTMLElement | null;
+    if (!inputRow) return;
+    inputRow.addEventListener("mousedown", (e: MouseEvent) => {
+      const target = e.target as HTMLElement | null;
+      if (!target) return;
+      // 命中卡片 / 发送按钮 / token ring → 不抢焦点（这些有自己的点击行为）
+      if (target.closest(".hiword-ai-block-ref, .hiword-ai-doc-ref, .hiword-ai-send, .hiword-ai-token-ring")) return;
+      // 命中 wysiwyg 内部 → 不需要代劳，原生 contenteditable 自己处理
+      if (target.closest(".protyle-wysiwyg")) return;
+      // 其他区域（input-row padding / 间隙）→ 主动 focus Protyle
+      this.focusInput();
+    });
+  }
+
   /** 合法思源块 ID：优先 Lute.NewNodeID()（YYYYMMDDHHmmss-xxxxxxx），不可用时时间戳+随机 */
   private newBlockId(): string {
     try {
@@ -1526,9 +1637,21 @@ export class AiPanel {
       textNode = document.createTextNode(ZWSP);
       parent.insertBefore(textNode, card.nextSibling);
     }
+    // 2026-09-03 修复：原 setStartAfter(textNode) 把 range 起点放在 ZWSP 之后的 DOM 边界，
+    // Protyle wysiwyg 把它解释为「段落末尾」，键入字符跳到下一段。
+    // 现在的方案：
+    //   ① 在第一个 ZWSP text node 之后再追加一个 ZWSP text node 作为「段末哨兵」，
+    //      让 Protyle 看到段末有显式字符、不把它识别为段末边界。
+    //   ② range.setStart(nextText, 0) 把光标放在第二个 ZWSP 内部开头，
+    //      键入字符追加到 nextText 内部、紧跟 chip 之后、同一段落。
+    let nextText = textNode.nextSibling as Text | null;
+    if (!nextText || nextText.nodeType !== Node.TEXT_NODE || !nextText.data.includes(ZWSP)) {
+      nextText = document.createTextNode(ZWSP);
+      parent.insertBefore(nextText, textNode.nextSibling);
+    }
     try {
       const range = document.createRange();
-      range.setStartAfter(textNode);
+      range.setStart(nextText, 0);
       range.collapse(true);
       const sel = window.getSelection();
       sel?.removeAllRanges();
@@ -1925,6 +2048,33 @@ export class AiPanel {
   }
 
   /**
+   * 空态快捷卡片：读取当前块/选区 → 套用指令 → 直接发送。
+   * 没有定位到内容时只把指令放进输入框（不发送），并提示用户粘贴或导入。
+   * @param kind deep=纯精读（不加指令） / explain=逐句解释 / vocab=提炼生词
+   */
+  private async quickStart(kind: string): Promise<void> {
+    const instruction =
+      kind === "explain" ? "请用中文逐句解释下面这段英文，指出语法难点与惯用法。"
+      : kind === "vocab" ? "请提取下面这段英文的生词与短语，逐条给出音标、中文释义和所在原句。"
+      : "";
+    const src = this.host.getDeepReadSource();
+    let text = src?.text ?? "";
+    if (!text && src?.blockId) text = (await this.host.fetchBlockText(src.blockId)) || "";
+    const statusEl = this.contentEl?.querySelector("#hiword-ai-status") as HTMLElement | null;
+    if (text) {
+      this.setInputMarkdown(instruction ? `${instruction}\n\n${text}` : text);
+      this.runBtnEl?.click(); // 复用既有发送链路（含预设/引用展开/流式渲染）
+      return;
+    }
+    if (instruction) this.setInputMarkdown(instruction);
+    if (statusEl) {
+      statusEl.textContent = instruction
+        ? "已放入指令，粘贴或导入英文内容后点「AI 精读」。"
+        : "未定位到当前块/选区，请先在文档中点选。";
+    }
+  }
+
+  /**
    * 初次使用自动命名：发送首条用户消息后，若会话标题仍为默认「新会话」或为
    * sessionStore.saveMessages 中的 24 字截断版，则调用 AI 生成更贴切的标题。
    * 失败/超时/无 API key 时静默跳过，保留兜底标题。
@@ -1936,11 +2086,16 @@ export class AiPanel {
       // 已被用户手动改过名（不是默认名、也不是 saveMessages 的截断版）就不动它
       const fallbackSlice = firstUserContent.slice(0, 24).replace(/\s+/g, " ").trim();
       if (sess.title !== "新会话" && sess.title !== fallbackSlice) return;
+      // 2026-09-03：只尝试一次。命名失败（网络/配额）时标题会停留在默认名，
+      // 若不加标记，此后每一轮对话都会再白调一次命名 API。
+      if (sessionStore.hasRenameTried(sid)) return;
       const settings = this.host.getAiSettings();
       if (!settings.enabled || !settings.apiKey || !settings.baseUrl) return;
       const content = firstUserContent.trim().slice(0, 500);
       if (!content) return;
       const prompt = `请根据以下用户消息内容，生成一个不超过 12 个字的简洁中文会话标题。只输出标题文本本身，不要加引号、不要加任何前缀说明。\n\n用户消息：\n${content}`;
+      // 先落标记再发请求：即便下面抛异常被 catch，也不会在下一轮重复尝试
+      sessionStore.markRenameTried(sid);
       const result = await requestAIGenerate({
         messages: [{ role: "user", content: prompt }],
         settings: { ...settings, maxTokens: 60, temperature: 0.2, jsonMode: false, systemPrompt: "" },
@@ -2327,15 +2482,65 @@ export class AiPanel {
       if (!presetsBtn) return;
       if (p && p.name) {
         presetsBtn.classList.add("hiword-ai-tool-btn--active");
-        presetsBtn.title = `当前预设：${p.name}（点击管理）`;
+        presetsBtn.title = `当前角色：${p.name}（点击管理）`;
         if (nameEl) { nameEl.textContent = p.name; nameEl.style.display = ""; }
       } else {
         presetsBtn.classList.remove("hiword-ai-tool-btn--active");
-        presetsBtn.title = "预设：切换 AI 角色/温度（点击管理）";
+        presetsBtn.title = "AI 角色：决定 AI 是谁（语气 / 温度 / 输出形态），点击管理";
         if (nameEl) { nameEl.textContent = ""; nameEl.style.display = "none"; }
       }
+      // 2026-09-03：模式条常驻显示当前模式（与发送链路 useLearning 判定一致：
+      // 有激活角色且 templateType !== "chat" → 结构化精读，否则自由对话）
+      const structured = !!p && p.templateType !== "chat";
+      const modeIcon = contentEl.querySelector("#hiword-ai-mode-icon");
+      const modeText = contentEl.querySelector("#hiword-ai-mode-text");
+      const modeBar = contentEl.querySelector("#hiword-ai-modebar");
+      if (modeIcon) modeIcon.textContent = structured ? "📖" : "💬";
+      if (modeText) modeText.textContent = structured ? `结构化精读 · ${p?.name ?? ""}` : "自由对话";
+      if (modeBar) modeBar.classList.toggle("hiword-ai-modebar--structured", structured);
     };
     syncPresetButton(); // 初始渲染即反映已持久化的激活预设
+    // 2026-09-03：「↓ 有新内容」——用户上翻阅读历史时，流式新内容在视口外无提示
+    // 性能要点：读 scrollHeight / scrollTop 会强制浏览器同步完成整棵子树的布局
+    // （layout thrashing）。流式渲染每 100ms 一次，若每帧都读，等于每 100ms
+    // 强制一次全量重排 —— 消息区 DOM 越大越贵，是「AI 输出时思源卡死」的帮凶之一。
+    // 改为：只在 scroll 事件里更新一次标志（滚动时浏览器本就要算布局，属免费搭车），
+    // 渲染路径直接读标志，全程零强制重排。
+    const jumpBtn = contentEl.querySelector("#hiword-ai-jump") as HTMLElement | null;
+    const NEAR_BOTTOM_PX = 120;
+    let nearBottom = true; // 空面板视为贴近底部
+    const measureBottom = () =>
+      (bodyEl ? bodyEl.scrollHeight - bodyEl.scrollTop - bodyEl.clientHeight < NEAR_BOTTOM_PX : true);
+    const syncJump = () => { jumpBtn?.classList.toggle("hiword-ai-jump--visible", !nearBottom); };
+    bodyEl?.addEventListener(
+      "scroll",
+      () => {
+        nearBottom = measureBottom();
+        syncJump();
+      },
+      { passive: true }
+    );
+    jumpBtn?.addEventListener("click", () => {
+      if (bodyEl) bodyEl.scrollTop = bodyEl.scrollHeight;
+      nearBottom = true;
+      syncJump();
+    });
+    /** 滚动跟随：贴近底部才自动滚，避免打断上翻阅读（读标志，不触发重排） */
+    const followScroll = () => {
+      if (!bodyEl) return;
+      if (nearBottom) {
+        bodyEl.scrollTop = bodyEl.scrollHeight;
+        // 赋值后 scroll 事件会异步重算 nearBottom，这里保持 true 即可（下一轮渲染仍在底部）
+      } else {
+        syncJump(); // 上翻中：浮出「↓ 有新内容」提示
+      }
+    };
+    // 模式条「切换」→ 直达 AI 角色面板（复用预设按钮的既有绑定）
+    contentEl.querySelector("#hiword-ai-mode-switch")?.addEventListener("click", () => presetsBtn?.click());
+    // 空态快捷卡片：读取当前块/选区 + 套用指令（有内容直接发，无内容只填指令）
+    contentEl.querySelectorAll<HTMLElement>(".hiword-ai-quick-card").forEach((card) => {
+      card.addEventListener("click", () => { void this.quickStart(card.dataset.quick || ""); });
+    });
     const tokenRing = contentEl.querySelector("#hiword-ai-token-ring") as HTMLButtonElement;
     const tokenRingText = tokenRing?.querySelector(".hiword-ai-token-ring__text") as HTMLElement | null;
     const tokenRingProgress = tokenRing?.querySelector(".hiword-ai-token-ring__progress") as SVGCircleElement | null;
@@ -2642,7 +2847,7 @@ export class AiPanel {
         openOverlay(`
           <div class="hiword-ai-tpl-editor">
             <div class="hiword-ai-preset-field">
-              <label class="hiword-ai-preset-label">模板名称</label>
+              <label class="hiword-ai-preset-label">指令名称</label>
               <input class="hiword-ai-preset-input" data-field="name" value="${escapeHtml(tpl?.name || "")}" />
             </div>
             <div class="hiword-ai-preset-field">
@@ -2659,7 +2864,7 @@ export class AiPanel {
         ep.querySelector('[data-act="save"]')?.addEventListener("click", async () => {
           const name = (ep.querySelector('[data-field="name"]') as HTMLInputElement)?.value?.trim();
           const content = (ep.querySelector('[data-field="content"]') as HTMLTextAreaElement)?.value;
-          if (!name) { statusEl.textContent = "请填写模板名称"; return; }
+          if (!name) { statusEl.textContent = "请填写指令名称"; return; }
           await this.host.savePromptTemplate({ id: tpl?.id || "", name, content: content || "" });
           refresh();
         });
@@ -2849,7 +3054,7 @@ export class AiPanel {
     presetsBtn?.addEventListener("click", () => {
       const activeId = this.host.getActivePreset()?.id || "";
       const initial = this.host.getActivePreset() || {
-        id: "", name: "新预设", templateType: "learning", contextMessages: -1, temperature: 0.3,
+        id: "", name: "新角色", templateType: "learning", contextMessages: -1, temperature: 0.3,
         temperatureEnabled: false, systemPrompt: "",
         autoCollectWords: false, autoAnnotateSentences: false,
       } as AiPreset;
@@ -2874,7 +3079,7 @@ export class AiPanel {
           const q = (f: string) => panel.querySelector(`[data-field="${f}"]`) as HTMLInputElement | null;
           return {
             id: preset.id,
-            name: q("name")?.value?.trim() || "未命名预设",
+            name: q("name")?.value?.trim() || "未命名角色",
             templateType: (panel.querySelector('[data-field="templateType"]') as HTMLSelectElement | null)?.value === "chat" ? "chat" : "learning",
             contextMessages: parseInt(q("contextMessages")?.value || "-1", 10),
             temperature: parseFloat(q("temperature")?.value || "0.3"),
@@ -2889,7 +3094,7 @@ export class AiPanel {
           const p = readPresetForm();
           await this.host.savePreset(p);
           this.activePreset = p; // 保存即激活，本次精读生效
-          statusEl.textContent = "预设已保存并激活";
+          statusEl.textContent = "AI 角色已保存并激活";
           closeOverlay();
           syncPresetButton();
         });
@@ -2897,7 +3102,7 @@ export class AiPanel {
         panel.querySelector('[data-act="close-preset"]')?.addEventListener("click", async () => {
           await this.host.setActivePreset("");
           this.activePreset = undefined;
-          statusEl.textContent = "已关闭预设，恢复自由对话";
+          statusEl.textContent = "已关闭 AI 角色，恢复自由对话";
           closeOverlay();
           syncPresetButton();
         });
@@ -2908,7 +3113,7 @@ export class AiPanel {
             await this.host.deletePreset(preset.id);
             this.activePreset = undefined;
           }
-          statusEl.textContent = "预设已删除";
+          statusEl.textContent = "AI 角色已删除";
           showPresetList();
           syncPresetButton();
         });
@@ -2950,8 +3155,8 @@ export class AiPanel {
           } else {
             listEl.innerHTML = `<div class="hiword-ai-preset-empty">${
               presets.length === 0
-                ? "还没有预设，点击「＋ 新建预设」创建你的第一个预设"
-                : "没有匹配「" + escapeHtml(listKw) + "」的预设"
+                ? "还没有 AI 角色，点击「＋ 新建角色」创建你的第一个角色"
+                : "没有匹配「" + escapeHtml(listKw) + "」的 AI 角色"
             }</div>`;
           }
         });
@@ -2974,11 +3179,11 @@ export class AiPanel {
             e.stopPropagation();
             const p = this.host.listPresets().find((x) => x.id === id);
             if (!p) return;
-            const ok = await confirmDelete(`删除预设「${p.name}」？\n若是当前激活预设，删除后将恢复自由对话。`);
+            const ok = await confirmDelete(`删除 AI 角色「${p.name}」？\n若是当前激活角色，删除后将恢复自由对话。`);
             if (!ok) return;
             await this.host.deletePreset(id);
             this.activePreset = undefined;
-            statusEl.textContent = "预设已删除";
+            statusEl.textContent = "AI 角色已删除";
             listKw = "";
             showPresetList();
             syncPresetButton();
@@ -2996,7 +3201,7 @@ export class AiPanel {
         lp.querySelector('[data-act="new"]')?.addEventListener("click", () => {
           listKw = "";
           showPresetPanel({
-            id: "", name: "新预设", templateType: "learning", contextMessages: -1, temperature: 0.3,
+            id: "", name: "新角色", templateType: "learning", contextMessages: -1, temperature: 0.3,
             temperatureEnabled: false, systemPrompt: "",
             autoCollectWords: false, autoAnnotateSentences: false,
           } as AiPreset, true);
@@ -3556,6 +3761,7 @@ export class AiPanel {
           if (this._busySince && Date.now() - this._busySince > 30_000) {
             getLogger().warn("aiBusy 卡死超过 30s，强制重置发送状态");
             this.aiBusy = false;
+            aiStreaming = false; // 卡死自愈：一并清除全局流式标志
             this._busySince = null;
             this.aiAbort = null;
             this.setInputDisabled(false);
@@ -3615,6 +3821,7 @@ export class AiPanel {
       hideWelcome();
       statusEl.textContent = "AI 精读中…";
       this.aiBusy = true;
+      aiStreaming = true; // 全局标志：流式期间让文档标记观察器让路
       this._busySince = Date.now(); // 记录进入时间，用于卡死自愈
       this.aiAbort = new AbortController();
       runBtn.disabled = false;
@@ -3688,15 +3895,27 @@ export class AiPanel {
         logger.info("用户发送消息", { operation: "AI对话发送", data: { hasPreset: !!activePreset, templateType: activePreset?.templateType, textLen: expanded.length } });
         let result: DeepReadResult;
         // 流式 thinking 回调：实时追加到 loading 消息的 think 容器
+        // 2026-09-03 性能修复（AI 输出时思源卡死的主因）：
+        //   SSE 每收到一帧（粒度是 token 级）就回调一次，而回调体是三件套
+        //     ① renderMarkdown(累计全文)  —— O(n) 全量重渲染
+        //     ② innerHTML = ...           —— O(n) DOM 全量销毁 + 重建
+        //     ③ bodyEl.scrollTop = ...    —— 读 scrollHeight 强制同步布局
+        //   未节流 ⇒ 总代价 O(n²)。实测 12000 字 / 2400 帧，仅第①项在 Node 下
+        //   就耗 936ms；叠加 Lute 解析、DOM 重建与上千次强制 reflow，主线程被
+        //   完全占满 → 思源卡死。正文 onToken 早有 createStreamThrottle(100)，
+        //   thinking 此前漏了，这里补齐。
+        const renderThinking = () => {
+          if (!this.liveThinkingEl) return;
+          this.liveThinkingEl.style.display = "";
+          // P2-4：thinking 区支持 markdown（粗体/列表/代码等），而非裸文本
+          this.liveThinkingEl.innerHTML = renderMarkdown(this.liveThinkingText);
+          // 滚动跟随：与正文一致，仅当用户已贴近底部时自动滚，避免打断上翻阅读
+          followScroll();
+        };
+        const thinkThrottle = createStreamThrottle(renderThinking, 100);
         const onThinking = (chunk: string) => {
           this.liveThinkingText += chunk;
-          if (this.liveThinkingEl) {
-            this.liveThinkingEl.style.display = "";
-            // P2-4：thinking 区支持 markdown（粗体/列表/代码等），而非裸文本
-            this.liveThinkingEl.innerHTML = renderMarkdown(this.liveThinkingText);
-            // 自动滚动到最新 thinking 内容
-            bodyEl.scrollTop = bodyEl.scrollHeight;
-          }
+          thinkThrottle.schedule();
         };
         // ── 流式正文渲染（chat 模式）：首 token 即把 loading 升级为结果气泡，节流增量渲染 ──
         // 2026-08-29 性能改造（AGENTS.md 4.1）：用 createIncrementalRenderer 替换
@@ -3710,24 +3929,40 @@ export class AiPanel {
           if (!liveMdEl || !liveRaw.trim()) return;
           liveMdEl.innerHTML = liveRenderer.push(liveRaw);
           // 滚动跟随：仅当用户已贴近底部时自动滚，避免打断上翻阅读
-          if (bodyEl.scrollHeight - bodyEl.scrollTop - bodyEl.clientHeight < 120) {
-            bodyEl.scrollTop = bodyEl.scrollHeight;
-          }
+          followScroll();
         };
         const liveThrottle = createStreamThrottle(renderLive, 100);
+        // 2026-09-03：结构化精读常跑 30s~2min，原先只显示字数在涨，用户不知道 AI 在做什么、
+        // 还要多久。改为按 JSON 字段出现顺序推断阶段（words → sentences → summary）。
+        // 只扫描新增片段（回看 16 字符，避免键名被切在两个 chunk 之间），阶段单调递增。
+        const STAGE_KEYS = ['"words"', '"sentences"', '"summary"'];
+        const STAGE_LABELS = ["正在解析文本…", "正在提炼重点词…", "正在逐句讲解…", "正在生成小结…"];
+        let stageIdx = 0;
+        let stageScanned = 0;
+        const stageText = (): string => {
+          if (stageIdx < STAGE_KEYS.length && liveRaw.length > stageScanned) {
+            const tail = liveRaw.slice(Math.max(0, stageScanned - 16));
+            while (stageIdx < STAGE_KEYS.length && tail.includes(STAGE_KEYS[stageIdx])) stageIdx++;
+            stageScanned = liveRaw.length;
+          }
+          return STAGE_LABELS[stageIdx];
+        };
+        // 2026-09-03：onToken 是 SSE 逐帧回调（一次回复可达数千帧），
+        // 原先每帧两次 querySelector = 数千次 DOM 查询。这两个元素引用固定，缓存一次即可。
+        const cntEl = loadingMsg.querySelector("[data-role='live-count']") as HTMLElement | null;
+        const dotsEl = loadingMsg.querySelector(".hiword-ai-msg-loading") as HTMLElement | null;
         const onToken = (chunk: string) => {
           liveRaw += chunk;
           if (useLearning) {
-            // 结构化精读：JSON 无法增量美化，仅更新「已生成 N 字」计数，完成后整体渲染卡片
-            const cntEl = loadingMsg.querySelector("[data-role='live-count']") as HTMLElement | null;
+            // 结构化精读：JSON 无法增量美化，更新分阶段进度 + 字数，完成后整体渲染卡片
             if (cntEl) {
               cntEl.style.display = "";
-              cntEl.textContent = `AI 正在生成结构化分析…（已生成 ${liveRaw.length} 字）`;
+              cntEl.textContent = `AI ${stageText()}（已生成 ${liveRaw.length} 字）`;
             }
             // P2-5：中间态渲染——生成已在进行，隐藏加载动画小圆点，
             // 让「思考面板 + 进度行」构成干净的中间态（与 chat 模式观感一致，不再像卡在加载）
-            const dots = loadingMsg.querySelector(".hiword-ai-msg-loading") as HTMLElement | null;
-            if (dots) dots.style.display = "none";
+            // 只写一次：重复写同样值也会让浏览器反复做样式失效判断
+            if (dotsEl && dotsEl.style.display !== "none") dotsEl.style.display = "none";
             return;
           }
           if (!liveStarted) {
@@ -3822,10 +4057,11 @@ export class AiPanel {
           const el: HTMLElement = liveMdEl;
           el.innerHTML = liveRenderer.flush();
           // 滚动跟随：保持原行为（仅当用户已贴近底部时自动滚，避免打断上翻）
-          if (bodyEl.scrollHeight - bodyEl.scrollTop - bodyEl.clientHeight < 120) {
-            bodyEl.scrollTop = bodyEl.scrollHeight;
-          }
+          followScroll();
         }
+        // 补渲节流窗口内未执行的最后一帧 thinking（仅在有待决渲染时执行）。
+        // 若正文已开始，thinking 会被内联进结果气泡并用完整 liveThinkingText 重渲，此处无害。
+        thinkThrottle.flush();
         this.liveThinkingEl = null;
         if (result.aborted) {
           // 用户主动停止：流式已出内容则保留展示；未出内容则不渲染、仅提示
@@ -3930,6 +4166,7 @@ export class AiPanel {
       } finally {
         // 恢复发送态（无论成功/失败/停止）
         this.aiBusy = false;
+        aiStreaming = false; // 流式结束：文档标记观察器恢复工作
         this._busySince = null;
         this.aiAbort = null;
         runBtn.disabled = false;

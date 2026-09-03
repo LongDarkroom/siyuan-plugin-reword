@@ -74,7 +74,7 @@ import { requestEditSession, releaseEditSession } from "./annotation/edit-sessio
 // REword AI 精读（适配自 Achuan-2/siyuan-plugin-copilot，裁剪为最小可用对话能力）
 import { DEFAULT_AI_SETTINGS, normalizeAiSettings, DEFAULT_MODELS, inferContextWindow } from "./ai/ai-settings.ts";
 import type { AiSettings } from "./ai/ai-settings.ts";
-import { AiPanel } from "./ai/ai-panel.ts";
+import { AiPanel, isAiStreaming } from "./ai/ai-panel.ts";
 import type { AiDeepReadSource, AiHost } from "./ai/ai-panel.ts";
 import { runAiDeepRead } from "./ai/ai-orchestrator.ts";
 import type { DeepReadWord, DeepReadSentence } from "./ai/ai-orchestrator.ts";
@@ -377,6 +377,9 @@ export default class RewordPlugin extends Plugin {
   /** AI 预设（hiword-ai-presets.json）与提示词模板（hiword-ai-prompts.json） */
   private persistAiPresets!: PersistentStore;
   private persistAiPrompts!: PersistentStore;
+  /** AI 会话历史（hiword-ai-sessions.json）。2026-09-03 加防抖：原先 store.onChange
+   *  直连 saveData，一次流式回复期间数十次变更 = 数十次全量重写整个 JSON。 */
+  private persistAiSessions!: PersistentStore;
   private aiPresetStore!: AiPresetStore;
   private promptTemplateStore!: PromptTemplateStore;
   /** 词库标签横切筛选（2026-08-14 新增：all=全部） */
@@ -590,11 +593,15 @@ export default class RewordPlugin extends Plugin {
       );
       this.persistAiPresets = new PersistentStore(
         (d) => this.saveData("hiword-ai-presets.json", d),
-        { onError: () => showMessage("预设保存失败，请检查存储空间", 3000, "error") }
+        { onError: () => showMessage("AI 角色保存失败，请检查存储空间", 3000, "error") }
       );
       this.persistAiPrompts = new PersistentStore(
         (d) => this.saveData("hiword-ai-prompts.json", d),
-        { onError: () => showMessage("提示词模板保存失败，请检查存储空间", 3000, "error") }
+        { onError: () => showMessage("快捷指令保存失败，请检查存储空间", 3000, "error") }
+      );
+      this.persistAiSessions = new PersistentStore(
+        (d) => this.saveData("hiword-ai-sessions.json", d),
+        { onError: () => showMessage("AI 会话保存失败，请检查存储空间", 3000, "error") }
       );
       this.vocabStore = new VocabStore(() => this.saveVocab());
       this.annotationStore = new AnnotationStore(() => this.saveAnnotations());
@@ -1249,8 +1256,9 @@ export default class RewordPlugin extends Plugin {
     this.copilotConvo.load(convRaw);
     if (!this.copilotConvo.list().length) this.copilotConvo.createSession();
 
-    // REword AI 会话历史持久化：变更即 saveData；首次进入保证至少有一个会话
-    sessionStore.onChange = () => { void this.saveData("hiword-ai-sessions.json", sessionStore.toJSON()); };
+    // REword AI 会话历史持久化：经防抖层落盘（400ms 合并 + 失败重试 + 卸载 flush）；
+    // 首次进入保证至少有一个会话
+    sessionStore.onChange = () => { this.persistAiSessions.update(sessionStore.toJSON()); };
     const aiSessRaw = (await this.loadData("hiword-ai-sessions.json")) as AiSessionData | null;
     sessionStore.load(aiSessRaw);
     if (!sessionStore.list().length) sessionStore.create();
@@ -9825,6 +9833,7 @@ export default class RewordPlugin extends Plugin {
     void this.persistAnnotationLabels.flush();
     void this.persistAiPresets.flush();
     void this.persistAiPrompts.flush();
+    void this.persistAiSessions.flush();
     // 2026-09-02：日志已改为缓冲异步落盘，卸载时必须同步刷一次，
     // 否则最后 1 秒内的日志（含上面这几条「插件卸载」）会随渲染进程退出而丢失。
     try { getLogger().flushSync(); } catch { /* 落盘失败不阻断卸载 */ }
@@ -11310,6 +11319,10 @@ export default class RewordPlugin extends Plugin {
     const observer = new MutationObserver((mutations) => {
       // v4：自身施加行内标记期间的 DOM 变化不触发重扫（防递归）
       if (this.suppressMarkRefresh) return;
+      // 2026-09-03：AI 流式生成期间让路。AI 气泡每 100ms 重写 innerHTML，
+      // 会持续产生成批 mutation，而本回调必须同步遍历全部节点做 isSiYuanBlockUi
+      // 判定 —— 与流式渲染争抢主线程（AI 面板也不是用户正在编辑的文档，扫它毫无意义）。
+      if (isAiStreaming()) return;
       // 只在结构变化（节点增删）时刷新；纯文本/属性变化忽略
       let structural = false;
       let onlyUi = true;

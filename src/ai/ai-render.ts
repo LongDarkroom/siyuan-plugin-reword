@@ -683,7 +683,15 @@ export function createIncrementalRenderer(): IncrementalRenderer {
         lastTailHtml = "";
       }
 
-      const newBoundary = findStableBoundary(cur);
+      let newBoundary = findStableBoundary(cur);
+      // 兜底：无空行内容（紧凑 JSON / 大段不换行正文）会让 boundary 停在 0，
+      // tail 吞下全文 → 每 tick 全量 Lute 解析。超过阈值时改用句/行边界强制切分，
+      // 保证 tail 始终维持在小体型。仅影响超长内容，短内容行为不变。
+      if (cur.length - newBoundary > MAX_TAIL_RENDER) {
+        const forced = findForcedBoundary(cur, cur.length - MAX_TAIL_RENDER);
+        if (forced > newBoundary) newBoundary = forced;
+      }
+      if (newBoundary < stableBoundary) newBoundary = stableBoundary; // 边界只前进不回退
 
       // 1) 沉淀新稳定部分到 cache
       if (newBoundary > stableBoundary) {
@@ -769,4 +777,34 @@ export function findStableBoundary(md: string): number {
   }
 
   return boundary;
+}
+
+/**
+ * 强制切分兜底阈值（2026-09-03 性能修复，对应「AI 流式输出卡死」）
+ * ------------------------------------------------------------------
+ * 问题：findStableBoundary 只在「围栏外空行」处推进边界。而 AI 常输出两类
+ * 无空行内容 —— ① 结构化精读的紧凑 JSON；② 大段不换行的正文。
+ * 实测这两种情况 boundary 恒为 0 → tail 占比 100% → 每个 tick 都要对
+ *「全文」跑一次 Lute 解析，增量渲染优化完全失效，主线程被反复压垮。
+ *
+ * 对策：当 tail 超过阈值时，退而求其次用「行结束 / 句末标点」兜底切分，
+ * 把前面已完整的内容沉淀进 stableHtml 缓存，tail 始终维持在小体型。
+ *
+ * 只在超长内容时触发；短内容（< 阈值）走原逻辑，渲染产物与之前逐字一致。
+ */
+const MAX_TAIL_RENDER = 1200;
+
+/**
+ * 在 [minPos, md.length) 区间内找最后一个安全切分点（换行 或 句末标点之后）。
+ * 只扫描新增区间，O(tail)，远低于一次全量 Lute 解析的代价。
+ * @returns 切分位置；找不到返回 -1
+ */
+export function findForcedBoundary(md: string, minPos: number): number {
+  const start = Math.max(0, Math.min(minPos, md.length));
+  const seg = md.slice(start);
+  let best = -1;
+  const re = /[。！？；\n]/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(seg)) !== null) best = m.index + 1;
+  return best > 0 ? start + best : -1;
 }

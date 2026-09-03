@@ -48,7 +48,7 @@ export function normalizePreset(raw: any, fallbackId?: string): AiPreset {
   const tt = r.templateType === "chat" ? "chat" : "learning";
   return {
     id: typeof r.id === "string" && r.id ? r.id : fallbackId || genId(),
-    name: typeof r.name === "string" ? r.name : "未命名预设",
+    name: typeof r.name === "string" ? r.name : "未命名角色",
     templateType: tt,
     contextMessages: Math.max(-1, Math.min(100, Math.round(ctx))),
     temperature: Math.max(0, Math.min(2, temp)),
