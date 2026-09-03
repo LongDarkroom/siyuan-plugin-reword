@@ -230,6 +230,8 @@ export class AiPanel {
   private protyle: Protyle | null = null;
   /** Protyle 延迟挂载重试计数（等待元素进入布局且有尺寸） */
   private mountAttempts = 0;
+  /** 监听输入框尺寸变化以补挂载（dock 从隐藏变可见时触发），避免「隐藏时超时 → 永久 contenteditable 降级」 */
+  private mountResizeObserver: ResizeObserver | null = null;
   /** 待填充内容：Protyle 延迟挂载完成后再写入（避免被 Protyle 挂载重建 DOM 冲掉） */
   private pendingPrefill: string | null = null;
   /** 面板根容器（render 时持有引用，供 applyAiFontSize 等外部调用实时刷新） */
@@ -552,6 +554,7 @@ export class AiPanel {
   private destroyInput(): void {
     try { this.emptyObserver?.disconnect(); } catch (__swallowErr) { logSwallow(__swallowErr, "ai-panel.ts · destroyInput", "debug"); }
     this.emptyObserver = null;
+    this.teardownMountRetryObserver();
     try { this.protyle?.destroy(); } catch (__swallowErr) { logSwallow(__swallowErr, "ai-panel.ts · destroyInput", "debug"); }
     // 无论 destroy 是否异常，强制移除容器内残留的 Protyle DOM——
     // 思源内核在该 DOM 上绑定的 dragover/click 监听器随元素移除失效，
@@ -563,11 +566,18 @@ export class AiPanel {
     this.inputEl = null;
   }
 
+  /** 停止 Protyle 延迟挂载的尺寸监听（destroyInput / 真正回退 contenteditable 时调用） */
+  private teardownMountRetryObserver(): void {
+    try { this.mountResizeObserver?.disconnect(); } catch (__swallowErr) { logSwallow(__swallowErr, "ai-panel.ts · teardownMountRetryObserver", "debug"); }
+    this.mountResizeObserver = null;
+  }
+
   /**
    * 挂载「共享 SiYuan Lute 引擎」的轻量 Protyle 作为 AI 输入框。
    * 同引擎下，从思源复制/拖出的原生块 HTML 粘贴进本输入框后 DOM 结构与 CSS class 一致，
    * 加粗 / 代码 / 颜色 / 链接等富文本格式由 Protyle 原生管线零转换保留。
    * 若元素尚未进入布局（零尺寸/未挂载）则延迟重试；构造失败则回退 contenteditable。
+   * 隐藏 dock 下容器零尺寸导致的「超时」不再永久回退——由 ResizeObserver 在元素获得尺寸（dock 展开）时补挂载。
    */
   private mountProtyle(contentEl: HTMLElement): void {
     const inputEl = contentEl.querySelector("#hiword-ai-protyle") as HTMLElement | null;
@@ -578,12 +588,16 @@ export class AiPanel {
     const attempt = () => {
       if (!this.inputEl || this.protyle) return;
       const el = this.inputEl;
-      if (!el.isConnected || el.getBoundingClientRect().height < 2) {
+      if (!el.isConnected) {
+        // 面板已销毁，停止重试并清理尺寸监听
+        this.teardownMountRetryObserver();
+        return;
+      }
+      if (el.getBoundingClientRect().height < 2) {
+        // 容器尚未就绪（dock 隐藏 / 零尺寸）：不直接回退 contenteditable，
+        // 先短期 rAF 重试；若 60 帧内仍无尺寸，交给 ResizeObserver 在元素获得尺寸（dock 展开）时补挂载
         if (this.mountAttempts++ < 60) {
           requestAnimationFrame(attempt);
-        } else {
-          getLogger().error("Protyle 容器长时间未就绪，回退 contenteditable", { operation: "挂载AI输入框" });
-          this.fallbackToContentEditable();
         }
         return;
       }
@@ -675,9 +689,23 @@ export class AiPanel {
         // 失败路径：销毁可能已创建的部分实例并清空引用，残留 DOM 由 fallbackToContentEditable 统一清理
         try { this.protyle?.destroy(); } catch (__swallowErr) { logSwallow(__swallowErr, "ai-panel.ts · try { this.protyle?.destroy(); }", "debug"); }
         this.protyle = null;
+        this.teardownMountRetryObserver();
         this.fallbackToContentEditable();
       }
     };
+    // 尺寸就绪（如 dock 从隐藏变可见）后自动补挂载：避免「隐藏时超时 → 永久回退 contenteditable」。
+    // 60 帧 rAF 仅覆盖初始同步窗口；真正的「隐藏→展示」跨事件由 ResizeObserver 兜底触发。
+    if (!this.mountResizeObserver && inputEl.isConnected) {
+      this.mountResizeObserver = new ResizeObserver(() => {
+        const el = this.inputEl;
+        if (el && el.isConnected && el.getBoundingClientRect().height >= 2 && !this.protyle) {
+          this.mountAttempts = 0;
+          requestAnimationFrame(attempt);
+        }
+      });
+      this.mountResizeObserver.observe(inputEl);
+    }
+
     requestAnimationFrame(attempt);
   }
 
