@@ -5576,7 +5576,9 @@ body.hiword-dragging {
   gap: 4px;
   flex: 1;
   min-height: 0;
-  background: var(--b3-theme-background, var(--b3-theme-on-background, #222));
+  /* 与 .hiword-ai-panel 保持一致，仅依赖主题背景变量；
+     不要回退到文字色 --b3-theme-on-background（缺失时输入框背景会变近黑/近白，与面板割裂） */
+  background: var(--b3-theme-background);
   /* 暗色主题下原 1.5px divider 边框与背景对比过低、几乎不可见；
      提升为 2px，并用 divider 70% + on-surface 30% 混合提高对比度。 */
   border: 2px solid color-mix(in srgb, var(--b3-theme-divider) 70%, var(--b3-theme-on-surface) 30%);
