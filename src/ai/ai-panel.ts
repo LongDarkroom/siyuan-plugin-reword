@@ -277,7 +277,7 @@ export class AiPanel {
       (window as any).__REWORD_BUILD_INFO__ = {
         buildTime:
           typeof __REWORD_BUILD_TIME__ !== "undefined" ? __REWORD_BUILD_TIME__ : "dev",
-        features: ["ref-attachments(B组一等数据)", "expandRefs-single-pass", "lute-primary-html-markdown-fallback", "fetchBlockText-md-sql", "user-msg-light-bg", "user-msg-render-cleanText"],
+        features: ["ref-attachments(B组一等数据)", "expandRefs-single-pass", "lute-primary-html-markdown-fallback", "fetchBlockText-md-sql", "user-msg-light-bg", "user-msg-render-cleanText", "ref-card-hover-preview+jump"],
         expandBlockRefs: true,
         fetchBlockTextFallback: true,
       };
@@ -286,6 +286,10 @@ export class AiPanel {
     const contentEl = dockElement.querySelector("#hiword-dock-content") as HTMLElement;
     if (!contentEl) return;
     this.contentEl = contentEl;
+
+    // 2026-09-03：全局 hover 浮动预览层（事件委托到 document，处理 input/msg 两类卡片）
+    //   内部已带 `__hoverPreviewInstalled` 守卫，重复 render 安全。
+    this.setupHoverPreviewLayer();
 
     // 2026-08-26 修复：不再在 render() 中自动把选区文本预填进输入框。
     // 旧逻辑无论用户是否已输入，每次切回 AI 精读（重渲染）都会把「先前选中文本」灌入输入框，
@@ -653,7 +657,12 @@ export class AiPanel {
               this.refreshInputEmptyState();
               return;
             }
-            target.classList.toggle("hiword-ref--expanded");
+            // 2026-09-03：点击改为「跳转到原文档/块」（悬浮预览由 document 级 hover 层提供）
+            const id = target.getAttribute("data-id") || "";
+            const kind: RefKind = target.classList.contains("hiword-ai-doc-ref") ? "doc" : "block";
+            if (id && looksLikeRefId(id)) {
+              void this.openRefInSiyuan(id, kind);
+            }
           }
         }, true);
         // Protyle 挂载完成，写入延迟的预填内容
@@ -708,7 +717,12 @@ export class AiPanel {
           this.refreshInputEmptyState();
           return;
         }
-        target.classList.toggle("hiword-ref--expanded");
+        // 2026-09-03：点击改为跳转（兜底 contenteditable 路径同步）
+        const id = target.getAttribute("data-id") || "";
+        const kind: RefKind = target.classList.contains("hiword-ai-doc-ref") ? "doc" : "block";
+        if (id && looksLikeRefId(id)) {
+          void this.openRefInSiyuan(id, kind);
+        }
       }
     }, true);
     // 兜底模式同样写入延迟的预填内容
@@ -1162,13 +1176,246 @@ export class AiPanel {
     }
   }
 
-  /** 直接向 wysiwyg DOM 写入块引用卡片（绕开思源 insertHTML 所有静默失败点） */
+  // ── 引用卡跳转与预览（2026-09-03）─────────────────────────────────────
+  //  原逻辑：输入框/msg 气泡里的引用卡 click 是 toggle 展开（toggle className），
+  //  「展开」操作每次都要 fetch 正文，DOC 体积大时延明显，体验重。
+  //  新逻辑（与 src/index.ts:12126 openAnnotationBlock 风格保持一致）：
+  //    · 悬浮 → 浮动层显示正文预览（DOC 限 6 行；BLOCK 全文不超过 8000 字）
+  //    · 点击 → 通过 window.siyuan.openBlock(cb-get-hl) 跳转到原文档/块
+
+  /** 跳转到原文档/块（沿用 src/index.ts:12126 openAnnotationBlock 的两段式回退） */
+  private async openRefInSiyuan(id: string, kind: RefKind): Promise<void> {
+    const op = kind === "doc" ? "AI精读跳转doc" : "AI精读跳转block";
+    const s = (window as any).siyuan;
+    try {
+      if (s && typeof s.openBlock === "function") {
+        // cb-get-hl = scroll + highlight；不进编辑器聚焦模式，用户体感为「看一眼原文」
+        const r = s.openBlock({ id, action: ["cb-get-hl"] });
+        if (r && typeof r.catch === "function") {
+          r.catch((err: unknown) => {
+            getLogger().warn(`[REword] ${op} openBlock 失败，回退协议链接`, { operation: op, error: err });
+            window.open(`siyuan://blocks/${id}`);
+          });
+        }
+        return;
+      }
+    } catch (err) {
+      getLogger().warn(`[REword] ${op} openBlock 抛错，回退协议链接`, { operation: op, error: err });
+    }
+    window.open(`siyuan://blocks/${id}`);
+  }
+
+  /** 拉预览正文（缓存优先 → 按需 fetch + 回写缓存）；用于 hover 浮动层 */
+  private async fetchPreviewBody(id: string, kind: RefKind): Promise<string> {
+    const cached = this.peekRefBody(id);
+    if (cached !== undefined && cached.length > 0) return cached;
+    const op = kind === "doc" ? "AI精读预览doc" : "AI精读预览block";
+    let text = "";
+    try {
+      const fetched: string | null = kind === "doc"
+        ? await this.host.fetchDocText(id)
+        : await this.host.fetchBlockText(id);
+      text = fetched ?? "";
+    } catch (err) {
+      getLogger().warn(`[REword] ${op} fetch 异常`, { operation: op, data: { id }, error: err });
+    }
+    const body = (text || "").trim();
+    if (body) {
+      this.registerRef({
+        kind,
+        id,
+        title: this.attachments.get(id)?.title ?? "",
+        body,
+        status: "ready",
+      });
+    }
+    return body || "";
+  }
+
+  /**
+   * 限制预览长度：DOC 体积可能数万字，仅显示前 6 行；BLOCK 正文硬上限就是 8000，
+   * 全量预览可接受。用于 hover 浮动层，避免卡顿。
+   */
+  private truncatePreview(body: string): string {
+    if (!body) return "";
+    const MAX_PREVIEW_CHARS = 240;
+    const MAX_PREVIEW_LINES = 6;
+    if (body.length <= MAX_PREVIEW_CHARS) {
+      const lines = body.split(/\n/);
+      if (lines.length <= MAX_PREVIEW_LINES) return body;
+      return lines.slice(0, MAX_PREVIEW_LINES).join("\n") + "\n…";
+    }
+    return body.slice(0, MAX_PREVIEW_CHARS) + "…";
+  }
+
+  /**
+   * 创建全局 hover 浮动预览层 + 绑定事件委托。
+   *   - 三种卡共享一个浮动层，避免给每张卡单独管理 DOM
+   *   - mouseover 命中卡 → 200ms 防抖后拉正文 → 在卡右下方显示
+   *   - mouseleave（鼠标出卡或出浮动层）→ 即刻隐藏
+   *   - 浮动层也接受 hover，鼠标进入时不立即消失
+   *
+   * 设计取舍：不与卡片在自己容器下挂监听，是因为 Protyle 重渲染会丢弃
+   * 子节点上的监听；委托到 document 同样稳定但更简单。
+   */
+  private setupHoverPreviewLayer(): void {
+    if ((this as any).__hoverPreviewInstalled) return;
+    (this as any).__hoverPreviewInstalled = true;
+
+    const layer = document.createElement("div");
+    layer.className = "hiword-ref-hover-preview";
+    layer.style.display = "none";
+    document.body.appendChild(layer);
+
+    type Pending = { id: string; kind: RefKind; cardRect: DOMRect; token: number };
+    let pending: Pending | null = null;
+    let hideTimer: number | null = null;
+    let loadToken = 0;
+
+    const place = (rect: DOMRect, anchorId: string) => {
+      // 计算最佳位置：默认卡片右下方，溢出视口则翻转到上方或左侧
+      const PAD = 8;
+      const lw = layer.offsetWidth;
+      const lh = layer.offsetHeight;
+      let top = rect.bottom + PAD;
+      let left = rect.left;
+      if (top + lh > window.innerHeight - PAD) {
+        top = Math.max(PAD, rect.top - lh - PAD);
+      }
+      if (left + lw > window.innerWidth - PAD) {
+        left = Math.max(PAD, window.innerWidth - lw - PAD);
+      }
+      top = Math.max(PAD, top);
+      left = Math.max(PAD, left);
+      layer.style.top = `${top}px`;
+      layer.style.left = `${left}px`;
+      layer.setAttribute("data-anchor-id", anchorId);
+    };
+
+    const showLoading = () => {
+      layer.innerHTML = '<span class="hiword-ref-hover-preview__loading">加载中…</span>';
+      layer.style.display = "";
+    };
+
+    const showBody = (body: string) => {
+      const truncated = this.truncatePreview(body);
+      if (!truncated) {
+        layer.innerHTML = '<span class="hiword-ref-hover-preview__loading">内容暂不可用</span>';
+      } else {
+        // textContent 保安全（卡内容是文本不是 HTML）
+        const bodyEl = document.createElement("div");
+        bodyEl.className = "hiword-ref-hover-preview__body";
+        bodyEl.textContent = truncated;
+        layer.replaceChildren(bodyEl);
+      }
+    };
+
+    const hide = () => {
+      layer.style.display = "none";
+      layer.removeAttribute("data-anchor-id");
+      pending = null;
+    };
+
+    const scheduleHide = () => {
+      if (hideTimer) window.clearTimeout(hideTimer);
+      hideTimer = window.setTimeout(hide, 120);
+    };
+
+    const cancelHide = () => {
+      if (hideTimer) { window.clearTimeout(hideTimer); hideTimer = null; }
+    };
+
+    layer.addEventListener("mouseenter", cancelHide);
+    layer.addEventListener("mouseleave", scheduleHide);
+
+    const resolveKind = (card: HTMLElement): RefKind | null => {
+      // 输入框两种卡：hiword-ai-doc-ref / hiword-ai-block-ref；msg 气泡：hiword-ref-card
+      if (card.classList.contains("hiword-ai-doc-ref")) return "doc";
+      if (card.classList.contains("hiword-ai-block-ref")) return "block";
+      if (card.classList.contains("hiword-ref-card")) return "block";
+      return null;
+    };
+
+    const readId = (card: HTMLElement): string | null => {
+      // 输入框卡用 data-id，msg 卡用 data-block-id
+      return card.dataset.id || card.dataset.blockId || null;
+    };
+
+    document.addEventListener(
+      "mouseover",
+      (e: MouseEvent) => {
+        const target = e.target as HTMLElement | null;
+        if (!target) return;
+        const card = target.closest<HTMLElement>(
+          ".hiword-ai-doc-ref[data-id], .hiword-ai-block-ref[data-id], .hiword-ref-card[data-block-id]",
+        );
+        if (!card) return;
+        const id = readId(card);
+        const kind = resolveKind(card);
+        if (!id || !kind) return;
+        if (pending && pending.id === id) return; // 已经在加载同一张
+        pending = { id, kind, cardRect: card.getBoundingClientRect(), token: ++loadToken };
+        cancelHide();
+        showLoading();
+        place(pending.cardRect, id);
+        const myToken = pending.token;
+        this.fetchPreviewBody(id, kind).then((body) => {
+          // 期间可能已经移开或换卡
+          if (loadToken !== myToken) return;
+          showBody(body);
+          // 重新定位（load 完成后尺寸可能变化）
+          if (pending && pending.id === id) {
+            const r = card.getBoundingClientRect();
+            place(r, id);
+          }
+        });
+      },
+      true,
+    );
+
+    document.addEventListener(
+      "mouseout",
+      (e: MouseEvent) => {
+        const target = e.target as HTMLElement | null;
+        if (!target) return;
+        const card = target.closest<HTMLElement>(
+          ".hiword-ai-doc-ref[data-id], .hiword-ai-block-ref[data-id], .hiword-ref-card[data-block-id]",
+        );
+        if (!card) return;
+        scheduleHide();
+      },
+      true,
+    );
+  }
+
+  /**
+   * 直接向 wysiwyg DOM 写入块引用卡片（绕开思源 insertHTML 所有静默失败点）
+   *
+   * 2026-09-03 v2：所有路径都让卡片「inline 在段落内」，并用
+   *   `<br data-reword-tail="1">` 在卡片后留出一个可光标位置；
+   *   readInputValue 在 Lute 序列化前会剥除 `<br data-reword-tail>`。
+   *   解决原 placeholder 升级路径「append 一段空段 + 光标过去 → 卡片行 + 编辑行」的
+   *   占满一行问题，让用户可在卡片后面直接打字。
+   */
   private directInsertCard(cardHtml: string, wysiwyg: HTMLElement | undefined, blockId?: string): void {
     if (!wysiwyg) return;
     // 去重保护：原生路径已插入同名块引用（校验时序导致的误判）时，跳过避免重复卡片
     if (blockId && wysiwyg.querySelector(`[data-type="block-ref"][data-id="${CSS.escape(blockId)}"]`)) {
       return;
     }
+    const setCaretAfterCards = (inner: HTMLElement) => {
+      try {
+        // inner 末尾已有 <br data-reword-tail>，光标定位在该 br 前 = 卡片之后
+        const tail = inner.querySelector<HTMLElement>("[data-reword-tail]");
+        const range = document.createRange();
+        if (tail) range.setStartBefore(tail);
+        else range.selectNodeContents(inner);
+        range.collapse(true);
+        const sel = window.getSelection();
+        sel?.removeAllRanges();
+        sel?.addRange(range);
+      } catch (__swallowErr) { logSwallow(__swallowErr, "ai-panel.ts · setCaretAfterCards", "debug"); }
+    };
     // 确保有可编辑段落作为锚点（优先非占位段落）
     let paragraph = wysiwyg.querySelector<HTMLElement>("[data-node-id]:not([data-reword-placeholder]) > [contenteditable]");
     if (!paragraph) {
@@ -1181,52 +1428,31 @@ export class AiPanel {
     }
     if (!paragraph) {
       // ★ 升级占位段为真段落：新会话时 wysiwyg 只有占位段，
-      // 与其创建新段落导致「空第一行 + 块引用第二行」的错乱布局，
-      // 不如直接把占位段升级——移除 placeholder 标记、写入内容、更新 node-id。
+      // 把卡片写到该段 inner 后再追加 <br data-reword-tail="1"> 作为可光标锚点，
+      // 这样卡片是 inline（不再占据独立一行），用户可紧贴卡片继续打字。
       // 升级后 readInputValue 不再把它当占位清理，预设提示词也不会顶掉块引用。
       const placeholder = wysiwyg.querySelector<HTMLElement>('[data-reword-placeholder="1"]');
       if (placeholder) {
         placeholder.removeAttribute('data-reword-placeholder');
         placeholder.setAttribute('data-node-id', 'reword-p-' + Date.now());
         const inner = placeholder.querySelector<HTMLElement>('[contenteditable="true"]');
-        if (inner) { inner.innerHTML = cardHtml; }
-        // ★ 追加空真段落供光标/后续输入（否则用预设提示词会出现「块引用→空行→文本」三行错乱）
-        const emptyId = 'reword-p-' + Date.now();
-        wysiwyg.insertAdjacentHTML('beforeend',
-          `<div data-node-id="${emptyId}" data-type="NodeParagraph"><div contenteditable="true"><br></div></div>`);
-        // 光标移到空段落，用户可直接继续输入
-        const newPara = wysiwyg.querySelector<HTMLElement>(`[data-node-id="${emptyId}"] > [contenteditable]`);
-        if (newPara) {
-          try {
-            const sel = window.getSelection();
-            const range = document.createRange();
-            range.selectNodeContents(newPara);
-            range.collapse(true);
-            sel?.removeAllRanges();
-            sel?.addRange(range);
-          } catch (__swallowErr) { logSwallow(__swallowErr, "ai-panel.ts · try { const sel = window.getSelection(); const range = document…", "debug"); }
+        if (inner) {
+          inner.innerHTML = cardHtml + '<br data-reword-tail="1">';
+          setCaretAfterCards(inner);
         }
         return;
       }
-      // 连占位段都没有（极端边界）：创建全新真段落
+      // 连占位段都没有（极端边界）：创建全新真段落 + inline 卡片 + 光标锚点
       const newId = "reword-p-" + Date.now();
       wysiwyg.insertAdjacentHTML("beforeend",
-        `<div data-node-id="${newId}" data-type="NodeParagraph"><div contenteditable="true">${cardHtml}</div></div>`);
+        `<div data-node-id="${newId}" data-type="NodeParagraph"><div contenteditable="true">${cardHtml}<br data-reword-tail="1"></div></div>`);
+      const newInner = wysiwyg.querySelector<HTMLElement>(`[data-node-id="${newId}"] > [contenteditable]`);
+      if (newInner) setCaretAfterCards(newInner);
       return;
     }
-    // 在段落末尾追加卡片
-    paragraph.insertAdjacentHTML("beforeend", cardHtml);
-    // 将光标移到卡片之后
-    const sel = window.getSelection();
-    if (sel && paragraph.contains(sel.anchorNode)) {
-      try {
-        const range = document.createRange();
-        range.selectNodeContents(paragraph);
-        range.collapse(false); // 折叠到末尾
-        sel.removeAllRanges();
-        sel.addRange(range);
-      } catch (__swallowErr) { logSwallow(__swallowErr, "ai-panel.ts · try { const range = document.createRange(); range.selectNodeCon…", "debug"); }
-    }
+    // 在段落末尾追加卡片 + 光标锚点（inline：与已有内容同行）
+    paragraph.insertAdjacentHTML("beforeend", cardHtml + '<br data-reword-tail="1">');
+    setCaretAfterCards(paragraph);
   }
 
   /** 强制刷新输入框 empty 态（移除 --empty 类，防止伪元素遮挡已插入的内容） */
@@ -1480,6 +1706,9 @@ export class AiPanel {
           }
           placeholder.remove();
         });
+        // ★ 剥除 directInsertCard 留下的光标锚点（<br data-reword-tail>），Lute 序列化看不到这些
+        //   节点，但仍显式清除，避免极端情况下（如段落里只有 br）输出多余的换行。
+        clone.querySelectorAll('[data-reword-tail]').forEach((br) => br.remove());
         // ★ Lute 为主：所有行内/块级格式（加粗/高亮/列表/代码块等）仍由 Lute 序列化。
         //   发送场景下块引用走「占位符旁路」：列表块 anchor 常含 {、数字. 等 kramdown 语法字符，
         //   Lute 序列化时会二次解析 anchor 文本导致截断（((id '27. 泄漏）。
@@ -1763,10 +1992,12 @@ export class AiPanel {
     return html;
   }
 
-  /** 引用折叠卡片 HTML（气泡内展示，点击异步展开完整正文预览） */
+  /** 引用折叠卡片 HTML（气泡内展示）
+   *  2026-09-03：原文案「点击展开预览」已不准确——点击改成跳转到原文档/块，
+   *  悬停预览改由 document 级 hover 浮动层提供。 */
   private refCardHtml(id: string, title: string): string {
     return (
-      `<span class="hiword-ref-card" data-block-id="${escapeHtml(id)}" title="点击展开预览（发送给 AI 时为完整内容）">` +
+      `<span class="hiword-ref-card" data-block-id="${escapeHtml(id)}" title="悬停查看预览 · 点击跳转到原文">` +
         `<span class="hiword-ref-card__icon">📎</span>` +
         `<span class="hiword-ref-card__anchor">${escapeHtml(title)}</span>` +
         `<span class="hiword-ref-card__chevron">▸</span>` +
@@ -3259,36 +3490,22 @@ export class AiPanel {
         </div>
       `;
       this.bindMessageToolbar(userMsg, userIndex, "user");
-      // 折叠卡片点击展开：异步加载完整内容预览
-      userMsg.addEventListener("click", async (e: Event) => {
+      // 2026-09-03：折叠卡点击改为「跳转到原文档/块」（悬浮预览由 document 级 hover 层提供）。
+      //   历史气泡里同张卡若已展开，强制收起——preview 节点内存留着，但视觉折叠，
+      //   与新行为保持一致。
+      userMsg.addEventListener("click", (e: Event) => {
         const card = (e.target as HTMLElement).closest(".hiword-ref-card") as HTMLElement | null;
         if (!card) return;
         e.stopPropagation();
-        const isExpanded = card.classList.toggle("hiword-ref-card--expanded");
-        if (isExpanded && !card.querySelector(".hiword-ref-card__preview__content")) {
-          const blockId = card.dataset.blockId;
-          if (blockId) {
-            const previewEl = card.querySelector(".hiword-ref-card__preview") as HTMLElement | null;
-            if (previewEl) {
-              previewEl.innerHTML = '<span style="opacity:0.5">加载中…</span>';
-              const cached = this.peekRefBody(blockId);
-              const fullText = cached !== undefined ? cached : (await this.host.fetchBlockText(blockId));
-              if (cached === undefined && fullText) {
-                this.registerRef({
-                  kind: "block",
-                  id: blockId,
-                  title: this.refTitleOf(blockId),
-                  body: fullText,
-                  status: "ready",
-                });
-              }
-              const contentEl = document.createElement("span");
-              contentEl.className = "hiword-ref-card__preview__content";
-              contentEl.textContent = fullText || "（无法读取内容）";
-              previewEl.replaceChildren(contentEl);
-            }
-          }
-        }
+        const id = card.dataset.blockId || "";
+        if (!id || !looksLikeRefId(id)) return;
+        // kind 推断顺序：attachments 优先 → 锚文本前缀兜底（📄 文档 → doc；其他 → block）
+        const attached = this.attachments.get(id);
+        const kind: RefKind =
+          attached?.kind ??
+          (isDocAnchor((card.textContent || "").trim()) ? "doc" : "block");
+        card.classList.remove("hiword-ref-card--expanded");
+        void this.openRefInSiyuan(id, kind);
       });
       messagesEl.appendChild(userMsg);
 

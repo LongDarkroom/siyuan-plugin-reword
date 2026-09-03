@@ -5141,6 +5141,58 @@ body.hiword-dragging {
   opacity: 0.9;
 }
 
+/* 2026-09-03 v2：input/msg 两处引用卡的紧凑化与点击手型。
+   原 hover 时显示 ×（::after 删除入口），仍保留——卡片可点击删除仍是有用行为。
+   视觉上确认「可点击」的手型光标，给用户一个明确反馈。 */
+.hiword-ai-doc-ref,
+.hiword-ai-block-ref,
+.hiword-ref-card {
+  cursor: pointer;
+}
+
+/* 引用卡 hover 浮动预览层（document.body 下唯一一份，
+   在 ai-panel.ts · setupHoverPreviewLayer 中创建） */
+.hiword-ref-hover-preview {
+  position: fixed;
+  z-index: 9999;
+  max-width: 360px;
+  max-height: 220px;
+  overflow: auto;
+  padding: 8px 10px;
+  border-radius: var(--hw-radius-sm, 6px);
+  background: var(--b3-theme-surface, #ffffff);
+  color: var(--b3-theme-on-background, #1f2329);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.18), 0 1px 3px rgba(0, 0, 0, 0.1);
+  border: 1px solid var(--hw-border, rgba(128, 128, 128, 0.25));
+  font-size: 12px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-word;
+  /* 进入时不抢鼠标焦点 */
+  pointer-events: auto;
+
+  &::-webkit-scrollbar { width: 4px; }
+  &::-webkit-scrollbar-thumb {
+    background: rgba(128, 128, 128, 0.4);
+    border-radius: 2px;
+  }
+
+  .hiword-ref-hover-preview__loading {
+    opacity: 0.55;
+    font-style: italic;
+  }
+  .hiword-ref-hover-preview__body {
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+}
+/* 深色主题适配 */
+.b3-theme--dark .hiword-ref-hover-preview {
+  background: var(--b3-theme-surface, #2a2a2a);
+  color: var(--b3-theme-on-surface, #d4d4d4);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5), 0 1px 3px rgba(0, 0, 0, 0.3);
+}
+
 /* 加载动画：三点跳动 */
 .hiword-ai-msg-loading {
   display: inline-flex;
