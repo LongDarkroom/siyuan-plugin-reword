@@ -42,6 +42,7 @@ const TESTS = [
   "test/ai-doc-ref.test.mjs",
   "test/ai-refs.test.mjs",
   "test/ai-refs-panel.test.mjs",
+  "test/ai-input-protyle-standard.test.mjs",
   "test/clean-for-ai-doc-ref.test.mjs",
   "test/get-document-content.test.mjs",
   "test/ai-settings-normalize.test.mjs",
@@ -92,15 +93,16 @@ const TESTS = [
   "test/vocab-highlight-toggle.test.mjs",
   "test/reader-vocab-autohighlight.test.mjs",
   "test/reader-floating-layer.test.mjs",
-  "test/reader-annotation-onestep-flow.test.mjs",
+  // 2026-09-03：test/reader-annotation-onestep-flow.test.mjs 已删除（旧一步流程设计残留），
+  // 白名单同步移除，否则全量运行恒定报 ERR_MODULE_NOT_FOUND。
   "test/reader-book-excerpts-refresh.test.mjs",
   "test/reader-bookmarks-annots.test.mjs",
   "test/reader-sel-toolbar.test.mjs",
   "test/reader-show-annotation-rec-fallback.test.mjs",
   "test/reader-settings-4-sections.test.mjs",
   "test/reader-settings-placeholder-encoding.test.mjs",
-  "test/safe-delete-annotation.test.mjs",
-  "test/safe-delete-annotation-v4.test.mjs",
+  // 2026-09-03：safe-delete-annotation / -v4 两个测试文件已删除（旧设计残留），
+  // 白名单同步移除，否则全量运行恒定报 ERR_MODULE_NOT_FOUND。
   "test/reader-settings-compact.test.mjs",
   "test/reader-font-size-override.test.mjs",
   "test/reader-search.test.mjs",

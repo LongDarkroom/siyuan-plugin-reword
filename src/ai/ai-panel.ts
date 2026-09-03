@@ -207,6 +207,11 @@ export interface AiHost {
   ): Promise<number>;
 }
 
+/** 思源零宽空格（内核 Constants.ZWSP）：空段落用它与 `<wbr>` 占位，不产生可见内容 */
+const ZWSP = "\u200b";
+/** 零宽/不可见字符：判定段落是否有真实内容前需剥除（不然空段的 ZWSP 会被当成内容） */
+const ZERO_WIDTH_RE = /[\u200b\u200c\u200d\ufeff\u00ad]/g;
+
 export class AiPanel {
   private disposables = new Disposables();
   /** 当前激活预设（其 systemPrompt / temperature 覆盖本次精读） */
@@ -277,7 +282,7 @@ export class AiPanel {
       (window as any).__REWORD_BUILD_INFO__ = {
         buildTime:
           typeof __REWORD_BUILD_TIME__ !== "undefined" ? __REWORD_BUILD_TIME__ : "dev",
-        features: ["ref-attachments(B组一等数据)", "expandRefs-single-pass", "lute-primary-html-markdown-fallback", "fetchBlockText-md-sql", "user-msg-light-bg", "user-msg-render-cleanText", "ref-card-hover-preview+jump"],
+        features: ["ref-attachments(B组一等数据)", "expandRefs-single-pass", "lute-primary-html-markdown-fallback", "fetchBlockText-md-sql", "user-msg-light-bg", "user-msg-render-cleanText", "ref-card-hover-preview+jump", "native-empty-block(Copilot对齐)"],
         expandBlockRefs: true,
         fetchBlockTextFallback: true,
       };
@@ -593,26 +598,24 @@ export class AiPanel {
           toolbar: [],
         });
         this.mountAttempts = 0;
-        // lite Protyle 不会自动插入初始块，wysiwyg 始终为空——
-        // protyle.insert() 会因找不到 blockElement 而在 insertHTML 中静默 return，导致拖块不显示。
-        // 此处显式写入最小 NodeParagraph 占位，确保后续 insert 始终能命中 fallback 锚点。
+        // 2026-09-03：对齐 Copilot——预塞一个「思源标准空段落」。
+        // lite Protyle 不会自动插入初始块，且 protyle.insert() 会因找不到合法 blockElement
+        // 而在 insertHTML 中静默 return。标准段落必须补齐 class="p" + ZWSP<wbr> +
+        // protyle-attr + 合法 node-id，否则块引用卡片会失去思源原生 inline 排版上下文，
+        // 渲染成独占一行（旧手搓占位段 data-node-id="placeholder" 正是这个坑）。
         const wysiwyg = this.protyle.protyle?.wysiwyg?.element;
         if (wysiwyg) {
           if (wysiwyg.childElementCount === 0) {
-            wysiwyg.innerHTML =
-              '<div data-reword-placeholder="1" data-node-id="placeholder" data-type="NodeParagraph">' +
-              '<div contenteditable="true"><br></div></div>';
+            wysiwyg.appendChild(this.createEmptyBlock());
           }
-          // 空态占位符：监听 wysiwyg 输入切换 --empty 类（忽略 REword 占位节点）
+          // 空态占位符：监听 wysiwyg 输入切换 --empty 类与原生 placeholder
           const refreshEmpty = () => {
             let hasContent = false;
             for (const child of Array.from(wysiwyg.children)) {
-              const c = child as HTMLElement;
-              if (c.dataset?.rewordPlaceholder === "1") continue;
-              if ((c.textContent || "").trim()) { hasContent = true; break; }
-              if (c.querySelector("[data-type='block-ref']")) { hasContent = true; break; }
+              if (this.blockHasContent(child as HTMLElement)) { hasContent = true; break; }
             }
             el.classList.toggle("hiword-ai-input--empty", !hasContent);
+            this.syncNativePlaceholder(wysiwyg);
           };
           const refreshInputTokens = () => {
             this.inputTokenEstimate = this.estimateInputTokens();
@@ -651,8 +654,8 @@ export class AiPanel {
             e.preventDefault();
             e.stopPropagation();
             const me = e as MouseEvent;
-            // 命中卡片右侧 × 区域（padding-right 18px 预留）→ 删除该引用卡
-            if (target.getBoundingClientRect().right - me.clientX <= 20) {
+            // 命中卡片右侧 × 区域（padding-right 18px 预留，命中区 16px 与 Copilot 一致）→ 删除该引用卡
+            if (target.getBoundingClientRect().right - me.clientX <= 16) {
               target.remove();
               this.refreshInputEmptyState();
               return;
@@ -712,7 +715,7 @@ export class AiPanel {
       if (target) {
         e.stopPropagation();
         const me = e as MouseEvent;
-        if (target.getBoundingClientRect().right - me.clientX <= 20) {
+        if (target.getBoundingClientRect().right - me.clientX <= 16) {
           target.remove();
           this.refreshInputEmptyState();
           return;
@@ -1389,70 +1392,132 @@ export class AiPanel {
   }
 
   /**
-   * 直接向 wysiwyg DOM 写入块引用卡片（绕开思源 insertHTML 所有静默失败点）
+   * 生成思源标准空段落（2026-09-03 对齐 Copilot 输入框做法）。
    *
-   * 2026-09-03 v2：所有路径都让卡片「inline 在段落内」，并用
-   *   `<br data-reword-tail="1">` 在卡片后留出一个可光标位置；
-   *   readInputValue 在 Lute 序列化前会剥除 `<br data-reword-tail>`。
-   *   解决原 placeholder 升级路径「append 一段空段 + 光标过去 → 卡片行 + 编辑行」的
-   *   占满一行问题，让用户可在卡片后面直接打字。
+   * lite Protyle（blockId:""）不会自动建块，protyle.insert() 在找不到合法 blockElement 时
+   * 会静默 return → 拖入的引用卡不显示。故必须预塞标准段落，四件套缺一不可：
+   *   class="p"（思源原生 inline 排版上下文，缺了卡片会独占一行）、
+   *   ZWSP + <wbr>（零宽占位，不产生可见换行；<br> 会产生空行盒）、
+   *   protyle-attr（段落元信息区）、合法 data-node-id（Lute.NewNodeID()）。
+   */
+  private createEmptyBlock(): HTMLElement {
+    const lute = this.protyle?.protyle?.lute as (Lute & { Md2BlockDOM?: (md: string) => string }) | undefined;
+    if (lute && typeof lute.Md2BlockDOM === "function") {
+      try {
+        const html = lute.Md2BlockDOM("");
+        if (html) {
+          const wrap = document.createElement("div");
+          wrap.innerHTML = html;
+          const first = wrap.firstElementChild as HTMLElement | null;
+          if (first && first.getAttribute("data-type") === "NodeParagraph") {
+            // 内核产物可能不带 class="p"（思源段落排版依赖它）
+            if (!first.classList.contains("p")) first.classList.add("p");
+            return first;
+          }
+        }
+      } catch (err) {
+        getLogger().debug("Md2BlockDOM 生成空段失败，走手搓兜底", { operation: "挂载AI输入框", error: err as Error });
+      }
+    }
+    const b = document.createElement("div");
+    b.setAttribute("data-node-id", this.newBlockId());
+    b.setAttribute("data-type", "NodeParagraph");
+    b.className = "p";
+    b.innerHTML =
+      `<div contenteditable="true" spellcheck="false">${ZWSP}<wbr></div>` +
+      `<div class="protyle-attr" contenteditable="false">${ZWSP}</div>`;
+    return b;
+  }
+
+  /** 合法思源块 ID：优先 Lute.NewNodeID()（YYYYMMDDHHmmss-xxxxxxx），不可用时时间戳+随机 */
+  private newBlockId(): string {
+    try {
+      const L = (window as any)?.siyuan?.lute ?? (window as any)?.Lute;
+      const id = L && typeof L.NewNodeID === "function" ? String(L.NewNodeID() || "") : "";
+      if (id) return id;
+    } catch (__swallowErr) { logSwallow(__swallowErr, "ai-panel.ts · newBlockId", "debug"); }
+    const d = new Date();
+    const p = (n: number) => String(n).padStart(2, "0");
+    const ts =
+      `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}` +
+      `${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
+    return `${ts}-${Math.random().toString(36).slice(2, 9)}`;
+  }
+
+  /** 段落是否含真实内容：思源空段落只有 ZWSP，须剥零宽字符后再判定 */
+  private blockHasContent(block: HTMLElement): boolean {
+    if ((block.textContent || "").replace(ZERO_WIDTH_RE, "").trim()) return true;
+    return !!block.querySelector("[data-type='block-ref']");
+  }
+
+  /**
+   * 思源原生空态：给「唯一空段落」挂 protyle-wysiwyg--empty + placeholder
+   * （思源内核 CSS 会用 ::before content: attr(placeholder) 渲染）。
+   * 多段落时一律清除，避免 placeholder 伪元素压在内容上方。
+   */
+  private syncNativePlaceholder(wysiwyg: HTMLElement): void {
+    const blocks = Array.from(wysiwyg.children) as HTMLElement[];
+    const inners = blocks
+      .map((b) => b.querySelector<HTMLElement>('[contenteditable="true"]'))
+      .filter((i): i is HTMLElement => !!i);
+    inners.forEach((i) => i.classList.remove("protyle-wysiwyg--empty"));
+    const only = blocks.length === 1 ? blocks[0] : null;
+    if (only && !this.blockHasContent(only)) {
+      const inner = only.querySelector<HTMLElement>('[contenteditable="true"]') ?? only;
+      inner.classList.add("protyle-wysiwyg--empty");
+      inner.setAttribute("placeholder", "输入提示词，或拖入文档/块作为上下文…");
+    }
+  }
+
+  /** 最后一个可编辑段落内胆（跳过 protyle-attr 元信息区与代码块） */
+  private lastEditableInner(wysiwyg: HTMLElement): HTMLElement | null {
+    const list = Array.from(wysiwyg.querySelectorAll<HTMLElement>("[contenteditable='true']"));
+    for (let i = list.length - 1; i >= 0; i--) {
+      const el = list[i];
+      if (el.closest(".protyle-attr")) continue;
+      if (el.closest("[data-type='NodeCodeBlock']")) continue;
+      return el;
+    }
+    return null;
+  }
+
+  /** 光标置于元素内容末尾（不再插入 <br> 占位，避免多出空行盒） */
+  private placeCaretAtEnd(el: HTMLElement): void {
+    try {
+      const range = document.createRange();
+      range.selectNodeContents(el);
+      range.collapse(false);
+      const sel = window.getSelection();
+      sel?.removeAllRanges();
+      sel?.addRange(range);
+    } catch (__swallowErr) { logSwallow(__swallowErr, "ai-panel.ts · placeCaretAtEnd", "debug"); }
+  }
+
+  /**
+   * 向 wysiwyg 插入引用卡片（2026-09-03 v3：回归 Protyle 原生）。
+   *
+   * 旧版在卡片后追加一个带自定义标记的 `<br>` 作为光标锚点 —— br 会产生换行行盒，
+   * 卡片因此独占一行，这正是「卡片占满一行」的根因。
+   * 现在优先走 protyle.insert()（标准段落已就位，原生路径能命中 blockElement），
+   * 失败才把卡片 inline 追加到末尾段落，并把光标放到其后（不再插入 br）。
    */
   private directInsertCard(cardHtml: string, wysiwyg: HTMLElement | undefined, blockId?: string): void {
     if (!wysiwyg) return;
     // 去重保护：原生路径已插入同名块引用（校验时序导致的误判）时，跳过避免重复卡片
-    if (blockId && wysiwyg.querySelector(`[data-type="block-ref"][data-id="${CSS.escape(blockId)}"]`)) {
-      return;
+    const exists = () =>
+      !!(blockId && wysiwyg.querySelector(`[data-type="block-ref"][data-id="${CSS.escape(blockId)}"]`));
+    if (exists()) return;
+    try {
+      this.protyle?.focus();
+      this.protyle?.insert(cardHtml, false);
+      if (exists() || !blockId) return; // 无 blockId 时无法校验，按原生成功处理
+    } catch (err) {
+      getLogger().debug("protyle.insert() 异常，走 DOM 兜底", { operation: "引用卡插入", error: err as Error });
     }
-    const setCaretAfterCards = (inner: HTMLElement) => {
-      try {
-        // inner 末尾已有 <br data-reword-tail>，光标定位在该 br 前 = 卡片之后
-        const tail = inner.querySelector<HTMLElement>("[data-reword-tail]");
-        const range = document.createRange();
-        if (tail) range.setStartBefore(tail);
-        else range.selectNodeContents(inner);
-        range.collapse(true);
-        const sel = window.getSelection();
-        sel?.removeAllRanges();
-        sel?.addRange(range);
-      } catch (__swallowErr) { logSwallow(__swallowErr, "ai-panel.ts · setCaretAfterCards", "debug"); }
-    };
-    // 确保有可编辑段落作为锚点（优先非占位段落）
-    let paragraph = wysiwyg.querySelector<HTMLElement>("[data-node-id]:not([data-reword-placeholder]) > [contenteditable]");
-    if (!paragraph) {
-      // 回退到任意非占位 contenteditable 段落
-      const allEditable = Array.from(wysiwyg.querySelectorAll<HTMLElement>("[contenteditable='true']"));
-      paragraph = allEditable.find((p) => {
-        const parent = p.closest<HTMLElement>("[data-node-id]");
-        return parent?.dataset?.rewordPlaceholder !== "1";
-      }) ?? null;
-    }
-    if (!paragraph) {
-      // ★ 升级占位段为真段落：新会话时 wysiwyg 只有占位段，
-      // 把卡片写到该段 inner 后再追加 <br data-reword-tail="1"> 作为可光标锚点，
-      // 这样卡片是 inline（不再占据独立一行），用户可紧贴卡片继续打字。
-      // 升级后 readInputValue 不再把它当占位清理，预设提示词也不会顶掉块引用。
-      const placeholder = wysiwyg.querySelector<HTMLElement>('[data-reword-placeholder="1"]');
-      if (placeholder) {
-        placeholder.removeAttribute('data-reword-placeholder');
-        placeholder.setAttribute('data-node-id', 'reword-p-' + Date.now());
-        const inner = placeholder.querySelector<HTMLElement>('[contenteditable="true"]');
-        if (inner) {
-          inner.innerHTML = cardHtml + '<br data-reword-tail="1">';
-          setCaretAfterCards(inner);
-        }
-        return;
-      }
-      // 连占位段都没有（极端边界）：创建全新真段落 + inline 卡片 + 光标锚点
-      const newId = "reword-p-" + Date.now();
-      wysiwyg.insertAdjacentHTML("beforeend",
-        `<div data-node-id="${newId}" data-type="NodeParagraph"><div contenteditable="true">${cardHtml}<br data-reword-tail="1"></div></div>`);
-      const newInner = wysiwyg.querySelector<HTMLElement>(`[data-node-id="${newId}"] > [contenteditable]`);
-      if (newInner) setCaretAfterCards(newInner);
-      return;
-    }
-    // 在段落末尾追加卡片 + 光标锚点（inline：与已有内容同行）
-    paragraph.insertAdjacentHTML("beforeend", cardHtml + '<br data-reword-tail="1">');
-    setCaretAfterCards(paragraph);
+    const inner = this.lastEditableInner(wysiwyg);
+    if (!inner) return;
+    inner.insertAdjacentHTML("beforeend", cardHtml);
+    this.placeCaretAtEnd(inner);
   }
 
   /** 强制刷新输入框 empty 态（移除 --empty 类，防止伪元素遮挡已插入的内容） */
@@ -1465,12 +1530,10 @@ export class AiPanel {
     if (wysiwyg) {
       let hasContent = false;
       for (const child of Array.from(wysiwyg.children)) {
-        const c = child as HTMLElement;
-        if (c.dataset?.rewordPlaceholder === "1") continue;
-        if ((c.textContent || "").trim()) { hasContent = true; break; }
-        if (c.querySelector("[data-type='block-ref']")) { hasContent = true; break; }
+        if (this.blockHasContent(child as HTMLElement)) { hasContent = true; break; }
       }
       el.classList.toggle("hiword-ai-input--empty", !hasContent);
+      this.syncNativePlaceholder(wysiwyg);
     }
   }
 
@@ -1686,29 +1749,9 @@ export class AiPanel {
       const existingLute = p.protyle.lute ?? undefined;
       const lute = this.fullKramdownLute(existingLute);
       try {
-        // 克隆并清理 REword 占位节点（lite Protyle wysiwyg 初始占位），避免被当作消息正文发送到 LLM
+        // 2026-09-03：输入框已改为思源标准段落（见 createEmptyBlock），不再有自造占位段
+        // 与光标锚点 br，原先的「占位段块引用救援 / br 剥除」两段清理逻辑随之删除。
         const clone = wysiwyg.cloneNode(true) as HTMLElement;
-        // ★ 安全网：移除占位段前，先将其中的块引用「救出」到新真段落。
-        //   场景：protyle.insert() 原生路径可能把块引用写入占位段（光标默认在占位段内），
-        //   若直接删占位段，块引用随之丢失 → 新会话拖块后用预设提示词会「顶掉」块引用。
-        clone.querySelectorAll('[data-reword-placeholder="1"]').forEach((placeholder) => {
-          const refs = placeholder.querySelectorAll('[data-type="block-ref"]');
-          if (refs.length > 0) {
-            // 将块引用迁移到新建的真段落中，再删除空占位段
-            const safePara = document.createElement('div');
-            safePara.setAttribute('data-node-id', 'reword-saved-' + Date.now());
-            safePara.setAttribute('data-type', 'NodeParagraph');
-            const inner = document.createElement('div');
-            inner.setAttribute('contenteditable', 'true');
-            refs.forEach((r) => inner.appendChild(r.cloneNode(true)));
-            safePara.appendChild(inner);
-            placeholder.parentNode?.insertBefore(safePara, placeholder.nextSibling);
-          }
-          placeholder.remove();
-        });
-        // ★ 剥除 directInsertCard 留下的光标锚点（<br data-reword-tail>），Lute 序列化看不到这些
-        //   节点，但仍显式清除，避免极端情况下（如段落里只有 br）输出多余的换行。
-        clone.querySelectorAll('[data-reword-tail]').forEach((br) => br.remove());
         // ★ Lute 为主：所有行内/块级格式（加粗/高亮/列表/代码块等）仍由 Lute 序列化。
         //   发送场景下块引用走「占位符旁路」：列表块 anchor 常含 {、数字. 等 kramdown 语法字符，
         //   Lute 序列化时会二次解析 anchor 文本导致截断（((id '27. 泄漏）。
@@ -1732,7 +1775,8 @@ export class AiPanel {
         });
         // 2026-08-21 v3：页签引用已改为原生 block-ref（锚以「📄 文档 」开头），
         // 走上面的统一 block-ref 通道即可，发送时由 expandDocRefs 识别锚前缀拉全文。
-        return lute.BlockDOM2Md(clone.innerHTML).trim();
+        // ZWSP 是空段落占位符，剥除后不影响真实内容。
+        return lute.BlockDOM2Md(clone.innerHTML).replace(ZERO_WIDTH_RE, "").trim();
       } catch (e) {
         getLogger().error("Protyle 序列化失败，回退 htmlToMarkdown", { operation: "读取输入框", error: e as Error });
       }
