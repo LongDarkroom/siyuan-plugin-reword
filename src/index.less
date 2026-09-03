@@ -5719,6 +5719,19 @@ body.hiword-dragging {
   }
 }
 
+/* 自绘空态占位符：不依赖思源内核 CSS（内核 .protyle-wysiwyg--empty::before 已禁用）。
+   在「唯一空段落」的可编辑内胆挂 .hiword-ai-ph + data-ph，由本项目 CSS 渲染 ::before，
+   完全自控、对齐首行文本；思源升级改空态样式也不会丢占位文案。 */
+.hiword-ai-protyle .protyle-wysiwyg--empty::before { content: none !important; }
+.hiword-ai-protyle .protyle-wysiwyg [contenteditable].hiword-ai-ph::before {
+  content: attr(data-ph);
+  color: var(--b3-theme-on-surface-light, #8f959e);
+  font-size: var(--hiword-ai-font-size, 14px);
+  opacity: 0.75;
+  pointer-events: none;
+  user-select: none;
+}
+
 /* 加载中禁用态 */
 .hiword-ai-protyle.hiword-ai-input--disabled {
   opacity: 0.5;

@@ -47,7 +47,7 @@ function bodyOf(marker) {
 const createEmptyBlock = bodyOf("private createEmptyBlock(");
 const newBlockId = bodyOf("private newBlockId(");
 const blockHasContent = bodyOf("private blockHasContent(");
-const syncNativePlaceholder = bodyOf("private syncNativePlaceholder(");
+const syncPlaceholder = bodyOf("private syncPlaceholder(");
 const lastEditableInner = bodyOf("private lastEditableInner(");
 const directInsertCard = bodyOf("private directInsertCard(");
 const ensureCaretAfterCard = bodyOf("private ensureCaretAfterCard(");
@@ -136,7 +136,7 @@ test("C5: lastEditableInner 跳过 protyle-attr 与代码块", () => {
   assert.match(lastEditableInner, /closest\("\[data-type='NodeCodeBlock'\]"\)/, "应跳过代码块");
 });
 
-// ============ D. 空态判定：剥零宽字符 + 原生 placeholder ============
+// ============ D. 空态判定：剥零宽字符 + 自绘 placeholder ============
 
 test("D1: blockHasContent 剥零宽字符后再判定（空段只有 ZWSP）", () => {
   assert.match(blockHasContent, /replace\(ZERO_WIDTH_RE,\s*""\)/, "判空前须剥除 ZWSP，否则空段被误判为有内容");
@@ -146,14 +146,18 @@ test("D2: blockHasContent 把块引用卡片视为内容", () => {
   assert.match(blockHasContent, /querySelector\("\[data-type='block-ref'\]"\)/, "只有引用卡也应算有内容");
 });
 
-test("D3: syncNativePlaceholder 用思源原生 protyle-wysiwyg--empty", () => {
-  assert.match(syncNativePlaceholder, /protyle-wysiwyg--empty/, "应使用思源原生空态 class");
-  assert.match(syncNativePlaceholder, /setAttribute\("placeholder"/, "应设置 placeholder 属性");
+test("D3: syncPlaceholder 自绘占位符（不依赖内核 protyle-wysiwyg--empty）", () => {
+  // 改为自绘：用 .hiword-ai-ph + data-ph，由本项目 CSS 渲染 ::before，脱离思源内核 CSS
+  assert.match(syncPlaceholder, /hiword-ai-ph/, "应挂自绘占位符 class");
+  assert.match(syncPlaceholder, /setAttribute\("data-ph"/, "应设置 data-ph 属性供 CSS 读取");
+  assert.doesNotMatch(syncPlaceholder, /protyle-wysiwyg--empty/, "不应再依赖内核空态 class");
+  assert.doesNotMatch(syncPlaceholder, /setAttribute\("placeholder"/, "不应再设置内核 placeholder 属性");
 });
 
-test("D4: syncNativePlaceholder 只对「唯一空段落」生效，多段一律清除", () => {
-  assert.match(syncNativePlaceholder, /blocks\.length === 1 \? blocks\[0\] : null/, "只在单段时显示 placeholder");
-  assert.match(syncNativePlaceholder, /classList\.remove\("protyle-wysiwyg--empty"\)/, "多段时应清除空态 class");
+test("D4: syncPlaceholder 只对「唯一空段落」生效，多段一律清除", () => {
+  assert.match(syncPlaceholder, /blocks\.length === 1 \? blocks\[0\] : null/, "只在单段时显示占位符");
+  assert.match(syncPlaceholder, /classList\.remove\("hiword-ai-ph"\)/, "多段时应清除自绘占位符 class");
+  assert.match(syncPlaceholder, /removeAttribute\("data-ph"\)/, "多段时应清除 data-ph 属性");
 });
 
 // ============ E. mountProtyle 预塞标准空段 + 删除命中区 ============

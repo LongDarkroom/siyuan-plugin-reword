@@ -608,14 +608,14 @@ export class AiPanel {
           if (wysiwyg.childElementCount === 0) {
             wysiwyg.appendChild(this.createEmptyBlock());
           }
-          // 空态占位符：监听 wysiwyg 输入切换 --empty 类与原生 placeholder
+          // 空态占位符：监听 wysiwyg 输入切换 --empty 类与自绘占位符（syncPlaceholder）
           const refreshEmpty = () => {
             let hasContent = false;
             for (const child of Array.from(wysiwyg.children)) {
               if (this.blockHasContent(child as HTMLElement)) { hasContent = true; break; }
             }
             el.classList.toggle("hiword-ai-input--empty", !hasContent);
-            this.syncNativePlaceholder(wysiwyg);
+            this.syncPlaceholder(wysiwyg);
           };
           const refreshInputTokens = () => {
             this.inputTokenEstimate = this.estimateInputTokens();
@@ -1452,21 +1452,23 @@ export class AiPanel {
   }
 
   /**
-   * 思源原生空态：给「唯一空段落」挂 protyle-wysiwyg--empty + placeholder
-   * （思源内核 CSS 会用 ::before content: attr(placeholder) 渲染）。
-   * 多段落时一律清除，避免 placeholder 伪元素压在内容上方。
+   * 自绘空态占位符（不依赖思源内核 CSS）。
+   * 旧实现依赖内核 .protyle-wysiwyg--empty::before{content:attr(placeholder)}，
+   * 思源升级若改空态样式占位文案会丢失。现改为在「唯一空段落」的可编辑内胆上挂
+   * .hiword-ai-ph + data-ph，由本文件自定义 CSS 渲染 ::before，完全自控、对齐首行文本。
+   * 多段落时一律清除，避免占位伪元素压在内容上方。
    */
-  private syncNativePlaceholder(wysiwyg: HTMLElement): void {
+  private syncPlaceholder(wysiwyg: HTMLElement): void {
     const blocks = Array.from(wysiwyg.children) as HTMLElement[];
     const inners = blocks
       .map((b) => b.querySelector<HTMLElement>('[contenteditable="true"]'))
       .filter((i): i is HTMLElement => !!i);
-    inners.forEach((i) => i.classList.remove("protyle-wysiwyg--empty"));
+    inners.forEach((i) => { i.classList.remove("hiword-ai-ph"); i.removeAttribute("data-ph"); });
     const only = blocks.length === 1 ? blocks[0] : null;
     if (only && !this.blockHasContent(only)) {
       const inner = only.querySelector<HTMLElement>('[contenteditable="true"]') ?? only;
-      inner.classList.add("protyle-wysiwyg--empty");
-      inner.setAttribute("placeholder", "输入提示词，或拖入文档/块作为上下文…");
+      inner.classList.add("hiword-ai-ph");
+      inner.setAttribute("data-ph", "输入提示词，或拖入文档/块作为上下文…");
     }
   }
 
@@ -1566,7 +1568,7 @@ export class AiPanel {
         if (this.blockHasContent(child as HTMLElement)) { hasContent = true; break; }
       }
       el.classList.toggle("hiword-ai-input--empty", !hasContent);
-      this.syncNativePlaceholder(wysiwyg);
+      this.syncPlaceholder(wysiwyg);
     }
   }
 
