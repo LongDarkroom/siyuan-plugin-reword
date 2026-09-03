@@ -6473,17 +6473,19 @@ body.hiword-dragging {
   font-size: var(--hiword-ai-font-size, 14px);
 }
 
-/* 复刻 Copilot 侧边栏观感：分级彩色标题 + 加粗/斜体强调色，提升 AI 回答可读性。
-   注：思源 b3-typography 在深色主题下 strong 为 inherit、h1-h6 无专属色，故需显式配色。
-   蓝(primary)主标题 + 琥珀(warning)次标题 + 琥珀加粗 + 蓝斜体，双色层次分明。 */
+/* 复刻 Copilot 侧边栏观感：仅对分级标题显式配色（思源 b3-typography 在深色主题下
+   h1-h6 无专属色，故需显式配色），提升 AI 回答结构可读性。
+   注：strong/em 不再强制改色——AI 原文常用加粗/斜体表达语义（重点词、术语、书名等），
+   统一染成琥珀/蓝会扭曲原意并干扰英文精读；保留 font-weight/font-style 仅加强调，
+   颜色交回原文（继承正文色），深色下靠字重/字型区分即可。 */
 .hiword-ai-chat.b3-typography,
 .hiword-ai-md.b3-typography,
 .hiword-ai-msg-content.b3-typography {
   h1, h2 { color: var(--b3-theme-primary); }
   h3, h4 { color: var(--b3-theme-warning); }
   h5, h6 { color: var(--b3-theme-on-surface); }
-  strong { color: var(--b3-theme-warning); font-weight: 600; }
-  em { color: var(--b3-theme-primary); font-style: italic; }
+  strong { font-weight: 600; }
+  em { font-style: italic; }
   a { color: var(--b3-theme-primary); }
   blockquote { color: var(--b3-theme-on-surface); }
 }
