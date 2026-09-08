@@ -1,5 +1,6 @@
 import { logSwallow } from "../core/safe.ts";
 import { readDir } from "../siyuan/api.ts";
+import { sanitizeTranslation } from "./sanitize.ts";
 import {
   isSqliteCacheReady,
   sqliteDeleteBook,
@@ -49,6 +50,17 @@ type ModeCacheMap = Record<string, Record<string, string>>;
 /** mem 中每本书的缓存：mode -> 译文 hash map */
 type BookCacheMap = Record<TranslationMode, Record<string, string>>;
 
+/** 译文条目状态（R0 地基：供「释义与英文表格」面板筛选） */
+export type TranslationStatus = "engine" | "ai" | "error" | "empty";
+
+/** 译文元数据：状态 / 来源引擎 / 更新时间 / 脏标记（人工改过 → 回到该页重注） */
+export interface TranslationMeta {
+  status: TranslationStatus;
+  provider: string;
+  updatedAt: number;
+  dirty: boolean;
+}
+
 export class TranslationCache {
   private mem = new Map<string, BookCacheMap>();
   private timers = new Map<string, any>();
@@ -59,6 +71,9 @@ export class TranslationCache {
   /** 书名索引（bookId → 书名），落盘进 translations/_index.json，供 UI「选择书籍」下拉 */
   private bookIndex = new Map<string, string>();
   private indexLoaded = false;
+  /** 译文元数据（bookId → metaKey → meta），随 .meta.json 的 trMeta 字段落盘 */
+  private trMeta = new Map<string, Record<string, TranslationMeta>>();
+  private metaTimers = new Map<string, any>();
 
   constructor(plugin: any, saltFn?: () => string) {
     this.plugin = plugin;
@@ -79,6 +94,11 @@ export class TranslationCache {
       h = Math.imul(h, 0x01000193);
     }
     return (h >>> 0).toString(36);
+  }
+
+  /** 公开哈希（与缓存键同源）：BlockLocator.textHash 使用 → 定位键=缓存键单源 */
+  hashText(text: string, mode: TranslationMode = DEFAULT_TRANSLATION_MODE): string {
+    return this.hash(text, mode);
   }
 
   private path(bookId: string): string {
@@ -140,8 +160,12 @@ export class TranslationCache {
     const fromCache: boolean[] = new Array(texts.length).fill(false);
     texts.forEach((t, i) => {
       const v = modeMap[this.hash(t, mode)];
-      if (v != null && v !== "") { hits[i] = v; fromCache[i] = true; }
-      else misses.push(i);
+      if (v != null && v !== "") {
+        // 2026-09-05 读侧净化：存量缓存里有「AI 解说体」脏值（**翻译：**…重点词组解释…），
+        // 读出时统一规整为整洁单行；纯译文快路径零开销。
+        hits[i] = sanitizeTranslation(v);
+        fromCache[i] = true;
+      } else misses.push(i);
     });
 
     // 2026-08-31 Phase 2：JSON 未命中的段，兜底查 SQLite（思源块 / attributes 表）。
@@ -160,16 +184,23 @@ export class TranslationCache {
         const k = translationKey(bookId, mode, this.hash(texts[i], mode));
         const v = found.get(k);
         if (v) {
-          hits[i] = v;
+          hits[i] = sanitizeTranslation(v);
           fromCache[i] = true;
           // 回写内存，下次直接命中，不必再查 SQLite
-          modeMap[this.hash(texts[i], mode)] = v;
+          modeMap[this.hash(texts[i], mode)] = hits[i];
         } else {
           stillMiss.push(i);
         }
       }
       if (stillMiss.length !== misses.length) {
         this.mem.set(bookId, bookMap);
+        // 2026-09-05 R0：SQLite 兜底命中的条目回写 JSON 落盘（防抖），
+        // 冷启动不再依赖 SQLite 二次查询（原只写内存，重启后仍查 SQLite）。
+        clearTimeout(this.timers.get(bookId));
+        this.timers.set(bookId, setTimeout(() => {
+          this.plugin.saveData(this.path(bookId), bookMap).catch(() => {});
+          this.timers.delete(bookId);
+        }, 500));
         misses.length = 0;
         misses.push(...stillMiss);
       }
@@ -183,7 +214,7 @@ export class TranslationCache {
     const bookMap = await this.load(bookId);
     const modeMap = bookMap[mode] || {};
     const v = modeMap[this.hash(text, mode)];
-    return v != null && v !== "" ? v : null;
+    return v != null && v !== "" ? sanitizeTranslation(v) : null;
   }
 
   /** 单条写入（覆盖，用于单段重译后落盘） */
@@ -241,6 +272,128 @@ export class TranslationCache {
       );
       void sqliteSetBatch(sp, { bookId, mode }).catch(() => {});
     }
+  }
+
+  /* ================= R0 地基：译文元数据（状态/来源/脏标记） =================
+   * 供后续「释义与英文表格」面板与脏标记重注使用。
+   * 存储：随既有 <bookId>.meta.json 的 trMeta 字段落盘（不新建文件、
+   * 不改 <bookId>.json 译文格式 → 旧缓存零迁移）。
+   * 注意：hash 为单向，译文 JSON 不含原文 → query 采用「调用方给候选原文」
+   * 的契约（BookDoc 枚举文本块后传入），缓存侧只负责命中与筛选。
+   */
+
+  private metaKey(mode: TranslationMode, hash: string): string {
+    return mode + "\u0001" + hash;
+  }
+
+  private async loadTrMeta(bookId: string): Promise<Record<string, TranslationMeta>> {
+    let m = this.trMeta.get(bookId);
+    if (m) return m;
+    m = {};
+    try {
+      const raw = await this.plugin.loadData(this.metaPath(bookId));
+      if (raw && typeof raw === "object" && raw.trMeta && typeof raw.trMeta === "object") {
+        m = raw.trMeta as Record<string, TranslationMeta>;
+      }
+    } catch (err) { logSwallow(err, "cache.ts · loadTrMeta", "debug"); }
+    this.trMeta.set(bookId, m);
+    return m;
+  }
+
+  private scheduleMetaSave(bookId: string): void {
+    clearTimeout(this.metaTimers.get(bookId));
+    this.metaTimers.set(bookId, setTimeout(() => {
+      this.metaTimers.delete(bookId);
+      void this.persistTrMeta(bookId);
+    }, 500));
+  }
+
+  /** 读-改-写合并既有 { sections, title }，只增改 trMeta 字段（不破坏旧 meta 内容） */
+  private async persistTrMeta(bookId: string): Promise<void> {
+    const m = this.trMeta.get(bookId);
+    if (!m) return;
+    let obj: any = {};
+    try {
+      const cur = await this.plugin.loadData(this.metaPath(bookId));
+      if (cur && typeof cur === "object") obj = cur;
+    } catch (err) { logSwallow(err, "cache.ts · persistTrMeta", "debug"); }
+    obj.trMeta = { ...m };
+    this.plugin.saveData(this.metaPath(bookId), obj).catch(() => {});
+  }
+
+  /** 单条元数据读取（无记录返回 null） */
+  async getMeta(
+    bookId: string,
+    text: string,
+    mode: TranslationMode = DEFAULT_TRANSLATION_MODE,
+  ): Promise<TranslationMeta | null> {
+    const m = await this.loadTrMeta(bookId);
+    return m[this.metaKey(mode, this.hash(text, mode))] ?? null;
+  }
+
+  /** 单条元数据写入（防抖落盘；局部合并，不覆盖未提供字段） */
+  async setMeta(
+    bookId: string,
+    text: string,
+    mode: TranslationMode,
+    meta: Partial<TranslationMeta>,
+  ): Promise<void> {
+    const m = await this.loadTrMeta(bookId);
+    const k = this.metaKey(mode, this.hash(text, mode));
+    const prev = m[k];
+    m[k] = {
+      status: meta.status ?? prev?.status ?? "engine",
+      provider: meta.provider ?? prev?.provider ?? "",
+      updatedAt: meta.updatedAt ?? prev?.updatedAt ?? Date.now(),
+      dirty: meta.dirty ?? prev?.dirty ?? false,
+    };
+    this.scheduleMetaSave(bookId);
+  }
+
+  /** 标脏：该段释义被人工修改/重译 → 回到该页时按新缓存重注 */
+  async markDirty(
+    bookId: string,
+    text: string,
+    mode: TranslationMode = DEFAULT_TRANSLATION_MODE,
+  ): Promise<void> {
+    await this.setMeta(bookId, text, mode, { dirty: true });
+  }
+
+  /**
+   * 查询（供「释义与英文表格」面板）：候选原文 → 命中译文 + 元数据，
+   * 支持状态 / 脏标记筛选与分页。原文由调用方传入（缓存只存单向 hash，无原文）。
+   */
+  async query(
+    bookId: string,
+    texts: string[],
+    filter: {
+      mode?: TranslationMode;
+      status?: TranslationStatus;
+      dirtyOnly?: boolean;
+      offset?: number;
+      limit?: number;
+    } = {},
+  ): Promise<{ rows: Array<{ text: string; tr: string; meta: TranslationMeta | null }>; total: number }> {
+    const mode = filter.mode ?? DEFAULT_TRANSLATION_MODE;
+    const bookMap = await this.load(bookId);
+    const modeMap = bookMap[mode] || {};
+    const metas = await this.loadTrMeta(bookId);
+    const all: Array<{ text: string; tr: string; meta: TranslationMeta | null }> = [];
+    for (const text of texts) {
+      const h = this.hash(text, mode);
+      const tr = modeMap[h];
+      if (tr == null || tr === "") continue;
+      all.push({ text, tr: sanitizeTranslation(tr), meta: metas[this.metaKey(mode, h)] ?? null });
+    }
+    const filtered = all.filter((r) => {
+      if (filter.dirtyOnly && !(r.meta && r.meta.dirty)) return false;
+      if (filter.status && !(r.meta && r.meta.status === filter.status)) return false;
+      return true;
+    });
+    const total = filtered.length;
+    const offset = filter.offset ?? 0;
+    const limit = filter.limit ?? 200;
+    return { rows: filtered.slice(offset, offset + limit), total };
   }
 
   /** 记录本书已缓存节（增量合并进 cachedSections，并落盘元信息 + 书名索引）。节号 1-based */
@@ -473,6 +626,9 @@ export class TranslationCache {
     this.mem.delete(bookId);
     this.cachedSections.delete(bookId);
     this.bookIndex.delete(bookId);
+    this.trMeta.delete(bookId);
+    clearTimeout(this.metaTimers.get(bookId));
+    this.metaTimers.delete(bookId);
     this.saveIndex();
     clearTimeout(this.timers.get(bookId));
     this.timers.delete(bookId);

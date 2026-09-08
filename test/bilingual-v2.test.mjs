@@ -100,7 +100,9 @@ test("lifecycle: setEnabled(false) 清除全部注入节点（正文零残留）
 
 /* ==================== 预翻译：缓存短路（防白烧 token 回归） ==================== */
 
-test("pretranslate: 全部命中缓存时不调用翻译（短路，避免重译全书）", async () => {
+// R6：full 模式的视野是全书，而 checkCached 只能查已加载分节，
+// 「窗口内全命中」不等于「全书已译」——故短路只在 progressive 下成立。
+test("pretranslate: progressive 全部命中缓存时不调用翻译（短路，避免重译）", async () => {
   const doc = makeDoc("<p>A</p><p>B</p><p>C</p>");
   let calls = 0;
   let lastStatus = null;
@@ -117,6 +119,7 @@ test("pretranslate: 全部命中缓存时不调用翻译（短路，避免重译
   });
   handle.setEnabled(true);
   await handle.pretranslateAll({
+    full: false,
     onProgress: (p) => { lastStatus = p.status; },
   });
   assert.equal(calls, 0, "全部命中缓存不应调用翻译");

@@ -21,6 +21,32 @@ import { dirname, join } from "node:path";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const viewSrc = readFileSync(join(__dirname, "..", "src", "reader", "ReaderView.svelte"), "utf-8");
+// 2026-09-02 拆分：PDF 缩放 + 页码控件迁入 PdfToolbar.svelte，样式在 reader-controls.less
+const toolbarSrc = readFileSync(join(__dirname, "..", "src", "reader", "PdfToolbar.svelte"), "utf-8");
+const controlsSrc = readFileSync(join(__dirname, "..", "src", "reader", "reader-controls.less"), "utf-8");
+
+/** 取源码中 `name` 函数的花括号配对函数体（纯切片，无 jsdom） */
+function bodyOf2(src, name) {
+  const idx = src.indexOf(name);
+  if (idx < 0) return null;
+  let open = -1;
+  for (let i = idx; i < src.length - 1; i++) {
+    if (src[i] === "{" && (src[i + 1] === "\n" || src[i + 1] === "\r")) {
+      open = i;
+      break;
+    }
+  }
+  if (open < 0) return null;
+  let depth = 0;
+  for (let i = open; i < src.length; i++) {
+    if (src[i] === "{") depth++;
+    else if (src[i] === "}") {
+      depth--;
+      if (depth === 0) return src.slice(open, i + 1);
+    }
+  }
+  return null;
+}
 
 /* ================= 导入契约 ================= */
 
@@ -113,55 +139,51 @@ test("[relocate] PDF 跳页时更新 pdfCurrentPage + activeHref", () => {
 
 /* ================= 工具栏 UI ================= */
 
-test("[工具栏] PDF 工具栏新增 reader-page-group + reader-page-input", () => {
-  // 应在 isPdfBook() 块内
+test("[工具栏] PDF 页码控件在 PdfToolbar 组件，ReaderView 正确接线", () => {
+  // 2026-09-02 拆分后控件本体在 PdfToolbar.svelte
+  assert.ok(/reader-page-group/.test(toolbarSrc), "PdfToolbar 应含 reader-page-group");
+  assert.ok(/reader-page-input/.test(toolbarSrc), "PdfToolbar 应含 reader-page-input");
+  // ReaderView 在 readerMode === "pdf" 块内挂载并接线
   assert.ok(
-    /{#if\s+isPdfBook\(\)[\s\S]*?reader-page-group[\s\S]*?reader-page-input/.test(viewSrc),
-    "isPdfBook 块内应含 reader-page-group + reader-page-input"
+    /{#if\s+readerMode\s*===\s*"pdf"\s*}\s*<PdfToolbar[\s\S]*?onGoPage=\{goPdfPage\}/.test(viewSrc),
+    "ReaderView 应在 pdf 模式挂 PdfToolbar 并传 onGoPage={goPdfPage}"
   );
+  assert.ok(/onPageInputKeydown=\{onPageInputKeydown\}/.test(viewSrc), "应接线 onPageInputKeydown");
+  assert.ok(/onPageInputChange=\{onPageInputChange\}/.test(viewSrc), "应接线 onPageInputChange");
+  assert.ok(/pdfTotalPages=\{pdfTotalPages\}/.test(viewSrc), "应传 pdfTotalPages");
 });
 
-test("[工具栏] 页码按钮 / 输入框 / 上下页按钮齐全", () => {
-  // 抽 Phase 1 PDF 注释开头到 reader-page-group 的 </span> 段
-  const idx = viewSrc.indexOf("<!-- [2026-09-01] Phase 1:PDF");
-  assert.ok(idx > 0, "应有 Phase 1 注释");
-  const region = viewSrc.slice(idx, idx + 4000);
-  // 上一页
-  assert.ok(/goPdfPage\(Math\.max\(1,\s*pdfCurrentPage\s*-\s*1\)\)/.test(region),
-    "上一页应调 goPdfPage(currentPage - 1)");
-  // 下一页
-  assert.ok(/goPdfPage\(Math\.min\(pdfTotalPages,\s*pdfCurrentPage\s*\+\s*1\)\)/.test(region),
-    "下一页应调 goPdfPage(currentPage + 1)");
+test("[工具栏] 页码按钮 / 输入框 / 上下页按钮齐全（PdfToolbar）", () => {
+  // 上一页 / 下一页
+  assert.ok(/onGoPage\(Math\.max\(1,\s*pdfCurrentPage\s*-\s*1\)\)/.test(toolbarSrc),
+    "上一页应调 onGoPage(currentPage - 1)");
+  assert.ok(/onGoPage\(Math\.min\(pdfTotalPages,\s*pdfCurrentPage\s*\+\s*1\)\)/.test(toolbarSrc),
+    "下一页应调 onGoPage(currentPage + 1)");
   // 输入框
-  assert.ok(/reader-page-input[\s\S]*?type="number"/.test(region),
-    "输入框应为 number 类型");
-  assert.ok(/min="1"/.test(region), "输入框 min=1");
-  assert.ok(/max=\{pdfTotalPages/.test(region), "输入框 max 绑 pdfTotalPages");
-  // 回车跳转 - 接受两种实现:内联箭头函数 或 命名函数
-  const enterTriggersGoPdfPage =
-    /e\.key\s*===\s*"Enter"[\s\S]*?goPdfPage/.test(region) ||
-    /onPageInputKeydown[\s\S]*?e\.key\s*!==\s*"Enter"[\s\S]*?goPdfPage/.test(viewSrc);
-  assert.ok(enterTriggersGoPdfPage, "回车应触发 goPdfPage");
-  // 失焦回填 - 接受内联或命名函数
-  const blurRefills =
-    /String\(pdfCurrentPage\s*\|\|\s*""\)/.test(region) ||
-    /onPageInputChange[\s\S]*?String\(pdfCurrentPage\s*\|\|\s*""\)/.test(viewSrc);
-  assert.ok(blurRefills, "失焦后应回填 pdfCurrentPage");
+  assert.ok(/reader-page-input[\s\S]*?type="number"/.test(toolbarSrc), "输入框应为 number 类型");
+  assert.ok(/min="1"/.test(toolbarSrc), "输入框 min=1");
+  assert.ok(/max=\{pdfTotalPages/.test(toolbarSrc), "输入框 max 绑 pdfTotalPages");
+  // 回车跳转：ReaderView 的 onPageInputKeydown 内 Enter → goPdfPage
+  const kb = bodyOf2(viewSrc, "function onPageInputKeydown");
+  assert.ok(kb && /e\.key\s*!==\s*"Enter"/.test(kb) && /goPdfPage\(/.test(kb),
+    "onPageInputKeydown 应在 Enter 时调 goPdfPage");
+  // 失焦回填：onPageInputChange 内回填 pdfCurrentPage
+  const chg = bodyOf2(viewSrc, "function onPageInputChange");
+  assert.ok(chg && /String\(pdfCurrentPage\s*\|\|\s*""\)/.test(chg), "失焦后应回填 pdfCurrentPage");
   // 总页数显示
-  assert.ok(/\{pdfTotalPages\s*\|\|\s*"\?"\}/.test(region), "总页数应为 pdfTotalPages || '?'");
+  assert.ok(/\{pdfTotalPages\s*\|\|\s*"\?"\}/.test(toolbarSrc), "总页数应为 pdfTotalPages || '?'");
 });
 
 /* ================= CSS 风格 ================= */
 
-test("[CSS] reader-page-group 用 SiYuan 主题变量", () => {
-  // 应有 reader-page-* CSS 类
-  assert.ok(/\.reader-page-group\s*\{/.test(viewSrc), "应有 .reader-page-group 样式");
-  assert.ok(/\.reader-page-input\s*\{/.test(viewSrc), "应有 .reader-page-input 样式");
-  assert.ok(/\.reader-page-btn\s*\{/.test(viewSrc), "应有 .reader-page-btn 样式");
+test("[CSS] reader-page-* 样式在 reader-controls.less 且用 SiYuan 主题变量", () => {
+  assert.ok(/\.reader-page-group\s*\{/.test(controlsSrc), "应有 .reader-page-group 样式");
+  assert.ok(/\.reader-page-input\s*\{/.test(controlsSrc), "应有 .reader-page-input 样式");
+  assert.ok(/\.reader-page-btn\s*\{/.test(controlsSrc), "应有 .reader-page-btn 样式");
   // 关键:用 var(--b3-theme-primary) 等 SiYuan 主题变量
-  assert.ok(/\.reader-page-btn:hover[\s\S]*?var\(--b3-theme-primary/.test(viewSrc),
+  assert.ok(/\.reader-page-btn:hover[\s\S]*?var\(--b3-theme-primary/.test(controlsSrc),
     "hover 态应用 SiYuan primary 主题色");
-  assert.ok(/\.reader-page-input:focus[\s\S]*?var\(--b3-theme-primary/.test(viewSrc),
+  assert.ok(/\.reader-page-input:focus[\s\S]*?var\(--b3-theme-primary/.test(controlsSrc),
     "input focus 态应用 SiYuan primary 主题色");
 });
 

@@ -14,8 +14,8 @@ import { logSwallow } from "../core/safe.ts";
  *  - 关闭 AI 弹窗后,点击"填回批注"会用 prefillNote 重开批注弹窗
  *    （与"新建批注"语义一致,颜色/标签等设置都保留）
  */
-import { requestAIStream } from "../copilot/ai/ai-client.ts";
-import type { AiMessage } from "../copilot/ai/ai-client.ts";
+import { requestAIStream } from "./ai-client.ts";
+import type { AiMessage } from "./ai-client.ts";
 import type { AiSettings } from "./ai-settings.ts";
 import { toEngineSettings } from "./ai-orchestrator.ts";
 import { getLogger } from "../core/logger.ts";
@@ -35,6 +35,11 @@ export const ANNO_AI_SYSTEM_PROMPT = `你是 REword 英语学习助手，正在�
 - 风格：简洁、贴合语境、像学习者自己写的笔记；避免学术化堆砌。
 - 如果用户没给附加问题：基于选中词和上下文补写/润色当前批注（如果当前批注为空则新建；如果已写则润色/扩写）。
 - 如果用户给了附加问题（如"翻译成中文"/"换成学术口吻"/"加一句例句"）：按问题执行。
+
+【严格禁止】
+- 只基于用户提供的选中片段、上下文与批注内容作答；禁止编造原文没有的内容。
+- 禁止把推测当事实；不确定就写"不确定"，不要给看似合理的答案。
+- 禁止把英文材料当创作素材续写或扩写成文章。
 
 【输出格式】
 - 纯文本，不要 Markdown、不要代码块、不要解释。

@@ -103,7 +103,11 @@ test("B3. responsiveDialogSize：phone → 100vw - 16px", () => {
  * ============================================================ */
 
 test("C1. index.ts dock 宽度按设备分级（Phase 5）", () => {
-  const idxSrc = readFileSync(join(__dirname, "..", "src", "index.ts"), "utf-8");
+  // 2026-09-06 P1-5 拆分：initDockPanels 迁至 src/dock/dock-layout.ts，两处合并扫描
+  let idxSrc = readFileSync(join(__dirname, "..", "src", "index.ts"), "utf-8");
+  try {
+    idxSrc += "\n" + readFileSync(join(__dirname, "..", "src", "dock", "dock-layout.ts"), "utf-8");
+  } catch { /* 拆分前旧布局：仅扫 index.ts */ }
   // 查找 initDockPanels 内的 dockWidth 表达式
   assert.match(idxSrc, /isSmallMobile\(\)[\s\S]{0,200}\* 0\.92/,
     "小屏 dock 应取视口宽度的 92%");

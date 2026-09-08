@@ -88,7 +88,8 @@ test("B4: 输出 text-indent: 2em 当 textIndent=2", () => {
   assert.ok(out.includes("text-indent: 2em"), `应输出 text-indent: 2em，实际：${out}`);
 });
 
-test("B5: 输出 margin: 16 16 16 16 当 4 边距都=16", () => {
+test("B5: 输出 body padding: 16 16 16 16 + column-gap 当 4 边距都=16", () => {
+  // 2026-09-04 对齐：layoutMarginStyles 已改为 body padding + column-gap（原 margin 简写）
   const css = styleSrc.match(/export\s+function\s+layoutMarginStyles[\s\S]*?return\s+`([^`]+)`/)?.[1] ?? "";
   const out = css
     .replace(/\$\{mt[^}]*\}/g, "16")
@@ -96,7 +97,8 @@ test("B5: 输出 margin: 16 16 16 16 当 4 边距都=16", () => {
     .replace(/\$\{ml[^}]*\}/g, "16")
     .replace(/\$\{mr[^}]*\}/g, "16")
     .replace(/\$\{gap[^}]*\}/g, "16");
-  assert.ok(/margin:\s*16px\s+16px\s+16px\s+16px/.test(out), `应输出 margin: 16px 16px 16px 16px，实际：${out}`);
+  assert.ok(/padding:\s*16px\s+16px\s+16px\s+16px/.test(out), `应输出 padding: 16px 16px 16px 16px，实际：${out}`);
+  assert.ok(/column-gap:\s*16px/.test(out), `应输出 column-gap: 16px，实际：${out}`);
 });
 
 // ============== C. 设置 UI 模板（ReaderView.svelte） ==============
@@ -123,33 +125,31 @@ test("C3: 段落设置分组含行距/段距/首行缩进", () => {
   }
 });
 
-test("C4: 页面布局分组含 4 边距 + 3 switch + dropdown + slider", () => {
+test("C4: 第 3 分组为朗读设置（语音引擎 + 讯飞配置 + 中文发音人）", () => {
+  // 2026-09-04 对齐：页面布局分组已移除（边距仅数据层保留、UI 收敛），第 3 组现为朗读设置
   const blocks = viewSrc.match(/<details\s+class="reader-setting-section"[^>]*>[\s\S]*?<\/details>/g) ?? [];
   assert.ok(blocks[2], "应至少有 3 个 details 块");
-  for (const label of ["上边距", "下边距", "左边距", "右边距", "分栏间距", "显示页眉", "显示页脚", "显示阅读进度", "进度样式"]) {
-    assert.match(blocks[2], new RegExp(`>${label}<`), `页面布局分组应含 ${label}`);
+  for (const label of ["语音引擎", "AppID", "APIKey", "APISecret", "中文发音人"]) {
+    assert.match(blocks[2], new RegExp(label), `朗读设置分组应含 ${label}`);
   }
 });
 
-test("C5: 笔记插入分组含 2 switch + dropdown + 2 textarea", () => {
+test("C5: 设置弹窗收敛为 3 大分组（笔记插入组已移除）", () => {
+  // 2026-09-04 对齐：笔记插入 UI 已从阅读设置移除（insertPosition/linkFormat 逻辑保留在 onSelSend 数据层）
   const blocks = viewSrc.match(/<details\s+class="reader-setting-section"[^>]*>[\s\S]*?<\/details>/g) ?? [];
-  assert.ok(blocks[3], "应至少有 4 个 details 块");
-  for (const label of ["添加时同步", "删除时同步", "插入位置", "模板预设", "链接格式", "排除正则", "标注标签预设"]) {
-    assert.match(blocks[3], new RegExp(`>${label}<`), `笔记插入分组应含 ${label}`);
-  }
-  // textarea 数量：3（链接格式、排除正则、标签预设）
-  const textareas = blocks[3].match(/<textarea[\s\S]*?<\/textarea>/g) ?? [];
-  assert.ok(textareas.length >= 3, `笔记插入分组应至少 3 个 textarea，实际 ${textareas.length}`);
+  assert.equal(blocks.length, 3, `应恰好 3 个 details 分组，实际 ${blocks.length}`);
+  assert.doesNotMatch(blocks.join("\n"), /笔记插入/, "设置弹窗分组内不应再有「笔记插入」标题");
 });
 
-test("C6: 字重 slider 有 min=100 / max=900 / step=100", () => {
-  assert.match(viewSrc, /min="100"\s+max="900"\s+step="100"[^>]*value=\{settings\.text\.fontWeight\}/, "字重 slider 应 min=100 max=900 step=100");
+test("C6: 字重 slider 有 min=100 / max=900 / step=10", () => {
+  // 2026-09-04 对齐：步进从 100 收细为 10
+  assert.match(viewSrc, /min="100"\s+max="900"\s+step="10"[^>]*value=\{settings\.text\.fontWeight\}/, "字重 slider 应 min=100 max=900 step=10");
 });
 
-test("C7: 笔记插入 linkFormat textarea 是双向绑定", () => {
-  // 找 textarea 上下文（链接格式 textarea）
-  assert.match(viewSrc, /<textarea[^>]*class="reader-setting-textarea"[^>]*value=\{settings\.note\.linkFormat\}/, "linkFormat textarea 应绑定 settings.note.linkFormat");
-  assert.match(viewSrc, /on:input=\{[^}]*setNoteLinkFormat/, "linkFormat textarea 应调用 setNoteLinkFormat");
+test("C7: 笔记插入 UI 已移除（linkFormat textarea / setNoteLinkFormat 不在设置弹窗）", () => {
+  // 2026-09-04 对齐：笔记插入分组整体移除，模板编辑不再暴露在阅读设置
+  assert.doesNotMatch(viewSrc, /setNoteLinkFormat/, "setNoteLinkFormat handler 应已移除");
+  assert.doesNotMatch(viewSrc, /value=\{settings\.note\.linkFormat\}/, "linkFormat textarea 应已移除");
 });
 
 // ============== D. 笔记模板渲染（renderNoteTemplate） ==============

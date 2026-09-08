@@ -331,7 +331,9 @@ export function applyVocabMarksToBlock(
  */
 export class VocabHighlighter {
   private io: IntersectionObserver | null = null;
-  private blockObserver: MutationObserver | null = null;
+  // 2026-09-04：移除 blockObserver（MutationObserver）。实测其回调只调
+  // scheduleProcessPending，而 processPending 对空 pendingBlocks 直接
+  // early-return——观察器从未入队任何新块，纯付出生效 mutation 记录的开销。
   private pendingBlocks = new Set<HTMLElement>();
   private rafId = 0;
   private unsubscribeStore: (() => void) | null = null;
@@ -378,13 +380,9 @@ export class VocabHighlighter {
       } catch (__swallowErr) { logSwallow(__swallowErr, "vocab-highlight.ts · start", "debug"); }
     });
 
-    // 2) DOM 变化观察:块增删时加入待处理(思源块级动态加载/卸载)
-    this.blockObserver = new MutationObserver(() => {
-      this.scheduleProcessPending();
-    });
-    try {
-      this.blockObserver.observe(protyleEl, { childList: true, subtree: true });
-    } catch (__swallowErr) { logSwallow(__swallowErr, "vocab-highlight.ts · start", "debug"); }
+    // 2) DOM 变化观察已移除（2026-09-04）：原 MutationObserver 从未把新块
+    //    入队（回调只调 scheduleProcessPending，对空队列是空转），删除后
+    //    行为完全不变。动态加载的新块仍由 onStoreChange 全量重扫兜底。
 
     // 编辑失焦后重新入队该块,恢复高亮
     // (编辑期间跳过聚焦块,避免反复拆/包 span 干扰思源输入)
@@ -417,10 +415,6 @@ export class VocabHighlighter {
     if (this.io) {
       this.io.disconnect();
       this.io = null;
-    }
-    if (this.blockObserver) {
-      this.blockObserver.disconnect();
-      this.blockObserver = null;
     }
     if (this.unsubscribeStore) {
       this.unsubscribeStore();

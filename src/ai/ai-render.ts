@@ -9,7 +9,7 @@ import { logSwallow } from "../core/safe.ts";
  * 渲染层只产出 HTML 字符串 + data-* 钩子，交互（收藏/批注）由 ai-panel 绑定。
  */
 
-import type { DeepReadResult } from "./ai-orchestrator.ts";
+import type { DeepReadIssue, DeepReadResult } from "./ai-orchestrator.ts";
 import { getLogger } from "../core/logger.ts";
 
 export function escapeHtml(s: string): string {
@@ -435,8 +435,21 @@ export function renderMarkdown(md: string): string {
   return out.join("");
 }
 
+/**
+ * 渲染选项：
+ *  - citation：引文渲染为可点击回链（settings.citationEnabled，默认 true）
+ *  - annotate：每条句子下显示「批注到原文」按钮（settings.annotateSentences，默认 false）
+ *    按钮点击由 ai-panel（bindResult）委托给 AiHost.annotateSentences；
+ *    流式路径默认渲染的是 markdown（无句级 DOM），故开启本项时 ai-panel 会在
+ *    流式结束后改用结构化渲染重绘一次，否则按钮无处挂载。
+ */
+export interface RenderDeepReadOptions {
+  citation?: boolean;
+  annotate?: boolean;
+}
+
 /** 渲染结构化结果 */
-export function renderDeepReadHtml(result: DeepReadResult): string {
+export function renderDeepReadHtml(result: DeepReadResult, opts?: RenderDeepReadOptions): string {
   if (!result.ok && result.error) {
     return `<div class="hiword-ai-error">⚠️ AI 精读失败：${escapeHtml(result.error)}</div>`;
   }
@@ -449,7 +462,7 @@ export function renderDeepReadHtml(result: DeepReadResult): string {
   }
 
   // 2026-08-21 精简：双模式删除,统一走 renderLearningHtml 渲染(isJson=true 即结构化)
-  return renderLearningHtml(result);
+  return renderLearningHtml(result, opts);
 }
 
 /** 对话模式渲染：纯 markdown 气泡（无结构化、无联动） */
@@ -485,12 +498,56 @@ function renderMasteryStars(m: number): string {
   return `<span class="hiword-ai-word-mastery" title="模型自评熟悉度 ${filled}/5">${stars}</span>`;
 }
 
+/**
+ * P1-B 第 3 层：后校验不符项黄色提示条（details 折叠，默认收起不遮挡正文）。
+ * 注意条目文案已由 verify 层产出，这里只做转义展示。
+ */
+function renderIssuesBar(issues: DeepReadIssue[]): string {
+  const KIND_LABEL: Record<DeepReadIssue["kind"], string> = {
+    sentence: "句子",
+    word: "词",
+    quote: "引文",
+    translation: "翻译",
+  };
+  const items = issues
+    .map(
+      (i) =>
+        `<li><b>[${KIND_LABEL[i.kind] || i.kind}]</b> ${escapeHtml(i.target)} —— ${escapeHtml(i.reason)}</li>`
+    )
+    .join("");
+  return (
+    `<details class="hiword-ai-issues">` +
+      `<summary class="hiword-ai-issues-sum">⚠️ 原文校验：${issues.length} 处不符（点击展开）</summary>` +
+      `<ul class="hiword-ai-issues-list">${items}</ul>` +
+    `</details>`
+  );
+}
+
+/**
+ * P1-B 第 1 层：引文回链渲染。
+ * citation 开启且结果带 sourceBlockId 时，引文渲染为可点击元素，
+ * 由 ai-panel（bindResult）委托 openRefInSiyuan 跳回原文块；否则纯文本。
+ */
+function renderCitation(text: string, result: DeepReadResult, opts?: RenderDeepReadOptions): string {
+  const safe = escapeHtml(text);
+  if (opts?.citation === false || !result.sourceBlockId) return safe;
+  return (
+    `<span class="hiword-ai-quote-jump" data-block-id="${escapeHtml(result.sourceBlockId)}" ` +
+      `title="点击跳转到原文块">「${safe}」↗</span>`
+  );
+}
+
 /** 学习模式渲染：单词表格 + 顶部悬浮批量栏 + 纯文本句子 + 小结 */
-function renderLearningHtml(result: DeepReadResult): string {
+function renderLearningHtml(result: DeepReadResult, opts?: RenderDeepReadOptions): string {
   const html: string[] = [];
 
   // thinking 折叠面板（默认展开，可点击收起；放在最前）
   html.push(renderThinking(result.thinking));
+
+  // P1-B 第 3 层：后校验不符项黄色提示条（可折叠，不遮挡正文）
+  if (result.issues && result.issues.length) {
+    html.push(renderIssuesBar(result.issues));
+  }
 
   if (result.words.length) {
     html.push(renderVocabBar(result.words));
@@ -512,7 +569,9 @@ function renderLearningHtml(result: DeepReadResult): string {
           (w.pos ? `<span class="hiword-ai-word-pos">${escapeHtml(w.pos)}</span>` : "") +
           (w.mastery != null ? renderMasteryStars(w.mastery) : "") +
           `<span class="hiword-ai-word-m">${escapeHtml(w.meaning) || "（未提供释义）"}</span>` +
-          (w.context ? `<span class="hiword-ai-word-ctx">${escapeHtml(w.context)}</span>` : "") +
+          (w.context
+            ? `<span class="hiword-ai-word-ctx">${renderCitation(w.context, result, opts)}</span>`
+            : "") +
           (defs && defs.length ? `<div class="hiword-ai-word-defs">` + defs.map((d) => `<div class="hiword-ai-word-def">${d.pos ? `<i>${escapeHtml(d.pos)}</i> ` : ""}${escapeHtml(d.def)}</div>`).join("") + `</div>` : "") +
           (exs && exs.length ? `<div class="hiword-ai-word-exs">` + exs.map((e) => `<div class="hiword-ai-word-ex">${escapeHtml(e.en)}${e.zh ? ` <span class="hiword-ai-word-ex-zh">${escapeHtml(e.zh)}</span>` : ""}</div>`).join("") + `</div>` : "") +
           `<button class="hiword-ai-collect b3-button b3-button--small" data-word="${escapeHtml(w.word)}" data-meaning="${escapeHtml(w.meaning)}">＋收藏</button>` +
@@ -529,15 +588,22 @@ function renderLearningHtml(result: DeepReadResult): string {
         `<span class="hiword-ai-sec-hint">可直接复制需要的句子</span>` +
       `</div><div class="hiword-ai-sents">`
     );
-    for (const s of result.sentences) {
+    result.sentences.forEach((s, i) => {
       html.push(
-        `<div class="hiword-ai-sent">` +
+        `<div class="hiword-ai-sent" data-sent-idx="${i}">` +
           `<div class="hiword-ai-sent-src">${escapeHtml(s.sentence)}</div>` +
           (s.structure ? `<div class="hiword-ai-sent-st">结构：${escapeHtml(s.structure)}</div>` : "") +
           (s.translation ? `<div class="hiword-ai-sent-tr">译：${escapeHtml(s.translation)}</div>` : "") +
+          // 第 5 批：逐句批注按钮（data-sent-idx 供 bindResult 回查 DeepReadResult.sentences）
+          (opts?.annotate
+            ? `<div class="hiword-ai-sent-acts">` +
+                `<button class="hiword-ai-anno b3-button b3-button--small" data-sent-idx="${i}" ` +
+                  `title="把这句的结构与译文写入原文批注">批注到原文</button>` +
+              `</div>`
+            : "") +
         `</div>`
       );
-    }
+    });
     html.push(`</div></div>`);
   }
 

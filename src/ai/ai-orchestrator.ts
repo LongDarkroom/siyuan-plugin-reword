@@ -6,7 +6,14 @@
  */
 
 import type { AiSettings } from "./ai-settings.ts";
-import { fillAiTemplate } from "./ai-settings.ts";
+import {
+  DEFAULT_AI_CHAT_SYSTEM,
+  fillAiTemplate,
+  resolveModelParams,
+  resolveModelStreamOverride,
+  resolveModelSystemPrompt,
+  activePlatformOf,
+} from "./ai-settings.ts";
 import {
   type AiTransport,
   type AiGenerateResult,
@@ -14,8 +21,10 @@ import {
   type AiUsage,
   requestAIGenerate,
   requestAIStream,
-} from "../copilot/ai/ai-client.ts";
+} from "./ai-client.ts";
 import type { VocabStore } from "../vocab/vocab-store.ts";
+import { verifyDeepReadResult } from "./ai-deepread-verify.ts";
+import { buildSoulSection } from "./ai-soul.ts";
 import {
   type HighlightTerm,
   extractHighlights,
@@ -47,6 +56,8 @@ export interface DeepReadWord {
   examples?: { en: string; zh?: string }[];
   /** 模型自评熟悉度 0~5（用于词库联动） */
   mastery?: number;
+  /** 出处短句：AI 必须逐字照抄原文（P1-B 第 1 层；normalize 时并入 context 渲染） */
+  quote?: string;
 }
 
 /** 结构化结果：一句讲解 */
@@ -54,6 +65,16 @@ export interface DeepReadSentence {
   sentence: string;
   structure?: string;
   translation?: string;
+  /** 句序号（1-based，回链定位用；AI 未给时由后校验按预处理分句派生） */
+  ordinal?: number;
+}
+
+/** 后校验问题条目（P1-B 第 3 层：本地逐字比对原文的产物，UI 黄色提示条用） */
+export interface DeepReadIssue {
+  kind: "sentence" | "word" | "quote" | "translation";
+  /** 目标片段（截断展示用） */
+  target: string;
+  reason: string;
 }
 
 /** AI 精读结果（统一结构，喂给渲染层） */
@@ -82,6 +103,12 @@ export interface DeepReadResult {
   thinking?: string;
   /** 词库联动：精读后自动写入词库的单词清单 */
   savedWords?: { word: string; added: boolean; updated?: boolean }[];
+  /** AI 明确声明「无法判断/不确定」的项（P1-B 第 1 层协议字段） */
+  unsupported?: string[];
+  /** 本地后校验发现的不符项（P1-B 第 3 层，deepReadVerify ≠ off 时产生） */
+  issues?: DeepReadIssue[];
+  /** 本次精读的来源块 ID（引文回链 siyuan://blocks/ 用） */
+  sourceBlockId?: string;
 }
 
 /** 精读可选项（全面采用 Copilot 引擎后的扩展参数） */
@@ -102,19 +129,34 @@ export interface DeepReadOptions {
 
 /**
  * 把 REword 精读设置映射为 Copilot 引擎所需的精简设置（仅取网络请求相关字段）。
- * 全面采用 Copilot 插件：深读的网络请求统一走 src/copilot/ai/ai-client.ts。
+ * 全面采用 Copilot 插件：深读的网络请求统一走 src/ai/ai-client.ts。
  * 2026-08-22 导出：批注 AI 助手(anno-ai-dialog)复用此映射。
  */
 export function toEngineSettings(s: AiSettings) {
+  // 2026-09-07 改动点 1/3：baseUrl/apiKey/模型参数 一律取「当前激活平台」，
+  // 顶层镜像字段仅在激活平台缺失时兜底，保证切换平台后请求打到正确端点。
+  const plat = activePlatformOf(s);
+  const baseUrl = plat?.baseUrl || s.baseUrl || "";
+  const apiKey = plat?.apiKey || s.apiKey || "";
+  const modelParams = plat?.modelParams || s.modelParams;
+  // T6：这里是「完整设置 → 引擎设置」的窄化点，只透传 6 个字段 —— 若不在此解析，
+  // 按模型覆写的 temperature/maxTokens 会在这一步被丢掉。
+  const { temperature, maxTokens } = resolveModelParams({ model: s.model, temperature: s.temperature, maxTokens: s.maxTokens, modelParams });
+  // R2（2026-09-07）：流式覆写也在此解析——false 时编排层「有回调走 requestAIStream」
+  // 的分支改走 requestAIGenerate（一次性返回，onToken 不再逐字）。
+  // 注意：翻译引擎共用 buildRequestBody 但走 requestAIGenerate（非流式），不受此覆写影响。
+  const streamOverride = resolveModelStreamOverride({ model: s.model, modelParams });
   return {
     enabled: true,
-    baseUrl: s.baseUrl,
-    apiKey: s.apiKey,
+    baseUrl,
+    apiKey,
     model: s.model,
-    temperature: s.temperature,
-    maxTokens: s.maxTokens,
+    temperature,
+    maxTokens,
     systemPrompt: "",
     jsonMode: s.jsonMode,
+    /** undefined = 跟随全局；false = 该模型禁用流式 */
+    streamOverride,
     // 2026-08-21 精简：topP/frequencyPenalty/presencePenalty/transportMode 已删除,走 engine 默认
   };
 }
@@ -142,6 +184,28 @@ export async function continueTruncatedGen(
       { role: "assistant", content: current.content },
       { role: "user", content: CONTINUE_HINT },
     ];
+    // R2：该模型禁用流式时续传同样降级非流式（端点不支持 SSE，流式续传必失败）
+    if (resolveModelStreamOverride(settings) === false) {
+      const g = await requestAIGenerate({
+        messages: continueMessages,
+        settings: { ...toEngineSettings(settings), jsonMode: false },
+        jsonMode: false,
+        signal: opts.signal,
+        timeout: 60 * 1000,
+      });
+      if (!g.content) break;
+      const nextContent0 = current.content + g.content;
+      current = {
+        content: nextContent0,
+        raw: nextContent0,
+        model: g.model ?? current.model,
+        reasoning: g.reasoning ? (current.reasoning || "") + g.reasoning : current.reasoning,
+        usage: g.usage ?? current.usage,
+        truncated: g.truncated,
+      };
+      if (opts.signal?.aborted) break;
+      continue;
+    }
     const streamRes = await requestAIStream({
       messages: continueMessages,
       // 续传请求关闭 json 约束：模型以纯文本接续，最终 raw 合并后整体再解析
@@ -185,19 +249,20 @@ export function buildSystemPrompt(settings: AiSettings, vars?: {
   return fillAiTemplate(settings.promptTemplate, vars || {});
 }
 
-/** 用户提示词：组织 title / 高亮词 / 正文 / 分句；自由阅读模式附加难度说明 */
+/** 用户提示词：组织 title / 高亮词 / 正文 / 分句；材料包 <user_input> 边界（P1-B 第 2 层抗注入） */
 export function buildUserPrompt(input: DeepReadInput): string {
   const parts: string[] = [];
   if (input.title) parts.push(`【材料标题】${input.title}`);
   if (input.highlights && input.highlights.length) {
     parts.push(`【已高亮重点词】请优先讲解并给出语境释义：${input.highlights.join("、")}`);
   }
-  parts.push(`【请精读下列文本】\n${input.text}`);
+  // 正文与逐句参考都是「待讲解材料」——与 system 的【输入边界】声明配套，
+  // 材料内的指令性文字（"ignore previous instructions" 等）一律降级为普通文本
+  const material: string[] = [input.text];
   if (input.sentences && input.sentences.length) {
-    parts.push(
-      `【逐句参考】\n${input.sentences.map((s, i) => `${i + 1}. ${s}`).join("\n")}`
-    );
+    material.push(`【逐句参考（由原文拆分）】\n${input.sentences.map((s, i) => `${i + 1}. ${s}`).join("\n")}`);
   }
+  parts.push(`【请精读下列文本】\n<user_input>\n${material.join("\n\n")}\n</user_input>`);
   return parts.join("\n\n");
 }
 
@@ -221,24 +286,30 @@ export function normalizeDeepRead(
 ): DeepReadResult {
   const words: DeepReadWord[] = Array.isArray(obj?.words)
     ? obj.words
-        .map((w: any) => ({
-          word: typeof w?.word === "string" ? w.word : "",
-          phonetic: typeof w?.phonetic === "string" ? w.phonetic : undefined,
-          pos: typeof w?.pos === "string" ? w.pos : undefined,
-          meaning: typeof w?.meaning === "string" ? w.meaning : "",
-          context: typeof w?.context === "string" ? w.context : undefined,
-          definitions: Array.isArray(w?.definitions)
-            ? w.definitions
-                .map((d: any) => ({ pos: typeof d?.pos === "string" ? d.pos : undefined, def: typeof d?.def === "string" ? d.def : "" }))
-                .filter((d: { def: string }) => d.def)
-            : undefined,
-          examples: Array.isArray(w?.examples)
-            ? w.examples
-                .map((e: any) => ({ en: typeof e?.en === "string" ? e.en : "", zh: typeof e?.zh === "string" ? e.zh : undefined }))
-                .filter((e: { en: string }) => e.en)
-            : undefined,
-          mastery: typeof w?.mastery === "number" ? Math.max(0, Math.min(5, Math.round(w.mastery))) : undefined,
-        }))
+        .map((w: any) => {
+          // P1-B：quote 是「逐字照抄」的出处短句；优先取 quote，兼容旧模型的 context
+          const quote = typeof w?.quote === "string" && w.quote.trim() ? w.quote : undefined;
+          const context = quote || (typeof w?.context === "string" && w.context.trim() ? w.context : undefined);
+          return {
+            word: typeof w?.word === "string" ? w.word : "",
+            phonetic: typeof w?.phonetic === "string" ? w.phonetic : undefined,
+            pos: typeof w?.pos === "string" ? w.pos : undefined,
+            meaning: typeof w?.meaning === "string" ? w.meaning : "",
+            context,
+            quote,
+            definitions: Array.isArray(w?.definitions)
+              ? w.definitions
+                  .map((d: any) => ({ pos: typeof d?.pos === "string" ? d.pos : undefined, def: typeof d?.def === "string" ? d.def : "" }))
+                  .filter((d: { def: string }) => d.def)
+              : undefined,
+            examples: Array.isArray(w?.examples)
+              ? w.examples
+                  .map((e: any) => ({ en: typeof e?.en === "string" ? e.en : "", zh: typeof e?.zh === "string" ? e.zh : undefined }))
+                  .filter((e: { en: string }) => e.en)
+              : undefined,
+            mastery: typeof w?.mastery === "number" ? Math.max(0, Math.min(5, Math.round(w.mastery))) : undefined,
+          };
+        })
         .filter((w: DeepReadWord) => w.word)
     : [];
 
@@ -248,6 +319,7 @@ export function normalizeDeepRead(
           sentence: typeof s?.sentence === "string" ? s.sentence : "",
           structure: typeof s?.structure === "string" ? s.structure : undefined,
           translation: typeof s?.translation === "string" ? s.translation : undefined,
+          ordinal: typeof s?.ordinal === "number" && Number.isFinite(s.ordinal) ? Math.max(1, Math.round(s.ordinal)) : undefined,
         }))
         .filter((s: DeepReadSentence) => s.sentence)
     : [];
@@ -258,6 +330,10 @@ export function normalizeDeepRead(
     ? obj.keyPoints.filter((k: any) => typeof k === "string" && k.trim()).map((k: string) => k.trim())
     : [];
   const thinking = typeof obj?.thinking === "string" ? obj.thinking : undefined;
+  // P1-B：AI 明确声明「无法判断」的项（容错：字符串数组）
+  const unsupported: string[] = Array.isArray(obj?.unsupported)
+    ? obj.unsupported.filter((u: any) => typeof u === "string" && u.trim()).map((u: string) => u.trim())
+    : [];
 
   return {
     ok: true,
@@ -272,6 +348,7 @@ export function normalizeDeepRead(
     model,
     usage,
     thinking,
+    unsupported: unsupported.length ? unsupported : undefined,
   };
 }
 
@@ -352,16 +429,22 @@ export async function runAiDeepRead(
   const vocabStore = opts?.vocabStore;
   const sourceBlockId = opts?.sourceBlockId;
 
-  const sys = buildSystemPrompt(settings, {
-    title: input.title,
-    text: input.text,
-  });
+  // R2（2026-09-07）：模型专属系统提示词**最高优先级**——非空时覆盖全局模板
+  // （此时 settings.promptTemplate 可能已被面板层替换为激活 AI 角色的提示词，一并覆盖）。
+  // 覆盖的是「基础人格段」，词库注入 / 不确定处理 / SOUL 记忆等运行时附加段不受影响。
+  const sys = resolveModelSystemPrompt(settings) ||
+    buildSystemPrompt(settings, {
+      title: input.title,
+      text: input.text,
+    });
 
   let buffered = false; // 是否走了代理缓冲回退（用于 UI 提示）
 
-  // 词库联动①：注入已知词，避免重复讲解其基础释义
+  // 词库联动①：注入已知词，避免重复讲解其基础释义。
+  // 批次 1 假接线修复：此前无条件注入，设置项 vocabSkipKnown 形同虚设；
+  // 现按开关门控（false = 关闭「已知词跳过讲解」，全部照常讲解）。
   let sysWithVocab = sys;
-  if (vocabStore && input.highlights && input.highlights.length) {
+  if (vocabStore && (settings.vocabSkipKnown ?? true) && input.highlights && input.highlights.length) {
     const known = input.highlights
       .map((h) => vocabStore.findRecord(h))
       .filter((r): r is NonNullable<typeof r> => !!r);
@@ -370,28 +453,52 @@ export async function runAiDeepRead(
       sysWithVocab = `${sys}\n\n【用户词库已掌握的词（无需重复讲解基础释义，可补充进阶用法/搭配）】\n${lines.join("\n")}`;
     }
   }
+  // P1-B 第 2 层：未知项处理（unknownHandling = mark 时追加约束；omit 保持默认提示词行为）
+  if ((settings.unknownHandling ?? "omit") === "mark") {
+    sysWithVocab +=
+      "\n\n【不确定处理】对无法从给定材料确定的释义、音标、结构或出处，在对应字段写「不确定」；" +
+      "完全无法判断的项放入顶层 unsupported 数组，不要给看似合理的答案。";
+  }
 
   const user = buildUserPrompt(input);
+  // 第 5 批（P0-5）：SOUL 长期记忆注入 system（未开启/无文档/失败 → 空串无副作用）
+  const soul = await buildSoulSection(settings);
+  if (soul) sysWithVocab += soul;
   const messages: AiMessage[] = [
     { role: "system", content: sysWithVocab },
     { role: "user", content: user },
   ];
 
   let gen: AiGenerateResult;
-  const hasStreamCb = !!(opts?.onThinking || opts?.onToken);
+  // P0（2026-09-08）：流式中止标志（requestAIStream 返回的 aborted 此前被丢弃，
+  // 中止会渲染成「（AI 未返回内容）」而非「已停止」）
+  let streamAborted = false;
+  // R2：流式判定 = 有回调 且 该模型未禁用流式（streamOverride === false → 降级非流式，
+  // 内容一次性到达，onToken 不再逐字；上层 UI 的节流渲染对此无感知，只是不再增量更新）
+  const engSettings = toEngineSettings(settings);
+  const hasStreamCb = !!(opts?.onThinking || opts?.onToken) && engSettings.streamOverride !== false;
   try {
     if (hasStreamCb) {
       // 流式模式：逐 chunk 回调 thinking / token，用于实时显示
       const streamRes = await requestAIStream(
-        { messages, settings: toEngineSettings(settings), jsonMode: settings.jsonMode, signal,
+        { messages, settings: engSettings, jsonMode: settings.jsonMode, signal,
           onReasoning: opts?.onThinking, onToken: opts?.onToken }
       );
       buffered = streamRes.buffered ?? false;
+      // P0（2026-09-08）流式失败不再吞错：requestAIStream 永不抛错，直连+代理兜底都失败时
+      // 返回 ok=false + error。此前只取 content，失败被加工成 ok:true/raw:"" →「（AI 未返回内容）」
+      // 且日志记「AI 精读完成」，真实错误（HTTP 状态/CORS/超时）完全丢失。
+      if (!streamRes.ok && !streamRes.aborted) {
+        const errMsg = streamRes.error || "流式请求失败";
+        logger.error("AI 精读失败（流式传输）", { operation: "AI精读", data: { error: errMsg, buffered } });
+        return { ok: false, isJson: false, words: [], sentences: [], raw: "", error: errMsg };
+      }
       gen = { content: streamRes.content, raw: streamRes.content, model: streamRes.model,
               reasoning: streamRes.reasoning, usage: streamRes.usage, truncated: streamRes.truncated };
+      streamAborted = streamRes.aborted ?? false;
     } else {
       gen = await requestAIGenerate(
-        { messages, settings: toEngineSettings(settings), jsonMode: settings.jsonMode, signal,
+        { messages, settings: engSettings, jsonMode: settings.jsonMode, signal,
           // 2026-08-21 精简：timeoutSec 已删除,固定 60s
           timeout: 60 * 1000 },
         transport
@@ -442,6 +549,24 @@ export async function runAiDeepRead(
   if (gen.reasoning) result.thinking = gen.reasoning;
   result.truncated = gen.truncated; // 截断标记（供 UI 提示）
   result.buffered = buffered; // 缓冲回退标记（供 UI 提示「缓冲模式」）
+  if (sourceBlockId) result.sourceBlockId = sourceBlockId; // 引文回链用
+
+  // P1-B 第 3 层：本地后校验（零 AI 调用）。
+  //   warn  → 不符条目标 issues（UI 黄色提示条）；quote 不符就地清空。
+  //   strict → 同 warn，另将被标记的词排除出词库自动写入。
+  let flaggedWords: Set<string> | null = null;
+  const verifyMode = settings.deepReadVerify ?? "warn";
+  if (result.isJson && verifyMode !== "off") {
+    const v = verifyDeepReadResult(result, input.text, { sentences: input.sentences });
+    if (v.issues.length) {
+      result.issues = v.issues;
+      logger.warn("AI 精读后校验发现不符项", {
+        operation: "AI精读",
+        data: { total: v.issues.length, kinds: v.issues.map((i) => i.kind).join(",") },
+      });
+    }
+    if (verifyMode === "strict" && v.flaggedWords.size) flaggedWords = v.flaggedWords;
+  }
 
   if (result.isJson === false && settings.jsonMode) {
     // 结构化失败但内容非空：把已识别高亮词的语境补到 fallback 的 words 中（轻量增强）
@@ -460,6 +585,8 @@ export async function runAiDeepRead(
     const saved: { word: string; added: boolean; updated?: boolean }[] = [];
     const tasks = result.words
       .filter((w) => w.word && w.meaning)
+      // strict 模式：被后校验标记「未见于原文」的词不入词库（防幻觉污染词库）
+      .filter((w) => !flaggedWords?.has(w.word))
       .map(async (w) => {
         try {
           const ups = await vocabStore.upsertWord(
@@ -487,7 +614,28 @@ export async function runAiDeepRead(
     operation: "AI精读",
     data: { ok: result.ok, isJson: result.isJson, words: result.words.length, sentences: result.sentences.length, saved: result.savedWords?.length ?? 0, model: gen.model },
   });
+  if (streamAborted) result.aborted = true; // P0（2026-09-08）：中止标志透传给 UI（已停止生成分支）
   return result;
+}
+
+/**
+ * 对话模式的消息预处理（2026-09-04 P0：止住跑题）：
+ * 1) 注入对话版 system（缺失时补 DEFAULT_AI_CHAT_SYSTEM）——原先对话裸发 messages 无 system，
+ *    模型无从得知自己是"英语学习助手"，只能按材料本身的文体（小说/新闻）续写。
+ * 2) 把每条 user 消息用 <user_input> 标签包裹——配合 system 的声明，
+ *    把内容降级为"待处理材料"，材料里的指令性文字（如 "continue the story"）不再被执行。
+ * 3) 丢弃空的 system 消息（历史数据里存在 content:"" 的占位，发给 API 无意义且干扰 system 判定）。
+ */
+function prepareChatMessages(messages: AiMessage[]): AiMessage[] {
+  const out: AiMessage[] = [];
+  for (const m of messages) {
+    if (m.role === "system" && !m.content?.trim()) continue;
+    out.push(m.role === "user" ? { ...m, content: `<user_input>\n${m.content}\n</user_input>` } : m);
+  }
+  if (!out.some((m) => m.role === "system")) {
+    out.unshift({ role: "system", content: DEFAULT_AI_CHAT_SYSTEM });
+  }
+  return out;
 }
 
 /**
@@ -502,35 +650,57 @@ export async function runAiChat(
 ): Promise<DeepReadResult> {
   const logger = getLogger();
   const signal = opts?.signal;
+  const payload = prepareChatMessages(messages);
+  // R2（2026-09-07）：模型专属系统提示词最高优先级——非空时**替换**对话 system
+  // （此时 system 可能已是 DEFAULT_AI_CHAT_SYSTEM 或激活 AI 角色的提示词，一并覆盖；
+  //  SOUL 记忆随后仍会追加到其后，不冲突）。无 system 消息时补一条。
+  const modelSys = resolveModelSystemPrompt({ model: settings.model, modelParams: activePlatformOf(settings)?.modelParams || settings.modelParams });
+  if (modelSys) {
+    const sysMsg = payload.find((m) => m.role === "system");
+    if (sysMsg) sysMsg.content = modelSys;
+    else payload.unshift({ role: "system", content: modelSys });
+  }
+  // 第 5 批（P0-5）：SOUL 长期记忆同样注入对话 system（找不到 system 则补默认）
+  const soul = await buildSoulSection(settings);
+  if (soul) {
+    const sysMsg = payload.find((m) => m.role === "system");
+    if (sysMsg) sysMsg.content += soul;
+    else payload.unshift({ role: "system", content: DEFAULT_AI_CHAT_SYSTEM + soul });
+  }
   let gen: AiGenerateResult;
   let buffered = false; // 是否走了代理缓冲回退（用于 UI 提示）
+  let streamAborted = false; // P0（2026-09-08）：流式中止标志（此前被丢弃）
+  // R2：与 runAiDeepRead 同口径——该模型禁用流式时降级 requestAIGenerate
+  const engSettings = toEngineSettings(settings);
+  const hasStreamCb = !!(opts?.onThinking || opts?.onToken) && engSettings.streamOverride !== false;
   try {
-    const hasStreamCb = !!(opts?.onThinking || opts?.onToken);
     if (hasStreamCb) {
       const streamRes = await requestAIStream(
-        { messages, settings: toEngineSettings(settings), jsonMode: false, signal,
+        { messages: payload, settings: engSettings, jsonMode: false, signal,
           onReasoning: opts?.onThinking, onToken: opts?.onToken }
       );
       buffered = streamRes.buffered ?? false;
+      // P0（2026-09-08）流式失败不再吞错：失败此前被加工成 ok:true/raw:"" →「（AI 未返回内容）」
+      // 且日志记「AI 对话完成」，真实错误（HTTP 状态/CORS/超时）完全丢失。
+      if (!streamRes.ok && !streamRes.aborted) {
+        const errMsg = streamRes.error || "流式请求失败";
+        logger.error("AI 对话失败（流式传输）", { operation: "AI对话", data: { error: errMsg, buffered } });
+        return { ok: false, isJson: false, words: [], sentences: [], raw: "", error: errMsg };
+      }
       gen = { content: streamRes.content, raw: streamRes.content, model: streamRes.model,
               reasoning: streamRes.reasoning, usage: streamRes.usage, truncated: streamRes.truncated };
+      streamAborted = streamRes.aborted ?? false;
     } else {
       gen = await requestAIGenerate(
-        { messages, settings: toEngineSettings(settings), jsonMode: false, signal,
+        { messages: payload, settings: engSettings, jsonMode: false, signal,
           timeout: 60 * 1000 },
         opts?.transport
       );
     }
-    // 输出被 max_tokens 截断时自动续传（2026-08-21 精简：autoContinue 已删除,固定开启）
-    if (gen.truncated) {
-      gen = await continueTruncatedGen(gen, messages, settings, {
-        transport: opts?.transport,
-        signal,
-        onThinking: opts?.onThinking,
-        onToken: opts?.onToken,
-        maxRounds: 1,
-      });
-    }
+    // 对话模式不做截断自动续传（2026-09-04 P0）：
+    // 续传提示词是"请从断点处继续输出剩余内容"，对"续写型"模型等于明确授权它接着写，
+    // 正是跑题的直接放大器（翻译请求返回续写小说）。此处只保留 truncated 标记供 UI 提示，
+    // 由用户决定是否调大 maxTokens 重试。结构化精读仍走 continueTruncatedGen（JSON 续传语义明确）。
   } catch (e: any) {
     // 用户主动中断：标记 aborted，不记 error
     if (e?.name === "AbortError" || signal?.aborted) {
@@ -570,5 +740,6 @@ export async function runAiChat(
     truncated: gen.truncated,
     buffered,
     thinking: gen.reasoning,
+    aborted: streamAborted || undefined, // P0（2026-09-08）：中止标志透传给 UI
   };
 }

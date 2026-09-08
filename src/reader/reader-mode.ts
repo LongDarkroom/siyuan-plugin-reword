@@ -33,3 +33,28 @@ export function isPdfFormat(format?: string | null): boolean {
 export function isBookFormat(format?: string | null): boolean {
   return resolveReaderMode(format) === "book";
 }
+
+/**
+ * 书籍标记（书签 / 批注）归属的媒体类型 —— 双重保险字段。
+ *
+ * 背景（2026-09-03）：「半分半合」把书签 + 摘录合并进「我的标记」抽屉后，
+ * 担心 PDF 阅读时误把图书（EPUB 等）的标记混进来。虽然存储层已按 `bookId` 隔离，
+ * 但加一层 `bookType` 过滤可彻底杜绝跨格式串味：渲染「我的标记」时只显示
+ * 与当前书籍 `bookType` 相同的标记（旧数据无该字段则放行，向后兼容）。
+ */
+export type BookType = "pdf" | "epub" | "other";
+
+/** 由书籍格式解析 bookType（与 resolveReaderMode 同源，但粒度更细，便于精确匹配）。 */
+export function bookTypeFromFormat(format?: string | null): BookType {
+  const f = String(format || "").toLowerCase();
+  if (f === "pdf") return "pdf";
+  if (f === "epub") return "epub";
+  return "other";
+}
+
+/** 判断某条标记是否允许在当前 bookType 下显示（双重保险过滤）。 */
+export function matchBookType(itemBookType: BookType | undefined, current: BookType): boolean {
+  // 旧数据无 bookType → 放行（向后兼容，避免老标记消失）
+  if (!itemBookType) return true;
+  return itemBookType === current;
+}

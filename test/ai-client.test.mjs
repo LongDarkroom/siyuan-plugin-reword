@@ -8,7 +8,7 @@ import {
   requestAIGenerate,
   requestAIStream,
   estimateTokens,
-} from "../src/copilot/ai/ai-client.ts";
+} from "../src/ai/ai-client.ts";
 import {
   DEFAULT_AI_SETTINGS,
   normalizeAiSettings,
@@ -35,7 +35,8 @@ test("buildRequestBody: jsonMode 时带 response_format", () => {
   const json = buildRequestBody([{ role: "user", content: "hi" }], s, true);
   assert.equal(json.response_format.type, "json_object");
   assert.equal(json.stream, false);
-  assert.equal(json.model, "gpt-4o-mini");
+  // 2026-09-07 改动点 1：默认模型对齐硅基流动（DeepSeek-V3），断言引用默认值防漂移
+  assert.equal(json.model, DEFAULT_AI_SETTINGS.model);
   const plain = buildRequestBody([{ role: "user", content: "hi" }], s, false);
   assert.equal(plain.response_format, undefined);
 });
@@ -63,11 +64,11 @@ test("requestAIGenerate: 注入 mock transport 返回结构化内容（不触达
     assert.equal(req.method, "POST");
     assert.equal(req.headers["Authorization"], "Bearer sk-test");
     const body = JSON.parse(req.body);
-    assert.equal(body.model, "gpt-4o-mini");
+    assert.equal(body.model, DEFAULT_AI_SETTINGS.model);
     const resp = {
       status: 200,
       headers: {},
-      body: JSON.stringify({ model: "gpt-4o-mini", choices: [{ message: { content: "AI says hi" } }] }),
+      body: JSON.stringify({ model: DEFAULT_AI_SETTINGS.model, choices: [{ message: { content: "AI says hi" } }] }),
     };
     return resp;
   };
@@ -77,7 +78,7 @@ test("requestAIGenerate: 注入 mock transport 返回结构化内容（不触达
     jsonMode: false,
   }, transport);
   assert.equal(res.content, "AI says hi");
-  assert.equal(res.model, "gpt-4o-mini");
+  assert.equal(res.model, DEFAULT_AI_SETTINGS.model);
 });
 
 test("requestAIGenerate: 非 2xx 抛错", async () => {

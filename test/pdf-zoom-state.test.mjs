@@ -19,7 +19,11 @@ import { dirname, join } from "node:path";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const storePath = join(__dirname, "..", "src", "reader", "bookshelf-store.ts");
-const src = readFileSync(storePath, "utf-8");
+const typesPath = join(__dirname, "..", "src", "reader", "library", "library-types.ts");
+// R2 重构：ZoomState / ZOOM_PRESETS / ReadingProgress / BookMeta 等类型与常量已原位抽取到
+// library/library-types.ts，bookshelf-store.ts 仅做再导出（对外契约不变）。
+// 源码断言需同时覆盖两个文件，且 types 放前面避免误命中 store 里残留的同名字段。
+const src = readFileSync(typesPath, "utf-8") + "\n" + readFileSync(storePath, "utf-8");
 
 test("[核心] ZoomState 类型导出（fit-width / fit-page / custom）", () => {
   assert.ok(

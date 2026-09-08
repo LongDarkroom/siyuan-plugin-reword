@@ -115,13 +115,39 @@ export function removeStroke(strokeId: string): void {
   inkStrokes.update((arr) => arr.filter((s) => s.id !== strokeId));
 }
 
-/** 设置上下文（开新书 / 翻页时调用） */
-export function setInkContext(bookId: string, pageIndex: number): void {
+/**
+ * 设置上下文（开新书 / 翻页时调用）。
+ * 2026-09-04 P0-3 补完：开新书时不再无脑清空 inkStrokes——
+ * 持久化层（InkSaver）会在此之前把新书墨迹灌入 inkStrokes。
+ * 翻页（同书不同页）也不清空——笔触按 pageIndex 自带上下文，跨页查看。
+ *
+ * 仍保留「清空后重置」的兜底：调用方明确传 lastSetup = true 时强制清空
+ * （用于异常恢复，例如持久化层还没就绪就调了 setInkContext）。
+ */
+export function setInkContext(bookId: string, pageIndex: number, opts: { reset?: boolean } = {}): void {
   inkContext.set({ bookId, pageIndex });
+  if (opts.reset) inkStrokes.set([]);
 }
 
 /** 清除所有笔触（debug 用） */
 export function clearAllStrokes(): void {
   inkStrokes.set([]);
   activeStroke.set(null);
+}
+
+/**
+ * 整体替换 inkStrokes（2026-09-04 P0-3 补完）。
+ * 用途：持久化层切书时把指定 bookId 的笔触塞进 store。
+ * 不触发额外副作用（无 save 回调，调用方自己控节奏）。
+ */
+export function replaceAllStrokes(strokes: InkStroke[]): void {
+  inkStrokes.set([...strokes]);
+}
+
+/**
+ * 切书时把"内存全局笔触"按 bookId 过滤出来（2026-09-04 P0-3 补完）。
+ * 调用方通常是 InkSaver.setStrokesForBook 调此函数。
+ */
+export function filterStrokesByBook(strokes: readonly InkStroke[], bookId: string): InkStroke[] {
+  return strokes.filter((s) => s.bookId === bookId);
 }

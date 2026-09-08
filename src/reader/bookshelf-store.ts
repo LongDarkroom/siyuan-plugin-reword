@@ -1,4 +1,6 @@
 import { logSwallow } from "../core/safe.ts";
+import { loadLibraryIndex, saveLibraryIndex, INDEX_KEY, GROUPS_KEY } from "./library/library-persist.ts";
+import { isValidBookMeta, isValidBookGroup } from "./library/library-types.ts";
 /**
  * 阅读器 - 书架存储
  * ---------------------------------------------------------------
@@ -11,165 +13,25 @@ import { putFile, getFileBlob, removeFile } from "../siyuan/api";
 import { unzipSync } from "fflate";
 import { writable } from "svelte/store";
 import { bookFingerprint } from "./book-fingerprint.ts";
+import { type BookType } from "./reader-mode.ts";
 
-/** 阅读进度：cfi（EPUB 定位）/ fraction（通用比例定位 0-1）/ index（章节或页码 0-based） */
-export interface ReadingProgress {
-  cfi?: string;
-  fraction?: number;
-  index?: number;
-  // [REword patch 2026-08-29] PDF 缩放状态（仅 PDF 用，optional 字段，老数据兼容）
-  zoom?: ZoomState;
-}
+/*
+ * 类型与常量已原位抽取到 library/ 层（library-types.ts / library-persist.ts），
+ * 这里 import 供内部使用 + re-export 保持对外契约 100% 不变（约 10 处消费者零改动）。
+ */
+import {
+  BOOK_COLORS, isValidBookColor, BOOK_COLOR_INDEX,
+} from "./library/library-types.ts";
+export { BOOK_COLORS, ZOOM_PRESETS, isValidBookColor } from "./library/library-types.ts";
 
-/** PDF 缩放状态（per-file 持久化） */
-export type ZoomState =
-  | { kind: "fit-width" }
-  | { kind: "fit-page" }
-  | { kind: "custom"; scale: number };  // 0.25 - 4.0
-
-/** 缩放预设档位（Zoom in/out 步进用，参考 Obsidian PDF++） */
-export const ZOOM_PRESETS: readonly number[] = [0.5, 0.75, 1.0, 1.25, 1.5, 2.0] as const;
-
-/* ================================================================
- * 2026-08-29 书架 P0/P1：阅读状态 / 分组 / 标签 / 排序 / 筛选
- * ================================================================ */
-
-/** 阅读状态：想读（未开始）/ 在读 / 读完 */
-export type BookStatus = "unread" | "reading" | "finished";
-
-/* ================================================================
- * 2026-08-29 书架 P2：macOS 风格 7 色 token
- * - 用于 BookGroup.color / BookMeta.color / BookFilter.color
- * - 不用裸 hex 存储,token 化便于未来扩展自定义色 + 主题适配
- * - 与 docs/bookshelf-interaction-refinement.md §2.1 保持一致
- * ================================================================ */
-
-/** 7 色 token（与 macOS Finder 6 色 + 灰色归档对齐,沿用用户截图） */
-export type BookColor = "red" | "orange" | "yellow" | "green" | "blue" | "purple" | "gray";
-
-/** 7 色字典:UI swatch 渲染 / 排序时反查索引 / 任意模块查找 token 用 */
-export const BOOK_COLORS: readonly { token: BookColor; label: string; hex: string }[] = [
-  { token: "red",    label: "红", hex: "#ff453a" },
-  { token: "orange", label: "橙", hex: "#ff9f0a" },
-  { token: "yellow", label: "黄", hex: "#ffd60a" },
-  { token: "green",  label: "绿", hex: "#34c759" },
-  { token: "blue",   label: "蓝", hex: "#0a84ff" },
-  { token: "purple", label: "紫", hex: "#bf5af2" },
-  { token: "gray",   label: "灰", hex: "#8e8e93" },
-] as const;
-
-/** 反查 token → 索引(用于颜色排序),O(1) 字典 */
-const BOOK_COLOR_INDEX: Record<BookColor, number> = (() => {
-  const out = {} as Record<BookColor, number>;
-  BOOK_COLORS.forEach((c, i) => (out[c.token] = i));
-  return out;
-})();
-
-/** 校验颜色 token 合法性,用于 API 入口的脏数据防御 */
-export function isValidBookColor(s: unknown): s is BookColor {
-  return typeof s === "string" && s in BOOK_COLOR_INDEX;
-}
-
-/** 用户自建分组（书架「文件夹」），独立索引文件持久化 */
-export interface BookGroup {
-  id: string;
-  name: string;
-  createdAt: number;
-  /** 2026-08-29 新增:macOS 风格 7 色 token,见 BOOK_COLORS 字典;缺省 = 无色 */
-  color?: BookColor;
-}
-
-/** 排序键 */
-export type BookSortKey =
-  | "lastRead"
-  | "addedAt"
-  | "title"
-  | "author"
-  | "progress"
-  | "readingTime"
-  | "rating"
-  | "size"
-  | "color";
-
-/** 排序方向 */
-export type SortDir = "asc" | "desc";
-
-/** 书架筛选条件（全部 optional，缺省 = 不限） */
-export interface BookFilter {
-  /** 关键词：匹配书名 / 作者 / 标签 / 丛书 */
-  keyword?: string;
-  /** 阅读状态；"all" 或缺省 = 不限 */
-  status?: BookStatus | "all";
-  /** 格式（小写，如 epub/pdf）；"all" 或缺省 = 不限 */
-  format?: string;
-  /** 单标签精确匹配 */
-  tag?: string;
-  /** 分组：具体 id / "ungrouped" 未分组 / "all" 不限 */
-  groupId?: string;
-  /** 仅看收藏 */
-  favoriteOnly?: boolean;
-  /** 最低评分（1-5） */
-  minRating?: number;
-  /** 2026-08-29 新增:单色精确匹配;缺省 = 不限 */
-  color?: BookColor;
-}
-
-/** 阅读书签（2026-08-29 新增：对齐 Obsidian weave 的「书签 / 参考阅读点」） */
-export interface BookMark {
-  id: string;
-  /** foliate CFI 锚点（PDF 时为 foliate 自派发的锚点串） */
-  cfi: string;
-  /** 用户可改的书签名；缺省时 UI 回退显示章节名 */
-  label?: string;
-  /** 书签处的正文摘录（前若干字，便于列表里辨认位置） */
-  excerpt?: string;
-  createdAt: number;
-}
-
-export interface BookMeta {
-  id: string;
-  title: string;
-  author?: string;
-  /** EPUB 语言（dc:language） */
-  language?: string;
-  /** epub / mobi / azw3 / fb2 / cbz / pdf / txt / md */
-  format: string;
-  /** 思源 data 内路径 */
-  path: string;
-  /** 封面图路径（EPUB 提取；TXT/MD 无） */
-  cover?: string;
-  size: number;
-  addedAt: number;
-  lastReadAt?: number;
-  /** 累计阅读时长（毫秒） */
-  readingTimeMs?: number;
-  /** 按本地日期分桶的阅读时长（毫秒），键为 YYYY-MM-DD，用于日历热力图 */
-  readingLog?: Record<string, number>;
-  progress?: ReadingProgress;
-  /* ---- 2026-08-29 书架 P0/P1 新增字段（全 optional，老数据兼容） ---- */
-  /** 阅读状态；缺省视为 unread */
-  status?: BookStatus;
-  /** 评分 0-5；0/缺省 = 未评分 */
-  rating?: number;
-  /** 收藏星标 */
-  favorite?: boolean;
-  /** 标签 */
-  tags?: string[];
-  /** 丛书 / 系列名 */
-  series?: string;
-  /** 所属用户分组 id；缺省 = 未分组 */
-  groupId?: string;
-  /** 2026-08-29 新增：本书书签（按 createdAt 升序；老数据无此字段，缺省空数组） */
-  bookmarks?: BookMark[];
-  /** 2026-08-29 P2 新增:macOS 风格 7 色 token,见 BOOK_COLORS 字典;缺省 = 无色 */
-  color?: BookColor;
-  /** 2026-08-29 P2 新增:同组内手动排序用(数字小 = 靠前),缺省 = 跟随 query 排序 */
-  order?: number;
-}
-
-const INDEX_KEY = "hiword-bookshelf.json";
-/** 用户分组索引（独立文件：书架索引保持纯数组，向后兼容） */
-const GROUPS_KEY = "hiword-bookshelf-groups.json";
+import type {
+  ReadingProgress, ZoomState, BookStatus, BookColor, BookGroup,
+  BookSortKey, SortDir, BookFilter, BookMark, BookMeta,
+} from "./library/library-types.ts";
+export type {
+  ReadingProgress, ZoomState, BookStatus, BookColor, BookGroup,
+  BookSortKey, SortDir, BookFilter, BookMark, BookMeta,
+} from "./library/library-types.ts";
 const BOOKS_DIR = (pluginName: string) =>
   `/data/plugins/${pluginName}/books`;
 
@@ -209,29 +71,25 @@ export class BookshelfStore {
       this._store.set([...this.books]);
       return;
     }
-    try {
-      const data = await this.plugin.loadData(INDEX_KEY);
-      if (Array.isArray(data)) this.books = data;
-    } catch {
-      this.books = [];
-    }
-    // 分组索引：独立文件，不存在即空数组（老数据无此文件）
-    try {
-      const g = await this.plugin.loadData(GROUPS_KEY);
-      if (Array.isArray(g)) this._groups = g;
-    } catch {
-      this._groups = [];
-    }
+    // 安全恢复：主索引损坏回退 .bak、单条损坏 quarantine 保留其余
+    const idx = await loadLibraryIndex<BookMeta>(this.plugin, INDEX_KEY, isValidBookMeta);
+    this.books = idx.data;
+    const groups = await loadLibraryIndex<BookGroup>(this.plugin, GROUPS_KEY, isValidBookGroup);
+    this._groups = groups.data;
     this.loaded = true;
+    // 恢复场景自愈：主索引/分组损坏或含坏条 → 把清洗后的数据写回，避免下次再走恢复路径
+    if (
+      idx.primaryFailed || idx.quarantined.length > 0 ||
+      groups.primaryFailed || groups.quarantined.length > 0
+    ) {
+      await this.save();
+      await this.saveGroups();
+    }
     this._store.set([...this.books]);
   }
 
   private async save(): Promise<void> {
-    try {
-      await this.plugin.saveData(INDEX_KEY, this.books);
-    } catch (e) {
-      console.warn("[REword] 书架索引持久化失败:", e);
-    }
+    await saveLibraryIndex<BookMeta>(this.plugin, INDEX_KEY, this.books);
   }
 
   /**
@@ -250,6 +108,9 @@ export class BookshelfStore {
     author?: string;
     cover?: { blob: Blob; ext: string };
   }> {
+    // 2026-09-05：提到外层，供 finally 统一释放（原实现中途抛错即泄漏）
+    let loadingTask: any = null;
+    let pdf: any = null;
     try {
       // 动态 import 触发 pdf.mjs 自挂载到 globalThis.pdfjsLib
       // @ts-expect-error vendor/pdfjs/pdf.mjs 无 .d.ts，运行时类型已挂 globalThis
@@ -290,14 +151,14 @@ export class BookshelfStore {
       }
 
       const buf = new Uint8Array(await file.arrayBuffer());
-      const loadingTask = pdfjsLib.getDocument({
+      loadingTask = pdfjsLib.getDocument({
         data: buf,
         // [REword patch 2026-08-29] PDF 适配 Phase 1.5：恢复 worker 模式
         // 配合 workerSrc = /plugins/siyuan-plugin-reword/pdf.worker.mjs
         // Phase 1 的 disableWorker: true 已移除（详见 foliate-js/pdf.js 注释）
         // [REword patch 2026-08-29] 移动端：workerSrc 为空时 PDF.js 自动主线程跑
       });
-      const pdf = await loadingTask.promise;
+      pdf = await loadingTask.promise;
 
       // 1. 元数据
       const info = await pdf.getMetadata().then((m: any) => m?.info ?? {});
@@ -324,16 +185,15 @@ export class BookshelfStore {
         // 封面渲染失败不阻断
       }
 
-      // 释放 PDF 文档
-      try {
-        await pdf.destroy?.();
-      } catch {
-        // ignore
-      }
-
       return { title, author, cover };
     } catch {
       return {};
+    } finally {
+      // 2026-09-05：pdf.destroy() 只释放文档对象，必须再 loadingTask.destroy()
+      // 才会真正终止 pdf.js 的 worker 线程；放进 finally 保证元数据/封面渲染
+      // 中途抛错时也释放（原实现在抛错路径上整份 PDF 常驻）。
+      try { await pdf?.destroy?.(); } catch { /* ignore */ }
+      try { await loadingTask?.destroy?.(); } catch { /* ignore */ }
     }
   }
 
@@ -642,11 +502,7 @@ export class BookshelfStore {
   }
 
   private async saveGroups(): Promise<void> {
-    try {
-      await this.plugin.saveData(GROUPS_KEY, this._groups);
-    } catch (e) {
-      console.warn("[REword] 书架分组持久化失败:", e);
-    }
+    await saveLibraryIndex<BookGroup>(this.plugin, GROUPS_KEY, this._groups);
   }
 
   /** 新建分组；同名直接复用已有，返回分组对象 */
@@ -779,7 +635,7 @@ export class BookshelfStore {
    * 新增书签。同一 cfi 已存在则直接返回现有列表（幂等，不重复添加）。
    * @returns 操作后的书签列表（升序）
    */
-  async addBookmark(id: string, bm: { cfi: string; label?: string; excerpt?: string }): Promise<BookMark[]> {
+  async addBookmark(id: string, bm: { cfi: string; label?: string; excerpt?: string; bookType?: BookType }): Promise<BookMark[]> {
     await this.load();
     const cfi = bm?.cfi?.trim();
     if (!cfi) return this.getBookmarks(id);
@@ -793,6 +649,7 @@ export class BookshelfStore {
         label: bm.label?.trim() || undefined,
         excerpt: bm.excerpt?.trim() || undefined,
         createdAt: Date.now(),
+        bookType: bm.bookType,
       },
     ];
     await this.updateMeta(id, { bookmarks: next });
@@ -824,7 +681,7 @@ export class BookshelfStore {
    */
   async toggleBookmark(
     id: string,
-    bm: { cfi: string; label?: string; excerpt?: string }
+    bm: { cfi: string; label?: string; excerpt?: string; bookType?: BookType }
   ): Promise<{ list: BookMark[]; added: boolean }> {
     await this.load();
     const cfi = bm?.cfi?.trim();

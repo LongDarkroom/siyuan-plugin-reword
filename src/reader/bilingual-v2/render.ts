@@ -178,31 +178,64 @@ export function bindAiRedoDelegation(
 
 /**
  * 兄弟节点注入：原文元素不变，译文作为紧邻其后的兄弟节点插入。
- * - 已注入则跳过（幂等）
+ * - 已注入则跳过（幂等），返回 false
  * - 原文 <p>/<li>/<blockquote> 的父节点关系、子节点索引、文本偏移全部不变 → CFI 稳定
+ *
+ * 2026-09-05 R6 三态改造：本函数**只做插入，不再打标、不再算样式**。
+ *  - 打标移到注入器（injector）：只有「译文非空且插入成功」才打
+ *    data-reword-translated；失败段不打标，下一轮才会被重新切出并重试。
+ *    旧实现无条件打标，导致失败段被永久当作已译跳过（永久黑洞）。
+ *  - 样式计算拆成 readParaStyle / applyAlignment 两步，由注入器做读写分离：
+ *    一帧内先连续读 N 段样式（只触发 1 次 layout），再连续写 N 段（写不触发
+ *    layout），强制同步布局从 2N 降到 O(1)。
  */
-export function injectSibling(paragraphEl: Element, translationEl: HTMLElement): void {
-  if (isTranslatedPeer(paragraphEl)) return;
-  // 标记原文节点已译（foliate 重渲后该属性仍稳定保留在原文节点上）
-  paragraphEl.setAttribute("data-reword-translated", "1");
+export function injectSibling(paragraphEl: Element, translationEl: HTMLElement): boolean {
+  if (isTranslatedPeer(paragraphEl)) return false;
   paragraphEl.insertAdjacentElement("afterend", translationEl);
+  return true;
+}
 
-  // 2026-08-31（对齐修正 · 译文与英文句子齐平）：
-  // 译文是紧邻原文的兄弟节点（同父、同 offsetLeft）。令英文文字左缘与译文文字左缘相等：
-  //   英文文字左缘 = paragraphEl.offsetLeft + paragraphEl.paddingLeft + paragraphEl.textIndent
-  //   译文文字左缘 = paragraphEl.offsetLeft + marginLeft + borderLeft + paddingLeft + textIndent
-  // 译文自身 textIndent / paddingLeft 设 0（避免首行 / 内边距再缩进），二者相等得：
-  //   marginLeft = paragraphEl.paddingLeft + paragraphEl.textIndent - translationBorderLeft
-  // 这样无论英文段是否首行缩进、是否位于列表 / 引用内，译文文字都精确对齐英文文字左缘；
-  // 左侧 2.5px 竖线因此落在左留白（gutter）里，不挤占正文、不破坏齐平。
-  // v2 译文是 li / blockquote 的「兄弟」而非「子节点」，旧的 `li > .reword-bilingual`
-  // CSS 规则对 v2 不生效，故此处对所有元素统一套用同一对齐公式（不再特判 LI）。
+/** 译文左侧竖线宽度（CSS 常量；不再运行时读 getComputedStyle） */
+const BORDER_LEFT_PX = 2.5;
+
+/** 原文段落的对齐相关样式（读阶段产出） */
+export interface ParaStyle {
+  padLeft: number;
+  textIndent: number;
+}
+
+const paraStyleCache = new WeakMap<Element, ParaStyle>();
+
+/**
+ * 读阶段：取原文段落的对齐样式（paddingLeft / textIndent）。
+ * 按元素缓存，同一元素只算一次。
+ */
+export function readParaStyle(el: Element): ParaStyle {
+  const hit = paraStyleCache.get(el);
+  if (hit) return hit;
+  const style: ParaStyle = { padLeft: 0, textIndent: 0 };
   try {
-    const pcs = getComputedStyle(paragraphEl);
-    const padLeft = parseFloat(pcs.paddingLeft) || 0;
-    const textIndent = parseFloat(pcs.textIndent) || 0;
-    const borderLeft = parseFloat(getComputedStyle(translationEl).borderLeftWidth) || 2.5;
-    const marginLeft = padLeft + textIndent - borderLeft;
+    const cs = getComputedStyle(el);
+    style.padLeft = parseFloat(cs.paddingLeft) || 0;
+    style.textIndent = parseFloat(cs.textIndent) || 0;
+  } catch {
+    // 某些安全/沙箱环境下 getComputedStyle 不可用，按 0 处理
+  }
+  paraStyleCache.set(el, style);
+  return style;
+}
+
+/**
+ * 写阶段：把对齐结果写进译文块（纯写，不读任何样式，不触发 layout）。
+ *
+ * 对齐公式（2026-08-31 确立，R6 保留）：英文文字左缘与译文文字左缘相等 →
+ *   marginLeft = 原文 paddingLeft + 原文 textIndent - 译文 borderLeft
+ * 译文自身 textIndent / paddingLeft 归零，避免首行与内边距二次缩进。
+ * 左侧 2.5px 竖线因此落在左留白里，不挤占正文。
+ */
+export function applyAlignment(translationEl: HTMLElement, style: ParaStyle): void {
+  const marginLeft = style.padLeft + style.textIndent - BORDER_LEFT_PX;
+  try {
     translationEl.style.setProperty("margin-left", marginLeft + "px", "important");
     translationEl.style.setProperty("padding-left", "0px", "important");
     translationEl.style.setProperty("text-indent", "0px", "important");

@@ -184,7 +184,11 @@ export interface ReaderSettings {
   bilingualHidden?: Record<string, string[]>;
   /** 译文字号（em 倍数，相对正文；默认 0.70；思源 CJK 字体大，0.70≈书籍字体的 0.90；2026-08-28） */
   translationFontSize?: number;
-  /** 双语预取页数：当前屏之后额外预译并缓存的「面」数（默认 2；值越大越省翻页等待但越费 token；2026-08-28 新增可调） */
+  /**
+   * 预取分节数（整数 0–4，默认 2）：渐进窗口与注入闸门共用的「当前 + N 分节」。
+   * 2026-09-05 更名与复活：R6 新运行时重新消费它（此前「窗口页数」UI 改了无效）；
+   * 值越大翻页等待越少但消耗额度越快。
+   */
   bilingualPrefetchPages?: number;
   /** 双语调试信息：译文块显示引擎与 Token 明细（默认关，替代原写死的 DEBUG_BILINGUAL 常量；2026-08-30） */
   bilingualDebug?: boolean;
@@ -202,8 +206,13 @@ export interface ReaderSettings {
   bilingualSkipCached?: boolean;
   /** 整书预翻译：边译边显示译文（默认 true；关则纯后台缓存，不注入 DOM） */
   bilingualRealtimePreview?: boolean;
-  /** 用量告警阈值（0~1，默认 0.8）：达到即黄，达 1.0 即红并触发停止/提示 */
-  bilingualAlertRatio?: number;
+  /**
+   * 失败自动重试（默认 true）：翻译失败的段落按 5s→30s 退避最多重试 2 次。
+   * 关闭后失败段不再自动重试（等下一轮翻页窗口自然重试）。2026-09-05 新增。
+   * （2026-09-05 删除了 bilingualAlertRatio：R6 换运行时后无消费方，
+   *   用量告警统一由监督中心 aiTokenAlertRatio 承担。）
+   */
+  bilingualRetry?: boolean;
   /* 2026-08-31：原 bilingualV2Enabled 开关已删除——v1（bilingual.ts）移除后，
    * v2 兄弟节点渲染成为唯一实现，无需再灰度切换。 */
   /** 段落悬停高亮：鼠标悬停段落时轻微底色（默认开，2026-08-28 增强项） */
@@ -235,6 +244,10 @@ export interface ReaderSettings {
   pdfScrollDir?: "vertical" | "horizontal";
   /** PDF 反色 / 暗色：canvas 级 pageColors 反色，独立于阅读器通用主题 */
   pdfInvert?: boolean;
+  /** 2026-09-04 P2：PDF 文本标注类型开关（精简聚焦，仅保留 3 类） */
+  pdfAnnotHighlight?: boolean;  // 高亮（背景标注）
+  pdfAnnotUnderline?: boolean;  // 直线段 / 波浪线（下划线类）
+  pdfAnnotAnnotate?: boolean;   // 带批注内容的气泡
   /** 文本设置（2026-08-24 新增） */
   text: ReaderTextSettings;
   /** 段落设置（2026-08-24 新增） */
@@ -275,7 +288,7 @@ export const READER_DEFAULT_SETTINGS: ReaderSettings = {
   bilingualProgressiveAuto: true,
   bilingualSkipCached: true,
   bilingualRealtimePreview: true,
-  bilingualAlertRatio: 0.8,
+  bilingualRetry: true,
   paragraphHover: true,
   // 2026-08-31 Phase 2：译文归档默认关闭（会在用户思源里建文档，需明确启用）
   translationArchiveEnabled: false,
@@ -289,6 +302,9 @@ export const READER_DEFAULT_SETTINGS: ReaderSettings = {
   pdfViewMode: "single",
   pdfScrollDir: "vertical",
   pdfInvert: false,
+  pdfAnnotHighlight: true,
+  pdfAnnotUnderline: true,
+  pdfAnnotAnnotate: true,
   text: {
     fontWeight: 400,
     letterSpacing: 0,

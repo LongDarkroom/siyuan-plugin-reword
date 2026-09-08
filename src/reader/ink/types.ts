@@ -1,8 +1,8 @@
 /**
  * Apple Pencil 墨迹批注 · 数据类型
  * ----------------------------------------------------------------
- * 5 种笔刷 + 7 色 + 5 线型 = 35 组合 + 6 预设 + 橡皮
- * 沿用批注模块 (whale-manager) 的 7 色 × 5 线型设计
+ * 5 种笔刷 + 5 色 + 5 线型 = 25 组合 + 6 预设 + 橡皮
+ * 沿用批注模块 (annotation-store) 的 WHALE_COLORS 5 色调色板
  *
  * 笔触模型：每个 InkStroke 是连续的 pointer 路径（Catmull-Rom 拟合后）
  * 存储：SVG path 的 d 属性（d="M x0 y0 Q x1 y1 x2 y2 ..."）
@@ -13,15 +13,13 @@
 /** 笔刷类型（5 种 + 橡皮） */
 export type InkBrush = "ballpoint" | "pencil" | "marker" | "highlighter" | "fountain" | "eraser";
 
-/** 7 色调色板（沿用批注模块 WHALE_COLORS） */
+/** 5 色调色板（2026-09-04 统一：与批注模块 WHALE_COLORS 严格一致，勿单方面增删） */
 export const INK_COLORS = [
-  "#facc15", // 黄色 (默认)
-  "#22c55e", // 绿色
-  "#3b82f6", // 蓝色
-  "#ec4899", // 粉色
-  "#f97316", // 橙色
-  "#a855f7", // 紫色
-  "#6b7280", // 灰色
+  "#facc15", // 明黄 (默认)
+  "#22c55e", // 翠绿
+  "#06b6d4", // 青蓝
+  "#ec4899", // 玫粉
+  "#8b5cf6", // 紫罗兰
 ] as const;
 export type InkColor = typeof INK_COLORS[number];
 
@@ -76,10 +74,10 @@ export const INK_PRESETS: Array<{
   opacity: number;
 }> = [
   { name: "中性笔 · 黄", brush: "ballpoint", color: "#facc15", style: "solid", baseWidth: 2, opacity: 1 },
-  { name: "铅笔 · 灰", brush: "pencil", color: "#6b7280", style: "solid", baseWidth: 1.5, opacity: 0.85 },
-  { name: "马克笔 · 蓝", brush: "marker", color: "#3b82f6", style: "solid", baseWidth: 6, opacity: 0.7 },
+  { name: "铅笔 · 青", brush: "pencil", color: "#06b6d4", style: "solid", baseWidth: 1.5, opacity: 0.85 },
+  { name: "马克笔 · 粉", brush: "marker", color: "#ec4899", style: "solid", baseWidth: 6, opacity: 0.7 },
   { name: "荧光笔 · 黄", brush: "highlighter", color: "#facc15", style: "solid", baseWidth: 12, opacity: 0.35 },
-  { name: "钢笔 · 黑", brush: "fountain", color: "#6b7280", style: "solid", baseWidth: 1.2, opacity: 1 },
+  { name: "钢笔 · 紫", brush: "fountain", color: "#8b5cf6", style: "solid", baseWidth: 1.2, opacity: 1 },
   { name: "下划线 · 红", brush: "fountain", color: "#ec4899", style: "underline", baseWidth: 1, opacity: 0.8 },
 ];
 

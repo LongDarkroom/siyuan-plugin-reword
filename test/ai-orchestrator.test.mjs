@@ -100,7 +100,7 @@ test("runAiDeepRead: jsonMode 失败时回退补全高亮词语境", async () =>
   assert.equal(res.words[0].context, "Apple is red.");
 });
 
-test("runAiChat: 对话模式直出 markdown，透传 messages", async () => {
+test("runAiChat: 对话模式直出 markdown，注入 system 并用 user_input 包裹用户消息", async () => {
   let capturedMessages = null;
   const transport = async (req) => {
     capturedMessages = JSON.parse(req.body).messages;
@@ -116,6 +116,8 @@ test("runAiChat: 对话模式直出 markdown，透传 messages", async () => {
   const messages = [
     { role: "system", content: "" },
     { role: "user", content: "解释一下这句话" },
+    { role: "assistant", content: "好的。" },
+    { role: "user", content: "那这句呢" },
   ];
   const res = await runAiChat(messages, { ...DEFAULT_AI_SETTINGS, model: "gpt-4o-mini" }, { transport });
   assert.equal(res.ok, true);
@@ -124,8 +126,60 @@ test("runAiChat: 对话模式直出 markdown，透传 messages", async () => {
   assert.equal(res.raw, "你好，我明白了。");
   assert.equal(res.words.length, 0);
   assert.equal(res.sentences.length, 0);
-  // 消息原样透传（不做结构化，不丢失历史）
-  assert.deepEqual(capturedMessages, messages);
+  // 2026-09-04 P0-1：空 system 被丢弃并替换为对话版 system（含角色与禁止续写约束）
+  assert.equal(capturedMessages.length, 4);
+  assert.equal(capturedMessages[0].role, "system");
+  assert.match(capturedMessages[0].content, /英语学习助手/);
+  assert.match(capturedMessages[0].content, /禁止续写/);
+  // 2026-09-04 P0-2：user 消息被标签包裹，assistant 消息保持原样，历史条数不变
+  assert.equal(capturedMessages[1].content, "<user_input>\n解释一下这句话\n</user_input>");
+  assert.equal(capturedMessages[2].content, "好的。");
+  assert.equal(capturedMessages[3].content, "<user_input>\n那这句呢\n</user_input>");
+});
+
+test("runAiChat [P0-1]: 调用方已带 system 时不覆盖", async () => {
+  let capturedMessages = null;
+  const transport = async (req) => {
+    capturedMessages = JSON.parse(req.body).messages;
+    return {
+      status: 200,
+      headers: {},
+      body: JSON.stringify({ model: "x", choices: [{ message: { content: "ok" } }] }),
+    };
+  };
+  await runAiChat(
+    [{ role: "system", content: "自定义提示词" }, { role: "user", content: "hi" }],
+    { ...DEFAULT_AI_SETTINGS },
+    { transport }
+  );
+  assert.equal(capturedMessages[0].content, "自定义提示词");
+  assert.equal(capturedMessages[1].content, "<user_input>\nhi\n</user_input>");
+});
+
+test("runAiChat [P0-3]: 截断不再自动续传，只保留 truncated 标记", async () => {
+  const calls = [];
+  const transport = async (req) => {
+    const body = JSON.parse(req.body);
+    calls.push(body.messages.length);
+    return {
+      status: 200,
+      headers: {},
+      body: JSON.stringify({
+        model: "gpt-4o-mini",
+        choices: [{ message: { content: "前半段" }, finish_reason: "length" }],
+      }),
+    };
+  };
+  const res = await runAiChat(
+    [{ role: "user", content: "翻译一下" }],
+    { ...DEFAULT_AI_SETTINGS, model: "gpt-4o-mini" },
+    { transport }
+  );
+  assert.equal(res.ok, true);
+  assert.equal(res.truncated, true);
+  assert.equal(res.raw, "前半段");
+  // 只有一次请求：不再追加「请从断点处继续输出」的续传轮
+  assert.equal(calls.length, 1);
 });
 
 test("runAiChat: 网络异常返回 ok=false 与 error", async () => {

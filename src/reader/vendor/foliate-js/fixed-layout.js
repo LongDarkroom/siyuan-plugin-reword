@@ -411,7 +411,16 @@ export class FixedLayout extends HTMLElement {
             margin: calc(var(--scroll-page-gap, 4px) * var(--scroll-zoom, 1)) 0;
         }
         :host([flow="scrolled"]) .scroll-page iframe {
-            pointer-events: none;
+            /* REword fix 2026-09-04 (fail-safe): the CSS fallback is now
+               auto instead of none. Interaction is still dropped during
+               scrolling (see the setScrollIframeInteraction helper, which sets
+               none inline) but if that state machine ever fails to re-arm, the
+               reader degrades to "scrolling is slightly less smooth" instead
+               of "text can never be selected at all". A dead text layer is
+               unrecoverable for the user; a hijacked scroll tick is not.
+               NOTE: this CSS lives inside a JS template literal, so the
+               comment must not contain backticks. */
+            pointer-events: auto;
         }
         :host([flow="scrolled"][scroll-direction="horizontal"]) .scroll-container {
             flex-direction: row;
@@ -845,6 +854,13 @@ export class FixedLayout extends HTMLElement {
         for (const page of this.#scrollPages) {
             this.#scrollObserver.observe(page.el)
         }
+
+        // REword fix 2026-09-04: start scroll mode with iframe interaction
+        // enabled. The scroll-mode CSS defaults iframe pointer-events to none,
+        // so without this explicit call the user cannot select text until after
+        // the first scroll-tick/idle cycle (and in some edge cases never at all
+        // if the re-enable timer is dropped).
+        this.#setScrollIframeInteraction(true)
     }
     // Load the nearest visible idle pages and evict the farthest off-screen ones,
     // honouring the concurrency and in-memory caps. Re-run whenever visibility or
@@ -864,6 +880,17 @@ export class FixedLayout extends HTMLElement {
         for (const index of evict) this.#teardownScrollPage(this.#scrollPages[index])
         for (const index of load) this.#loadScrollPage(this.#scrollPages[index])
     }
+    #armScrollIdleReenable() {
+        if (this.#scrollIdleTimer) clearTimeout(this.#scrollIdleTimer)
+        this.#scrollIdleTimer = setTimeout(() => {
+            this.#scrollIdleTimer = null
+            this.#scrolling = false
+            this.#setScrollIframeInteraction(true)
+            // Report location only after scroll settles to avoid
+            // expensive React re-renders on every frame
+            this.#reportScrollLocation()
+        }, 150)
+    }
     #handleScrollEvent = () => {
         // Drop iframe interaction while the host is actively scrolling so the
         // scroll stays native-smooth (the iframe's own pointer handlers can't
@@ -873,15 +900,8 @@ export class FixedLayout extends HTMLElement {
         // owned by one document — keeping the iframes interactive is the
         // trade-off for native selection.)
         this.#scrolling = true
+        this.#armScrollIdleReenable()
         this.#setScrollIframeInteraction(false)
-        if (this.#scrollIdleTimer) clearTimeout(this.#scrollIdleTimer)
-        this.#scrollIdleTimer = setTimeout(() => {
-            this.#scrolling = false
-            this.#setScrollIframeInteraction(true)
-            // Report location only after scroll settles to avoid
-            // expensive React re-renders on every frame
-            this.#reportScrollLocation()
-        }, 150)
     }
     #handleScrollWheel = e => {
         const delta = computeScrollWheelDelta({
@@ -894,7 +914,17 @@ export class FixedLayout extends HTMLElement {
         this.scrollBy({ left: delta.left, behavior: 'auto' })
     }
     #setScrollIframeInteraction(enabled) {
-        const value = enabled ? 'auto' : ''
+        // REword fix 2026-09-04: any disable must be self-healing — arm the
+        // idle re-enable HERE so no caller can ever leave the page iframes
+        // stuck at the scroll-mode CSS default `pointer-events: none`.
+        // (Original bug: the per-iframe wheel listener disabled interaction
+        // unconditionally; in vertical mode / ctrl+wheel pinch / scroll-limit
+        // no host `scroll` event followed, the re-enable timer never armed,
+        // and text selection died permanently after the first wheel tick.)
+        if (!enabled) this.#armScrollIdleReenable()
+        // Explicit `none`/`auto` (not empty string) so we never depend on the
+        // scroll-mode CSS default to disable interaction during scrolling.
+        const value = enabled ? 'auto' : 'none'
         for (const page of this.#scrollPages) {
             if (page.frame?.iframe) {
                 page.frame.iframe.style.pointerEvents = value
@@ -1045,8 +1075,14 @@ export class FixedLayout extends HTMLElement {
             // and taps work without first scrolling. While scrolling, leave it
             // inert (the scroll-settle handler turns it back on) so its pointer
             // handlers can't hijack the native scroll.
-            if (!this.#scrolling && !this.#pinching && frame.iframe) {
-                frame.iframe.style.pointerEvents = 'auto'
+            // REword fix 2026-09-04: set the value unconditionally, not only on
+            // the idle branch. The CSS fallback is now `auto`, so a page that
+            // finishes loading mid-scroll must be explicitly pinned to `none`
+            // or it lands interactive and its pointer handlers hijack the
+            // in-progress native scroll.
+            if (frame.iframe) {
+                frame.iframe.style.pointerEvents =
+                    (this.#scrolling || this.#pinching) ? 'none' : 'auto'
             }
 
             // Create overlayer
@@ -1080,7 +1116,16 @@ export class FixedLayout extends HTMLElement {
                 // applies — so the translated scroll can never stack on a
                 // native one either.
                 doc.addEventListener('wheel', e => {
-                    this.#setScrollIframeInteraction(false)
+                    // REword fix 2026-09-04: route the interaction drop through
+                    // #handleScrollEvent so the 150ms idle timer always re-arms.
+                    // Calling #setScrollIframeInteraction(false) directly left
+                    // all page iframes permanently inert (pointer-events stuck
+                    // at the scroll-mode CSS default `none`) whenever no host
+                    // scroll followed the tick — vertical mode, ctrl+wheel
+                    // pinch and scroll-limit all return null from
+                    // computeScrollWheelDelta, so no `scroll` event ever fired
+                    // and text selection died for good after the first wheel.
+                    this.#handleScrollEvent()
                     const delta = computeScrollWheelDelta({
                         deltaX: e.deltaX, deltaY: e.deltaY, ctrlKey: e.ctrlKey,
                         horizontal: this.#scrollHorizontal, rtl: this.rtl,

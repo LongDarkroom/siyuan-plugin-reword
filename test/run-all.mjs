@@ -1,126 +1,34 @@
-// 聚合测试运行器：逐个运行白名单测试文件，不因单个失败而中断，
+// 聚合测试运行器：逐个运行测试文件，不因单个失败而中断，
 // 最后汇总 PASS/FAIL 并退出对应状态码（有任一失败则 exit 1）。
 // 用法：npm test  （等价于 node test/run-all.mjs）
 // 调试单个失败文件完整日志：VERBOSE=1 npm test
+//
+// 2026-09-04 P1：白名单改为自动发现。
+// 此前是 108 条硬编码白名单，而 test/ 下实有 151 个 .test.mjs —— 43 个文件
+// （集中在 pdf / ink / bookshelf 等近期改动最密的模块）从未被执行过，
+// 且白名单双向失真：文件删了条目还在（恒定 ERR_MODULE_NOT_FOUND）、
+// 文件新增了却没进白名单（静默漏测，测了也白测）。
 import { spawn } from "node:child_process";
+import { readdirSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 const NODE = process.execPath;
 const LOADER = "./test/siyuan-stub-loader.mjs";
+const TEST_DIR = join(dirname(fileURLToPath(import.meta.url)));
 
-const TESTS = [
-  "test/pos-toggle.test.mjs",
-  "test/responsive.test.mjs",
-  "test/reader-drawer-state.test.mjs",
-  "test/phrase-column.test.mjs",
-  "test/tts-read.test.mjs",
-  "test/tts-controller-create.test.mjs",
-  "test/tts-backend-fallback.test.mjs",
-  "test/tts-edge-fail-graceful.test.mjs",
-  "test/tts-settings-merge.test.mjs",
-  "test/annotation-store.test.mjs",
-  "test/annotation-store-subscribe.test.mjs",
-  "test/pdf-outline.test.mjs",
-  "test/pdf-phase1-ui.test.mjs",
-  "test/block-mark.test.mjs",
-  "test/annotation-render.test.mjs",
-  "test/inline-mark.test.mjs",
-  "test/ai-client.test.mjs",
-  "test/ai-text.test.mjs",
-  "test/ai-drag-doc-id.test.mjs",
-  "test/ai-drag-block-ids.test.mjs",
-  "test/ai-drag-drop-batch.test.mjs",
-  "test/ai-orchestrator.test.mjs",
-  "test/anno-ai-dialog.test.mjs",
-  "test/whale-prompt.test.mjs",
-  "test/online-phonetic.test.mjs",
-  "test/dict-search-index.test.mjs",
-  "test/label-store.test.mjs",
-  "test/whale-dialog-html.test.mjs",
-  "test/whale-dialog-ai-button.test.mjs",
-  "test/edit-session.test.mjs",
-  "test/render-roundtrip.test.mjs",
-  "test/online-dict.test.mjs",
-  "test/online-cache-ttl.test.mjs",
-  "test/ai-doc-ref.test.mjs",
-  "test/ai-refs.test.mjs",
-  "test/ai-refs-panel.test.mjs",
-  "test/ai-input-protyle-standard.test.mjs",
-  "test/clean-for-ai-doc-ref.test.mjs",
-  "test/get-document-content.test.mjs",
-  "test/ai-settings-normalize.test.mjs",
-  "test/word-preferred-defs.test.mjs",
-  "test/dict-renderer-preferred.test.mjs",
-  "test/preferred-pick-helper.test.mjs",
-  "test/review-preferred.test.mjs",
-  "test/export.test.mjs",
-  "test/review-difficulty.test.mjs",
-  "test/review-scheduler.test.mjs",
-  "test/review-config.test.mjs",
-  "test/review-data.test.mjs",
-  "test/review-data-injection.test.mjs",
-  "test/review-statemachine.test.mjs",
-  "test/review-calibrate.test.mjs",
-  "test/vocab-master-batch.test.mjs",
-  "test/vocab-store.test.mjs",
-  "test/ann-editor.test.mjs",
-  "test/ann-block-detect.test.mjs",
-  "test/table-render.test.mjs",
-  "test/note-table.test.mjs",
-  "test/ai-message-toolbar.test.mjs",
-  "test/confirm-delete.test.mjs",
-  "test/ai-render-think.test.mjs",
-  "test/ai-render-incremental.test.mjs",
-  "test/stream-throttle.test.mjs",
-  "test/chat-trim.test.mjs",
-  "test/ai-panel-resizer.test.mjs",
-  "test/brand-rename.test.mjs",
-  "test/vocab-highlight.test.mjs",
-  "test/learning-status.test.mjs",
-  "test/index-vocab-integration.test.mjs",
-  "test/reader-shortcuts.test.mjs",
-  "test/vocab-store-load-guard.test.mjs",
-  "test/console-filter.test.mjs",
-  "test/logger-perf.test.mjs",
-  "test/reader-tab-diagnostic-cleanup.test.mjs",
-  "test/reader-epub-style-override.test.mjs",
-  "test/reader-cjk-font-stack.test.mjs",
-  "test/reader-style-no-footnote-touch.test.mjs",
-  "test/reader-style-priority.test.mjs",
-  "test/reader-style-font-preserve.test.mjs",
-  "test/reader-toc-scroll.test.mjs",
-  "test/reader-fonts-host.test.mjs",
-  "test/reader-view-font-blob.test.mjs",
-  "test/dock-layout-persistence.test.mjs",
-  "test/reader-popover-outside-click.test.mjs",
-  "test/vocab-highlight-toggle.test.mjs",
-  "test/reader-vocab-autohighlight.test.mjs",
-  "test/reader-floating-layer.test.mjs",
-  // 2026-09-03：test/reader-annotation-onestep-flow.test.mjs 已删除（旧一步流程设计残留），
-  // 白名单同步移除，否则全量运行恒定报 ERR_MODULE_NOT_FOUND。
-  "test/reader-book-excerpts-refresh.test.mjs",
-  "test/reader-bookmarks-annots.test.mjs",
-  "test/reader-sel-toolbar.test.mjs",
-  "test/reader-show-annotation-rec-fallback.test.mjs",
-  "test/reader-settings-4-sections.test.mjs",
-  "test/reader-settings-placeholder-encoding.test.mjs",
-  // 2026-09-03：safe-delete-annotation / -v4 两个测试文件已删除（旧设计残留），
-  // 白名单同步移除，否则全量运行恒定报 ERR_MODULE_NOT_FOUND。
-  "test/reader-settings-compact.test.mjs",
-  "test/reader-font-size-override.test.mjs",
-  "test/reader-search.test.mjs",
-  "test/reader-layout.test.mjs",
-  "test/reader-footnote-robust.test.mjs",
-  "test/reader-toolbar-annotation.test.mjs",
-  "test/reader-typo-preset.test.mjs",
-  "test/bilingual-pretranslate.test.mjs",
-  "test/bilingual-v2.test.mjs",
-  "test/bilingual-render.test.mjs",
-  "test/sqlite-translation-cache.test.mjs",
-  "test/glossary.test.mjs",
-  "test/cache-mode.test.mjs",
-  "test/translate-providers.test.mjs",
-  "test/telemetry.test.mjs",
-];
+// 需要长期跳过的文件放这里，必须附原因与日期。
+// 为空是正常的 —— 宁可让它失败暴露出来，也不要静默漏测。
+const SKIP = new Set([
+  // 例："test/foo.test.mjs", // 2026-09-04 原因为 xxx
+]);
+
+const TESTS = readdirSync(TEST_DIR)
+  .filter((f) => f.endsWith(".test.mjs"))
+  .map((f) => "test/" + f)
+  .filter((f) => !SKIP.has(f))
+  .sort();
+
 
 function run(file) {
   return new Promise((resolve) => {

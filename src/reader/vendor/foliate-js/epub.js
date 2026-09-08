@@ -1,5 +1,16 @@
 import * as CFI from './epubcfi.js'
 
+// 2026-09-05 REword（性能）：并发映射，固定上限。
+// 用于把「逐个元素 await」的串行资源加载改为有界并发：既不串行排队，
+// 也不至于一次性把上百个请求同时打进加载队列。
+async function mapWithLimit(items, limit, fn) {
+    let cursor = 0
+    const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+        while (cursor < items.length) await fn(items[cursor++])
+    })
+    await Promise.all(workers)
+}
+
 const NS = {
     CONTAINER: 'urn:oasis:names:tc:opendocument:xmlns:container',
     XHTML: 'http://www.w3.org/1999/xhtml',
@@ -1057,7 +1068,10 @@ class Loader {
             const replace = async (el, attr) => el.setAttribute(attr,
                 await this.loadHref(el.getAttribute(attr), href, parents))
             for (const el of doc.querySelectorAll('link[href]')) await replace(el, 'href')
-            for (const el of doc.querySelectorAll('[src]')) await replace(el, 'src')
+            // 2026-09-05 REword（性能）：原为串行 await，图多的章节（一章 70 张）要等 70 次往返，
+            // 总耗时线性放大且主线程长时间被 await 链牵住；改为上限 6 的并发加载。
+            await mapWithLimit(Array.from(doc.querySelectorAll('[src]')), 6,
+                async (el) => { await replace(el, 'src') })
             for (const el of doc.querySelectorAll('[poster]')) await replace(el, 'poster')
             for (const el of doc.querySelectorAll('object[data]')) await replace(el, 'data')
             for (const el of doc.querySelectorAll('[*|href]:not([href])'))

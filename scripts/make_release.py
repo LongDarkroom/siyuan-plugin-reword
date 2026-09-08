@@ -5,6 +5,8 @@
   - zip 解压后必须【直接】是插件根文件，不能有外层父目录。
   - 必需：plugin.json, index.js, index.css, icon.png, preview.png, README.md, i18n/（多语言时）。
   - 体积建议 < 10MB：词典(dict/，约 64MB) 与废弃 sql.js 资源不随包，运行时按需下载。
+    当前实际约 4-5MB：主包 index.js 之外，cmaps/(1.6M) + standard_fonts/(800K)
+    为 PDF CJK 渲染必需，虽占 2.4M 但不可省（见下方 INCLUDE_DIRS 注释）。
 
 用法：先 `npm run build`，再 `python scripts/make_release.py`（或 `npm run make`）。
 产物：仓库根目录 package.zip
@@ -33,6 +35,15 @@ INCLUDE_FILES = [
 # 直接平铺到 zip 根的【白名单目录】
 INCLUDE_DIRS = [
     "i18n",
+    # [2026-09-04 修复] PDF CJK 渲染：pdf.js 的 CMap 与标准字体资源。
+    # 运行时按 `${origin}/plugins/siyuan-plugin-reword/cmaps/` 与
+    # `/standard_fonts/` 加载（见 src/reader/vendor/foliate-js/pdf.js:516-522），
+    # 即插件根目录下的同名目录。copy-dist.mjs 会把它们复制到根目录，
+    # 但此前 INCLUDE_DIRS 只列了 i18n —— 导致从集市安装的正式版缺这两个目录，
+    # 中文 PDF 的 CJK 字形取不到 CMap 而显示为方块（本地开发版因为根目录有
+    # copy-dist 的产物，反而正常，故该缺陷长期未被发现）。
+    "cmaps",
+    "standard_fonts",
 ]
 
 # 一律排除（非发布物 / 体积过大 / 废弃）

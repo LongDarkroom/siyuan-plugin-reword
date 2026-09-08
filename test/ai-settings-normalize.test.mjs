@@ -6,7 +6,12 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { normalizeAiSettings, DEFAULT_AI_SETTINGS } from "../src/ai/ai-settings.ts";
+import {
+  normalizeAiSettings,
+  listNormalizeGaps,
+  DEFAULT_AI_SETTINGS,
+  DEFAULT_CONCISE_TRANSLATE_PROMPT,
+} from "../src/ai/ai-settings.ts";
 
 test("Normalize:全字段缺省时回退到 DEFAULT_AI_SETTINGS", () => {
   const r = normalizeAiSettings({});
@@ -86,7 +91,7 @@ test("Normalize:chatPromptTemplate 空字符串 → 不触发迁移", () => {
   assert.ok(!r.promptTemplate.includes("[REword-legacy-chat-prompt]"));
 });
 
-test("Normalize:删字段(chatApi/topP/freqPenalty/presencePenalty/autoContinue/contextWindow/timeoutSec/transportMode/sendShortcut)被忽略", () => {
+test("Normalize:删字段(chatApi/topP/freqPenalty/presencePenalty/autoContinue/contextWindow/timeoutSec/transportMode)被忽略", () => {
   // 尝试写入这些已删字段,normalize 应静默忽略
   const r = normalizeAiSettings({
     chatApi: "gemini",
@@ -97,7 +102,6 @@ test("Normalize:删字段(chatApi/topP/freqPenalty/presencePenalty/autoContinue/
     contextWindow: 999999,
     timeoutSec: 999,
     transportMode: "proxy",
-    sendShortcut: "enter",
   });
   // 不应报错,且不应有这些字段
   assert.equal(r.chatApi, undefined);
@@ -108,7 +112,31 @@ test("Normalize:删字段(chatApi/topP/freqPenalty/presencePenalty/autoContinue/
   assert.equal(r.contextWindow, undefined);
   assert.equal(r.timeoutSec, undefined);
   assert.equal(r.transportMode, undefined);
-  assert.equal(r.sendShortcut, undefined);
+});
+
+test("Normalize:sendShortcut 已于 2026-09-06 复活(枚举收窄,非忽略)", () => {
+  // 该字段 2026-08-21 曾被精简删除,老断言要求 normalize 忽略它;
+  // 2026-09-06 第 1 批把它提升为「发送快捷键」设置项(🟡 待接线),故行为改为枚举收窄。
+  assert.equal(normalizeAiSettings({ sendShortcut: "enter" }).sendShortcut, "enter");
+  assert.equal(normalizeAiSettings({ sendShortcut: "mod+enter" }).sendShortcut, "mod+enter");
+  // 非法值(含 2026-08-21 之前的旧格式 "ctrl+enter")静默回退默认,不抛错
+  assert.equal(normalizeAiSettings({ sendShortcut: "ctrl+enter" }).sendShortcut, "mod+enter");
+  assert.equal(normalizeAiSettings({ sendShortcut: 123 }).sendShortcut, "mod+enter");
+  assert.equal(normalizeAiSettings({}).sendShortcut, "mod+enter");
+});
+
+test("Normalize:第 1 批功能蓝图字段枚举收窄(progressMode/deepReadVerify/unknownHandling)", () => {
+  // 🔵 规划中字段同样要做枚举收窄:脏数据回退默认,不能让插件起不来
+  assert.equal(normalizeAiSettings({ progressMode: "real" }).progressMode, "real");
+  assert.equal(normalizeAiSettings({ progressMode: "bogus" }).progressMode, "infer");
+  assert.equal(normalizeAiSettings({ deepReadVerify: "strict" }).deepReadVerify, "strict");
+  assert.equal(normalizeAiSettings({ deepReadVerify: "nope" }).deepReadVerify, "warn");
+  assert.equal(normalizeAiSettings({ unknownHandling: "mark" }).unknownHandling, "mark");
+  assert.equal(normalizeAiSettings({ unknownHandling: "x" }).unknownHandling, "omit");
+  // 数值型:限幅
+  assert.equal(normalizeAiSettings({ chunkChars: 99999 }).chunkChars, 8000);
+  assert.equal(normalizeAiSettings({ streamThrottleMs: -5 }).streamThrottleMs, 0);
+  assert.equal(normalizeAiSettings({ sessionRetentionDays: 9999 }).sessionRetentionDays, 365);
 });
 
 test("Normalize:数值限幅仍生效(温度/maxTokens)", () => {
@@ -145,5 +173,89 @@ test("Normalize:模型列表去重 + 去空", () => {
 test("Normalize:模型列表空时回退默认", () => {
   const r = normalizeAiSettings({ models: [] });
   assert.ok(r.models.length > 0, "空数组应回退默认");
-  assert.equal(r.models[0], "gpt-4o-mini");
+  // 2026-09-07 改动点 1：默认平台即硅基流动，空模型列表回退默认平台的代表模型
+  assert.equal(r.models[0], DEFAULT_AI_SETTINGS.models[0]);
+});
+
+// ── 2026-09-06 P0 修复：normalize 漏字段导致「用户配置重启即丢」──────────────
+// 背景：conciseTranslatePrompt 在接口 / DEFAULT / 消费方三层都存在，唯独
+// normalizeAiSettings 的返回对象里没有。因为它是可选字段，TS 不会报错，
+// 于是缺陷静默存在：用户自定义简洁版提示词 → 保存 → 重启 → 回退默认。
+// 下面两条用例把「字段完整性」固化为不变量，新增字段忘了补 normalize 立即变红。
+
+test("P0:normalize 返回对象不得缺少任何默认字段(listNormalizeGaps 必须为空)", () => {
+  assert.deepEqual(listNormalizeGaps(), [], "normalizeAiSettings 漏字段会导致配置无法持久化");
+});
+
+test("P0:conciseTranslatePrompt 往返不丢(自定义值能存能读)", () => {
+  const custom = "极简翻译：只给中文，不要任何解释。";
+  const r = normalizeAiSettings({ conciseTranslatePrompt: custom });
+  assert.equal(r.conciseTranslatePrompt, custom);
+  // 二次往返（模拟 保存 → 重启加载）
+  const again = normalizeAiSettings(JSON.parse(JSON.stringify(r)));
+  assert.equal(again.conciseTranslatePrompt, custom, "二次 normalize 后不得回退默认");
+});
+
+test("P0:conciseTranslatePrompt 缺失/空串时回退默认(与 translatePrompt 同口径)", () => {
+  assert.equal(
+    normalizeAiSettings({}).conciseTranslatePrompt,
+    DEFAULT_CONCISE_TRANSLATE_PROMPT
+  );
+  assert.equal(
+    normalizeAiSettings({ conciseTranslatePrompt: "   " }).conciseTranslatePrompt,
+    DEFAULT_CONCISE_TRANSLATE_PROMPT
+  );
+  assert.equal(
+    normalizeAiSettings({ conciseTranslatePrompt: 123 }).conciseTranslatePrompt,
+    DEFAULT_CONCISE_TRANSLATE_PROMPT
+  );
+});
+
+test("P0:save 语义——merge 后未出现在 UI 上的字段必须保留", () => {
+  // 模拟 index.ts #ais-save 的修复语义：patch 只有 14 个字段，
+  // merge + normalize 后，翻译引擎 Key 等其余字段必须原样存活。
+  const stored = normalizeAiSettings({
+    tencentSecretId: "AKIDxxx",
+    tencentSecretKey: "secretxxx",
+    youdaoAppKey: "yd-key",
+    baiduKey: "bd-key",
+    msKey: "ms-key",
+    aiTokenUsed: 4321,
+    bilingualStyle: "natural",
+    trBatchSize: 12,
+    conciseTranslatePrompt: "自定义简洁版",
+  });
+  const patch = {
+    enabled: true,
+    baseUrl: "https://api.example.com/v1",
+    apiKey: "sk-new",
+    model: "deepseek-chat",
+    models: ["deepseek-chat"],
+    temperature: 0.9,
+    maxTokens: 8192,
+    jsonMode: false,
+    promptTemplate: "新提示词",
+    fontSize: 16,
+    inputFontSize: 17,
+    useProtyleInput: true,
+    exportNotebookId: "",
+    exportSavePath: "",
+    soulDocId: "",
+  };
+  const merged = normalizeAiSettings({ ...stored, ...patch });
+
+  // patch 生效
+  assert.equal(merged.apiKey, "sk-new");
+  assert.equal(merged.temperature, 0.9);
+  assert.equal(merged.fontSize, 16);
+  // 未出现在 UI 上的字段存活（修复前会被整体替换抹掉）
+  assert.equal(merged.tencentSecretId, "AKIDxxx");
+  assert.equal(merged.tencentSecretKey, "secretxxx");
+  assert.equal(merged.youdaoAppKey, "yd-key");
+  assert.equal(merged.baiduKey, "bd-key");
+  assert.equal(merged.msKey, "ms-key");
+  assert.equal(merged.aiTokenUsed, 4321);
+  assert.equal(merged.bilingualStyle, "natural");
+  assert.equal(merged.trBatchSize, 12);
+  assert.equal(merged.conciseTranslatePrompt, "自定义简洁版");
 });

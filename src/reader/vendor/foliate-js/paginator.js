@@ -933,11 +933,20 @@ class View {
             'inline-grid': 'grid',
             'inline-table': 'table',
         }
+        // 2026-09-05 REword（性能）：读写分离。原为逐元素「读 display → 读 rect → 写 display」
+        // 交错，元素多时每个命中元素都强制一次同步布局。改为 ① 批量读 display（只 style recalc，
+        // 不触发 layout）→ ② 只对候选批量读 rect（flush 一次 layout）→ ③ 批量写。
+        const candidates = []
         for (const el of doc.body.querySelectorAll('*')) {
             const replacement = fragmentable[view.getComputedStyle(el).display]
-            if (replacement && el.getBoundingClientRect().height > availableHeight)
-                setStylesImportant(el, { display: replacement })
+            if (replacement) candidates.push([el, replacement])
         }
+        if (!candidates.length) return
+        const pending = []
+        for (const [el, replacement] of candidates) {
+            if (el.getBoundingClientRect().height > availableHeight) pending.push([el, replacement])
+        }
+        for (const [el, replacement] of pending) setStylesImportant(el, { display: replacement })
     }
     setImageSize(availableWidth, availableHeight) {
         const { width, height, marginTop, marginRight, marginBottom, marginLeft } = this.#layout
@@ -950,13 +959,24 @@ class View {
         // `auto`, so height:100% resolves to 0 and the cover collapses out of
         // sight (#4379). Apply it only when columnized.
         const applyFullscreen = pageFullscreen && this.#column
-        for (const el of doc.body.querySelectorAll('img, svg, video')) {
-            // clear previous inline constraints so we read CSS-authored values,
-            // not stale pixel values from a previous resize (#3634)
+        // 2026-09-05 REword（性能·layout thrashing 根治）：
+        // 原实现逐元素「removeProperty(写) → getComputedStyle(读) → setStyles(写)」交错，
+        // 每个元素都会强制一次同步重排；一章 34 张图 = 34 次整页重排，是开书卡死的主放大器。
+        // 改为三段式：① 批量清 → ② 批量读（只 flush 一次布局）→ ③ 批量写（不再夹带读取）。
+        const els = Array.from(doc.body.querySelectorAll('img, svg, video'))
+        // ① 清：去掉上一次渲染残留的内联约束，保证后面读到的是 CSS 原始值（#3634）
+        for (const el of els) {
             el.style.removeProperty('max-width')
             el.style.removeProperty('max-height')
+        }
+        // ② 读：取字符串快照（CSSStyleDeclaration 是 live 对象，不能留到写阶段再读）
+        const sizes = els.map((el) => {
+            const cs = doc.defaultView.getComputedStyle(el)
+            return { maxHeight: cs.maxHeight, maxWidth: cs.maxWidth }
+        })
+        els.forEach((el, i) => {
             // preserve max size if they are already set in CSS
-            let { maxHeight, maxWidth } = doc.defaultView.getComputedStyle(el)
+            let { maxHeight, maxWidth } = sizes[i]
             if (parseInt(maxWidth) > availableWidth) {
                 maxWidth = `${availableWidth}px`
             }
@@ -1024,7 +1044,7 @@ class View {
                     ancestor = ancestor.parentElement
                 }
             }
-        }
+        })
     }
     get #zoom() {
         // Safari does not zoom the client rects, while Chrome, Edge and Firefox does
@@ -1515,7 +1535,9 @@ export class Paginator extends HTMLElement {
             // top-up just moves off the active drag instead of being skipped.
             if (!this.noPreload && !this.noContinuousScroll && !this.#filling
                 && !this.#stabilizing && !this.#touchScrolled) {
-                const minPages = 5
+                // 2026-09-05 REword: 5 → 1。原值会让「剩余页数 < 5」时不断级联加载下一章，
+                // 短章节多的大书会被整本拉进 DOM，主线程被 columnize/expand 吃满 → 思源卡死。
+                const minPages = 1
                 const pagesAhead = this.size > 0
                     ? Math.floor((this.#renderedViewSize - this.#renderedEnd) / this.size)
                     : 0
@@ -1542,7 +1564,8 @@ export class Paginator extends HTMLElement {
             // anchored as the section is inserted above.
             if (this.scrolled && !this.noPreload && !this.noContinuousScroll
                 && !this.#filling && !this.#stabilizing) {
-                const minPages = 5
+                // 2026-09-05 REword: 5 → 1（与前向预热对称，同上原因）
+                const minPages = 1
                 const pagesBehind = this.size > 0
                     ? Math.floor(this.#renderedStart / this.size)
                     : 0

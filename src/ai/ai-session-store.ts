@@ -41,6 +41,8 @@ const HTML_KEEP_RECENT = 10;
 const MAX_SESSIONS = 30;
 /** 单会话消息上限：超出淘汰最旧 */
 const MAX_MESSAGES_PER_SESSION = 100;
+/** 一天毫秒数（会话保留天数换算） */
+const DAY_MS = 86_400_000;
 
 export interface AiSessionData {
   activeId: string | null;
@@ -53,11 +55,21 @@ export class AiSessionStore {
   /** 任意写操作后触发（由插件设置为 saveData 落盘） */
   onChange: () => void = () => {};
 
-  /** 从持久化数据加载 */
-  load(data: AiSessionData | null | undefined): void {
+  /**
+   * 从持久化数据加载
+   * @param data 持久化数据
+   * @param retentionDays 会话保留天数（>0 时剔除「超过该天数未更新」的会话；0/缺省 = 永久保留）
+   *   注意：激活会话同样在清理范围内 —— 但 index.ts 在 load 后有「空库则 create()」兜底，
+   *   不会出现「清理完没有会话可用」。
+   */
+  load(data: AiSessionData | null | undefined, retentionDays = 0): void {
     this.sessions.clear();
     this.activeId = null;
-    const arr = data?.sessions ?? [];
+    const days = typeof retentionDays === "number" && retentionDays > 0 ? retentionDays : 0;
+    const cutoff = days ? Date.now() - days * DAY_MS : 0;
+    const arr = days
+      ? (data?.sessions ?? []).filter((s) => (s.updatedAt ?? 0) >= cutoff)
+      : (data?.sessions ?? []);
     for (const s of arr) this.sessions.set(s.id, s);
     if (data?.activeId && this.sessions.has(data.activeId)) {
       this.activeId = data.activeId;

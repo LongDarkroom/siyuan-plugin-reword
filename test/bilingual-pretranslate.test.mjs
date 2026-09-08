@@ -51,7 +51,8 @@ test("pretranslateAll: 遍历全书段落并携带前文上下文送译", async 
   assert.equal(prog.pending, 0, "完成后剩余待译为 0");
 });
 
-test("pretranslateAll: 批大小上限为 8（分段送译）", async () => {
+// R6：默认批大小改为 5（用户规格「每列 5 个块」）
+test("pretranslateAll: 每批上限 5 块（分段送译）", async () => {
   const paras = Array.from({ length: 20 }, (_, i) => `<p>段${i + 1}</p>`).join("");
   doc = makeDoc(paras);
   calls = 0; lastExtra = undefined;
@@ -66,8 +67,8 @@ test("pretranslateAll: 批大小上限为 8（分段送译）", async () => {
     to: "zh",
   });
   await handle.pretranslateAll();
-  // 20 段 / 批 8 = 3 批 (8 + 8 + 4)
-  assert.equal(calls, 3);
+  // 20 段 / 每批 5 = 4 批
+  assert.equal(calls, 4);
 });
 
 test("pretranslateAll: 空文档不调用翻译且不抛错", async () => {
@@ -102,7 +103,9 @@ test("pretranslateAll: checkCached 全部命中则跳过翻译（pending=0, 状�
     from: "auto",
     to: "zh",
   });
+  // R6：短路只在 progressive 下成立（full 的视野是全书，checkCached 查不到全书）
   await handle.pretranslateAll({
+    full: false,
     onProgress: (p) => { lastStatus = p.status; },
   });
   assert.equal(calls, 0, "全部命中缓存不应调用翻译");

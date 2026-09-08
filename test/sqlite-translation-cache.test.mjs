@@ -139,14 +139,15 @@ test("cache: clear 清空该书缓存", async () => {
 
 /* ==================== 内容编解码（通过公开行为间接验证） ==================== */
 
-test("cache: 译文含换行时仍可原样取回", async () => {
+test("cache: 译文含换行时读出规整为整洁单行（2026-09-05 净化契约）", async () => {
   setTranslationArchiveDoc("");
   const plugin = makeStubPlugin();
   const c = new TranslationCache(plugin, () => "salt");
   const multi = "第一行\n\n第二行";
   await c.setBatch("b1", [[multi, "译文一\n\n译文二"]]);
   const got = await c.getOne("b1", multi);
-  assert.equal(got, "译文一\n\n译文二", "多行译文不应被破坏");
+  // 2026-09-05 起读侧净化：多行/解说体脏值统一规整为单行，不再原样透出
+  assert.equal(got, "译文一 译文二", "多行译文应规整为单行");
 });
 
 test("cache: 译文含单引号/特殊字符不破坏流程", async () => {

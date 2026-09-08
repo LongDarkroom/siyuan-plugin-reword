@@ -14,6 +14,7 @@ import { getLogger } from "../core/logger.ts";
 import { htmlToMd } from "./lute.ts";
 import { stripIal } from "./annotation-render.ts";
 import { getDefaultAnnotationColor } from "./annotation-config.ts";
+import { type BookType } from "../reader/reader-mode.ts";
 
 /** 批注来源 */
 export type AnnotationOrigin = "manual" | "ai";
@@ -79,6 +80,27 @@ export function normalizeAnnotationStyle(style?: string): AnnotationStyle {
 export function normalizeAnnotationColor(color?: string): string {
   if (color && WHALE_COLORS.some((c) => c.value === color)) return color;
   return DEFAULT_ANNOTATION_COLOR;
+}
+
+/** 校验并规整 PDF 归一化矩形数组：过滤非法数值、clamp 到 [0,1]、page 取整 ≥1。
+ *  返回 undefined 表示无有效矩形（落库时等同「未设置」，覆盖层据此不绘制）。 */
+export function sanitizePdfRects(rects?: PdfRect[]): PdfRect[] | undefined {
+  if (!rects || !Array.isArray(rects)) return undefined;
+  const out: PdfRect[] = [];
+  for (const r of rects) {
+    if (!r || typeof r !== "object") continue;
+    const x = Number(r.x), y = Number(r.y), w = Number(r.w), h = Number(r.h), p = Number(r.page);
+    if (![x, y, w, h, p].every((n) => Number.isFinite(n))) continue;
+    if (w <= 0 || h <= 0 || p < 1) continue;
+    out.push({
+      x: Math.min(1, Math.max(0, x)),
+      y: Math.min(1, Math.max(0, y)),
+      w: Math.min(1, Math.max(0, w)),
+      h: Math.min(1, Math.max(0, h)),
+      page: Math.round(p),
+    });
+  }
+  return out.length ? out : undefined;
 }
 
 /** 是否为「阅读批注」（书籍场景，由 bookId 区分文档编辑区批注）。文档批注 bookId 留空。 */
@@ -176,6 +198,17 @@ export interface AnnotationAiMeta {
   prompt?: string;     // 实际使用的 prompt 模板（调试 / 追溯）
 }
 
+/** PDF 文本标注的归一化矩形（P1 自建覆盖层 PdfTextHlLayer 使用）。
+ *  x/y/w/h ∈ [0,1]，相对当前 PDF 页 iframe 元素框；page 为 1-based 页码（= foliate 分节 index+1）。
+ *  翻页 / 缩放 / 滚动时由覆盖层按当前页 iframe 框重映射回屏幕坐标，不写 PDF 本体。 */
+export interface PdfRect {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  page: number;
+}
+
 /** 一条批注 */
 export interface AnnotationItem {
   id: string;            // 唯一 ID
@@ -222,6 +255,12 @@ export interface AnnotationItem {
    * 撤销删除即清掉该字段（restore），数据不丢、零正文污染。
    */
   deletedAt?: string;
+  /** 2026-09-03 新增：媒体类型双保险（pdf/epub/other）。渲染「我的标记」抽屉时按当前书籍过滤，防止跨格式串味 */
+  bookType?: BookType;
+  /** 2026-09-03 新增：PDF 标注在无 CFI 时的页码兜底（跳转用） */
+  page?: number;
+  /** 2026-09-04 P1：PDF 自建覆盖层用的归一化矩形（按页存储，翻页/缩放重映射） */
+  pdfRects?: PdfRect[];
 }
 
 /** 持久化结构 */
@@ -253,6 +292,12 @@ export interface AnnotationInput {
   labels?: string[];     // 分类标签 id 数组
   category?: AnnotationCategory; // 分类
   ai?: AnnotationAiMeta;
+  /** 2026-09-03 新增：媒体类型双保险（pdf/epub/other），落库到 AnnotationItem.bookType */
+  bookType?: BookType;
+  /** 2026-09-03 新增：PDF 标注页码兜底（无 CFI 时跳转用），落库到 AnnotationItem.page */
+  page?: number;
+  /** 2026-09-04 P1：PDF 自建覆盖层归一化矩形，落库到 AnnotationItem.pdfRects */
+  pdfRects?: PdfRect[];
   id?: string;           // 更新已有批注时传入
   noteFormat?: "html" | "kramdown"; // 预留（写入时由 store 强制置 kramdown）
   version?: number;      // 预留（写入时由 store 递增）
@@ -319,6 +364,10 @@ export function annotationKey(blockId: string, sentence: string, selectedText = 
 export class AnnotationStore {
   private items = new Map<string, AnnotationItem>();
   private byKey = new Map<string, string>(); // annotationKey -> id
+  // 2026-09-04 性能：blockId -> ids 索引。此前 getByBlock 每次全量 filter，
+  // 而 index.ts 批注刷新在 ids.forEach 循环内调用它，复杂度 O(块数 × 批注总数)，
+  // 且发生在 MutationObserver 触发的刷新路径上。
+  private byBlock = new Map<string, Set<string>>();
   private onChange?: () => void | Promise<void>;
   /** 2026-09-01：轻量订阅机制,供 ReaderView 等 Svelte 组件响应式刷新(避免每个写点都要手动 refreshAnnotsList) */
   private listeners = new Set<() => void>();
@@ -349,6 +398,7 @@ export class AnnotationStore {
   load(raw: any): void {
     this.items.clear();
     this.byKey.clear();
+    this.byBlock.clear();
     const list = Array.isArray(raw?.annotations) ? raw.annotations : [];
     let migrated = 0;
     for (const it of list) {
@@ -382,6 +432,7 @@ export class AnnotationStore {
         };
         this.items.set(normalized.id, normalized);
         this.byKey.set(annotationKey(normalized.blockId, normalized.sentence || "", normalized.selectedText || ""), normalized.id);
+        this.indexByBlockAdd(normalized);
       }
     }
     if (migrated > 0) {
@@ -474,7 +525,18 @@ export class AnnotationStore {
 
   /** 某块下的全部批注（供块级标记 #23） */
   getByBlock(blockId: string): AnnotationItem[] {
-    return [...this.items.values()].filter((a) => a.blockId === blockId && isActive(a));
+    // 2026-09-04 性能：改走 byBlock 索引（O(该块批注数)）。
+    // 此前 [...items.values()].filter() 全量扫描，而 index.ts 批注刷新在
+    // ids.forEach 循环内调用本方法，批注量大时是 O(块数 × 批注总数)。
+    // 软删项仍在索引中，这里照旧过滤 deletedAt。
+    const ids = this.byBlock.get(blockId);
+    if (!ids || ids.size === 0) return [];
+    const out: AnnotationItem[] = [];
+    for (const id of ids) {
+      const a = this.items.get(id);
+      if (a && isActive(a)) out.push(a);
+    }
+    return out;
   }
 
   /** 某本书下的全部批注（阅读器 / Phase 2：按 bookId 聚合高亮与批注） */
@@ -503,8 +565,11 @@ export class AnnotationStore {
    *  - 否则按 (blockId, sentence) 去重：已存在则覆盖 note（保留原 createdAt）。
    *  - 否则新增，生成 id 与 createdAt。
    * 返回最终落库的批注对象。
+   *
+   * 2026-09-05 R3 类型收口：参数放宽为 Partial（内部本就逐字段 merge，全量输入仅是特例）。
+   * 此前签名过严，ReaderView 的局部更新（upsert({id, style})）被迫 as any 绕过检查。
    */
-  async upsert(input: AnnotationInput): Promise<AnnotationItem> {
+  async upsert(input: Partial<AnnotationInput> & { id?: string }): Promise<AnnotationItem> {
     const ts = nowIso();
     // 2026-08-18：落库前先剥 IAL，防止块导出的 `{.: id="…" updated="…"}` 等属性码被写进 note/sentence/selectedText
     const cleanNote = stripIal(input.note ?? "");
@@ -538,19 +603,24 @@ export class AnnotationStore {
         labels: input.labels ?? prev.labels,
         category: input.category ?? prev.category,
         ai: input.ai ? { ...prev.ai, ...input.ai } : prev.ai,
+        pdfRects: sanitizePdfRects(input.pdfRects) ?? prev.pdfRects,
         updatedAt: ts,
       };
       // 2026-08-24 修复：更新 = 重新激活。此前 ...prev 展开会保留 deletedAt，
       // 导致"软删记录被重新标注 → 画出来了但数据不可见（被过滤）→ 又删不掉"。
       delete updated.deletedAt;
       this.items.set(updated.id, updated);
+      // blockId 可能被 input 覆盖（input.blockId || prev.blockId），索引须先摘旧再挂新
+      this.indexByBlockRemove(prev);
+      this.indexByBlockAdd(updated);
       this.reindexKeys();
       await this.emit();
       return updated;
     }
 
     // 2) 按 (blockId, sentence, selectedText) 去重覆盖（2026-08-17：纳入 selectedText）
-    const key = annotationKey(input.blockId, cleanSentence, cleanSelected);
+    // R3：Partial 输入可能缺 blockId——String() 与历史模板串 ${undefined} 产物一致（"undefined"），运行时不变。
+    const key = annotationKey(String(input.blockId), cleanSentence, cleanSelected);
     const existingId = this.byKey.get(key);
     if (existingId && this.items.has(existingId)) {
       const prev = this.items.get(existingId)!;
@@ -574,6 +644,7 @@ export class AnnotationStore {
         labels: input.labels ?? prev.labels,
         category: input.category ?? prev.category,
         ai: input.ai ? { ...prev.ai, ...input.ai } : prev.ai,
+        pdfRects: sanitizePdfRects(input.pdfRects) ?? prev.pdfRects,
         updatedAt: ts,
       };
       // 2026-08-24 修复：更新 = 重新激活（清除软删标记），同上。
@@ -584,11 +655,13 @@ export class AnnotationStore {
     }
 
     // 3) 新增
+    // R3：ghost 兜底建条（applyEditStyle 系列）历史上就允许缺 blockId/docId（此前靠 as any 绕过），
+    // 断言仅还原类型事实：运行时保持 undefined 原样，不抛错、不改写，避免破坏该功能。
     const note = normalizeNoteToKramdown(cleanNote);
     const created: AnnotationItem = {
       id: input.id || genId(),
-      blockId: input.blockId,
-      docId: input.docId,
+      blockId: input.blockId as string,
+      docId: input.docId as string,
       bookId: input.bookId,
       cfi: input.cfi,
       type: input.type,
@@ -610,9 +683,13 @@ export class AnnotationStore {
       createdAt: ts,
       updatedAt: ts,
       ai: input.origin === "ai" ? (input.ai || {}) : input.ai,
+      bookType: input.bookType,
+      page: input.page,
+      pdfRects: sanitizePdfRects(input.pdfRects),
     };
     this.items.set(created.id, created);
     this.byKey.set(key, created.id);
+    this.indexByBlockAdd(created);
     await this.emit();
     return created;
   }
@@ -655,6 +732,7 @@ export class AnnotationStore {
     if (!it) return false;
     this.items.delete(id);
     this.byKey.delete(annotationKey(it.blockId, it.sentence || "", it.selectedText || ""));
+    this.indexByBlockRemove(it);
     await this.emit();
     return true;
   }
@@ -665,6 +743,7 @@ export class AnnotationStore {
     if (count === 0) return 0;
     this.items.clear();
     this.byKey.clear();
+    this.byBlock.clear();
     await this.emit();
     return count;
   }
@@ -681,6 +760,7 @@ export class AnnotationStore {
     for (const o of orphans) {
       this.items.delete(o.id);
       this.byKey.delete(annotationKey(o.blockId, o.sentence || "", o.selectedText || ""));
+      this.indexByBlockRemove(o);
     }
     await this.emit();
     return orphans.length;
@@ -747,6 +827,24 @@ export class AnnotationStore {
     for (const it of this.items.values()) {
       this.byKey.set(annotationKey(it.blockId, it.sentence || "", it.selectedText || ""), it.id);
     }
+  }
+
+  /* ===== byBlock 索引维护（2026-09-04 性能）===== */
+
+  private indexByBlockAdd(it: AnnotationItem): void {
+    let set = this.byBlock.get(it.blockId);
+    if (!set) {
+      set = new Set();
+      this.byBlock.set(it.blockId, set);
+    }
+    set.add(it.id);
+  }
+
+  private indexByBlockRemove(it: AnnotationItem): void {
+    const set = this.byBlock.get(it.blockId);
+    if (!set) return;
+    set.delete(it.id);
+    if (set.size === 0) this.byBlock.delete(it.blockId);
   }
 
   private async emit(): Promise<void> {

@@ -12,8 +12,19 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 
+/**
+ * resizer 实现已搬到 src/ai/parts/ai-part-resizer.ts（P2 部件化）。
+ * 本文件是「源码扫描型」断言，合并扫描两个文件以保持原有回归语义；
+ * 新文件排在前，避免正则命中 ai-panel.ts 里的薄委托调用。
+ */
+async function readResizerSrc() {
+  const part = await readFile("src/ai/parts/ai-part-resizer.ts", "utf8");
+  const panel = await readFile("src/ai/ai-panel.ts", "utf8");
+  return part + "\n" + panel;
+}
+
 test("AI 精读面板模板：含 chevron 按钮 #hiword-ai-resizer-toggle", async () => {
-  const src = await readFile("src/ai/ai-panel.ts", "utf8");
+  const src = await readResizerSrc();
   // 模板：resizer 内部包含 toggle button(plan §4.1)
   assert.match(
     src,
@@ -28,7 +39,7 @@ test("AI 精读面板模板：含 chevron 按钮 #hiword-ai-resizer-toggle", asy
 });
 
 test("AI 精读面板：chevron 收展状态持久化(读 reword-ai-footer-collapsed)", async () => {
-  const src = await readFile("src/ai/ai-panel.ts", "utf8");
+  const src = await readResizerSrc();
   assert.match(
     src,
     /localStorage\.getItem\(COLLAPSE_KEY\)/,
@@ -48,7 +59,7 @@ test("AI 精读面板：chevron 收展状态持久化(读 reword-ai-footer-colla
 });
 
 test("AI 精读面板：chevron 收起/展开文本切换(▴/▾)", async () => {
-  const src = await readFile("src/ai/ai-panel.ts", "utf8");
+  const src = await readResizerSrc();
   // 找到 applyCollapsedState 函数体
   const fnMatch = src.match(/const applyCollapsedState[\s\S]*?\n    \};/);
   assert.ok(fnMatch, "应能找到 applyCollapsedState 函数");
@@ -59,7 +70,7 @@ test("AI 精读面板：chevron 收起/展开文本切换(▴/▾)", async () =>
 });
 
 test("AI 精读面板：拖拽结束 onResizeEnd 在收起态不写 height(避免 0 覆盖)", async () => {
-  const src = await readFile("src/ai/ai-panel.ts", "utf8");
+  const src = await readResizerSrc();
   // onResizeEnd 函数体
   const fnMatch = src.match(/const onResizeEnd = \(\) => \{[\s\S]*?\n    \};/);
   assert.ok(fnMatch, "应能找到 onResizeEnd 函数");
@@ -71,7 +82,7 @@ test("AI 精读面板：拖拽结束 onResizeEnd 在收起态不写 height(避�
 });
 
 test("AI 精读面板：chevron 点击 stopPropagation 不触发 resizer 拖拽", async () => {
-  const src = await readFile("src/ai/ai-panel.ts", "utf8");
+  const src = await readResizerSrc();
   // toggleBtn click 监听
   assert.match(
     src,

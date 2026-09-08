@@ -21,8 +21,17 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const indexPath = join(__dirname, "..", "src", "index.ts");
 const indexSrc = readFileSync(indexPath, "utf-8");
+// 2026-09-06 P1-5 拆分：dock 布局实现迁至 src/dock/dock-layout.ts（this. → p. 宿主参数形式），
+// 断言扫描合并两处源码，回归锁语义不变。
+let dockLayoutSrc = "";
+try {
+  dockLayoutSrc = readFileSync(join(__dirname, "..", "src", "dock", "dock-layout.ts"), "utf-8");
+} catch { /* 拆分前旧布局：仅扫 index.ts */ }
 const stripComments = (src) => src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
-const indexCode = stripComments(indexSrc);
+// dock-layout.ts 放在前面：bodyOf 取首个匹配，必须命中真实实现而非 index.ts 的薄委托壳
+const indexCode = stripComments(dockLayoutSrc + "\n" + indexSrc);
+// 拆分后方法体内 this.X 变为 p.X（宿主参数），断言统一用 \w+\.
+const self = String.raw`\w+\.`;
 
 function bodyOf(src, name) {
   // 从函数/方法定义处开始：name(...) : Type { ... } 或 name(...) { ... }
@@ -48,9 +57,9 @@ function bodyOf(src, name) {
 test("A1. clearStaleDockCache 不再删除缓存条目", () => {
   const fn = bodyOf(indexCode, "clearStaleDockCache");
   assert.ok(fn.length > 0, "应存在 clearStaleDockCache 函数");
-  assert.doesNotMatch(fn, /delete\s+root\[this\.name\]\[[kK]\]/,
+  assert.doesNotMatch(fn, new RegExp(`delete\\s+root\\[${self}name\\]\\[[kK]\\]`),
     "不应再删除整个缓存条目");
-  assert.doesNotMatch(fn, /for\s*\(\s*const\s+k\s+of\s+Object\.keys\s*\(\s*root\[this\.name\]\s*\)\s*\)\s*delete/,
+  assert.doesNotMatch(fn, new RegExp(`for\\s*\\(\\s*const\\s+k\\s+of\\s+Object\\.keys\\s*\\(\\s*root\\[${self}name\\]\\s*\\)\\s*\\)\\s*delete`),
     "不应遍历并删除缓存条目");
 });
 
@@ -60,7 +69,7 @@ test("A2. clearStaleDockCache 修正 hiword-sidebar 与 standalone 的 icon/titl
     "应识别组合栏 sidebar 缓存");
   assert.match(fn, /type\.startsWith\s*\(\s*["']hiword-standalone-["']\s*\)/,
     "应识别独立 Dock 缓存");
-  assert.match(fn, /cfg\.icon\s*=\s*ICON_REWORD/, "应修正 sidebar icon");
+  assert.match(fn, /cfg\.icon\s*=\s*(ICON_REWORD|["']iconREword["'])/, "应修正 sidebar icon");
   assert.match(fn, /cfg\.title\s*=\s*["']RE word["']/, "应修正 sidebar title");
   assert.match(fn, /cfg\.icon\s*=\s*f\.icon/, "应修正 feature icon");
   assert.match(fn, /cfg\.title\s*=\s*f\.title/, "应修正 feature title");
@@ -73,9 +82,9 @@ test("A2. clearStaleDockCache 修正 hiword-sidebar 与 standalone 的 icon/titl
 test("B1. fixStandaloneDockIcons 读取并写回 local-plugin-docks", () => {
   const fn = bodyOf(indexCode, "fixStandaloneDockIcons");
   assert.ok(fn.length > 0, "应存在 fixStandaloneDockIcons 函数");
-  assert.match(fn, /pluginDocks\s*=\s*root\?\.\[this\.name\]/,
+  assert.match(fn, new RegExp(`pluginDocks\\s*=\\s*root\\?\\.\\[${self}name\\]`),
     "应读取本插件缓存（可选链写法）");
-  assert.match(fn, /const\s+shortType\s*=\s*type\.slice\s*\(\s*this\.name\.length\s*\)/,
+  assert.match(fn, new RegExp(`const\\s+shortType\\s*=\\s*type\\.slice\\s*\\(\\s*${self}name\\.length\\s*\\)`),
     "应截取短 type 用于缓存 key");
   assert.match(fn, /cfg\.icon\s*=\s*iconId/, "应把 iconId 写回缓存");
   assert.match(fn, /if\s*\(\s*title\s*\)\s*cfg\.title\s*=\s*title/, "应把 title 写回缓存");
@@ -88,13 +97,13 @@ test("B1. fixStandaloneDockIcons 读取并写回 local-plugin-docks", () => {
 test("C1. restoreDockOrderFromCache 存在并按缓存恢复顺序", () => {
   const fn = bodyOf(indexCode, "restoreDockOrderFromCache");
   assert.ok(fn.length > 0, "应存在 restoreDockOrderFromCache 函数");
-  assert.match(fn, /local-plugin-docks["']\]\?\.\[this\.name\]/,
+  assert.match(fn, new RegExp(`local-plugin-docks["']\\]\\?\\.\\[${self}name\\]`),
     "应读取本插件缓存（可选链写法）");
   assert.match(fn, /document\.querySelector\s*\(\s*[`"']\.dock__item\[data-type=/,
     "应查找当前图标 DOM");
-  assert.match(fn, /this\.positionToSlot\s*\(\s*cfg\.position\s*\)/,
+  assert.match(fn, /positionToSlot\s*\(\s*\w+\s*,\s*cfg\.position\s*\)/,
     "应按缓存 position 解析 slot");
-  assert.match(fn, /this\.resolveTargetDock\s*\(\s*slot\s*\)/,
+  assert.match(fn, /resolveTargetDock\s*\(\s*\w+\s*,\s*slot\s*\)/,
     "应解析目标 Dock 与分组");
   assert.match(fn, /dock\.add\s*\(\s*index\s*,\s*item\s*\)/,
     "应调用 dock.add 恢复位置");
@@ -103,9 +112,9 @@ test("C1. restoreDockOrderFromCache 存在并按缓存恢复顺序", () => {
 test("C2. onLayoutReady 中调用 restoreDockOrderFromCache", () => {
   const fn = bodyOf(indexCode, "onLayoutReady");
   assert.ok(fn.length > 0, "应存在 onLayoutReady 函数");
-  assert.match(fn, /this\.restoreDockOrderFromCache\s*\(\s*\)/,
+  assert.match(fn, /restoreDockOrderFromCache\s*\(\s*\w+\s*\)/,
     "应在 onLayoutReady 中恢复顺序");
-  assert.match(fn, /this\.fixStandaloneDockIcons\s*\(\s*\)/,
+  assert.match(fn, /fixStandaloneDockIcons\s*\(\s*\w+\s*\)/,
     "仍应修正图标");
 });
 

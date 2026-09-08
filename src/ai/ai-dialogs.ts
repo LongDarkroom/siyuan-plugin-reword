@@ -9,19 +9,58 @@
  */
 
 import { escapeHtml } from "./ai-render.ts";
+import type { AiPlatform } from "./ai-settings.ts";
 import type { AiPreset } from "./ai-preset.ts";
 import type { AiPromptTemplate } from "./ai-prompt-templates.ts";
 
-/** 模型下拉菜单（返回内部 item HTML，不包含外层容器） */
-export function renderModelMenu(models: string[], current: string): string {
-  const items = (models && models.length ? models : [current]).map(
-    (m) => `
-      <button class="hiword-ai-model-item${m === current ? " hiword-ai-model-item--active" : ""}" data-model="${escapeHtml(m)}">
-        ${m === current ? '<span class="hiword-ai-model-check">✓</span>' : ""}
-        <span class="hiword-ai-model-name">${escapeHtml(m)}</span>
-      </button>`
-  ).join("");
-  return items;
+/**
+ * 2026-09-07 改动点 3：两级（平台 → 模型）模型选择器。
+ * - 按平台分组，分组默认展开（带折叠头）；
+ * - 模型行显示有效 T:/Max: 摘要（无覆写时回退全局默认），去掉图标；
+ * - 单选即时生效；空状态由调用方（ai-panel.ts）处理。
+ * 返回内部 HTML（外层容器在 ai-panel.ts 的浮层里），不含搜索框。
+ */
+export function renderModelSelector(
+  platforms: AiPlatform[],
+  activePlatformId: string,
+  current: string,
+  globalTemp: number,
+  globalMax: number
+): string {
+  const list = Array.isArray(platforms) ? platforms : [];
+  if (!list.length) {
+    return `<div class="hiword-ai-model-empty">请先去设置页添加模型</div>`;
+  }
+  const groups = list
+    .map((p) => {
+      const pid = escapeHtml(p.id);
+      const collapsed = p.id !== activePlatformId; // 非激活平台默认折叠，激活平台默认展开
+      const models = p.models && p.models.length ? p.models : [];
+      const rows = models.length
+        ? models
+            .map((m) => {
+              const ov = p.modelParams?.[m];
+              const t = typeof ov?.temperature === "number" ? ov.temperature : globalTemp;
+              const mx = typeof ov?.maxTokens === "number" ? ov.maxTokens : globalMax;
+              const isCur = m === current && p.id === activePlatformId;
+              return `<button class="hiword-ai-model-item${isCur ? " hiword-ai-model-item--active" : ""}" data-model="${escapeHtml(m)}" data-pid="${pid}">
+                <span class="hiword-ai-model-name">${escapeHtml(m)}</span>
+                <span class="hiword-ai-model-sum">T:${t} | Max:${mx}</span>
+                ${isCur ? '<span class="hiword-ai-model-check">✓</span>' : ""}
+              </button>`;
+            })
+            .join("")
+        : `<div class="hiword-ai-model-empty">该平台暂无模型</div>`;
+      return `<div class="hiword-ai-model-group${collapsed ? " collapsed" : ""}" data-pid="${pid}">
+        <div class="hiword-ai-model-group-head" data-act="grp" data-pid="${pid}">
+          <span class="hiword-ai-model-caret">${collapsed ? "▸" : "▾"}</span>
+          <span class="hiword-ai-model-gname">${escapeHtml(p.name)}</span>
+        </div>
+        <div class="hiword-ai-model-group-body">${rows}</div>
+      </div>`;
+    })
+    .join("");
+  return groups;
 }
 
 /** 提示词模板列表面板 */
@@ -62,27 +101,33 @@ function renderPresetSummary(p: AiPreset): string {
   return `上下文消息数: ${ctx} | 聊天模式: ${mode}`;
 }
 
+/**
+ * 单张 AI 角色卡片（2026-09-07 T7 抽出：renderPresetListView 与搜索局部重渲共用，消重复）。
+ * 搜索过滤态（allowDrag=false）禁用拖拽——过滤后的下标不等于 store 顺序，落位会错乱。
+ */
+export function renderPresetCard(p: AiPreset, isActive: boolean, allowDrag: boolean): string {
+  return `
+    <div class="hiword-ai-preset-item${isActive ? " active" : ""}" data-id="${escapeHtml(p.id)}"${allowDrag ? ' draggable="true"' : ""}>
+      <div class="hiword-ai-preset-item-main" data-act="open">
+        <div class="hiword-ai-preset-item-name">${escapeHtml(p.name)}${isActive ? '<span class="hiword-ai-preset-active-chip">· 使用中</span>' : ""}</div>
+        <div class="hiword-ai-preset-item-sub">${escapeHtml(renderPresetSummary(p))}</div>
+      </div>
+      <div class="hiword-ai-preset-item-actions">
+        <button class="hiword-ai-preset-icon" data-act="edit" title="编辑">✎</button>
+        <button class="hiword-ai-preset-icon" data-act="del" title="删除">🗑</button>
+      </div>
+    </div>`;
+}
+
 /** 预设列表视图（2026-08-16 重做：titlebar + 大紫色新建按钮 + 搜索框 + 卡片列表） */
 export function renderPresetListView(presets: AiPreset[], activeId: string, opts?: { keyword?: string }): string {
   const kw = (opts?.keyword || "").trim().toLowerCase();
   const filtered = kw
     ? presets.filter((p) => p.name.toLowerCase().includes(kw))
     : presets;
+  const allowDrag = !kw; // 过滤态禁拖（见 renderPresetCard 注释）
   const cards = filtered.length
-    ? filtered.map((p) => {
-        const isActive = p.id === activeId;
-        return `
-        <div class="hiword-ai-preset-item${isActive ? " active" : ""}" data-id="${escapeHtml(p.id)}">
-          <div class="hiword-ai-preset-item-main" data-act="open">
-            <div class="hiword-ai-preset-item-name">${escapeHtml(p.name)}${isActive ? '<span class="hiword-ai-preset-active-chip">· 使用中</span>' : ""}</div>
-            <div class="hiword-ai-preset-item-sub">${escapeHtml(renderPresetSummary(p))}</div>
-          </div>
-          <div class="hiword-ai-preset-item-actions">
-            <button class="hiword-ai-preset-icon" data-act="edit" title="编辑">✎</button>
-            <button class="hiword-ai-preset-icon" data-act="del" title="删除">🗑</button>
-          </div>
-        </div>`;
-      }).join("")
+    ? filtered.map((p) => renderPresetCard(p, p.id === activeId, allowDrag)).join("")
     : `<div class="hiword-ai-preset-empty">${
         presets.length === 0
           ? "还没有 AI 角色，点击「＋ 新建角色」创建你的第一个角色"

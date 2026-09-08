@@ -1,12 +1,13 @@
 /**
- * 阅读器 3 抽屉状态机（activeDrawer）回归测试（2026-08-30）
+ * 阅读器抽屉状态机（activeDrawer）回归测试（2026-08-30，2026-09-04 对齐 marks 合并）
  * ----------------------------------------------------------------
- * 验证 3 个独立 bool（showToc / showBookmarks / showAnnots）→ 1 个
- * activeDrawer 互斥单选状态机的改造正确：
+ * 验证独立 bool（showToc / showMarks）→ 1 个 activeDrawer 互斥单选状态机：
  *  - 同图标再点 = 关
  *  - 不同图标 = 自动切到新的
  *  - null 状态下点 = 开
  *  - 抽屉内点空白 = 全部关（move 到点空白 = activeDrawer = null）
+ * 2026-09-03「半分半合」改造：书签 + 摘录合并为「我的标记」（marks）单抽屉，
+ * DrawerKind 由三态收敛为 'toc' | 'marks'。
  *
  * 由于 activeDrawer 是 ReaderView.svelte 内的局部状态，本测试走源码契约扫描，
  * 验证状态机的核心表达式 + 模板钩子完整存在 + 角标 CSS 完整 + 工具栏 3 段 grid 改完。
@@ -29,9 +30,9 @@ const readerSrc = readFileSync(readerPath, "utf-8");
  * A. 状态机：activeDrawer 类型 + 互斥逻辑
  * ============================================================ */
 
-test("A1. 类型 DrawerKind = 'toc' | 'bookmarks' | 'annots'", () => {
-  assert.match(readerSrc, /type\s+DrawerKind\s*=\s*["']toc["']\s*\|\s*["']bookmarks["']\s*\|\s*["']annots["']/,
-    "应定义 DrawerKind 三态枚举");
+test("A1. 类型 DrawerKind = 'toc' | 'marks'（2026-09-03 书签/摘录合并后两态）", () => {
+  assert.match(readerSrc, /type\s+DrawerKind\s*=\s*["']toc["']\s*\|\s*["']marks["']/,
+    "应定义 DrawerKind 两态枚举");
 });
 
 test("A2. activeDrawer 初始为 null（默认全关）", () => {
@@ -46,45 +47,44 @@ test("A3. toggleDrawer：同 kind 再点 = null（互斥 + 同关）", () => {
     "toggleDrawer 核心应为：同关/不同切");
 });
 
-test("A4. toggleDrawer 同步到旧 3 个 bool（兼容）", () => {
-  // 三个 flag 同步赋值
+test("A4. toggleDrawer 同步到底层 2 个 bool（showToc / showMarks）", () => {
+  // 2026-09-04 对齐：bookmarks/annots 合并后只同步 showToc / showMarks
   assert.match(readerSrc, /showToc\s*=\s*activeDrawer\s*===\s*["']toc["']/,
     "应同步 showToc 标志位");
-  assert.match(readerSrc, /showBookmarks\s*=\s*activeDrawer\s*===\s*["']bookmarks["']/);
-  assert.match(readerSrc, /showAnnots\s*=\s*activeDrawer\s*===\s*["']annots["']/);
+  assert.match(readerSrc, /showMarks\s*=\s*activeDrawer\s*===\s*["']marks["']/,
+    "应同步 showMarks 标志位");
 });
 
-test("A5. toggleDrawer 打开时刷新数据（bookmarks/annots）", () => {
-  // 2026-09-01 修复：之前断言的是死引用 reloadBookmarks/reloadAnnots(函数未定义),
-  // 改用真实存在的 refreshBookmarks/refreshAnnotsList
-  assert.match(readerSrc, /if\s*\(\s*activeDrawer\s*===\s*["']bookmarks["']\s*\)\s*refreshBookmarks\(\)/);
-  assert.match(readerSrc, /if\s*\(\s*activeDrawer\s*===\s*["']annots["']\s*\)\s*refreshAnnotsList\(\)/);
+test("A5. toggleDrawer 打开 marks 时同时刷新书签 + 摘录两份数据", () => {
+  // 2026-09-03 半分半合：合并抽屉打开时两份数据一起刷
+  assert.match(readerSrc,
+    /if\s*\(\s*activeDrawer\s*===\s*["']marks["']\s*\)\s*\{[\s\S]{0,80}?refreshBookmarks\(\)[\s\S]{0,80}?refreshAnnotsList\(\)/,
+    "打开 marks 抽屉应同时调 refreshBookmarks() 与 refreshAnnotsList()");
 });
 
 /* ============================================================
  * B. 模板：3 个抽屉触发器图标（data-drawer-anchor）
  * ============================================================ */
 
-test("B1. 模板里有 3 个 data-drawer-anchor 按钮（toc/bookmarks/annots）", () => {
-  for (const kind of ["toc", "bookmarks", "annots"]) {
+test("B1. 模板里有 2 个 data-drawer-anchor 按钮（toc/marks）", () => {
+  for (const kind of ["toc", "marks"]) {
     const re = new RegExp(`data-drawer-anchor=["']${kind}["']`);
     assert.match(readerSrc, re, `模板里应有 data-drawer-anchor="${kind}" 的触发器`);
   }
 });
 
-test("B2. 3 个触发器都接 toggleDrawer(kind) 点击", () => {
-  for (const kind of ["toc", "bookmarks", "annots"]) {
+test("B2. 2 个触发器都接 toggleDrawer(kind) 点击", () => {
+  for (const kind of ["toc", "marks"]) {
     const re = new RegExp(`toggleDrawer\\(["']${kind}["']\\)`);
     assert.match(readerSrc, re, `on:click 应调用 toggleDrawer("${kind}")`);
   }
 });
 
 test("B3. 触发器按钮 active class 跟随抽屉可见态（show* 标志，覆盖点空白/Esc/翻页等所有收起路径）", () => {
-  // 2026-08-30 修复：图标高亮不再绑 activeDrawer，改绑 showToc/showBookmarks/showAnnots，
+  // 2026-08-30 修复：图标高亮不再绑 activeDrawer，改绑 showToc/showMarks，
   // 这样无论抽屉被哪种方式收起（点击空白、Esc、翻页导航），图标都能回到未选中态
   assert.match(readerSrc, /class:reader-btn-active=\{showToc\}/);
-  assert.match(readerSrc, /class:reader-btn-active=\{showBookmarks\}/);
-  assert.match(readerSrc, /class:reader-btn-active=\{showAnnots\}/);
+  assert.match(readerSrc, /class:reader-btn-active=\{showMarks\}/);
 });
 
 /* ============================================================
@@ -116,11 +116,11 @@ test("C3. 标题区有 ellipsis 支持 + justify-content: center", () => {
  * D. 角标 CSS：::before 三角
  * ============================================================ */
 
-test("D1. 3 个抽屉都有 ::before 角标（CSS 三角）", () => {
-  // 2026-08-30 改造：三个抽屉共用一组选择器
+test("D1. 各抽屉共用 ::before 角标（CSS 三角，含合并后的 marks）", () => {
+  // 2026-09-04 对齐：合并后选择器链为 toc/bookmarks/annots/marks 四个共用一组
   assert.match(readerSrc,
-    /\.reader-toc::before\s*,\s*\.reader-bookmarks::before\s*,\s*\.reader-annots::before\s*\{/,
-    "应定义 reader-toc/bookmarks/annots 的共用 ::before 角标");
+    /\.reader-toc::before\s*,\s*\.reader-bookmarks::before\s*,\s*\.reader-annots::before\s*,\s*\.reader-marks::before\s*\{/,
+    "应定义 reader-toc/bookmarks/annots/marks 的共用 ::before 角标");
 });
 
 test("D2. 角标用 45° 旋转（CSS 三角标配）", () => {
@@ -134,7 +134,7 @@ test("D2. 角标用 45° 旋转（CSS 三角标配）", () => {
 test("D3. 角标横向位置由 JS 写入 --tail-left 并中心对齐", () => {
   // 2026-08-30 改造：三角不再硬编码 left，而是用 CSS 变量 + translateX(-50%)
   // 指向对应锚点图标的中心，按钮宽度/间距变化也不偏移。
-  assert.match(readerSrc, /\.reader-toc::before\s*,\s*\.reader-bookmarks::before\s*,\s*\.reader-annots::before\s*\{[\s\S]*?left:\s*var\(--tail-left,\s*30px\)/,
+  assert.match(readerSrc, /left:\s*var\(--tail-left,\s*30px\)/,
     "共用角标应使用 left: var(--tail-left, 30px)");
   assert.match(readerSrc, /transform:\s*translateX\(-50%\)\s*rotate\(45deg\)/,
     "三角应用 translateX(-50%) 中心对准变量位置");
@@ -171,13 +171,12 @@ test("E4. Esc 关闭全浮层（已存在，line 1679 注释）", () => {
   assert.match(readerSrc, /Esc/, "源码应提到 Esc 键的处理");
 });
 
-test("E5. 点空白守卫必须覆盖三个抽屉标志（否则书签/摘录抽屉开着时点空白关不掉）", () => {
-  // 2026-08-30 修复：原守卫只查 !showToc，导致书签/摘录抽屉开着时点空白不收起。
-  // 现守卫需同时排除 !showBookmarks && !showAnnots && !activeDrawer。
+test("E5. 点空白守卫必须覆盖全部抽屉与浮层标志（否则 marks 抽屉开着时点空白关不掉）", () => {
+  // 2026-08-30 修复：原守卫只查 !showToc。2026-09-04 对齐：marks 合并后守卫应含
+  // !showMarks && !activeDrawer（另覆盖 settings/search/footnote/工具栏/批注气泡）。
   const guard = readerSrc.match(/if\s*\(!showToc\s*&&[^\n]*?return;/);
   assert.ok(guard, "应存在以 !showToc 开头、命中 return 的早退守卫");
-  assert.match(guard[0], /!showBookmarks/, "守卫需排除书签抽屉（点空白可收起）");
-  assert.match(guard[0], /!showAnnots/, "守卫需排除摘录抽屉（点空白可收起）");
+  assert.match(guard[0], /!showMarks/, "守卫需排除 marks 抽屉（点空白可收起）");
   assert.match(guard[0], /!activeDrawer/, "守卫需排除 activeDrawer（防状态残留漏关）");
 });
 

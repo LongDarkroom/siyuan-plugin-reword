@@ -20,8 +20,9 @@ import {
   type DeepReadWord,
   type DeepReadSentence,
 } from "./ai-orchestrator.ts";
-import type { AiMessage } from "../copilot/ai/ai-client.ts";
-import { requestAIGenerate, estimateTokens } from "../copilot/ai/ai-client.ts";
+import { runChunkedDeepRead } from "./ai-chunk.ts";
+import type { AiMessage } from "./ai-client.ts";
+import { requestAIGenerate, estimateTokens } from "./ai-client.ts";
 import { renderDeepReadHtml, renderWithLute, createIncrementalRenderer, type IncrementalRenderer } from "./ai-render.ts";
 import { computeFloatingPosition, viewportToOffsetParent } from "../core/floating-position.ts";
 import { isMobile } from "../core/env.ts";
@@ -32,7 +33,6 @@ import { trimChatHistory, type ChatTurn } from "./chat-trim.ts";
 import { sessionStore } from "./ai-session-store.ts";
 import type { AnnotationQuery, AnnotationQueryResult } from "../annotation/annotation-query.ts";
 import { formatAnnotationsForAi } from "../annotation/annotation-query.ts";
-import { renderAnnotationHTML } from "../annotation/whale-renderer.ts";
 import { Disposables } from "../core/disposable.ts";
 import { renderMarkdown, escapeHtml } from "../core/markdown.ts";
 import { getLogger } from "../core/logger.ts";
@@ -43,17 +43,32 @@ import type { VocabStore } from "../vocab/vocab-store.ts";
 import { confirmDelete } from "../annotation/whale-confirm.ts";
 import { Protyle, Lute, type App, showMessage } from "siyuan";
 import {
-  renderModelMenu,
+  renderModelSelector,
   renderPromptPanel,
   renderPresetPanel,
   renderPresetListView,
+  renderPresetCard,
   renderDocSearchDialog,
   renderDocSearchItems,
   renderMessageToolbar,
-  renderSaveToNoteDialog,
-  renderSaveToNoteTree,
 } from "./ai-dialogs.ts";
 import { logSwallow } from "../core/safe.ts";
+import type { AiBindCtx } from "./ai-bind-ctx.ts";
+import { bindResizer } from "./parts/ai-part-resizer.ts";
+import {
+  bindVocabBar,
+  collectCheckedWords,
+  bindResult,
+  getMessagePlainText,
+  bindMessageToolbar,
+  openSaveToNoteDialog,
+  editUserMessage,
+  reindexMessages,
+  editAssistantMessage,
+  retryAssistantMessage,
+  loadQueryFilters,
+  renderQueryResults,
+} from "./ai-msg-actions.ts";
 import {
   blockRefBodyText,
   docAnchorOf,
@@ -97,6 +112,9 @@ export interface AiHost {
   getDeepReadSource(): AiDeepReadSource | null;
   /** 异步读取整块正文（kramdown），用于「读取当前块」且无选区时补全文本 */
   fetchBlockText(blockId: string): Promise<string | null>;
+  /** 读取块正文范围：标题块自动收集「本标题及下属内容，遇同级或更高级标题停止」的全部块；
+   *  普通块退化为 fetchBlockText（单块自身）。用于拖入标题块时让 AI 读到完整小节（2026-09-08） */
+  fetchBlockRangeText(blockId: string): Promise<string | null>;
   /** 读取块类型（如 p 段落 / l,i 列表 / h 标题 / c 代码 / quote 引用），用于拖入卡片图标区分；失败返回 null */
   fetchBlockType(blockId: string): Promise<string | null>;
   /** 读取整篇文档正文（拼装 markdown，截断 12k）。用于页签/文档树拖入 */
@@ -177,8 +195,8 @@ export interface AiHost {
    */
   getAnnotatedDocIds(): Promise<string[]>;
 
-  /** 切换当前模型并持久化（header 模型下拉） */
-  setModel(model: string): Promise<void>;
+  /** 切换当前模型并持久化（header 两级模型选择器） */
+  setModel(model: string, platformId?: string): Promise<void>;
   /** 搜索文档（标题+路径模糊匹配；空关键词返回最近更新的文档列表） */
   searchDocs(keyword: string): Promise<AiDocSearchResult[]>;
   /** 读取文档正文（用于添加上下文） */
@@ -193,6 +211,8 @@ export interface AiHost {
   savePreset(p: AiPreset): Promise<void>;
   deletePreset(id: string): Promise<void>;
   setActivePreset(id: string): Promise<void>;
+  /** T7 拖拽排序：把预设移到目标下标（0 起） */
+  reorderPreset(id: string, toIndex: number): Promise<void>;
   /** 获取词库目标（单词本/主题两级，供批量入库下拉） */
   getVocabTargets(): {
     books: { id: string; name: string; themes: { id: string; name: string }[] }[];
@@ -216,6 +236,21 @@ const ZWSP = "\u200b";
 /** 零宽/不可见字符：判定段落是否有真实内容前需剥除（不然空段的 ZWSP 会被当成内容） */
 const ZERO_WIDTH_RE = /[\u200b\u200c\u200d\ufeff\u00ad]/g;
 
+/** 第 5 批：发送快捷键匹配（纯函数，便于单测）。
+ *  - mode="enter"：裸 Enter 发送；Shift/Cmd/Ctrl+Enter 不发送（留给换行 / 系统快捷键）。
+ *  - mode="mod+enter"（默认）：Cmd/Ctrl+Enter 发送；裸 Enter 不发送（留给换行）。
+ *  - 输入法组合中（isComposing 或 keyCode===229）一律不发送，Enter 用于选词。 */
+export function matchSendShortcut(
+  e: { key: string; shiftKey?: boolean; metaKey?: boolean; ctrlKey?: boolean; isComposing?: boolean; keyCode?: number },
+  mode: "mod+enter" | "enter"
+): boolean {
+  if (e.isComposing || e.keyCode === 229) return false;
+  if (mode === "enter") {
+    return e.key === "Enter" && !e.shiftKey && !e.metaKey && !e.ctrlKey;
+  }
+  return e.key === "Enter" && (e.metaKey === true || e.ctrlKey === true);
+}
+
 /**
  * AI 是否正在流式生成（2026-09-03 新增，跨模块只读标志）
  * ------------------------------------------------------------------
@@ -237,8 +272,21 @@ export function isAiStreaming(): boolean {
  */
 const INPUT_DISABLE_WATCHDOG_MS = 120_000;
 
+/**
+ * 中断标记（T2，2026-09-07）：用户中途停止时，已生成的正文照常入历史与会话，
+ * 尾部追加本标记。
+ *
+ * 为什么需要：编排层 abort 时统一返回 `{ aborted: true, raw: "" }`（见 ai-orchestrator
+ * 的 runAiDeepRead / runAiChat 两处 catch），流式正文只留在发送链路闭包的 liveRaw 里。
+ * 于是「停止生成」= 内容凭空消失：气泡上还在，重开面板 / 切会话就什么都没有了。
+ * 抄 copilot 语义（中断内容落库 + 追加标记），差别是 Reword 用本地常量而非写死
+ * 在每条消息里，便于将来改文案或做 i18n。
+ */
+const INTERRUPT_MARK = "\n\n[生成已中断]";
+
 export class AiPanel {
-  private disposables = new Disposables();
+  /** @internal parts/* 部件委托访问（P2 部件化拆分） */
+  disposables = new Disposables();
   /** 当前激活预设（其 systemPrompt / temperature 覆盖本次精读） */
   private activePreset?: AiPreset;
   /** 会话累计 token 用量（面板生命周期内累加，用于圆环 tooltip） */
@@ -246,9 +294,11 @@ export class AiPanel {
   /** 当前输入框文本的估算 token 数 */
   private inputTokenEstimate = 0;
   /** 对话模式多轮上下文（仅 chat 模式累加；学习模式不写入） */
-  private chatHistory: AiMessage[] = [];
+  /** @internal ai-msg-actions.ts 委托访问（P1-4 拆分） */
+  chatHistory: AiMessage[] = [];
   /** 当前会话 id（对话模式上下文挂载到该会话，落盘到 hiword-ai-sessions.json） */
-  private currentSessionId?: string;
+  /** @internal ai-msg-actions.ts 委托访问（P1-4 拆分） */
+  currentSessionId?: string;
   /** AI 输入框容器：挂载共享 Lute 引擎的轻量 Protyle 实例（#hiword-ai-protyle） */
   private inputEl: HTMLElement | null = null;
   /** 共享 SiYuan Lute 引擎的原生 Protyle 输入框实例（lite 模式）；为 null 时回退 contenteditable */
@@ -260,7 +310,8 @@ export class AiPanel {
   /** 待填充内容：Protyle 延迟挂载完成后再写入（避免被 Protyle 挂载重建 DOM 冲掉） */
   private pendingPrefill: string | null = null;
   /** 面板根容器（render 时持有引用，供 applyAiFontSize 等外部调用实时刷新） */
-  private contentEl: HTMLElement | null = null;
+  /** @internal ai-msg-actions.ts 委托访问（P1-4 拆分） */
+  contentEl: HTMLElement | null = null;
   /** 监听 wysiwyg DOM 变化以刷新 empty 态（防止程序化写入遗留 --empty 导致占位符残留） */
   private emptyObserver: MutationObserver | null = null;
   /** 输入框 token 估算节流定时器：每次估算都要跑一次 Lute 全量序列化，逐字符触发会卡 */
@@ -282,13 +333,44 @@ export class AiPanel {
   /** 流式 thinking 累积文本（用于最终替换为 <details> 面板） */
   private liveThinkingText = "";
   /** 通用浮层容器引用 */
-  private overlay: HTMLElement | null = null;
+  /** @internal ai-msg-actions.ts 委托访问（P1-4 拆分） */
+  overlay: HTMLElement | null = null;
+  /**
+   * 2026-09-04 性能修复：render() 每次都会调 bind()，而 bind() 内注册的
+   * document/window 全局监听从不解绑——此前每渲染一次就永久泄漏 5 个监听，
+   * 其中 scroll(capture) 与 click 在思源任意操作时都会触发全部历史监听，
+   * 直接拖慢全局响应。用 AbortController 在每轮 bind 开头作废上一轮监听。
+   */
+  private bindAbort: AbortController | null = null;
+  /**
+   * P1 幂等化（2026-09-06）：面板 DOM 是否已构建。
+   * 此前 render() 每次都整体重建 170 行模板 + 重跑 bind()（1840 行）+ 销毁重建 Protyle
+   * + 重渲全部历史消息；而 refreshActivePanel() 会被 SiYuan dock update 生命周期
+   * （dock-layout.ts:46）及多处设置/交互变更触发，用户正在输入时刷新会丢失草稿与光标。
+   * 现在只有首次（或 dock 宿主元素变更）才走完整构建。
+   */
+  private mounted = false;
+  /** 当前面板 DOM 所挂载的 dock 宿主元素（用于识别「面板被移到另一个 dock」） */
+  private rootEl: HTMLElement | null = null;
+  /**
+   * 2026-09-07 T5：全屏状态。
+   * 全屏用 CSS 把 .hiword-ai-panel 提为 position:fixed 覆盖视口，DOM 不动——
+   * 因此 P1 幂等化的「只刷新易变视图」不会把用户踢出全屏。
+   */
+  private fullscreen = false;
+  /**
+   * T5：Esc 退出全屏的监听器。**只在全屏期间挂在 document 上**，退出即摘除。
+   * 刻意不做常驻全局监听（本项目教训：常驻 document 级监听会干扰思源原生 UI）。
+   */
+  private fullscreenEscHandler: ((ev: KeyboardEvent) => void) | null = null;
   /** 通用浮层打开函数（在 render 中初始化） */
-  private openOverlay: ((html: string) => void) | null = null;
+  /** @internal ai-msg-actions.ts 委托访问（P1-4 拆分） */
+  openOverlay: ((html: string) => void) | null = null;
   /** 最近一次 AI 结果消息渲染后的展示 HTML（落盘到会话，重载时 1:1 还原，避免裸显原始 JSON/markdown） */
   private lastResultHtml: string | null = null;
   /** 原始 markdown 按消息索引存储（替代 data-raw-md DOM 属性，降低 innerHTML 解析负担，P3-2） */
-  private rawMdByIndex = new Map<number, string>();
+  /** @internal ai-msg-actions.ts 委托访问（P1-4 拆分） */
+  rawMdByIndex = new Map<number, string>();
   /**
    * 2026-09-02 B 组：引用附件表（id → RefAttachment）。
    * 统一取代旧的四张散表：lastDomRefs(锚文本) / refKramdownById(块正文) /
@@ -304,7 +386,8 @@ export class AiPanel {
    * node --experimental-strip-types 在 strip-only 模式下不支持参数属性，
    * 会导致整个模块无法被测试 import。保持普通字段赋值即可让 ai-panel 可被单测直接加载。
    */
-  private host: AiHost;
+  /** @internal ai-msg-actions.ts 委托访问（P1-4 拆分） */
+  host: AiHost;
   constructor(host: AiHost) {
     this.host = host;
   }
@@ -341,6 +424,17 @@ export class AiPanel {
     // 2026-08-26 修复：不再在 render() 中自动把选区文本预填进输入框。
     // 旧逻辑无论用户是否已输入，每次切回 AI 精读（重渲染）都会把「先前选中文本」灌入输入框，
     // 覆盖已输入内容。预填改为仅在显式动作（⌥⌘A 命令 / 右键「发送到 AI」）经 prefillSelection() 触发。
+    //
+    // ── P1 幂等化（2026-09-06）────────────────────────────────────────
+    // 只有首次（或 dock 宿主元素变更：面板在组合栏 / 独立 Dock 之间移动）才重建 DOM、
+    // 重绑事件、重建 Protyle、恢复历史会话。其余刷新只跑下面廉价的易变视图更新。
+    // 注：块内保持原缩进，避免 170 行模板的无意义 diff。
+    //
+    // 2026-09-07 修复：切到其他 Tab 后 #hiword-dock-content.innerHTML 会被覆盖，
+    // 实例仍以为 mounted=true。必须检查 DOM 中是否仍存在面板根节点，否则强制重建。
+    const panelStillInDom = !!contentEl.querySelector(".hiword-ai-panel");
+    const needFullBuild = !this.mounted || this.rootEl !== dockElement || !panelStillInDom;
+    if (needFullBuild) {
     contentEl.innerHTML = `
       <div class="hiword-ai-panel">
         <!-- 顶部工具栏 -->
@@ -365,7 +459,7 @@ export class AiPanel {
           <div class="hiword-ai-header-right">
             <div class="hiword-ai-model-wrap">
               <button class="hiword-ai-btn hiword-ai-btn--ghost hiword-ai-model-btn" id="hiword-ai-model-btn" title="切换模型">
-                <span class="hiword-ai-model-current">${escapeHtml(this.host.getAiSettings().model)}</span>
+                <span class="hiword-ai-model-current">${escapeHtml(this.host.getAiSettings().model || "选择模型")}</span>
                 <span class="hiword-ai-model-caret">▾</span>
               </button>
               <div class="hiword-ai-model-menu" id="hiword-ai-model-menu" style="display:none;"></div>
@@ -374,6 +468,7 @@ export class AiPanel {
             <button class="hiword-ai-btn hiword-ai-btn--ghost" id="hiword-ai-sessions" title="会话历史">💬</button>
             <button class="hiword-ai-btn hiword-ai-btn--ghost" id="hiword-ai-copyall" title="复制全部对话内容（Markdown）" aria-label="复制全部对话内容">⧉</button>
             <button class="hiword-ai-btn hiword-ai-btn--ghost" id="hiword-ai-settings" title="AI 设置">⚙</button>
+            <button class="hiword-ai-btn hiword-ai-btn--ghost" id="hiword-ai-fullscreen" title="全屏（Esc 退出）" aria-pressed="false">⛶</button>
           </div>
         </div>
 
@@ -522,14 +617,18 @@ export class AiPanel {
       if (oldTokenModal) oldTokenModal.remove();
     }
 
-    this.bind(contentEl);
-    this.mountProtyle(contentEl);
+      this.bind(contentEl);
+      this.mountProtyle(contentEl);
+      this.rootEl = dockElement;
+      this.mounted = true;
+      // 自动恢复上次活跃会话（有消息的会话才恢复，避免空会话干扰新用户）
+      this.restoreLastSession();
+    }
+
     // Protyle 延迟挂载：预填内容等挂载完成后再写入，避免被挂载重建的 DOM 冲掉
     this.pendingPrefill = null; // 2026-08-26：显式复位，预填仅在 prefillSelection() 显式触发
     // 应用 AI 消息字体大小设置（CSS 变量驱动，随设置实时生效）
     this.applyAiFontSize();
-    // 自动恢复上次活跃会话（有消息的会话才恢复，避免空会话干扰新用户）
-    this.restoreLastSession();
   }
 
   /** 数字格式化：千/k、百万/M */
@@ -660,6 +759,42 @@ export class AiPanel {
   }
 
   /**
+   * 2026-09-07 T5：全屏切换。
+   * 只给 .hiword-ai-panel 加/去 `hiword-ai-panel--fullscreen`（CSS 提为 position:fixed
+   * 覆盖视口），**不搬 DOM、不重建 Protyle**——与 P1「刷新不重建」同语义，
+   * 因此切全屏不会丢输入框草稿与光标，Protyle 实例也不用重建。
+   * Esc 监听只在全屏期间挂在 document（capture），退出即摘：
+   * 常驻全局监听干扰思源原生 UI 是本项目的既有教训。
+   */
+  public setFullscreen(on: boolean): void {
+    const panel = this.contentEl?.querySelector(".hiword-ai-panel") as HTMLElement | null;
+    if (!panel) return;
+    this.fullscreen = on;
+    panel.classList.toggle("hiword-ai-panel--fullscreen", on);
+    const btn = this.contentEl?.querySelector("#hiword-ai-fullscreen") as HTMLButtonElement | null;
+    if (btn) {
+      btn.textContent = on ? "⤡" : "⛶";
+      btn.title = on ? "退出全屏（Esc）" : "全屏（Esc 退出）";
+      btn.setAttribute("aria-pressed", on ? "true" : "false");
+    }
+    if (on) {
+      if (this.fullscreenEscHandler) return;
+      const h = (ev: KeyboardEvent) => {
+        if (ev.key !== "Escape") return;
+        // 有思源弹窗（设置/会话/模型菜单）打开时，Esc 让给弹窗，避免一次按键关两层
+        if (document.querySelector(".b3-dialog")) return;
+        ev.stopPropagation();
+        this.setFullscreen(false);
+      };
+      this.fullscreenEscHandler = h;
+      document.addEventListener("keydown", h, true);
+    } else if (this.fullscreenEscHandler) {
+      document.removeEventListener("keydown", this.fullscreenEscHandler, true);
+      this.fullscreenEscHandler = null;
+    }
+  }
+
+  /**
    * 输入框可编辑性自检（2026-09-03 P0）。
    * 挂载链路上有多个静默失败分支：容器持续零尺寸、Protyle 构造抛错被外层吞掉、
    * 内核把 wysiwyg 的 contenteditable 置为 false 却没恢复……
@@ -713,8 +848,8 @@ export class AiPanel {
     // "Cannot read properties of null (reading 'getAttribute')" 等未捕获异常，
     // 这些异常逃逸出下方 new Protyle() 的 try/catch，冒泡到 window.onerror，
     // 并把输入区留在「半成品 Protyle」状态 → 用户点进去连光标都没有、无法输入。
-    // 因此默认走稳定的 contenteditable 输入框（富文本粘贴转 Markdown、块引用卡/拖块仍支持），
-    // Protyle 富文本输入框仅作为实验性选项（设置 → AI → 通用 → 启用 Protyle 输入框）。
+    // 2026-09-07 T4：Protyle 已全面转正（默认开），下面这条只在设置被显式关掉时命中；
+    //   兜底语义不变——任何 Protyle 异常情况都退回可打字的 contenteditable。
     if (!this.host.getAiSettings().useProtyleInput) {
       this.fallbackToContentEditable();
       return;
@@ -1120,7 +1255,8 @@ export class AiPanel {
    */
   private async insertBlockRef(blockId: string, typeHint = "", dropPoint?: { x: number; y: number }): Promise<void> {
     const logger = getLogger();
-    const kramdownBody = (await this.host.fetchBlockText(blockId)) || "";
+    // 2026-09-08：标题块改用 fetchBlockRangeText（自动收集标题下全部内容），普通块退化为单块自身
+    const kramdownBody = (await this.host.fetchBlockRangeText(blockId)) || "";
     // 块类型：用于卡片差异化图标/颜色（段落 ¶ / 列表 ☰ / 标题 H / 代码 </> / 引用 "）
     // 误取/失败时不加修饰类，退化为默认段落样式，不影响功能
     // 2026-09-02：dragstart 已从 DOM 的 data-type 直接映射出类型 → 跳过一次 SQL 查询
@@ -1144,6 +1280,7 @@ export class AiPanel {
       title: displayAnchor || fallbackAnchor,
       body: kramdownBody || undefined,
       status: kramdownBody ? "ready" : "failed",
+      blockType: blockType || undefined,
     });
     const card = `<span data-type="block-ref" data-id="${blockId}" data-subtype="s" class="hiword-ai-block-ref${typeClass}" data-block-type="${escapeHtml(blockType)}">${safeAnchor}</span>${ZWSP}`;
     logger.debug("插入块 " + blockId, { operation: "拖块插入", data: { blockId } });
@@ -1308,6 +1445,7 @@ export class AiPanel {
       title: att.title || prev.title,
       body: att.body ?? prev.body,
       status: att.status ?? prev.status,
+      blockType: att.blockType ?? prev.blockType,
     };
     this.attachments.set(att.id, next);
     this.trimRefs();
@@ -1344,7 +1482,7 @@ export class AiPanel {
 
     // 延迟到微任务里再调用宿主接口：同步抛错也能被下面的 .catch 收住
     const p = Promise.resolve()
-      .then(() => (kind === "doc" ? this.host.fetchDocText(id) : this.host.fetchBlockText(id)))
+      .then(() => (kind === "doc" ? this.host.fetchDocText(id) : this.host.fetchBlockRangeText(id)))
       .then((text) => {
         const body = (text || "").trim();
         this.registerRef({
@@ -1401,7 +1539,8 @@ export class AiPanel {
   //    · 点击 → 通过 window.siyuan.openBlock(cb-get-hl) 跳转到原文档/块
 
   /** 跳转到原文档/块（沿用 src/index.ts:12126 openAnnotationBlock 的两段式回退） */
-  private async openRefInSiyuan(id: string, kind: RefKind): Promise<void> {
+  /** @internal ai-msg-actions.ts 委托访问（P1-4 拆分） */
+  async openRefInSiyuan(id: string, kind: RefKind): Promise<void> {
     const op = kind === "doc" ? "AI精读跳转doc" : "AI精读跳转block";
     const s = (window as any).siyuan;
     try {
@@ -1422,6 +1561,17 @@ export class AiPanel {
     window.open(`siyuan://blocks/${id}`);
   }
 
+  /** 气泡引用卡点击 → 跳转到原文档/块（2026-09-08：面板根委托监听统一处理） */
+  private onRefCardClick(e: Event): void {
+    const card = (e.target as HTMLElement)?.closest?.("[data-block-id]") as HTMLElement | null;
+    if (!card) return;
+    const id = card.getAttribute("data-block-id") || "";
+    if (!id || !looksLikeRefId(id)) return;
+    e.stopPropagation();
+    const kind: RefKind = (card.getAttribute("data-block-kind") as RefKind) || "block";
+    void this.openRefInSiyuan(id, kind);
+  }
+
   /** 拉预览正文（缓存优先 → 按需 fetch + 回写缓存）；用于 hover 浮动层 */
   private async fetchPreviewBody(id: string, kind: RefKind): Promise<string> {
     const cached = this.peekRefBody(id);
@@ -1431,7 +1581,7 @@ export class AiPanel {
     try {
       const fetched: string | null = kind === "doc"
         ? await this.host.fetchDocText(id)
-        : await this.host.fetchBlockText(id);
+        : await this.host.fetchBlockRangeText(id);
       text = fetched ?? "";
     } catch (err) {
       getLogger().warn(`[REword] ${op} fetch 异常`, { operation: op, data: { id }, error: err });
@@ -2112,7 +2262,8 @@ export class AiPanel {
   }
 
   /** 设置输入框内容：Protyle 模式用 Md2BlockDOM 渲染（同引擎）；回退用 markdownToHtml */
-  private setInputMarkdown(md: string): void {
+  /** @internal ai-msg-actions.ts 委托访问（P1-4 拆分） */
+  setInputMarkdown(md: string): void {
     const p = this.protyle;
     if (p && p.protyle?.wysiwyg) {
       const lute = p.protyle.lute ?? this.newLute();
@@ -2392,24 +2543,45 @@ export class AiPanel {
       return text || "";
     });
     // 兜底：去除任何独立的未闭合/残留 <span data-... 片段。
-    // ★ 必须排除我们自己渲染的 .hiword-ref-card（它带 data-block-id），
-    //   否则外层开标签被删掉 → closest(".hiword-ref-card") 失效 → 卡片点击展开不了。
-    html = html.replace(/<span\b(?![^>]*\bclass="[^"]*hiword-ref-card)[^>]*\bdata-\w+\b[^>]*>/gi, "");
+    // ★ 必须排除我们自己渲染的引用卡片（hiword-ref-card / hiword-ai-block-ref / hiword-ai-doc-ref，
+    //   它们都带 data-block-id），否则开标签被删 → closest 失效 → 卡片点击跳转不了。
+    html = html.replace(
+      /<span\b(?![^>]*\bclass="[^"]*(?:hiword-ref-card|hiword-ai-block-ref|hiword-ai-doc-ref))[^>]*\bdata-\w+\b[^>]*>/gi,
+      ""
+    );
 
     return html;
   }
 
-  /** 引用折叠卡片 HTML（气泡内展示）
-   *  2026-09-03：原文案「点击展开预览」已不准确——点击改成跳转到原文档/块，
-   *  悬停预览改由 document 级 hover 浮动层提供。 */
+  /** 引用卡片 HTML（气泡内展示，2026-09-08 起复用输入框风格）
+   *  与输入框拖入卡片（hiword-ai-block-ref / hiword-ai-doc-ref）视觉一致；
+   *  携带 data-block-id + data-block-kind，由面板委托监听统一处理「点击跳转原文档/块」。 */
   private refCardHtml(id: string, title: string): string {
-    return (
-      `<span class="hiword-ref-card" data-block-id="${escapeHtml(id)}" title="悬停查看预览 · 点击跳转到原文">` +
-        `<span class="hiword-ref-card__icon">📎</span>` +
-        `<span class="hiword-ref-card__anchor">${escapeHtml(title)}</span>` +
-        `<span class="hiword-ref-card__chevron">▸</span>` +
-      `</span>`
-    );
+    const att = this.attachments.get(id);
+    const kind: RefKind = att?.kind ?? "block";
+    const blockType = (att?.blockType || "").trim();
+    const safeId = escapeHtml(id);
+    const safeTitle = escapeHtml(title || (kind === "doc" ? docAnchorOf(id) : `块 ${shortRefId(id)}…`));
+    if (kind === "doc") {
+      return `<span class="hiword-ai-doc-ref" data-block-id="${safeId}" data-block-kind="doc" title="点击跳转到原文文档">${safeTitle}</span>`;
+    }
+    const typeClass = blockType ? ` hiword-ai-block-ref--${blockType}` : "";
+    return `<span class="hiword-ai-block-ref${typeClass}" data-block-id="${safeId}" data-block-kind="block" title="点击跳转到原文块">${safeTitle}</span>`;
+  }
+
+  /**
+   * 2026-09-06 第 3 批：引用正文的字符上限（面板 → 精读行为 → 「引用正文截断」）。
+   *
+   * 同时驱动两处：① 单文档正文截断（宿主 getDocText 的 maxLen）；
+   * ② 文档类附件的总量预算（expandRefs / expandDocRefs 的 docTotalCap）。
+   * normalizeAiSettings 已 clamp 到 2000–40000，这里只防御脏值/缺失。
+   */
+  private contextMaxChars(): number {
+    // 2026-09-06 回归修复：`?.` 不能省。测试里 AiHost 的 stub 常常不实现
+    // getAiSettings()（返回 null），而这是纯逻辑路径、本不该因缺设置而崩。
+    // 生产环境 host 恒返回 aiSettings，这里只是让「取不到」退化成用常量。
+    const v = this.host.getAiSettings()?.contextMaxChars;
+    return typeof v === "number" && Number.isFinite(v) && v > 0 ? v : MAX_DOC_TOTAL;
   }
 
   /**
@@ -2425,10 +2597,16 @@ export class AiPanel {
    *
    * 体积约束沿用旧实测值：单块 8000 硬上限、块总量 8000、文档总量 12000，
    * 超限时块退化为锚文本、文档只留标题，绝不把占位符/((id)) 原文发给 AI。
+   *
+   * 2026-09-06 第 3 批：文档总量上限改为读取 AiSettings.contextMaxChars
+   * （面板 → 精读行为 → 「引用正文截断」，默认 12000，normalize 已 clamp 2000–40000）。
+   * 单块/块总量两个约束（MAX_BLOCK_BODY / MAX_BLOCK_TOTAL）不在本设置项射程内，
+   * 它们是块级硬限制，与「引用正文」是两回事，继续用常量。
    */
   private async expandRefs(raw: string): Promise<string> {
     const markers = scanRefPlaceholders(raw);
     if (!markers.length) return raw;
+    const docTotalCap = this.contextMaxChars();
 
     const edits: RefEdit[] = [];
     let blockTotal = 0;
@@ -2445,7 +2623,7 @@ export class AiPanel {
           continue;
         }
         const header = docHeaderOf(mk.id);
-        if (docTotal + header.length + body.length > MAX_DOC_TOTAL) {
+        if (docTotal + header.length + body.length > docTotalCap) {
           edits.push({ from, to, text: header }); // 已达上限：只保留标题
           continue;
         }
@@ -2503,11 +2681,13 @@ export class AiPanel {
    *   - 拖入时 insertDocRef 已预取全文 → 发送时缓存优先（零网络延迟）
    *   - 缓存未命中时实时拉取（兼容历史会话/预取失败场景），按 docId 去重
    *   - 拉取失败 → 降级为明确提示文本（不再静默删掉导致 AI 看不到任何内容）
-   *   - 全文超 12k → 只保留标题
+   *   - 全文超 12k → 只保留标题（2026-09-06 第 3 批：这个 12k 改为读取
+   *     AiSettings.contextMaxChars，与 expandRefs 同一个开关）
    */
   private async expandDocRefs(md: string): Promise<string> {
     const edits: RefEdit[] = [];
     let expandedLen = 0;
+    const docTotalCap = this.contextMaxChars();
     for (const mk of scanRefMarkers(md)) {
       if (!isDocAnchor(mk.anchor)) continue;
       const docId = mk.id;
@@ -2522,7 +2702,7 @@ export class AiPanel {
         continue;
       }
       const header = docHeaderOf(docId);
-      if (expandedLen + header.length + body.length > MAX_DOC_TOTAL) {
+      if (expandedLen + header.length + body.length > docTotalCap) {
         edits.push({ from: mk.from, to: mk.to, text: header });
         continue;
       }
@@ -2556,6 +2736,9 @@ export class AiPanel {
   }
 
   private bind(contentEl: HTMLElement): void {
+    // 2026-09-04 性能修复：作废上一轮 render 遗留的全局监听（见 bindAbort 字段注释）
+    this.bindAbort?.abort();
+    const bindSignal = (this.bindAbort = new AbortController()).signal;
     const readBtn = contentEl.querySelector("#hiword-ai-read") as HTMLButtonElement;
     const runBtn = contentEl.querySelector("#hiword-ai-run") as HTMLButtonElement;
     const sendBtn = contentEl.querySelector("#hiword-ai-send") as HTMLButtonElement;
@@ -2567,7 +2750,17 @@ export class AiPanel {
     const bodyEl = contentEl.querySelector("#hiword-ai-body") as HTMLElement;
     const welcomeEl = contentEl.querySelector("#hiword-ai-welcome") as HTMLElement;
     const messagesEl = contentEl.querySelector("#hiword-ai-messages") as HTMLElement;
+    // 2026-09-08：气泡内引用卡「点击跳转原文档/块」——在面板根委托监听，覆盖实时/历史/恢复气泡，
+    // 用 bindSignal 自动随 re-render 清理，避免重复绑定。
+    contentEl.addEventListener("click", (e: Event) => this.onRefCardClick(e), { signal: bindSignal });
     const footerEl = contentEl.querySelector("#hiword-ai-footer") as HTMLElement;
+    // ── P2 部件化：所有部件共享的显式上下文（替代原隐式闭包共享）──────────────
+    const ctx: AiBindCtx = {
+      panel: this,
+      contentEl,
+      signal: bindSignal,
+      footerEl,
+    };
 
     // 新增：模型下拉 / 底部工具栏按钮 / 弹窗容器
     const modelBtn = contentEl.querySelector("#hiword-ai-model-btn") as HTMLButtonElement;
@@ -2701,20 +2894,35 @@ export class AiPanel {
       if (tokenModal.contains(t) || (tokenRing && tokenRing.contains(t))) return;
       closeTokenModal();
     };
-    document.addEventListener("mousedown", outsideClick);
+    document.addEventListener("mousedown", outsideClick, { signal: bindSignal });
     // Esc 关闭浮窗
     const escListener = (e: KeyboardEvent) => {
       if (e.key === "Escape" && tokenModal.classList.contains("hiword-ai-token-modal-host--open")) {
         closeTokenModal();
       }
     };
-    document.addEventListener("keydown", escListener);
+    document.addEventListener("keydown", escListener, { signal: bindSignal });
+    // 第 5 批：发送快捷键（sendShortcut，默认 mod+enter）。
+    // 仅在焦点落在 AI 输入框内时拦截，避免吞掉思源其它 Enter；
+    // 输入法组合中（isComposing / keyCode===229）绝不拦截，Enter 用于选词；
+    // 触发即走与发送按钮完全相同的链路（runBtn 点击含 busy 守卫：生成中=停止）。
+    const sendKeyListener = (e: KeyboardEvent) => {
+      if (!this.inputEl) return;
+      const t = e.target as Node | null;
+      if (!t || !this.inputEl.contains(t)) return;
+      if (e.isComposing || e.keyCode === 229) return;
+      const mode = this.host.getAiSettings()?.sendShortcut ?? "mod+enter";
+      if (!matchSendShortcut(e, mode)) return;
+      e.preventDefault();
+      runBtn?.click();
+    };
+    document.addEventListener("keydown", sendKeyListener, { signal: bindSignal });
     // 滚动 / 窗口缩放时自动收起浮窗（避免定位错位）
     const scrollClose = () => {
       if (tokenModal.classList.contains("hiword-ai-token-modal-host--open")) closeTokenModal();
     };
-    window.addEventListener("scroll", scrollClose, true);
-    window.addEventListener("resize", scrollClose);
+    window.addEventListener("scroll", scrollClose, { capture: true, signal: bindSignal });
+    window.addEventListener("resize", scrollClose, { signal: bindSignal });
     tokenRing?.addEventListener("click", (e) => {
       e.stopPropagation();
       openTokenModal();
@@ -2788,20 +2996,54 @@ export class AiPanel {
       e.stopPropagation();
       if (modelMenu.style.display === "none") {
         const s = this.host.getAiSettings();
-        modelMenu.innerHTML = renderModelMenu(s.models, s.model);
+        const platforms = Array.isArray(s.platforms) ? s.platforms : [];
+        const hasAny = platforms.some((p) => p.models && p.models.length);
+        const searchBox = hasAny
+          ? `<input class="hiword-ai-model-search" id="hiword-ai-model-search" placeholder="搜索模型..." />`
+          : "";
+        // 2026-09-07 改动点 3：两级（平台 → 模型）选择器，激活平台默认展开
+        modelMenu.innerHTML =
+          searchBox +
+          renderModelSelector(platforms, s.activePlatformId || "", s.model, s.temperature ?? 0.3, s.maxTokens ?? 2048);
         modelMenu.style.display = "";
         // Portal：挂到 body，用 fixed 定位逃逸面板的 overflow:hidden
         document.body.appendChild(modelMenu);
         const btnRect = modelBtn.getBoundingClientRect();
         modelMenu.style.position = "fixed";
         modelMenu.style.top = `${btnRect.bottom + 4}px`;
-        modelMenu.style.left = `${btnRect.right - Math.min(220, btnRect.width)}px`;
-        modelMenu.style.minWidth = `${Math.max(180, btnRect.width)}px`;
-        modelMenu.querySelectorAll(".hiword-ai-model-item").forEach((item) => {
+        modelMenu.style.left = `${btnRect.right - Math.min(280, btnRect.width)}px`;
+        modelMenu.style.minWidth = `${Math.max(200, btnRect.width)}px`;
+        modelMenu.style.maxHeight = "60vh";
+        modelMenu.style.overflowY = "auto";
+
+        // 搜索过滤（仅按模型名）
+        const searchEl = modelMenu.querySelector("#hiword-ai-model-search") as HTMLInputElement | null;
+        searchEl?.addEventListener("input", () => {
+          const q = (searchEl.value || "").trim().toLowerCase();
+          modelMenu.querySelectorAll<HTMLElement>(".hiword-ai-model-item").forEach((it) => {
+            const name = (it.querySelector(".hiword-ai-model-name")?.textContent || "").toLowerCase();
+            it.style.display = !q || name.includes(q) ? "" : "none";
+          });
+        });
+
+        // 平台分组折叠（默认激活平台展开，其余折叠，可手动切换）
+        modelMenu.querySelectorAll<HTMLElement>(".hiword-ai-model-group-head").forEach((head) => {
+          head.addEventListener("click", () => {
+            const grp = head.closest(".hiword-ai-model-group") as HTMLElement | null;
+            if (!grp) return;
+            grp.classList.toggle("collapsed");
+            const caret = head.querySelector(".hiword-ai-model-caret");
+            if (caret) caret.textContent = grp.classList.contains("collapsed") ? "▸" : "▾";
+          });
+        });
+
+        // 模型选择：单选即时持久化 activePlatformId + model
+        modelMenu.querySelectorAll<HTMLElement>(".hiword-ai-model-item").forEach((item) => {
           item.addEventListener("click", async () => {
-            const m = (item as HTMLElement).dataset.model || "";
+            const m = item.dataset.model || "";
+            const pid = item.dataset.pid || "";
             if (m) {
-              await this.host.setModel(m);
+              await this.host.setModel(m, pid);
               if (modelCurrent) modelCurrent.textContent = m;
             }
             closeModelMenu();
@@ -2818,7 +3060,7 @@ export class AiPanel {
           !(e.target as HTMLElement)?.closest?.("#hiword-ai-model-menu")) {
         closeModelMenu();
       }
-    });
+    }, { signal: bindSignal });
 
     /* ========== 文件上传 ========== */
     uploadBtn?.addEventListener("click", () => {
@@ -3221,6 +3463,8 @@ export class AiPanel {
 
       /** 渲染预设列表（2026-08-16 重构：使用 renderPresetListView，对齐参考样式） */
       let listKw = "";
+      /** T7：正在拖拽的预设 id（dragstart 记录，drop 消费；项目铁律：放置目标绝不反推拖拽源） */
+      let presetDragId = "";
       const showPresetList = () => {
         const presets = this.host.listPresets();
         const activeId = this.host.getActivePreset()?.id || "";
@@ -3236,19 +3480,10 @@ export class AiPanel {
           const kw = listKw.trim().toLowerCase();
           const filtered = kw ? presets.filter((p) => p.name.toLowerCase().includes(kw)) : presets;
           if (filtered.length) {
-            listEl.innerHTML = filtered.map((p) => {
-              const isActive = p.id === activeId;
-              return `<div class="hiword-ai-preset-item${isActive ? " active" : ""}" data-id="${escapeHtml(p.id)}">
-                <div class="hiword-ai-preset-item-main" data-act="open">
-                  <div class="hiword-ai-preset-item-name">${escapeHtml(p.name)}${isActive ? '<span class="hiword-ai-preset-active-chip">· 使用中</span>' : ""}</div>
-                  <div class="hiword-ai-preset-item-sub">上下文消息数: ${p.contextMessages === -1 ? "无限制" : p.contextMessages + " 条"} | 聊天模式: ${p.templateType === "learning" ? "结构化精读" : "问答模式"}</div>
-                </div>
-                <div class="hiword-ai-preset-item-actions">
-                  <button class="hiword-ai-preset-icon" data-act="edit" title="编辑">✎</button>
-                  <button class="hiword-ai-preset-icon" data-act="del" title="删除">🗑</button>
-                </div>
-              </div>`;
-            }).join("");
+            // T7：改用 renderPresetCard 共用渲染（与初始渲染同源，draggable 逻辑不漂移）
+            listEl.innerHTML = filtered
+              .map((p) => renderPresetCard(p, p.id === activeId, !kw))
+              .join("");
             bindListActions();
           } else {
             listEl.innerHTML = `<div class="hiword-ai-preset-empty">${
@@ -3266,8 +3501,40 @@ export class AiPanel {
       const bindListActions = () => {
         const lp = overlay.querySelector(".hiword-ai-overlay-panel") as HTMLElement;
         if (!lp) return;
-        lp.querySelectorAll(".hiword-ai-preset-item").forEach((item) => {
+        lp.querySelectorAll<HTMLElement>(".hiword-ai-preset-item").forEach((item) => {
           const id = (item as HTMLElement).dataset.id || "";
+          // ── T7 拖拽排序（搜索过滤态 draggable 已禁，见 renderPresetCard）──
+          item.addEventListener("dragstart", (e) => {
+            presetDragId = id;
+            item.classList.add("dragging");
+            if (e.dataTransfer) {
+              e.dataTransfer.setData("text/plain", id);
+              e.dataTransfer.effectAllowed = "move";
+            }
+          });
+          item.addEventListener("dragend", () => {
+            presetDragId = "";
+            item.classList.remove("dragging");
+          });
+          item.addEventListener("dragover", (e) => {
+            if (!presetDragId || presetDragId === id) return;
+            e.preventDefault(); // 只有 preventDefault 才允许 drop
+            if (e.dataTransfer) e.dataTransfer.dropEffect = "move";
+            item.classList.add("drop-target");
+          });
+          item.addEventListener("dragleave", () => item.classList.remove("drop-target"));
+          item.addEventListener("drop", async (e) => {
+            e.preventDefault();
+            item.classList.remove("drop-target");
+            // 放置目标恒为 item（currentTarget），拖拽源只从 dragstart 记录取 —— 绝不反推
+            const src = presetDragId || e.dataTransfer?.getData("text/plain") || "";
+            presetDragId = "";
+            if (!src || src === id) return;
+            const targetIndex = this.host.listPresets().findIndex((x) => x.id === id);
+            if (targetIndex < 0) return;
+            await this.host.reorderPreset(src, targetIndex);
+            showPresetList();
+          });
           item.querySelector('[data-act="edit"]')?.addEventListener("click", (e) => {
             e.stopPropagation();
             const p = this.host.listPresets().find((x) => x.id === id);
@@ -3312,128 +3579,7 @@ export class AiPanel {
 
 
 
-    /* ========== 输入区向上拖拽拉伸 + 2026-08-22 新增：chevron 点击收展 ========== */
-    const resizer = contentEl.querySelector("#hiword-ai-resizer") as HTMLElement;
-    const toggleBtn = contentEl.querySelector("#hiword-ai-resizer-toggle") as HTMLElement | null;
-    const panelEl = contentEl.querySelector(".hiword-ai-panel") as HTMLElement;
-    const MIN_FOOTER_H = 120;
-    const FOOTER_H_KEY = "reword-ai-footer-height";
-    const COLLAPSE_KEY = "reword-ai-footer-collapsed";  // 2026-08-22 新增
-
-    // 2026-08-22 改：纯函数 applyCollapsedState（吃 localStorage）,便于单测
-    const applyCollapsedState = (panel: HTMLElement | null, footer: HTMLElement | null, btn: HTMLElement | null, collapsed: boolean, lastH: number) => {
-      if (!panel || !footer || !btn) return;
-      if (collapsed) {
-        panel.classList.add("hiword-ai-panel--collapsed");
-        footer.style.height = "0px";
-        footer.style.minHeight = "0";
-        footer.style.overflow = "hidden";
-        btn.setAttribute("aria-label", "展开输入区");
-        btn.textContent = "▴";
-      } else {
-        panel.classList.remove("hiword-ai-panel--collapsed");
-        if (lastH >= MIN_FOOTER_H) footer.style.height = `${Math.round(lastH)}px`;
-        footer.style.minHeight = "";
-        footer.style.overflow = "";
-        btn.setAttribute("aria-label", "收起输入区");
-        btn.textContent = "▾";
-      }
-      try { localStorage.setItem(COLLAPSE_KEY, String(collapsed)); } catch (__swallowErr) { logSwallow(__swallowErr, "ai-panel.ts · applyCollapsedState", "debug"); }
-    };
-
-    /** 应用高度并持久化 */
-    const applyFooterHeight = (h: number) => {
-      if (!footerEl) return;
-      footerEl.style.height = `${Math.round(h)}px`;
-    };
-    const savedH = Number(localStorage.getItem(FOOTER_H_KEY) || "0");
-    if (savedH >= MIN_FOOTER_H && panelEl) {
-      const maxH = Math.max(MIN_FOOTER_H, Math.round(panelEl.clientHeight * 0.6));
-      applyFooterHeight(Math.min(savedH, maxH));
-    }
-
-    // 2026-08-22 新增：初始化收起态
-    let isCollapsed = false;
-    try { isCollapsed = localStorage.getItem(COLLAPSE_KEY) === "true"; } catch (__swallowErr) { logSwallow(__swallowErr, "ai-panel.ts · applyFooterHeight", "debug"); }
-    if (isCollapsed && footerEl && panelEl && toggleBtn) {
-      applyCollapsedState(panelEl, footerEl, toggleBtn, true, savedH);
-    }
-
-    let dragging = false;
-    let startY = 0;
-    let startH = 0;
-    let rafId = 0;
-    let pendingH = 0;
-
-    const doResize = () => {
-      rafId = 0;
-      if (!footerEl || !panelEl) return;
-      const maxH = Math.max(MIN_FOOTER_H, Math.round(panelEl.clientHeight * 0.6));
-      let h = pendingH;
-      if (h < MIN_FOOTER_H) h = MIN_FOOTER_H;
-      if (h > maxH) h = maxH;
-      footerEl.style.height = `${h}px`;
-    };
-
-    const onResizeMove = (ev: PointerEvent) => {
-      if (!dragging) return;
-      // 向上拖：起始 Y 大于当前 Y → 输入区变高
-      const dy = startY - ev.clientY;
-      pendingH = startH + dy;
-      if (!rafId) rafId = requestAnimationFrame(doResize);
-    };
-
-    const onResizeEnd = () => {
-      if (!dragging) return;
-      dragging = false;
-      document.removeEventListener("pointermove", onResizeMove);
-      document.removeEventListener("pointerup", onResizeEnd);
-      document.body.style.userSelect = "";
-      document.body.style.cursor = "";
-      resizer.classList.remove("hiword-ai-resizer--active");
-      if (rafId) {
-        cancelAnimationFrame(rafId);
-        rafId = 0;
-      }
-      doResize();
-      // 2026-08-22 改：仅在展开态才写 height（避免收起时把 0 写回 localStorage）
-      if (!isCollapsed) {
-        const finalH = footerEl ? footerEl.offsetHeight : 0;
-        if (finalH > 0) localStorage.setItem(FOOTER_H_KEY, String(finalH));
-      }
-    };
-
-    resizer?.addEventListener("pointerdown", (ev: PointerEvent) => {
-      ev.preventDefault();
-      if (!footerEl) return;
-      dragging = true;
-      startY = ev.clientY;
-      startH = footerEl.offsetHeight;
-      this.disposables.addEventListener(document, "pointermove", onResizeMove);
-      this.disposables.addEventListener(document, "pointerup", onResizeEnd);
-      document.body.style.userSelect = "none";
-      document.body.style.cursor = "row-resize";
-      resizer.classList.add("hiword-ai-resizer--active");
-    });
-
-    // 2026-08-22 新增：chevron 点击收展
-    toggleBtn?.addEventListener("click", (e) => {
-      e.stopPropagation();  // 不触发 resizer 的 pointerdown
-      if (!footerEl || !panelEl || !toggleBtn) return;
-      if (!isCollapsed) {
-        // 收起前记下当前高度
-        const h = footerEl.offsetHeight;
-        if (h >= MIN_FOOTER_H) {
-          try { localStorage.setItem(FOOTER_H_KEY, String(h)); } catch (__swallowErr) { logSwallow(__swallowErr, "ai-panel.ts · try { localStorage.setItem(FOOTER_H_KEY, String(h)); }", "debug"); }
-        }
-        applyCollapsedState(panelEl, footerEl, toggleBtn, true, h);
-        isCollapsed = true;
-      } else {
-        const lastH = Number(localStorage.getItem(FOOTER_H_KEY) || "0") || MIN_FOOTER_H;
-        applyCollapsedState(panelEl, footerEl, toggleBtn, false, lastH);
-        isCollapsed = false;
-      }
-    });
+    bindResizer(ctx);
 
     /* ========== AI 消息选字 → 复制 / 识别英文加入词库 ========== */
 
@@ -3851,6 +3997,18 @@ export class AiPanel {
           // 注意不能在此强制重置——生成超过 30s 的长文时，强制重置会与 finally 抢跑，
           // 导致按钮提前恢复成「AI 精读」而后台请求仍在跑，用户误以为已停止。
           if (runBtn.classList.contains("hiword-ai-btn--stop")) {
+            // 冷静期（2026-09-08 修复）：发送开始 1.2s 内的「停止」点击一律忽略。
+            // 根因：触控板轻点抖动会在 ~10ms 内产生第二个点击事件，此刻按钮已切「停止」态，
+            // 第二次点击经 sendBtn 转发命中停止分支 → 请求发出 2ms 即被 abort（「已停止生成/未返回内容」真凶）。
+            // 真人想停止生成需重新瞄准点击，不可能快过 1.2s，故该窗口内忽略绝对安全。
+            const busyMs = this._busySince ? Date.now() - this._busySince : Number.POSITIVE_INFINITY;
+            if (busyMs < 1200) {
+              getLogger().warn("停止点击落在冷静期内，判定为连点/重复事件，已忽略", { operation: "AI对话发送", data: { busyMs } });
+              statusEl.textContent = "";
+              return;
+            }
+            // ⏱ 诊断临时日志（2026-09-08）：任何一次 abort 都必须留痕
+            getLogger().warn("生成中点击「停止」→ abort（诊断）", { operation: "AI对话发送", data: { busySinceMs: this._busySince ? Date.now() - this._busySince : null } });
             this.aiAbort?.abort();
             statusEl.textContent = "正在停止上一次生成…";
             return;
@@ -3931,6 +4089,10 @@ export class AiPanel {
       sendBtn.title = "停止生成";
       this.setInputDisabled(true);
 
+      // P0-3：用户消息先入历史再建气泡，userIndex 才与 chatHistory 对齐。
+      //   原实现 push 在气泡创建之后（对话分支）甚至不 push（学习分支），
+      //   「编辑用户消息 / 重试」按 dataset.index 取到的是上一条。
+      this.chatHistory.push({ role: "user", content: cleanText, expandedContent: expanded });
       // 用户消息气泡（块引用渲染为折叠卡片，保持气泡简洁）
       const userMsg = document.createElement("div");
       const userIndex = this.chatHistory.length - 1;
@@ -3945,23 +4107,8 @@ export class AiPanel {
         </div>
       `;
       this.bindMessageToolbar(userMsg, userIndex, "user");
-      // 2026-09-03：折叠卡点击改为「跳转到原文档/块」（悬浮预览由 document 级 hover 层提供）。
-      //   历史气泡里同张卡若已展开，强制收起——preview 节点内存留着，但视觉折叠，
-      //   与新行为保持一致。
-      userMsg.addEventListener("click", (e: Event) => {
-        const card = (e.target as HTMLElement).closest(".hiword-ref-card") as HTMLElement | null;
-        if (!card) return;
-        e.stopPropagation();
-        const id = card.dataset.blockId || "";
-        if (!id || !looksLikeRefId(id)) return;
-        // kind 推断顺序：attachments 优先 → 锚文本前缀兜底（📄 文档 → doc；其他 → block）
-        const attached = this.attachments.get(id);
-        const kind: RefKind =
-          attached?.kind ??
-          (isDocAnchor((card.textContent || "").trim()) ? "doc" : "block");
-        card.classList.remove("hiword-ref-card--expanded");
-        void this.openRefInSiyuan(id, kind);
-      });
+      // 2026-09-08：气泡引用卡「点击跳转」改由面板根委托监听（onRefCardClick）统一处理，
+      // 覆盖实时气泡、历史气泡、恢复气泡，不再逐条绑定。
       messagesEl.appendChild(userMsg);
 
       // 加载动画消息（含流式 thinking 实时显示区）
@@ -3975,6 +4122,9 @@ export class AiPanel {
             <span class="hiword-ai-dot"></span>
             <span class="hiword-ai-dot"></span>
           </div>
+          <div class="hiword-ai-skeleton" data-role="skeleton">
+            <span></span><span></span><span></span>
+          </div>
           <div class="hiword-ai-live-think" data-role="live-think" style="display:none"></div>
           <div class="hiword-ai-live-count" data-role="live-count" style="display:none"></div>
         </div>
@@ -3987,6 +4137,19 @@ export class AiPanel {
 
       try {
         const logger = getLogger();
+        // 2026-09-06 第 3 批：流式节流间隔与「是否显示思考过程」原本是硬编码行为，
+        // 改为读取设置（面板 → 精读行为）。normalizeAiSettings 已做 clamp
+        // （节流 0–500ms），这里只防御脏值/缺失，不重复 clamp，免得两处口径漂移。
+        // 同上：`?.` 防御（host stub 可能返回 null）。缺省语义与各自默认值一致。
+        const aiSet = this.host.getAiSettings();
+        const throttleMs =
+          typeof aiSet?.streamThrottleMs === "number" &&
+          Number.isFinite(aiSet.streamThrottleMs) &&
+          aiSet.streamThrottleMs >= 0
+            ? aiSet.streamThrottleMs
+            : 100;
+        // `!== false` 而非 `=== true`：取不到设置 / 老配置无该字段时都视为开启
+        const wantThinking = aiSet?.showThinking !== false;
         // 预设驱动：有激活的 learning 预设 → 结构化精读（约束自由对话）；否则 → 自由对话常态
         const activePreset = this.host.getActivePreset();
         const useLearning = !!activePreset && activePreset.templateType !== "chat";
@@ -4003,14 +4166,16 @@ export class AiPanel {
         //   完全占满 → 思源卡死。正文 onToken 早有 createStreamThrottle(100)，
         //   thinking 此前漏了，这里补齐。
         const renderThinking = () => {
-          if (!this.liveThinkingEl) return;
+          // 2026-09-06 第 3 批：关闭「显示思考过程」时，流式期间不展开 thinking 区。
+          //   （结果气泡内的 <details> 同开关，见下方 thinkHtml。）
+          if (!this.liveThinkingEl || !wantThinking) return;
           this.liveThinkingEl.style.display = "";
           // P2-4：thinking 区支持 markdown（粗体/列表/代码等），而非裸文本
           this.liveThinkingEl.innerHTML = renderMarkdown(this.liveThinkingText);
           // 滚动跟随：与正文一致，仅当用户已贴近底部时自动滚，避免打断上翻阅读
           followScroll();
         };
-        const thinkThrottle = createStreamThrottle(renderThinking, 100);
+        const thinkThrottle = createStreamThrottle(renderThinking, throttleMs);
         const onThinking = (chunk: string) => {
           this.liveThinkingText += chunk;
           thinkThrottle.schedule();
@@ -4021,6 +4186,10 @@ export class AiPanel {
         // 已稳定块一次性沉淀到 cache，整文档不再每 100ms 全量重渲。
         let liveRaw = "";            // 已累积的正文（markdown）
         let liveStarted = false;     // 是否已从 loading 升级为结果气泡
+        // 第 5 批：「逐句批注按钮」开启时，流式结束后改用结构化渲染重绘一次 ——
+        // 流式期间是 markdown 增量渲染，没有句级 DOM，批注按钮无处挂载。
+        // 默认关闭 → 行为与改动前完全一致（保留 markdown 视图，不做任何重绘）。
+        const wantAnnotate = this.host.getAiSettings()?.annotateSentences === true;
         let liveMdEl: HTMLElement | null = null; // 结果气泡内的 md 增量容器
         const liveRenderer: IncrementalRenderer = createIncrementalRenderer();
         const renderLive = () => {
@@ -4029,7 +4198,7 @@ export class AiPanel {
           // 滚动跟随：仅当用户已贴近底部时自动滚，避免打断上翻阅读
           followScroll();
         };
-        const liveThrottle = createStreamThrottle(renderLive, 100);
+        const liveThrottle = createStreamThrottle(renderLive, throttleMs);
         // 2026-09-03：结构化精读常跑 30s~2min，原先只显示字数在涨，用户不知道 AI 在做什么、
         // 还要多久。改为按 JSON 字段出现顺序推断阶段（words → sentences → summary）。
         // 只扫描新增片段（回看 16 字符，避免键名被切在两个 chunk 之间），阶段单调递增。
@@ -4068,7 +4237,10 @@ export class AiPanel {
             // 原位升级：loading 消息 → 结果气泡；thinking 已实时滚动的内容内联进气泡顶部
             loadingMsg.classList.remove("hiword-ai-msg--loading");
             loadingMsg.classList.add("hiword-ai-msg--result");
-            const thinkHtml = this.liveThinkingText
+            // 2026-09-06 第 3 批：同一开关也管结果气泡内的 <details>。
+            //   关闭时连「AI 思考过程」折叠标题都不渲染（thinking 文本仍保留在
+            //   this.liveThinkingText，重新打开设置后下次生成即可看到）。
+            const thinkHtml = this.liveThinkingText && wantThinking
               ? `<details class="hiword-ai-think" open><summary class="hiword-ai-think-sum">AI 思考过程（点击收起）</summary><div class="hiword-ai-think-body">${renderMarkdown(this.liveThinkingText)}</div></details>`
               : "";
             loadingMsg.innerHTML = `
@@ -4088,60 +4260,114 @@ export class AiPanel {
           // 2026-08-21 精简：双模式已删除,所有响应走统一渲染
           settings.jsonMode = true;
           const input2: DeepReadInput = { ...prepareDeepReadInput({ title, text: expanded }) };
-          result = await runAiDeepRead(input2, settings, {
-            signal: this.aiAbort?.signal,
-            vocabStore: this.host.getVocabStore(),
-            sourceBlockId: blockId,
-            onThinking,
-            onToken,
-          });
+          // 第 5 批（P2-A）：长文分块——开启且超阈值时改走分块精读（逐块并发 + 合并去重）
+          if (settings.chunkEnabled && expanded.length > (settings.chunkChars ?? 3000)) {
+            result = await runChunkedDeepRead(input2, settings, {
+              signal: this.aiAbort?.signal,
+              vocabStore: this.host.getVocabStore(),
+              // 批次 1 假接线修复：设置项 autoSaveVocab 此前只声明未传参（orchestrator
+              // 恒按默认 true 写回词库），此处补传让开关真正生效。
+              autoSaveVocab: settings.autoSaveVocab ?? true,
+              sourceBlockId: blockId,
+              chunkChars: settings.chunkChars ?? 3000,
+              chunkConcurrency: settings.chunkConcurrency ?? 2,
+              // P1-D 真实进度：progressMode=real 时按分块完成数上报，写入 loading 行
+              onProgress:
+                settings.progressMode === "real"
+                  ? (done, total) => {
+                      if (cntEl) {
+                        cntEl.style.display = "";
+                        cntEl.textContent = `AI 分块精读中：已完成 ${done}/${total} 块`;
+                      }
+                    }
+                  : undefined,
+            });
+          } else {
+            result = await runAiDeepRead(input2, settings, {
+              signal: this.aiAbort?.signal,
+              vocabStore: this.host.getVocabStore(),
+              // 批次 1 假接线修复：同上，补传 autoSaveVocab（默认 true）。
+              autoSaveVocab: settings.autoSaveVocab ?? true,
+              sourceBlockId: blockId,
+              onThinking,
+              onToken,
+            });
+          }
+          // P0-2：结构化精读同样入历史（此前学习分支不 push，重开面板即丢）。
+          // 成功 → 压入 assistant（content 为 JSON/markdown 原文；分块路径 raw 可能为空，
+          //   展示 HTML 由下方公用落盘段随 lastResultHtml 一并存）；失败（非中断）→
+          //   回滚本次用户消息，与对话分支口径一致；中断 → 保留用户消息可重试。
+          if (result.ok && !result.aborted) {
+            this.chatHistory.push({ role: "assistant", content: result.raw });
+          } else if (!result.aborted) {
+            this.chatHistory.pop();
+          }
         } else {
-          // 对话常态：维护多轮上下文，把用户输入压栈后整段发送给 AI
-          this.chatHistory.push({ role: "user", content: expanded });
+          // 对话常态：维护多轮上下文（用户消息已在气泡创建前入栈，P0-3），整段发送给 AI
           // 历史裁剪（P2-1）：按 token 预算从最旧整轮丢弃，避免「越聊越慢」；仅裁剪发送副本，保留完整 chatHistory 供显示
+          // 2026-09-08：用户消息发送副本用 expandedContent（占位符已展开）；旧会话/恢复态无 expandedContent 时，
+          // 若正文仍含占位符则兜底 expandRefs 展开，确保 AI 不会收到裸 @@REWORD_REF_id@@
+          const userTurns = await Promise.all(
+            this.chatHistory.map(async (m) => {
+              if (m.role !== "user") return { role: "assistant" as const, content: m.content };
+              let content = m.expandedContent ?? m.content;
+              if (content.includes("@@REWORD_REF_")) content = await this.expandRefs(content);
+              return { role: "user" as const, content };
+            })
+          );
           const sendCtx: ChatTurn[] = trimChatHistory(
-            this.chatHistory.map((m) => ({ role: m.role as "user" | "assistant", content: m.content })),
+            userTurns,
             { maxTokens: settings.maxTokens, keepRecentRatio: 0.6, maxMessages: 24 }
           );
           result = await runAiChat(sendCtx, settings, { signal: this.aiAbort?.signal, onThinking, onToken });
           if (result.ok && result.raw) {
             this.chatHistory.push({ role: "assistant", content: result.raw });
+          } else if (result.aborted && liveRaw.trim()) {
+            // T2（2026-09-07）：中断但已有正文 → 保留并打标记（result.raw 在 abort 时恒为空，
+            // 正文只在 liveRaw 里）。重试 / 重载都能看到断点，而不是内容离奇消失。
+            this.chatHistory.push({ role: "assistant", content: liveRaw + INTERRUPT_MARK });
           } else if (!result.ok && !result.aborted) {
             // 失败时把上一轮用户消息弹出，避免脏数据污染下次
             this.chatHistory.pop();
           }
-          // 落盘到当前会话（先渲染后落盘：fire-and-forget，不阻塞结果气泡出现）
-          if (result.ok && result.raw) {
-            void (async () => {
-              try {
-                const sid = await this.ensureSession();
-                const existing = sessionStore.get(sid)?.messages ?? [];
-                await sessionStore.saveMessages(
-                  sid,
-                  this.chatHistory.map((m, i) => {
-                    if (m.role === "assistant") {
-                      // 最后一条 assistant 用本次新鲜渲染的 HTML；更早的保留之前落盘的 HTML，避免裸显 JSON
-                      const fresh = i === this.chatHistory.length - 1 && this.lastResultHtml ? this.lastResultHtml : undefined;
-                      return {
-                        role: "assistant" as const,
-                        content: m.content,
-                        ts: existing[i]?.ts ?? Date.now(),
-                        html: fresh ?? existing[i]?.html,
-                      };
-                    }
-                    return { role: "user" as const, content: m.content, ts: existing[i]?.ts ?? Date.now() };
-                  })
-                );
-                // 初次使用自动命名：若当前会话还是默认名/24 字截断名，调用 AI 生成更贴切的标题
-                const firstUser = this.chatHistory.find((m) => m.role === "user");
-                if (firstUser) {
-                  void this.aiAutoRenameSession(sid, firstUser.content);
-                }
-              } catch (e) {
-                getLogger().error("会话落盘失败（异步）", { operation: "AI对话发送", error: e });
+        }
+
+        // 落盘到当前会话（P0-2：学习/对话两路共用；此前学习分支整体不落盘）。
+        // 先渲染后落盘：fire-and-forget，不阻塞结果气泡出现。
+        // 学习路径 raw 可能为空（分块合并无 summary），展示靠 lastResultHtml，故仅对话路径要求 raw 非空。
+        // T2：中断且已保留部分正文时同样落盘（result.ok 在 abort 时为 false，需显式并列）。
+        // 结构化精读的中断内容是半截 JSON，无法渲染，故不纳入（该路径 liveStarted 恒 false，
+        // 上面也不会 push，落盘缺一条不会造成历史错位）。
+        if ((result.ok && (useLearning || !!result.raw)) || (result.aborted && !useLearning && !!liveRaw.trim())) {
+          void (async () => {
+            try {
+              const sid = await this.ensureSession();
+              const existing = sessionStore.get(sid)?.messages ?? [];
+              await sessionStore.saveMessages(
+                sid,
+                this.chatHistory.map((m, i) => {
+                  if (m.role === "assistant") {
+                    // 最后一条 assistant 用本次新鲜渲染的 HTML；更早的保留之前落盘的 HTML，避免裸显 JSON
+                    const fresh = i === this.chatHistory.length - 1 && this.lastResultHtml ? this.lastResultHtml : undefined;
+                    return {
+                      role: "assistant" as const,
+                      content: m.content,
+                      ts: existing[i]?.ts ?? Date.now(),
+                      html: fresh ?? existing[i]?.html,
+                    };
+                  }
+                  return { role: "user" as const, content: m.content, ts: existing[i]?.ts ?? Date.now() };
+                })
+              );
+              // 初次使用自动命名：若当前会话还是默认名/24 字截断名，调用 AI 生成更贴切的标题
+              const firstUser = this.chatHistory.find((m) => m.role === "user");
+              if (firstUser) {
+                void this.aiAutoRenameSession(sid, firstUser.content);
               }
-            })();
-          }
+            } catch (e) {
+              getLogger().error("会话落盘失败（异步）", { operation: "AI对话发送", error: e });
+            }
+          })();
         }
 
         // ── 移除加载动画，替换 / 复用结果消息 ──
@@ -4153,7 +4379,15 @@ export class AiPanel {
           // - 省一次对 Lute 的全量调用（tail 已经在最后一次 push 时渲染过）
           // liveMdEl 在 if 里被 narrow 成 never（跨闭包赋值），强制断言
           const el: HTMLElement = liveMdEl;
-          el.innerHTML = liveRenderer.flush();
+          // 仅在「逐句批注按钮」开启且结果是结构化 JSON 时切结构化视图（见 wantAnnotate 注释）
+          if (wantAnnotate && result.isJson) {
+            el.innerHTML = renderDeepReadHtml(result, {
+              citation: this.host.getAiSettings()?.citationEnabled !== false,
+              annotate: true,
+            });
+          } else {
+            el.innerHTML = liveRenderer.flush();
+          }
           // 滚动跟随：保持原行为（仅当用户已贴近底部时自动滚，避免打断上翻）
           followScroll();
         }
@@ -4164,6 +4398,8 @@ export class AiPanel {
         if (result.aborted) {
           // 用户主动停止：流式已出内容则保留展示；未出内容则不渲染、仅提示
           if (!liveStarted) {
+            // ⏱ 诊断临时日志（2026-09-08）：编排层返回 aborted 且零内容 → 「已停止生成」无气泡
+            getLogger().warn("编排层返回 aborted 且无正文（诊断）", { operation: "AI对话发送", data: { ok: result.ok, rawLen: result.raw?.length ?? 0, signalAborted: this.aiAbort?.signal.aborted ?? null } });
             loadingMsg.remove();
             statusEl.textContent = "已停止生成。";
             return;
@@ -4184,37 +4420,51 @@ export class AiPanel {
         const msgIndex = this.chatHistory.length - 1;
         resultMsg.dataset.index = String(msgIndex);
         resultMsg.dataset.role = "assistant";
+        // 截断提示：精读走自动续传，对话模式不续传（2026-09-04 P0），文案需区分
+        const truncatedNote = result.truncated
+          ? `<div class="hiword-ai-truncated">⚠️ 输出达到 Token 上限被截断${useLearning ? "（已自动续传仍不完整）" : ""}。可在 ⚙ 设置中调大「最大 Token」后重试。</div>`
+          : "";
+        // T2：与截断提示同款的中性提示条，说明气泡内容是"半截"的（已入历史，可重试续接）
+        const interruptedNote = result.aborted
+          ? `<div class="hiword-ai-interrupted">⏹ 已停止生成 · 以上为中断前已生成的内容（已保留，可重试）</div>`
+          : "";
         if (!liveStarted) {
           // 非流式路径：一次性渲染完整结果（learning 结构化 / 缓冲模式 / 未触发流式）
-          const bodyHtml = renderDeepReadHtml(result);
+          // P1-B：citation 开关随渲染传入（引文回链渲染，默认 true）
+          const bodyHtml = renderDeepReadHtml(result, {
+            citation: this.host.getAiSettings()?.citationEnabled !== false,
+            annotate: wantAnnotate,
+          });
           resultMsg.innerHTML = `
             <div class="hiword-ai-msg-avatar">AI</div>
             <div class="hiword-ai-msg-content b3-typography">
               <button class="hiword-ai-msg-copy" data-act="copy-all" title="复制本条全部内容">📋 复制全部</button>
               ${bodyHtml}
-              ${result.truncated ? `<div class="hiword-ai-truncated">⚠️ 输出达到 Token 上限被截断（已自动续传仍不完整）。可在 ⚙ 设置中调大「最大 Token」后重试。</div>` : ""}
+              ${truncatedNote}
               ${renderMessageToolbar("assistant")}
             </div>
           `;
           messagesEl.appendChild(resultMsg);
           // 原始 markdown 存入 JS Map（替代 data-raw-md 属性，降低 innerHTML 解析负担，P3-2）
-          this.rawMdByIndex.set(msgIndex, result.raw || "");
+          // T2：abort 时 result.raw 为空，回退到流式累积的 liveRaw，
+          //     否则「复制全部 / 编辑重发」拿到空串，等于内容还是丢了。
+          this.rawMdByIndex.set(msgIndex, result.raw || liveRaw);
         } else {
-          // 流式路径：补截断提示 / 工具栏（内容已在流式中渲染）
+          // 流式路径：补中断 / 截断提示、工具栏（内容已在流式中渲染）
           const contentEl = resultMsg.querySelector(".hiword-ai-msg-content") as HTMLElement | null;
           if (contentEl) {
             // 原始 markdown 存入 JS Map（替代 data-raw-md 属性，P3-2）
-            this.rawMdByIndex.set(msgIndex, result.raw || "");
+            // T2：abort 时 result.raw 为空，回退到流式累积的 liveRaw，
+          //     否则「复制全部 / 编辑重发」拿到空串，等于内容还是丢了。
+          this.rawMdByIndex.set(msgIndex, result.raw || liveRaw);
+            if (result.aborted) contentEl.insertAdjacentHTML("beforeend", interruptedNote);
             if (result.truncated) {
-              contentEl.insertAdjacentHTML(
-                "beforeend",
-                `<div class="hiword-ai-truncated">⚠️ 输出达到 Token 上限被截断（已自动续传仍不完整）。可在 ⚙ 设置中调大「最大 Token」后重试。</div>`
-              );
+              contentEl.insertAdjacentHTML("beforeend", truncatedNote);
             }
             contentEl.insertAdjacentHTML("beforeend", renderMessageToolbar("assistant"));
           }
         }
-        this.bindResult(resultMsg, blockId);
+        this.bindResult(resultMsg, blockId, result);
         this.bindMessageToolbar(resultMsg, msgIndex, "assistant");
         // 思源原生样式增强：数学公式(KaTeX) + 代码高亮(highlight.js)，与思源正文视觉一致
         enhanceSiYuanRender(resultMsg);
@@ -4255,8 +4505,19 @@ export class AiPanel {
           <div class="hiword-ai-msg-avatar hiword-ai-msg-avatar--error">!</div>
           <div class="hiword-ai-msg-body">
             <div class="hiword-ai-msg-error">${this.friendlyError(e)}</div>
+            <div class="hiword-ai-msg-toolbar">
+              <button type="button" class="hiword-ai-msg-btn" data-act="retry">重试</button>
+            </div>
           </div>
         `;
+        // P2-5：错误气泡内重试——回填本次输入并复用主发送链路（run 按钮），
+        // 先移除错误气泡本身避免堆叠，上下文保留在上一次成功结果里。
+        errMsg.querySelector("[data-act='retry']")?.addEventListener("click", () => {
+          errMsg.remove();
+          this.setInputMarkdown(expanded);
+          const runBtn = this.contentEl?.querySelector("#hiword-ai-run") as HTMLButtonElement | null;
+          runBtn?.click();
+        });
         messagesEl.appendChild(errMsg);
         bodyEl.scrollTop = bodyEl.scrollHeight;
         statusEl.textContent = "精读异常。";
@@ -4288,476 +4549,76 @@ export class AiPanel {
     });
   }
 
-  /** 绑定悬浮词汇栏（renderVocabBar 输出的全不选 / 主题 / 入库） */
+  /** 绑定悬浮词汇栏（renderVocabBar 输出的全不选 / 主题 / 入库）——实现见 ai-msg-actions.ts */
   private bindVocabBar(resultEl: HTMLElement, result: DeepReadResult, blockId?: string): void {
-    const bar = resultEl.querySelector(".hiword-ai-vocab-bar") as HTMLElement | null;
-    if (!bar) return;
-
-    // 填充目标本下拉（默认词库 + 用户词库）
-    const targets = this.host.getVocabTargets();
-    const bookSel = bar.querySelector('[data-field="book"]') as HTMLSelectElement | null;
-    if (bookSel) {
-      const opts = [`<option value="">（默认词库）</option>`];
-      targets.books.forEach((b) => {
-        opts.push(`<option value="${escapeHtml(b.id)}">${escapeHtml(b.name)}</option>`);
-      });
-      bookSel.innerHTML = opts.join("");
-    }
-
-    const getCheckedWords = (): DeepReadWord[] => {
-      const checked = Array.from(resultEl.querySelectorAll<HTMLInputElement>('.hiword-ai-sel[data-kind="word"]:checked'));
-      if (checked.length) {
-        const set = new Set(checked.map((c) => (c as HTMLElement).dataset.word || ""));
-        return result.words.filter((w) => set.has(w.word));
-      }
-      return result.words;
-    };
-
-    // 「全不选」按钮
-    bar.querySelector('[data-act="none"]')?.addEventListener("click", () => {
-      resultEl.querySelectorAll<HTMLInputElement>('.hiword-ai-sel[data-kind="word"]').forEach((c) => {
-        c.checked = false;
-        c.dispatchEvent(new Event("change", { bubbles: true }));
-      });
-    });
-
-    // 主题 chips：点击切换 active（视觉态），具体主题随词库目标本决定，这里仅作为过滤标签
-    const chips = bar.querySelectorAll<HTMLElement>(".hiword-ai-theme-chip");
-    chips.forEach((chip) => {
-      chip.addEventListener("click", () => {
-        chip.classList.toggle("active");
-      });
-    });
-
-    // 「添加到词库」按钮
-    bar.querySelector('[data-act="add"]')?.addEventListener("click", () => {
-      const sel = getCheckedWords();
-      if (!sel.length) {
-        const statusEl = document.querySelector("#hiword-ai-status") as HTMLElement | null;
-        if (statusEl) statusEl.textContent = "请先勾选要入库的单词。";
-        return;
-      }
-      const bookSel = bar.querySelector('[data-field="book"]') as HTMLSelectElement | null;
-      const bookId = bookSel?.value || undefined;
-      const activeTheme = bar.querySelector(".hiword-ai-theme-chip.active") as HTMLElement | null;
-      const themeId = activeTheme?.dataset.theme || undefined;
-      this.collectCheckedWords(sel, bookId, themeId, resultEl, blockId);
-    });
+    bindVocabBar(this, resultEl, result, blockId);
   }
 
-  /** 把选中词写入词库（同步上下文例句 / 标记 #未掌握 / 继承主题标签） */
-  private async collectCheckedWords(
+  /** 把选中词写入词库 —— 实现见 ai-msg-actions.ts */
+  private collectCheckedWords(
     sel: DeepReadWord[],
     bookId: string | undefined,
     themeId: string | undefined,
     resultEl: HTMLElement,
     blockId?: string
   ): Promise<void> {
-    const statusEl = document.querySelector("#hiword-ai-status") as HTMLElement | null;
-    if (statusEl) statusEl.textContent = `入库中（${sel.length} 词）…`;
-    let added = 0;
-    for (const w of sel) {
-      try {
-        const r = await this.host.collectWord(w, bookId, themeId, {
-          example: w.context,
-          markUnmastered: true,
-          inheritThemeTags: true,
-        });
-        if (r.added) added++;
-      } catch (__swallowErr) { logSwallow(__swallowErr, "ai-panel.ts · try { const r = await this.host.collectWord(w, bookId, themeId,…", "debug"); }
-    }
-    if (statusEl) statusEl.textContent = `入库完成：新增 ${added} 个单词`;
-    // 把已入库的复选框置灰
-    resultEl.querySelectorAll<HTMLInputElement>('.hiword-ai-sel[data-kind="word"]').forEach((c) => {
-      const word = (c as HTMLElement).dataset.word || "";
-      if (sel.some((w) => w.word === word)) {
-        c.checked = false;
-        c.disabled = true;
-      }
-    });
+    return collectCheckedWords(this, sel, bookId, themeId, resultEl, blockId);
   }
 
-  /** 绑定结果区内的收藏按钮（单词收藏 / 上下文 + 学习模式） */
-  private bindResult(resultEl: HTMLElement, blockId?: string): void {
-    // 整条消息「复制全部」：复制本条 AI 输出的纯文本（还原数学公式原始写法）
-    resultEl.querySelector(".hiword-ai-msg-copy")?.addEventListener("click", () => {
-      const content = resultEl.querySelector(".hiword-ai-msg-content") as HTMLElement | null;
-      const text = content ? this.getMessagePlainText(content) : "";
-      if (!text) { showMessage("本条暂无内容可复制", 2000, "info"); return; }
-      this.host.copyText(text);
-      showMessage("已复制本条全部内容", 2000, "info");
-    });
-
-    // 学习模式下单词行内 ＋收藏
-    resultEl.querySelectorAll(".hiword-ai-collect").forEach((btn) => {
-      btn.addEventListener("click", async () => {
-        const w = (btn as HTMLElement).dataset.word || "";
-        if (!w) return;
-        try {
-          await this.host.collectWord({ word: w, meaning: "" });
-          (btn as HTMLButtonElement).textContent = "已收藏";
-          (btn as HTMLButtonElement).disabled = true;
-        } catch (e: any) {
-          (btn as HTMLElement).textContent = "失败";
-        }
-      });
-    });
+  /** 绑定结果区内的收藏按钮（单词收藏 / 上下文 + 学习模式 / 逐句批注） */
+  private bindResult(resultEl: HTMLElement, blockId?: string, result?: DeepReadResult): void {
+    bindResult(this, resultEl, blockId, result);
   }
 
-  /** 提取消息内容纯文本：克隆节点，将已渲染的数学公式还原为原始写法，再读取 innerText */
+  /** 提取消息内容纯文本（还原数学公式原始写法） */
   private getMessagePlainText(content: HTMLElement): string {
-    const clone = content.cloneNode(true) as HTMLElement;
-    clone.querySelectorAll("[data-content]").forEach((n) => {
-      const raw = (n as HTMLElement).getAttribute("data-content");
-      if (raw != null) n.textContent = raw;
-    });
-    clone.querySelectorAll(".hiword-ai-msg-copy").forEach((n) => n.remove());
-    clone.querySelectorAll(".hiword-ai-collect, .hiword-ai-vocab-bar, .hiword-ai-word-cb").forEach((n) => n.remove());
-    return (clone.innerText || "").replace(/\n{3,}/g, "\n\n").trim();
+    return getMessagePlainText(content);
   }
 
   /** 绑定消息工具栏事件（复制 Markdown/TXT、保存到笔记、编辑、重试） */
   private bindMessageToolbar(msgEl: HTMLElement, index: number, role: "user" | "assistant"): void {
-    const contentEl = msgEl.querySelector(".hiword-ai-msg-content") as HTMLElement | null;
-    if (!contentEl) return;
-
-    const getRawMd = (): string => {
-      if (role === "user") {
-        return this.chatHistory[index]?.content || "";
-      }
-      // 优先读 JS Map（P3-2 替代 data-raw-md 属性），兜底读旧属性/历史
-      return this.rawMdByIndex.get(index) || contentEl.dataset.rawMd || this.chatHistory[index]?.content || "";
-    };
-
-    // 复制 Markdown
-    msgEl.querySelector('[data-act="copy-md"]')?.addEventListener("click", () => {
-      const md = getRawMd();
-      if (!md.trim()) { showMessage("本条暂无 Markdown 可复制", 2000, "info"); return; }
-      this.host.copyText(md);
-      showMessage("已复制 Markdown", 2000, "info");
-    });
-
-    // 复制 TXT
-    msgEl.querySelector('[data-act="copy-txt"]')?.addEventListener("click", () => {
-      const text = this.getMessagePlainText(contentEl);
-      if (!text) { showMessage("本条暂无内容可复制", 2000, "info"); return; }
-      this.host.copyText(text);
-      showMessage("已复制纯文本", 2000, "info");
-    });
-
-    // 保存到笔记
-    msgEl.querySelector('[data-act="save-note"]')?.addEventListener("click", () => {
-      void this.openSaveToNoteDialog(getRawMd());
-    });
-
-    // 编辑
-    msgEl.querySelector('[data-act="edit"]')?.addEventListener("click", () => {
-      if (role === "user") {
-        this.editUserMessage(index);
-      } else {
-        void this.editAssistantMessage(msgEl, index);
-      }
-    });
-
-    // 重试（仅 AI 消息）
-    if (role === "assistant") {
-      msgEl.querySelector('[data-act="retry"]')?.addEventListener("click", () => {
-        void this.retryAssistantMessage(index);
-      });
-    }
+    bindMessageToolbar(this, msgEl, index, role);
   }
 
   /** 打开「保存到笔记」对话框 */
   private async openSaveToNoteDialog(markdown: string): Promise<void> {
-    if (!this.openOverlay) {
-      // P3-2：overlay 未初始化时不再静默 return，给出反馈避免「点保存无反应」
-      showMessage("保存面板尚未就绪，请稍候重试", 3000, "error");
-      return;
-    }
-    const notebooks = await this.host.listNotebooks();
-    if (!notebooks.length) {
-      showMessage("未找到可用笔记本", 3000, "error");
-      return;
-    }
-    this.openOverlay(renderSaveToNoteDialog({ notebooks }));
-    const panel = this.overlay?.querySelector(".hiword-ai-overlay-panel") as HTMLElement | null;
-    if (!panel) return;
-
-    const notebookSel = panel.querySelector('[data-field="notebook"]') as HTMLSelectElement;
-    const pathInput = panel.querySelector('[data-field="path"]') as HTMLInputElement;
-    const titleInput = panel.querySelector('[data-field="title"]') as HTMLInputElement;
-    const treeEl = panel.querySelector('[data-field="tree"]') as HTMLElement;
-
-    const loadTree = async (notebookId: string, path = "") => {
-      if (!treeEl) return;
-      treeEl.innerHTML = '<div class="hiword-ai-savenote-empty">加载中…</div>';
-      try {
-        const nodes = await this.host.listDocTree(notebookId, path);
-        treeEl.innerHTML = renderSaveToNoteTree(nodes);
-        bindTreeEvents();
-      } catch {
-        treeEl.innerHTML = '<div class="hiword-ai-savenote-empty">加载失败</div>';
-      }
-    };
-
-    const bindTreeEvents = () => {
-      panel.querySelectorAll(".hiword-ai-savenote-node").forEach((node) => {
-        const el = node as HTMLElement;
-        el.addEventListener("click", (e) => {
-          e.stopPropagation();
-          const children = el.nextElementSibling as HTMLElement | null;
-          if (children?.classList.contains("hiword-ai-savenote-children")) {
-            const isHidden = children.style.display === "none";
-            children.style.display = isHidden ? "" : "none";
-            const toggle = el.querySelector(".hiword-ai-savenote-toggle");
-            if (toggle) toggle.textContent = isHidden ? "▼" : "▸";
-          }
-          const p = el.dataset.path;
-          if (p != null && pathInput) {
-            pathInput.value = p;
-          }
-        });
-      });
-    };
-
-    notebookSel?.addEventListener("change", () => {
-      const id = notebookSel.value;
-      if (id) loadTree(id);
-    });
-
-    // 初始加载第一个笔记本的树
-    if (notebooks[0]?.id) loadTree(notebooks[0].id);
-
-    panel.querySelector('[data-act="cancel"]')?.addEventListener("click", () => {
-      if (this.overlay) { this.overlay.style.display = "none"; this.overlay.innerHTML = ""; }
-    });
-    this.overlay?.querySelector('[data-act="close-overlay"]')?.addEventListener("click", () => {
-      if (this.overlay) { this.overlay.style.display = "none"; this.overlay.innerHTML = ""; }
-    });
-
-    panel.querySelector('[data-act="confirm"]')?.addEventListener("click", async () => {
-      const notebookId = notebookSel?.value || "";
-      const path = pathInput?.value || "";
-      const title = titleInput?.value || "";
-      const openAfterSave = (panel.querySelector('[data-field="openAfterSave"]') as HTMLInputElement)?.checked ?? true;
-      if (!notebookId) { showMessage("请选择笔记本", 2500, "info"); return; }
-      try {
-        const docId = await this.host.saveToNote({ markdown, notebookId, path, title, openAfterSave });
-        if (this.overlay) { this.overlay.style.display = "none"; this.overlay.innerHTML = ""; }
-        showMessage(`已保存到笔记 (${docId.slice(0, 8)}…)`, 2500, "success" as any);
-      } catch (e: any) {
-        showMessage(`保存失败：${e?.message || e}`, 3000, "error");
-      }
-    });
+    await openSaveToNoteDialog(this, markdown);
   }
 
   /** 编辑用户消息：回填输入框并截断后续上下文 */
   private editUserMessage(index: number): void {
-    const msg = this.chatHistory[index];
-    if (!msg || msg.role !== "user") return;
-    this.setInputMarkdown(msg.content);
-    // 截断到该消息之前
-    this.chatHistory = this.chatHistory.slice(0, index);
-    // 同步 session store
-    if (this.currentSessionId) {
-      sessionStore.saveMessages(
-        this.currentSessionId,
-        this.chatHistory.map((m) => ({ role: m.role as "user" | "assistant", content: m.content, ts: Date.now() }))
-      );
-    }
-    // 删除 DOM 中该消息及之后的所有消息
-    const messagesEl = this.contentEl?.querySelector("#hiword-ai-messages") as HTMLElement | null;
-    if (messagesEl) {
-      const all = Array.from(messagesEl.querySelectorAll(".hiword-ai-msg"));
-      for (const el of all) {
-        const idx = parseInt((el as HTMLElement).dataset.index || "-1", 10);
-        if (idx >= index) el.remove();
-      }
-      // 重新校正剩余消息的索引
-      this.reindexMessages(messagesEl);
-    }
-    const inputEl = this.contentEl?.querySelector("#hiword-ai-input") as HTMLElement | null;
-    inputEl?.focus();
+    editUserMessage(this, index);
   }
 
   /** 重新校正消息 DOM 的 data-index */
   private reindexMessages(messagesEl: HTMLElement): void {
-    const msgs = Array.from(messagesEl.querySelectorAll(".hiword-ai-msg"));
-    msgs.forEach((el, i) => { (el as HTMLElement).dataset.index = String(i); });
+    reindexMessages(messagesEl);
   }
 
   /** 编辑 AI 消息：就地进入 Markdown 编辑，保存后更新并重渲染 */
   private async editAssistantMessage(msgEl: HTMLElement, index: number): Promise<void> {
-    const contentEl = msgEl.querySelector(".hiword-ai-msg-content") as HTMLElement | null;
-    if (!contentEl) return;
-    const rawMd = this.rawMdByIndex.get(index) || contentEl.dataset.rawMd || this.chatHistory[index]?.content || "";
-
-    contentEl.style.display = "none";
-    const editor = document.createElement("div");
-    editor.className = "hiword-ai-msg-editor";
-    editor.innerHTML = `
-      <textarea class="hiword-ai-msg-editor-text" spellcheck="false">${escapeHtml(rawMd)}</textarea>
-      <div class="hiword-ai-msg-editor-actions">
-        <button class="hiword-ai-btn hiword-ai-btn--ghost" data-act="cancel">取消</button>
-        <button class="hiword-ai-btn hiword-ai-btn--primary" data-act="save">保存</button>
-      </div>
-    `;
-    contentEl.after(editor);
-    const textarea = editor.querySelector("textarea") as HTMLTextAreaElement;
-    textarea.focus();
-
-    const cleanup = () => {
-      contentEl.style.display = "";
-      editor.remove();
-    };
-
-    editor.querySelector('[data-act="cancel"]')?.addEventListener("click", cleanup);
-    editor.querySelector('[data-act="save"]')?.addEventListener("click", () => {
-      const newMd = textarea.value;
-      // 更新内存与持久化
-      if (this.chatHistory[index]) {
-        this.chatHistory[index].content = newMd;
-      }
-      if (this.currentSessionId) {
-        const sess = sessionStore.get(this.currentSessionId);
-        if (sess && sess.messages[index]) {
-          sess.messages[index].content = newMd;
-          sess.messages[index].html = undefined; // 强制重新渲染
-          sessionStore.saveMessages(this.currentSessionId, sess.messages);
-        }
-      }
-      // 重渲染内容区（保留工具栏，避免 innerHTML 覆盖后丢失）
-      const toolbar = contentEl.querySelector(".hiword-ai-msg-toolbar");
-      contentEl.innerHTML = renderWithLute(newMd);
-      if (toolbar) contentEl.appendChild(toolbar);
-      this.rawMdByIndex.set(index, newMd);
-      enhanceSiYuanRender(contentEl);
-      cleanup();
-      showMessage("已更新消息", 2000, "success" as any);
-    });
+    await editAssistantMessage(this, msgEl, index);
   }
 
   /** 重试 AI 消息：保留更早上下文，用前一条用户消息重新生成 */
   private async retryAssistantMessage(index: number): Promise<void> {
-    if (index <= 0 || index >= this.chatHistory.length) {
-      showMessage("没有可重试的用户消息", 2000, "info");
-      return;
-    }
-    const prevUser = this.chatHistory[index - 1];
-    if (prevUser?.role !== "user") {
-      showMessage("上一条不是用户消息，无法重试", 2000, "info");
-      return;
-    }
-    // 截断到前一条用户消息之前
-    this.chatHistory = this.chatHistory.slice(0, index - 1);
-    if (this.currentSessionId) {
-      sessionStore.saveMessages(
-        this.currentSessionId,
-        this.chatHistory.map((m) => ({ role: m.role as "user" | "assistant", content: m.content, ts: Date.now() }))
-      );
-    }
-    // 删除 DOM 中前一条用户消息及之后的所有消息
-    const messagesEl = this.contentEl?.querySelector("#hiword-ai-messages") as HTMLElement | null;
-    if (messagesEl) {
-      const all = Array.from(messagesEl.querySelectorAll(".hiword-ai-msg"));
-      for (const el of all) {
-        const idx = parseInt((el as HTMLElement).dataset.index || "-1", 10);
-        if (idx >= index - 1) el.remove();
-      }
-      this.reindexMessages(messagesEl);
-    }
-    // 回填输入框并触发发送
-    this.setInputMarkdown(prevUser.content);
-    const runBtn = this.contentEl?.querySelector("#hiword-ai-run") as HTMLButtonElement | null;
-    runBtn?.click();
+    await retryAssistantMessage(this, index);
   }
 
-  /**
-   * 加载查询面板的筛选选项（颜色列表 + 文档列表）
-   */
+  /** 加载查询面板的筛选选项（颜色列表 + 文档列表） */
   private async loadQueryFilters(
     colorSelect: HTMLSelectElement | null,
     docSelect: HTMLSelectElement | null
   ): Promise<void> {
-    // 颜色选项（与批注对话框一致）
-    const colors = [
-      { value: "", label: "全部颜色" },
-      { value: "#4285f4", label: "蓝色" },
-      { value: "#0d9e5f", label: "翠绿" },
-      { value: "#e6a23c", label: "琥珀" },
-      { value: "#db3f84", label: "玫红" },
-      { value: "#5b6ee1", label: "靛蓝" },
-      { value: "#17a2b8", label: "青色" },
-      { value: "#f06543", label: "珊瑚" },
-      { value: "#6c757d", label: "石板" },
-    ];
-    if (colorSelect) {
-      colorSelect.innerHTML = colors
-        .map((c) => `<option value="${c.value}">${c.label}</option>`)
-        .join("");
-    }
-
-    // 文档选项（从 host 获取已批注文档列表）
-    if (docSelect) {
-      try {
-        const docIds = await this.host.getAnnotatedDocIds();
-        docSelect.innerHTML = '<option value="">全部文档</option>';
-        for (const did of docIds) {
-          // 尝试获取文档标题
-          const label = did.slice(0, 12) + (did.length > 12 ? "…" : "");
-          const opt = document.createElement("option");
-          opt.value = did;
-          opt.textContent = label;
-          docSelect.appendChild(opt);
-        }
-      } catch {
-        // 静默失败，保持默认
-      }
-    }
+    await loadQueryFilters(this, colorSelect, docSelect);
   }
 
-  /**
-   * 渲染查询结果列表
-   */
+  /** 渲染查询结果列表 */
   private renderQueryResults(
     container: HTMLElement,
     result: AnnotationQueryResult
   ): void {
-    if (!result.items.length) {
-      container.innerHTML = `
-        <div class="hiword-ai-query-empty">
-          <p>未找到匹配的批注</p>
-          <p class="hiword-ai-query-hint">试试放宽筛选条件或更换关键词</p>
-        </div>`;
-      return;
-    }
-
-    const renderNote = (note: string) => {
-      const html = renderAnnotationHTML(note);
-      return html || renderMarkdown(note);
-    };
-
-    const html = result.items.map((a, i) => {
-      const colorDot = a.color
-        ? `<span class="hiword-ai-q-color-dot" style="background:${escapeHtml(a.color)}"></span>`
-        : "";
-      const timeShort = a.createdAt.slice(5, 16).replace("T", " ");
-      return `
-        <div class="hiword-ai-q-item" data-id="${escapeHtml(a.id)}">
-          <div class="hiword-ai-q-item-head">
-            ${colorDot}
-            <span class="hiword-ai-q-item-num">#${i + 1}</span>
-            <span class="hiword-ai-q-item-origin">${a.origin === "ai" ? "AI" : "手动"}</span>
-            <span class="hiword-ai-q-item-time">${timeShort}</span>
-          </div>
-          ${a.selectedText
-            ? `<div class="hiword-ai-q-item-sel">选中：${escapeHtml(a.selectedText)}</div>`
-            : ""}
-          ${a.note ? `<div class="hiword-ai-q-item-note b3-typography">${renderNote(a.note)}</div>` : ""}
-        </div>`;
-    }).join("");
-
-    container.innerHTML = `<div class="hiword-ai-q-list">${html}</div>`;
+    renderQueryResults(container, result);
   }
 
   /** 释放面板持有的全局监听（dragend / 拉伸 pointer 事件），配合插件 onunload */

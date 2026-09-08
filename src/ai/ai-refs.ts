@@ -37,6 +37,8 @@ export interface RefAttachment {
   /** 正文（kramdown / markdown）；undefined = 尚未取到 */
   body?: string;
   status?: RefStatus;
+  /** 思源块类型（h 标题 / l,i 列表 / c 代码 / quote 引用 / p 段落），用于气泡卡片差异化图标（2026-09-08） */
+  blockType?: string;
 }
 
 /** 文本中扫描到的引用标记（占位符 / kramdown / 残留 HTML 三种形态统一表示） */

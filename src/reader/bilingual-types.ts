@@ -79,8 +79,29 @@ export interface BilingualOptions {
    * 返回 "default" | "concise"。
    */
   getMode?: () => "default" | "concise";
-  /** 预取页数（动态回调）：当前屏之后额外预译并缓存的「面」数；默认 2.5。值越大越省翻页等待但越费 token */
+  /**
+   * 预取分节数（动态回调，0–4 整数，默认 2）：决定「当前分节 + N 个分节」窗口——
+   * 渐进式取段范围与注入闸门共用这一个值。2026-09-05 复活：R6 重写后编排层
+   * 重新消费它（此前窗口页数 UI 改了没有效果）。
+   */
   getPrefetchPages?: () => number;
+  /**
+   * 失败自动重试开关（动态回调，默认 true）。
+   * false 时失败段不进入退避重试（maxRetries=0），等下一轮翻页窗口自然重试。
+   */
+  getRetryEnabled?: () => boolean;
+  /**
+   * 全书分节（R6：full 预翻译做真全书枚举的入口）。
+   * foliate 的 `view.book.sections` 直接满足这个形状；拿不到时不提供即可，
+   * full 模式会自动退化为窗口取段（不会静默空转）。
+   */
+  getSections?: () => Array<{ index: number; createDocument(): Promise<Document> | Document }>;
+  /**
+   * 当前所在分节（0-based，R6 新增）。
+   * 注入闸门「当前位置 + aheadSections」与渐进式取段都以它为基准；
+   * 不提供时按 0 处理。
+   */
+  getCurrentSection?: () => number;
   /** 节号回调（1-based）：每当一批段落翻译并成功入缓存后，回传本次涉及的书「节」序号，用于 UI「第 X-Y 页缓存成功」 */
   onSectionsCached?: (bookId: string, sections: number[]) => void;
   /**
@@ -141,6 +162,11 @@ export interface PretranslateOptions {
   overwrite?: boolean;
   /** 译文风格：直译 / 简洁版（默认直译；与 BilingualOptions.mode 一致） */
   mode?: "default" | "concise";
+  /**
+   * 是否全书（R6）：默认 true = full，惰性遍历全书 sections；
+   * 传 false = progressive，只处理「当前页 + 后 2 页」窗口。
+   */
+  full?: boolean;
   /** 中断信号（停止按钮 / 卸载时 abort） */
   signal?: AbortSignal;
   /** 进度回调（每批完成后触发） */

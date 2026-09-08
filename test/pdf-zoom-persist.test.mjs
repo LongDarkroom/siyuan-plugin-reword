@@ -102,7 +102,8 @@ test("[关键] silent 模式不触发 scheduleProgressSave", () => {
 
 test("[回归] ReadingProgress.zoom 是 optional（save 时不传 zoom 不会出错）", () => {
   // 确认 ReadingProgress 的 zoom 字段是 optional（不是必填）
-  const storeSrc = readFileSync(join(__dirname, "..", "src", "reader", "bookshelf-store.ts"), "utf-8");
+  // R2 重构：ReadingProgress 已随类型抽取到 library-types.ts
+  const storeSrc = readFileSync(join(__dirname, "..", "src", "reader", "library", "library-types.ts"), "utf-8");
   assert.ok(/zoom\?:\s*ZoomState/.test(storeSrc), "ReadingProgress.zoom 应是 optional（zoom?: ZoomState）");
 });
 

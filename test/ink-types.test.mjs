@@ -29,21 +29,23 @@ test("[核心] InkBrush 6 种类型", () => {
   );
 });
 
-test("[核心] INK_COLORS 7 色（黄绿蓝粉橙紫灰）", () => {
-  // INK_COLORS 数组应包含 7 个 hex 颜色
+test("[核心] INK_COLORS 5 色（与批注模块 WHALE_COLORS 统一）", () => {
+  // 2026-09-04 调色板统一：INK_COLORS 与 annotation-store 的 WHALE_COLORS 严格一致（5 色）
   const m = src.match(/export const INK_COLORS\s*=\s*\[([\s\S]*?)\]\s*as const/);
   assert.ok(m, "INK_COLORS 应存在");
   const colors = m[1].match(/#[0-9a-fA-F]{6}/g);
   assert.ok(colors, "应包含 hex 颜色");
-  assert.equal(colors.length, 7, `应有 7 色，实际 ${colors.length}`);
-  // 检查关键颜色
-  assert.ok(colors.includes("#facc15"), "应含黄色 #facc15");
-  assert.ok(colors.includes("#22c55e"), "应含绿色 #22c55e");
-  assert.ok(colors.includes("#3b82f6"), "应含蓝色 #3b82f6");
-  assert.ok(colors.includes("#ec4899"), "应含粉色 #ec4899");
-  assert.ok(colors.includes("#f97316"), "应含橙色 #f97316");
-  assert.ok(colors.includes("#a855f7"), "应含紫色 #a855f7");
-  assert.ok(colors.includes("#6b7280"), "应含灰色 #6b7280");
+  assert.equal(colors.length, 5, `应有 5 色，实际 ${colors.length}`);
+  // 检查关键颜色（WHALE_COLORS：明黄/翠绿/青蓝/玫粉/紫罗兰）
+  assert.ok(colors.includes("#facc15"), "应含明黄 #facc15");
+  assert.ok(colors.includes("#22c55e"), "应含翠绿 #22c55e");
+  assert.ok(colors.includes("#06b6d4"), "应含青蓝 #06b6d4");
+  assert.ok(colors.includes("#ec4899"), "应含玫粉 #ec4899");
+  assert.ok(colors.includes("#8b5cf6"), "应含紫罗兰 #8b5cf6");
+  // 不应再含已删除的旧色（蓝/橙/灰）
+  assert.ok(!colors.includes("#3b82f6"), "不应再含旧蓝色 #3b82f6");
+  assert.ok(!colors.includes("#f97316"), "不应再含旧橙色 #f97316");
+  assert.ok(!colors.includes("#6b7280"), "不应再含旧灰色 #6b7280");
 });
 
 test("[核心] INK_STYLES 5 种线型", () => {
@@ -115,10 +117,9 @@ test("[核心] InkState 模式状态（mode/brush/color/style/baseWidth/opacity�
   assert.ok(/opacity:\s*number/.test(body), "应有 opacity 字段");
 });
 
-test("[类型推导] INK_COLORS 数组有 6 个有效 hex 颜色（与上面 7 个区分：这里是 7 个）", () => {
+test("[类型推导] INK_COLORS 数组有 5 个独立 hex 颜色（与 WHALE_COLORS 一致）", () => {
   const m = src.match(/export const INK_COLORS\s*=\s*\[([\s\S]*?)\]\s*as const/);
   const colors = m[1].match(/#[0-9a-fA-F]{6}/g);
-  // 7 个（包含注释里出现的颜色） - 只要都是 hex 就行
   const unique = new Set(colors);
-  assert.ok(unique.size >= 6, `应有至少 6 种独立颜色，实际 ${unique.size}`);
+  assert.ok(unique.size >= 5, `应有至少 5 种独立颜色，实际 ${unique.size}`);
 });

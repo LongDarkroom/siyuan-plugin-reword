@@ -507,13 +507,31 @@ export const makePDF = async file => {
     }
     const loadingTask = pdfjsLib.getDocument({
         range: transport,
-        // [REword patch 2026-08-29] PDF 适配 Phase 1.5：cMap / standard_fonts 暂不加载
-        // 思源 webview 相对路径 fetch 失败，90% PDF 走内置字体足够。
-        // 如某个 PDF 用了 CMap 字体（中文/日文/特殊字符），需在 copy-dist.mjs 把
-        // vendor/cmaps/ 和 vendor/standard_fonts/ 也复制到根目录，并恢复下面两行。
-        // cMapUrl: pdfjsPath('cmaps/'),
-        // standardFontDataUrl: pdfjsPath('standard_fonts/'),
+        // 2026-09-04 P1 修复：启用 cMap + standard_fonts 解决 CJK PDF 中文显示为方块
+        // 路径必须用绝对 URL（思源 webview 的 iframe srcdoc 上下文里相对路径 fetch 会失败，
+        // 与上方 worker 走同源 `${origin}/plugins/${name}/...` 同一策略）
+        // cmaps/ + standard_fonts/ 在 copy-dist.mjs 已复制到插件根目录
+        // - cMapPacked: true 必须传——现代 PDF.js 用的 .bcmap 是 gzip 压缩的
+        // - standard_fonts 提供 14 个 Type1 字体（PDF 1.7 之前 PDF 引用）
+        cMapUrl: _rewordOrigin
+            ? `${_rewordOrigin}/plugins/${_rewordPluginName}/cmaps/`
+            : './cmaps/',
+        cMapPacked: true,
+        standardFontDataUrl: _rewordOrigin
+            ? `${_rewordOrigin}/plugins/${_rewordPluginName}/standard_fonts/`
+            : './standard_fonts/',
+        // 2026-09-04 P1 修复：每个文本片段独立成 span，大幅提升文本选中体验
+        // （PDF.js 默认会合并多个片段到同一 span，跨片段选区经常"选不上"或"选到一半断"）
+        // 2026-09-08 重新开启 + 翻页虚拟化兜底：
+        //  - 文本层每页 200-500 spans 相比合并模式 30-80 spans 增 5-10x
+        //  - 但配合 .scroll-page { content-visibility: auto }（见 index.less），
+        //    浏览器对 off-screen 页的 iframe 不做 layout/paint/合成，
+        //    大 PDF（300+ 页）翻页成本可降至原先水平
+        //  - contain-intrinsic-size 给定典型页大小（800×1100），保留占位避免抖动
+        disableCombineTextItems: true,
         isEvalSupported: false,
+        // 静音 PDF.js 内部 warn（cMap 错误已通过上方配置修复，无须在控制台噪音刷屏）
+        verbosity: 0,
     })
     const pdf = await loadingTask.promise
 

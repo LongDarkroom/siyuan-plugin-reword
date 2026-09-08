@@ -15,6 +15,10 @@
   export let onSetPdfViewMode: (key: string) => void = () => {};
   export let onSetPdfScrollDir: (key: string) => void = () => {};
   export let onSetPdfInvert: (e: Event) => void = () => {};
+  /** 2026-09-04 P2：PDF 文本标注类型开关回调 */
+  export let onSetPdfAnnotHighlight: (e: Event) => void = () => {};
+  export let onSetPdfAnnotUnderline: (e: Event) => void = () => {};
+  export let onSetPdfAnnotAnnotate: (e: Event) => void = () => {};
 </script>
 
 <details class="reader-setting-section">
@@ -59,6 +63,30 @@
         checked={!!settings.pdfInvert}
         on:change={onSetPdfInvert}
       />
+      <span class="reader-switch-track"></span>
+    </label>
+  </div>
+
+  <!-- 2026-09-04 P2：PDF 文本标注类型开关（精简聚焦：高亮 / 下划线 / 批注） -->
+  <div class="reader-setting-subtitle">标注类型</div>
+  <div class="reader-setting-row reader-setting-toggle-row">
+    <span class="reader-setting-label">高亮（背景）</span>
+    <label class="reader-switch" title="允许在 PDF 上做背景高亮标注">
+      <input type="checkbox" checked={!!settings.pdfAnnotHighlight} on:change={onSetPdfAnnotHighlight} />
+      <span class="reader-switch-track"></span>
+    </label>
+  </div>
+  <div class="reader-setting-row reader-setting-toggle-row">
+    <span class="reader-setting-label">下划线 / 波浪线</span>
+    <label class="reader-switch" title="允许在 PDF 上做直线段 / 波浪线下划线标注">
+      <input type="checkbox" checked={!!settings.pdfAnnotUnderline} on:change={onSetPdfAnnotUnderline} />
+      <span class="reader-switch-track"></span>
+    </label>
+  </div>
+  <div class="reader-setting-row reader-setting-toggle-row">
+    <span class="reader-setting-label">批注（气泡）</span>
+    <label class="reader-switch" title="允许在 PDF 上做带批注内容的气泡">
+      <input type="checkbox" checked={!!settings.pdfAnnotAnnotate} on:change={onSetPdfAnnotAnnotate} />
       <span class="reader-switch-track"></span>
     </label>
   </div>

@@ -954,7 +954,9 @@ export function bilingualStyles(fontFamilyStack: string, fg: string, translation
   /* 2026-09-02 紧凑双语排版：译文块作为「原文段下的辅助条」紧跟英文，
      不再用 0.7em 大段距把页面切成两条平行轨道。数值与正文段距（默认 0.8em）
      配合，形成「原文 + 译文」一个呼吸单元，整体节奏更连贯。 */
-  margin: 0.1em 0 0.35em 0 !important;
+  /* 2026-09-06 紧贴英文：顶部 margin 用 -0.5em 负边距抵消上一段 margin-bottom，
+     让译文块上缘真正靠住原文段下缘；底部保留 0.35em，维持「原文+译文」单元与下一段的呼吸感。 */
+  margin: -0.6em 0 0.35em 0 !important;
   text-indent: 0 !important;
   /* Task B（2026-08-31）：强制译文文字左对齐。
      EPUB 容器常自带 text-align:center，且 injectSibling 只清了 margin/padding，
@@ -968,7 +970,7 @@ export function bilingualStyles(fontFamilyStack: string, fg: string, translation
      （公式：marginLeft = 原文 paddingLeft + 原文 textIndent - borderLeft）。
      若在这里给 padding-left，即使 injectSibling 用内联 !important 覆盖，简写 padding 的 !important
      在某些渲染路径下仍会生效，导致译文整体向右偏移、与原文不齐平。 */
-  padding-top: 0.1em !important;
+  padding-top: 0 !important;
   padding-right: 0.6em !important;
   padding-bottom: 0.1em !important;
   padding-left: 0 !important;
@@ -986,10 +988,11 @@ export function bilingualStyles(fontFamilyStack: string, fg: string, translation
 
   /* 字体：思源阅读字体栈（!important 压过 publisherFontOverride 的 inherit） */
   font-family: ${fontFamilyStack} !important;
-  /* 颜色：思源次级文本色，比正文淡一级；fallback 用传入的 fg */
+  /* 颜色：思源次级文本色，比正文淡一级；fallback 用传入的 fg。
+     2026-09-06 取消 opacity（改为 1）：原先 0.9 叠加 on-surface 灰色后对比度偏低，
+     在绘本/浅色页上显得发虚；用纯色 on-surface 既保留“辅助”语义，又确保可读。 */
   color: var(--b3-theme-on-surface, ${fg});
-  /* 轻微透明：译文是辅助信息，淡于原文但不至于看不清 */
-  opacity: 0.9;
+  opacity: 1;
 
   /* CJK 字间距微调，让中文更紧凑自然 */
   letter-spacing: 0.02em;
@@ -1031,7 +1034,7 @@ export function bilingualStyles(fontFamilyStack: string, fg: string, translation
 /* 列表项内的译文：随项目符号缩进，其余样式继承基类。
    因基类已用 !important，列表项规则也必须 !important 才能覆盖。 */
 li > .reword-bilingual[cfi-inert][data-translation-mark] {
-  margin: 0.2em 0 0.5em 0.5em !important;
+  margin: -0.6em 0 0.5em 0.5em !important;
   text-indent: 0 !important;
   border-left: 2.5px solid var(--b3-border-color, rgba(128, 128, 128, 0.22)) !important;
   background: var(--b3-theme-surface-light, rgba(128, 128, 128, 0.06));

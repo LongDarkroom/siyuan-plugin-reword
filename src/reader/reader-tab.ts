@@ -1,4 +1,5 @@
 import { logSwallow } from "../core/safe.ts";
+import { getLogger } from "../core/logger.ts";
 /**
  * 阅读器 - 独立 Tab 控制器
  * ---------------------------------------------------------------
@@ -11,7 +12,7 @@ import { logSwallow } from "../core/safe.ts";
 
 // @ts-ignore - Svelte 组件
 import ReaderView from "./ReaderView.svelte";
-import { openTab } from "siyuan";
+import { openTab, showMessage } from "siyuan";
 import type { BookshelfStore } from "./bookshelf-store";
 import type { ReaderSettingsStore } from "./reader-settings";
 import type { FontStore } from "./reader-fonts";
@@ -20,6 +21,53 @@ export const READER_TAB_TYPE = "reader";
 
 /** 阅读 Tab 会话持久化键（记录关机前打开的书，重启后自动恢复） */
 export const READER_SESSION_KEY = "hiword-reader-session.json";
+
+/**
+ * 启动标记（localStorage，仅 1 字节级小写入）：
+ * onload 开头写入 → 初始化（含会话恢复）走完才清除。
+ * 下次启动若发现标记仍在，说明**上次启动卡死在初始化中**，据此跳过会话恢复，
+ * 杜绝「自动恢复 → 卡死 → 又恢复同一本 → 又卡死」的自锁死循环。
+ */
+const LAUNCH_MARKER_KEY = "reword:launch-pending";
+
+/** 空闲窗口兜底：不支持 requestIdleCallback 或长时间无空闲时，最多等这么久就恢复 */
+const LAUNCH_IDLE_FALLBACK_MS = 3000;
+
+/** 读取「上次启动卡死」标记（读到即消费，避免永久生效） */
+export function consumeLaunchCrash(): boolean {
+  try {
+    return globalThis.localStorage?.getItem(LAUNCH_MARKER_KEY) === "1";
+  } catch (__e) { logSwallow(__e, "reader-tab.ts · consumeLaunchCrash", "debug"); return false; }
+}
+
+/** 写入「启动中」标记（onload 开头调用） */
+export function markLaunchStart(): void {
+  try { globalThis.localStorage?.setItem(LAUNCH_MARKER_KEY, "1"); }
+  catch (__e) { logSwallow(__e, "reader-tab.ts · markLaunchStart", "debug"); }
+}
+
+/** 清除「启动中」标记（初始化走完时调用） */
+export function clearLaunchMarker(): void {
+  try { globalThis.localStorage?.removeItem(LAUNCH_MARKER_KEY); }
+  catch (__e) { logSwallow(__e, "reader-tab.ts · clearLaunchMarker", "debug"); }
+}
+
+/**
+ * 会话恢复前等一个安全窗口：
+ * 1) 思源刚启动时布局/渲染密集，此时同步开大书极易把主线程吃满；
+ * 2) 后台窗口（不可见）不恢复 —— 等用户切到前台也拿不到渲染收益，白白冒险。
+ */
+function waitForLaunchIdle(): Promise<void> {
+  return new Promise((resolve) => {
+    const ric = (globalThis as any).requestIdleCallback;
+    if (typeof ric === "function") {
+      try { ric(() => resolve(), { timeout: LAUNCH_IDLE_FALLBACK_MS }); return; }
+      catch (__e) { logSwallow(__e, "reader-tab.ts · requestIdleCallback", "debug"); }
+    }
+    // 兜底：Electron 旧版 Chromium 可能没有 requestIdleCallback
+    setTimeout(resolve, LAUNCH_IDLE_FALLBACK_MS);
+  });
+}
 
 interface TabRecord {
   tab: any; // Tab
@@ -241,6 +289,9 @@ export class ReaderTabController {
     // 无名 Tab 当作「未修改」回收。用 opening 锁挡住并发的重复打开。
     if (this.opening.has(bookId)) return;
     this.opening.add(bookId);
+    // 2026-09-05 打点：开书是启动阶段最重的一步，记录耗时便于下次定位卡死
+    const t0 = Date.now();
+    getLogger().info(`[REword] 打开阅读 Tab：开始 bookId=${bookId}`);
     console.log("[REword] openBookTab 调 openTab", { bookId });
     try {
       // 思源 openTab 路由：custom.id 必须精确等于 addTab 注册的工厂 key
@@ -288,6 +339,7 @@ export class ReaderTabController {
     } finally {
       // 无论成功失败都释放锁，避免异常时永久卡住该书无法再开
       this.opening.delete(bookId);
+      getLogger().info(`[REword] 打开阅读 Tab：结束 bookId=${bookId}，耗时 ${Date.now() - t0}ms`);
     }
   }
 
@@ -318,9 +370,17 @@ export class ReaderTabController {
    * - 跳过书架已删除的书（避免开出空白页签）。
    * - 与思源自带布局恢复幂等：若思源已重建该 Tab（init 已写入 openTabs），
    *   openBookTab 会直接聚焦、不重复开。
+   * - 启动保护（2026-09-05）：先等空闲窗口再恢复，后台窗口不恢复；
+   *   若检测到上次启动卡死（启动标记未清除），本次直接跳过并清空会话，
+   *   避免「恢复 → 卡死 → 再恢复同一本」的自锁死循环。
    */
-  async restoreSession(): Promise<void> {
-    if (!this.plugin?.loadData) return;
+  async restoreSession(opts?: { crashed?: boolean }): Promise<void> {
+    const t0 = Date.now();
+    const finish = (reason: string) => {
+      getLogger().info(`[REword] 阅读会话恢复：结束（${reason}），耗时 ${Date.now() - t0}ms`);
+      clearLaunchMarker();
+    };
+    if (!this.plugin?.loadData) return finish("无 loadData");
     let saved: any = null;
     try {
       saved = await this.plugin.loadData(READER_SESSION_KEY);
@@ -336,24 +396,45 @@ export class ReaderTabController {
     if (!enabled) {
       // 用户关掉了恢复：清掉会话，下次启动不再重开
       try { await this.plugin.saveData(READER_SESSION_KEY, { openTabs: [] }); } catch (__e) {}
-      return;
+      return finish("开关关闭");
     }
 
-    if (open.length === 0) return;
+    if (open.length === 0) return finish("无待恢复 Tab");
 
-    // 顺序重开（Map 插入序 = 当初打开序，最后一本是最后聚焦的）
-    for (const item of open) {
-      if (!item?.bookId) continue;
-      // 书已被删除则跳过
-      try {
-        const meta = this.stores.store.get?.(item.bookId);
-        if (!meta) continue;
-      } catch (__e) { logSwallow(__e, "reader-tab.ts · checkBook", "debug"); }
-      try {
-        await this.openBookTab(item.bookId, item.title || undefined);
-      } catch (e) {
-        console.warn("[REword] 恢复阅读 Tab 失败:", e);
+    // 崩溃自愈：上次启动没走完初始化（大概率卡在恢复大书上），本次不再冒险
+    if (opts?.crashed) {
+      getLogger().warn("[REword] 检测到上次启动未完成初始化（疑似卡死），本次跳过阅读 Tab 自动恢复");
+      try { await this.plugin.saveData(READER_SESSION_KEY, { openTabs: [] }); } catch (__e) {}
+      try { showMessage("上次启动未能完成，已跳过自动恢复阅读 Tab，请从书架手动打开", 6000); } catch (__e) {}
+      return finish("上次启动卡死，已自愈");
+    }
+
+    if (typeof document !== "undefined" && document.visibilityState !== "visible") {
+      getLogger().info("[REword] 阅读会话恢复：窗口后台，本次不恢复");
+      return finish("窗口后台");
+    }
+
+    // 让出主线程：等思源启动的密集布局期过去再恢复
+    getLogger().info(`[REword] 阅读会话恢复：等待空闲窗口（待恢复 ${open.length} 本）`);
+    await waitForLaunchIdle();
+
+    try {
+      // 顺序重开（Map 插入序 = 当初打开序，最后一本是最后聚焦的）
+      for (const item of open) {
+        if (!item?.bookId) continue;
+        // 书已被删除则跳过
+        try {
+          const meta = this.stores.store.get?.(item.bookId);
+          if (!meta) continue;
+        } catch (__e) { logSwallow(__e, "reader-tab.ts · checkBook", "debug"); }
+        try {
+          await this.openBookTab(item.bookId, item.title || undefined);
+        } catch (e) {
+          console.warn("[REword] 恢复阅读 Tab 失败:", e);
+        }
       }
+    } finally {
+      finish("恢复完成");
     }
   }
 

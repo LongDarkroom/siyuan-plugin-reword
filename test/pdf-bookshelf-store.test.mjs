@@ -22,7 +22,10 @@ import { dirname, join } from "node:path";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const storePath = join(__dirname, "..", "src", "reader", "bookshelf-store.ts");
-const src = readFileSync(storePath, "utf-8");
+const typesSrc = readFileSync(join(__dirname, "..", "src", "reader", "library", "library-types.ts"), "utf-8");
+// R2 重构：BookMeta / ReadingProgress 的 JSDoc 已随类型抽取到 library-types.ts。
+// 类型源码放前面，避免 jsDocBefore("format: string;") 先命中 bookshelf-store 内其它 format 字段。
+const src = typesSrc + "\n" + readFileSync(storePath, "utf-8");
 
 /** 抽取 JSDoc 注释块（紧跟 target 之前） */
 function jsDocBefore(target) {

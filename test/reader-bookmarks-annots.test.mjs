@@ -16,9 +16,9 @@
  *     - buildBookDeepLink 存在，产出 siyuan://plugins/<插件名><tab 类型>?data=…
  *     - onSelSend 里 link 不再是恒空串（此前 link: "" 是死变量）
  *
- *  C. ReaderView.svelte 书签 / 摘录抽屉
- *     - 底栏 🔖 / 📑 按钮绑定 toggleBookmarkDrawer / toggleAnnots
- *     - showBookmarks / showAnnots 抽屉模板存在
+ *  C. ReaderView.svelte 我的标记抽屉（书签 + 摘录合并）
+ *     - 顶栏左侧 toc / marks 抽屉锚点绑定 toggleDrawer（2026-08-30 顶栏改版后）
+ *     - showMarks 合并抽屉模板（书签 / 摘录子区）+ 互斥关闭逻辑
  *     - refreshAnnotsList 走 annStore.getByBook 且过滤软删 deletedAt
  *     - exportAnnots 导出 Markdown 到剪贴板
  *     - toggleCurrentBookmark 取 view.lastLocation.cfi
@@ -41,7 +41,9 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const root = join(__dirname, "..", "src");
 
-const storeSrc = readFileSync(join(root, "reader", "bookshelf-store.ts"), "utf-8");
+const typesSrc = readFileSync(join(root, "reader", "library", "library-types.ts"), "utf-8");
+// R2 重构：BookMark / BookMeta.bookmarks 已随类型抽取到 library-types.ts
+const storeSrc = readFileSync(join(root, "reader", "bookshelf-store.ts"), "utf-8") + "\n" + typesSrc;
 const viewSrc = readFileSync(join(root, "reader", "ReaderView.svelte"), "utf-8");
 const indexSrc = readFileSync(join(root, "index.ts"), "utf-8");
 const tabSrc = readFileSync(join(root, "reader", "reader-tab.ts"), "utf-8");
@@ -154,26 +156,26 @@ test("[B2] onSelSend 的 link 不再是恒空串（此前是死变量）", () =>
 
 /* ================= C. 书签 / 摘录抽屉 ================= */
 
-test("[C1] 顶栏左侧有书签与摘录锚点并绑定 toggleDrawer", () => {
-  // 2026-08-30 改造：书签 / 摘录入口从底栏移到顶栏左侧，统一走 toggleDrawer
-  assert.match(viewSrc, /data-drawer-anchor="bookmarks"/, "顶栏左侧应有书签抽屉锚点");
-  assert.match(viewSrc, /data-drawer-anchor="annots"/, "顶栏左侧应有摘录抽屉锚点");
-  assert.match(viewSrc, /on:click=\{\(\) => toggleDrawer\("bookmarks"\)\}/, "🔖 应绑定 toggleDrawer('bookmarks')");
-  assert.match(viewSrc, /on:click=\{\(\) => toggleDrawer\("annots"\)\}/, "📝 应绑定 toggleDrawer('annots')");
+test("[C1] 顶栏左侧抽屉锚点（toc/marks）并绑定 toggleDrawer", () => {
+  // 2026-08-30 改造：书签 / 摘录抽屉合并为「我的标记」（marks），与目录（toc）共用抽屉锚点体系
+  assert.match(viewSrc, /data-drawer-anchor="toc"/, "顶栏左侧应有目录抽屉锚点");
+  assert.match(viewSrc, /data-drawer-anchor="marks"/, "顶栏左侧应有我的标记抽屉锚点");
+  assert.match(viewSrc, /on:click=\{\(\) => toggleDrawer\("toc"\)\}/, "☰ 应绑定 toggleDrawer('toc')");
+  assert.match(viewSrc, /on:click=\{\(\) => toggleDrawer\("marks"\)\}/, "📝 应绑定 toggleDrawer('marks')");
   const start = viewSrc.indexOf('<div class="reader-toolbar-left"');
   assert.ok(start > -1, "应定位到顶栏左侧组");
-  const end = viewSrc.indexOf('</div>\n    <!-- 中：书名', start);
-  const left = viewSrc.slice(start, end > -1 ? end : start + 2000);
-  assert.match(left, /🔖/, "顶栏左侧应有书签按钮");
-  assert.match(left, /📝/, "顶栏左侧应有摘录按钮");
+  const left = viewSrc.slice(start, start + 1500);
+  assert.match(left, /data-drawer-anchor="marks"/, "顶栏左侧应有我的标记按钮");
+  assert.match(left, /📝/, "顶栏左侧应有我的标记图标");
 });
 
-test("[C2] 两个抽屉模板存在且互斥关闭其它面板", () => {
-  assert.match(viewSrc, /\{#if showBookmarks\}/, "应有书签抽屉");
-  assert.match(viewSrc, /\{#if showAnnots\}/, "应有摘录抽屉");
-  assert.match(viewSrc, /class="reader-popover reader-bookmarks"/, "书签抽屉应复用 popover 样式");
-  assert.match(viewSrc, /class="reader-popover reader-annots"/, "摘录抽屉应复用 popover 样式");
+test("[C2] marks 合并抽屉存在且互斥关闭其它面板", () => {
+  // 书签 + 摘录合并为单一「我的标记」抽屉（子区 1 书签 / 子区 2 摘录）
+  assert.match(viewSrc, /\{#if showMarks\}/, "应有我的标记抽屉");
+  assert.match(viewSrc, /class="reader-popover reader-marks"/, "marks 抽屉应复用 popover 样式");
+  assert.match(viewSrc, /reader-marks-section/, "marks 抽屉内应有书签/摘录子区");
   assert.match(viewSrc, /function closeOtherPanels\(/, "应有统一的互斥关闭逻辑");
+  assert.match(viewSrc, /showMarks = activeDrawer === "marks"/, "toggleDrawer 应驱动 showMarks");
 });
 
 test("[C3] refreshAnnotsList 走 annStore 且过滤软删", () => {

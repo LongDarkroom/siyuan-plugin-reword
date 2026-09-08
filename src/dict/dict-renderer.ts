@@ -9,7 +9,7 @@ import { logSwallow } from "../core/safe.ts";
 import type { DictEntry } from "./dict-engine.ts";
 // 显式 .ts 扩展名：Node --experimental-strip-types 测试运行器不解析无扩展名导入（tsc/vite 用 bundler 解析不受影响）
 import { lookupWordMeta, getExtraPhonetic, hasExactHeadword } from "./dict-engine.ts";
-import type { WordInflections } from "./inflect.ts";
+import { getWordInflections, type WordInflections } from "./inflect.ts";
 
 /** 解析后的结构化词条 */
 export interface ParsedEntry {
@@ -1395,11 +1395,144 @@ export function renderDictCard(
   );
 }
 
+// ========== 简化小窗卡片（2026-09-07 查词典功能：单词小窗统一简化版） ==========
+
+/**
+ * 形态变化一行（小窗简化版专用）。
+ * 离线：getWordInflections 离线推导；在线：OnlineDictResult.inflections 直出。
+ * 只列「与原词不同」的形态，全部相同时返回空串。
+ */
+export function renderInflectionLine(word: string, posTags: string[], onlineInflections?: { label: string; form: string }[]): string {
+  // 在线源：海词已给出带标签的词形（过去式/过去分词/现在分词/复数等），直接拼接
+  if (onlineInflections) {
+    const parts = onlineInflections
+      .filter((it) => it.label && it.form && it.form.toLowerCase() !== word.toLowerCase())
+      .map((it) => `${escapeHtml(it.label)} ${escapeHtml(it.form)}`);
+    return parts.length
+      ? `<div class="hiword-dict-infl-line"><span class="hiword-dict-infl-title">形态变化</span>${parts.map((p) => `<span class="hiword-dict-infl-item">${p}</span>`).join('<span class="hiword-dict-infl-sep">·</span>')}</div>`
+      : "";
+  }
+  // 离线源：按词性离线推导
+  const lw = word.toLowerCase();
+  const inf: WordInflections = getWordInflections(lw, posTags);
+  const parts: string[] = [];
+  if (inf.verb) {
+    if (inf.verb.past && inf.verb.past.toLowerCase() !== lw) parts.push(`过去式 ${escapeHtml(inf.verb.past)}`);
+    if (inf.verb.pastParticiple && inf.verb.pastParticiple.toLowerCase() !== lw) parts.push(`过去分词 ${escapeHtml(inf.verb.pastParticiple)}`);
+    if (inf.verb.presentParticiple && inf.verb.presentParticiple.toLowerCase() !== lw) parts.push(`现在分词 ${escapeHtml(inf.verb.presentParticiple)}`);
+  }
+  if (inf.noun?.plural && inf.noun.plural.toLowerCase() !== lw) parts.push(`复数 ${escapeHtml(inf.noun.plural)}`);
+  if (inf.adjective?.comparative && inf.adjective.comparative.toLowerCase() !== lw) parts.push(`比较级 ${escapeHtml(inf.adjective.comparative)}`);
+  if (inf.adjective?.superlative && inf.adjective.superlative.toLowerCase() !== lw) parts.push(`最高级 ${escapeHtml(inf.adjective.superlative)}`);
+  if (inf.adverb?.comparative && inf.adverb.comparative.toLowerCase() !== lw) parts.push(`比较级 ${escapeHtml(inf.adverb.comparative)}`);
+  if (inf.adverb?.superlative && inf.adverb.superlative.toLowerCase() !== lw) parts.push(`最高级 ${escapeHtml(inf.adverb.superlative)}`);
+  return parts.length
+    ? `<div class="hiword-dict-infl-line"><span class="hiword-dict-infl-title">形态变化</span>${parts.map((p) => `<span class="hiword-dict-infl-item">${p}</span>`).join('<span class="hiword-dict-infl-sep">·</span>')}</div>`
+    : "";
+}
+
+/**
+ * 简化小窗公共头/底（离线与在线简化卡共用）：
+ * 词头 + 音标 + 查询次数 + 操作区（🌐源切换 / 🔍侧边栏 / 收藏星 / 朗读）。
+ */
+function renderSimpleCardShell(o: {
+  word: string;
+  phonetic: string;
+  badgeHtml: string;
+  bodyHtml: string;
+  queryCount?: number;
+  showStar: boolean;
+  inVocab: boolean;
+  switchAction: "dict-switch-online" | "dict-switch-offline";
+  switchTitle: string;
+}): string {
+  const starBtn = o.showStar
+    ? '<button class="hiword-dict-star ' + (o.inVocab ? "star-on" : "") + '" data-action="vocab-star" data-word="' + escapeAttr(o.word) + '" title="' + (o.inVocab ? "移出词库" : "加入词库") + '">' + (o.inVocab ? "★" : "☆") + "</button>"
+    : "";
+  const qcountBadge =
+    typeof o.queryCount === "number" && o.queryCount > 0
+      ? '<span class="hiword-qcount" title="累计查询次数">' + escapeHtml(String(o.queryCount)) + " 次查询</span>"
+      : "";
+  return (
+    '<div class="hiword-dict-card hiword-dict-card--simple" data-word="' + escapeAttr(o.word) + '">' +
+      o.badgeHtml +
+      '<div class="hiword-dict-header">' +
+        '<strong class="hiword-dict-word">' + escapeHtml(o.word) + "</strong>" +
+        (o.phonetic ? '<em class="hiword-dict-phonetic">' + escapeHtml(o.phonetic) + "</em>" : "") +
+        qcountBadge +
+        '<div class="hiword-dict-actions">' +
+          `<button class="hiword-dict-src-btn" data-action="${o.switchAction}" title="${escapeAttr(o.switchTitle)}">🌐</button>` +
+          '<button class="hiword-dict-side-btn" data-action="lookup-in-sidebar" data-word="' + escapeAttr(o.word) + '" title="在侧边栏查词典中查看详细释义">🔍</button>' +
+          starBtn +
+          '<button class="b3-button b3-button--small" data-action="tts" data-word="' + escapeAttr(o.word) + '">朗读</button>' +
+        "</div>" +
+      "</div>" +
+      '<div class="hiword-dict-body">' + o.bodyHtml + "</div>" +
+    "</div>"
+  );
+}
+
+/**
+ * 离线简化小窗卡（2026-09-07）：保留变形还原横幅、音标、词性+释义（前 4 条，无例句）、
+ * 形态变化一行；去除完整释义折叠 / 相关词 chips / 词组短语区块。
+ * 详细内容由 🔍 按钮送侧边栏查词典展示。
+ */
+export function renderDictCardSimple(
+  entry: ParsedEntry,
+  opts: { showStar?: boolean; inVocab?: boolean; queryCount?: number; preferredDefinitions?: string[] } = {}
+): string {
+  let badge = "";
+  if (entry.matchType === "inflection" && entry.originalWord) {
+    badge = '<div class="hiword-dict-badge hiword-dict-badge-inflection" title="原词「' + escapeAttr(entry.originalWord) + '」未收录，已还原为原形">' +
+      '<span class="hiword-dict-badge-icon">🔄</span>' +
+      '<span>变形还原：「' + escapeHtml(entry.originalWord) + "」→「" + escapeHtml(entry.word) + "」</span>" +
+    "</div>";
+  } else if (entry.matchType === "similar" && entry.originalWord) {
+    const candidateHtml = (entry.candidates || [])
+      .filter((c) => c !== entry.word)
+      .slice(0, 4)
+      .map((c) => '<span class="hiword-dict-candidate" data-action="lookup-candidate" data-word="' + escapeAttr(c) + '">' + escapeHtml(c) + "</span>")
+      .join("");
+    badge = '<div class="hiword-dict-badge hiword-dict-badge-similar" title="原词「' + escapeAttr(entry.originalWord) + '」未收录，以下为相似词">' +
+      '<span class="hiword-dict-badge-icon">📌</span>' +
+      '<span>此为相似单词（原词「' + escapeHtml(entry.originalWord) + "」未收录）</span>" +
+      (candidateHtml ? "<div class=\"hiword-dict-candidates\">其他候选：" + candidateHtml + "</div>" : "") +
+    "</div>";
+  }
+
+  // 词性 + 释义：前 4 条简洁行（无例句无折叠）
+  const senses = extractSenses(entry.definition, 4);
+  const bodyHtml = senses.length
+    ? `<ul class="hiword-dict-senses hiword-dict-senses--simple">` +
+      senses
+        .map((s) =>
+          `<li class="hiword-dict-sense-item">` +
+          (s.pos ? `<span class="hiword-dict-sense-pos">${escapeHtml(s.pos)}</span>` : "") +
+          (s.num ? `<span class="hiword-dict-sense-num">${escapeHtml(s.num)}</span>` : "") +
+          `<div class="hiword-dict-sense-body"><div class="hiword-dict-sense-main"><strong class="hiword-dict-sense-zh">${escapeHtml(s.zh)}</strong></div></div></li>`
+        )
+        .join("") +
+      `</ul>` +
+      renderInflectionLine(entry.word, senses.map((s) => s.pos || ""))
+    : (entry.html || "") + renderInflectionLine(entry.word, []);
+
+  return renderSimpleCardShell({
+    word: entry.word,
+    phonetic: entry.phonetic,
+    badgeHtml: badge,
+    bodyHtml,
+    queryCount: opts.queryCount,
+    showStar: opts.showStar !== false,
+    inVocab: opts.inVocab ?? false,
+    switchAction: "dict-switch-online",
+    switchTitle: "切换到在线词典（词海）",
+  });
+}
+
 /**
  * 渲染"未找到"提示
  */
-export function renderNotFound(word: string): string {
-  return (
+export function renderNotFound(word: string): string {  return (
     '<div class="hiword-dict-notfound">' +
       '<div class="hiword-dict-notfound-icon">📖</div>' +
       '<p>未找到 "<strong>' + escapeHtml(word) + '</strong>" 的释义</p>' +

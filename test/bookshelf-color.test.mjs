@@ -27,7 +27,11 @@ import { dirname, join } from "node:path";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
-const storeSrc = readFileSync(join(__dirname, "..", "src", "reader", "bookshelf-store.ts"), "utf-8");
+const typesSrc = readFileSync(join(__dirname, "..", "src", "reader", "library", "library-types.ts"), "utf-8");
+const persistSrc = readFileSync(join(__dirname, "..", "src", "reader", "library", "library-persist.ts"), "utf-8");
+// R2 重构：类型与常量已抽取到 library/ 层，这里合并三处源码供正则断言（保持测试语义不变）
+const storeSrc = readFileSync(join(__dirname, "..", "src", "reader", "bookshelf-store.ts"), "utf-8")
+  + "\n" + typesSrc + "\n" + persistSrc;
 const viewSrc = readFileSync(join(__dirname, "..", "src", "reader", "BookshelfView.svelte"), "utf-8");
 
 /* ================= 字典完整性 ================= */

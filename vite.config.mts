@@ -14,7 +14,11 @@ export default defineConfig({
   build: {
     target: "esnext",
     outDir: "dist",
-    emptyOutDir: true,
+    // 2026-09-04 P0：改为 false —— 不再清空 dist。
+    // 原因：清空动作会触发批量文件删除保护（dist 内文件数远超阈值），导致构建被拦截。
+    // 安全性：本工程开启 inlineDynamicImports，产物恒为 index.js + style.css 两个固定文件名，
+    // 不存在「改入口后旧 chunk 残留」的风险，覆盖写即等于全量刷新。
+    emptyOutDir: false,
     minify: "esbuild",
     lib: {
       entry: resolve(__dirname, "src/index.ts"),
@@ -47,7 +51,6 @@ export default defineConfig({
   resolve: {
     alias: {
       "@": resolve(__dirname, "src"),
-      "@cp": resolve(__dirname, "src/copilot-src"),
     },
   },
   publicDir: "public",

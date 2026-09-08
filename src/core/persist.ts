@@ -40,6 +40,16 @@ export class PersistentStore {
     };
   }
 
+  /**
+   * 运行时调整防抖延迟（ms）。
+   * 由 AI 设置「会话落盘节流」驱动（AI 会话体量大，允许用配置换实时性）；
+   * 0 = 不合并，下一个宏任务立即落盘（仍是异步写，不阻塞渲染进程）。
+   */
+  setDelay(delay: number): void {
+    if (typeof delay !== "number" || Number.isNaN(delay)) return;
+    this.opts.delay = Math.max(0, Math.floor(delay));
+  }
+
   /** 提交一次更新（防抖合并） */
   update(data: unknown): void {
     this.pending = data;

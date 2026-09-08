@@ -5,7 +5,33 @@ import {
   fetchSyncPost,
   getFrontend,
 } from "siyuan";
-import { DockManager, SLOT_LABELS, type DockableFeature, type DockSlot } from "./dock/dock-manager.ts";
+import { DockManager, type DockableFeature, type DockSlot } from "./dock/dock-manager.ts";
+import {
+  initDockPanels,
+  registerStandaloneDock,
+  renderCombinedDockShell,
+  refreshCombinedDock,
+  exposeDockContentDelegation,
+  featureTitle,
+  clearStaleDockCache,
+  fixStandaloneDockIcons,
+  restoreDockOrderFromCache,
+  migrateDockLayoutOnce,
+  findDockByType,
+  setStandaloneDockVisible,
+  closeStandaloneDockPanel,
+  resolveTargetDock,
+  positionToSlot,
+  moveFeatureToSlot,
+  onLayoutReady,
+  focusFeatureDock,
+  getFeatureElement,
+  refreshFeature,
+  openDockManagerPanel,
+  showDockDropZones,
+  hideDockDropZones,
+  slotLabel,
+} from "./dock/dock-layout.ts";
 import * as path from "path";
 import * as fs from "node:fs";
 import { isPluginRootWithFs, isAsarPath, resolvePluginPathWithFs } from "./core/plugin-path.ts";
@@ -25,7 +51,7 @@ import { installConsoleFilter } from "./core/console-filter.ts";
 import * as dictEngine from "./dict/dict-engine.ts";
 import * as dictRenderer from "./dict/dict-renderer.ts";
 import { maybeFillPhonetic, resetOnlinePhoneticCache } from "./dict/online-phonetic.ts";
-import { fetchOnlineDict, renderOnlineDictCard, resetOnlineDictCache } from "./dict/online-dict.ts";
+import { fetchOnlineDict, renderOnlineDictCard, renderOnlineDictCardSimple, resetOnlineDictCache } from "./dict/online-dict.ts";
 import type { ParsedEntry, SenseItem } from "./dict/dict-renderer.ts";
 import { getWordInflections } from "./dict/inflect.ts";
 import { normalizePos, parseReviewMeaning, parseWordList, isWordListLike, type ParsedWordListEntry } from "./utils/meaning-parser.ts";
@@ -72,8 +98,10 @@ import {
 } from "./annotation/ann-preview.ts";
 import { requestEditSession, releaseEditSession } from "./annotation/edit-session.ts";
 // REword AI 精读（适配自 Achuan-2/siyuan-plugin-copilot，裁剪为最小可用对话能力）
-import { DEFAULT_AI_SETTINGS, normalizeAiSettings, DEFAULT_MODELS, inferContextWindow } from "./ai/ai-settings.ts";
+import { DEFAULT_AI_SETTINGS, normalizeAiSettings, listNormalizeGaps, DEFAULT_MODELS, inferContextWindow, activePlatformOf } from "./ai/ai-settings.ts";
 import type { AiSettings } from "./ai/ai-settings.ts";
+// 2026-09-06 第 1 批：AI 设置面板改为 Svelte 组件（替换原 innerHTML 实现）
+import AiSettingsPanel from "./ai/settings/AiSettingsPanel.svelte";
 import { AiPanel, isAiStreaming } from "./ai/ai-panel.ts";
 import type { AiDeepReadSource, AiHost } from "./ai/ai-panel.ts";
 import { runAiDeepRead } from "./ai/ai-orchestrator.ts";
@@ -91,6 +119,7 @@ import {
   MAX_BLOCK_IDS,
   SIYUAN_DROP_BLOCK_REF,
 } from "./ai/drag-block-ids.ts";
+import { orderBlocksByTree, collectHeadingRange, headingLevelOf } from "./ai/block-range.ts";
 import { sessionStore, type AiSessionData } from "./ai/ai-session-store.ts";
 import { getBlockKramdownText as getBlockKramdown, putFile } from "./siyuan/api.ts";
 import { sqlQuery } from "./siyuan/attrs.ts";
@@ -104,42 +133,28 @@ import { openLogViewer, exportLogsCommand } from "./core/log-viewer.ts";
 // foliate customElement 注册保护（必须在 reader 其他模块之前）—— 防止热重载重复 define 抛错阻断 plugin onload
 import "./reader/foliate-shim.ts";
 import { ReaderDockController, READER_FEATURE_ID } from "./reader/reader-dock.ts";
+import { consumeLaunchCrash, markLaunchStart, clearLaunchMarker } from "./reader/reader-tab.ts";
 // 2026-08-31 Phase 4：双语翻译设置弹窗（Dialog 弹窗，命令/按钮直接打开）
 import { openBilingualSettingsTab } from "./reader/bilingual-settings-tab.ts";
+// 2026-09-04 P0-3：Apple Pencil 墨迹持久化（hiword-ink.json，复用 PersistentStore 防抖+重试）
+import { InkSaver, INK_STORAGE_KEY } from "./reader/ink/persistence.ts";
+import { inkStrokes as inkStrokesStore } from "./reader/ink/store.ts";
 // 2026-08-24：dock 批注面板删除后广播 → 各 ReaderView 全量 reconcile 清除当前页残留高亮
 import { notifyAnnotationsChanged } from "./reader/annotation-visual.ts";
 
-// ===== Copilot 聊天（照抄自独立 copilot 插件，作为 REword 内第二个 dock）=====
-import { CopilotPanel } from "./copilot/copilot/copilot-panel.ts";
-import type { CopilotHost, ChatSendResult } from "./copilot/copilot/copilot-host.ts";
-// [已移除] import { initCopilotSidebar } —— Copilot 对话入口已禁用（2026-08-17）
 // 共享基建（生命周期 / 持久化 / 安全渲染）
 import { Disposables } from "./core/disposable.ts";
-import { isMobile, isSmallMobile, isLargeMobile } from "./core/env.ts";
+import { isMobile } from "./core/env.ts";
 import { responsiveDialogSize, isPhoneSize } from "./core/responsive.ts";
-import { ConversationStore, type ConversationData } from "./copilot/store/conversation-store.ts";
-import {
-  normalizeAiSettings as normalizeCopilotSettings,
-  DEFAULT_AI_SETTINGS as COPILOT_DEFAULT_AI,
-} from "./copilot/ai/ai-settings.ts";
-import { fetchDocumentList, fetchDocumentSearch, fetchDocContent } from "./copilot/copilot/doc-context.ts";
-import {
-  DEFAULT_PROMPTS_RAW as COPILOT_DEFAULT_PROMPTS,
-  parsePrompts as parseCopilotPrompts,
-} from "./copilot/copilot/prompt-manager.ts";
-import { runChat as runCopilotChat } from "./copilot/ai/ai-orchestrator.ts";
+// 翻译 / 双语链路（含 AI 兜底 runCopilotChat，源自原 copilot 插件 ai-orchestrator）
+import { runChat as runCopilotChat } from "./ai/ai-chat.ts";
 import { buildProviders, translateWithFallback, isTencentLocked } from "./translate/engine";
 import { parseNumberedTranslations, parseTranslationsPositional } from "./translate/providers/ai";
-import { TranslationCache } from "./translate/cache";
+import { TranslationCache, type TranslationMode } from "./translate/cache";
+import { runTranslate, type TranslateRunDeps } from "./translate/run";
 import { BookModeStore } from "./reader/bilingual-book-mode.ts";
 import { GLOSSARY_STORAGE_KEY, GlossaryStore } from "./translate/glossary.ts";
 import { BookPrimerStore } from "./reader/book-primer";
-import type {
-  AiSettings as CopilotAiSettings,
-  ChatSession as CopilotSession,
-  ContextDoc as CopilotDoc,
-  PromptItem as CopilotPrompt,
-} from "./copilot/types.ts";
 import { logSwallow } from "./core/safe.ts";
 
 const PLUGIN_NAME = "hiword-vocab";
@@ -229,13 +244,26 @@ const DEFAULT_TTS: TtsSettings = {
 
 /** 在线词典设置（2026-08-15 新增，持久化在 hiword-online.json） */
 interface OnlineSettings {
-  /** 是否启用在线兜底（含音标 + 完整释义，欧路网页版，免费无 API key） */
+  /** 是否启用在线兜底（含音标 + 完整释义，2026-09-07 起数据源为海词 corp.dict.cn，免费无 API key） */
   enabled: boolean;
+  /** 2026-09-07 查词典功能：单词小窗默认词典源（"offline"=先离线 / "online"=先在线）；同时决定查词典界面默认 Tab */
+  popupSource: "offline" | "online";
+  /** 2026-09-07 在线词典卡片字体缩放倍数（0.8~1.4，默认 1.0）；经 CSS 变量 --hw-dict-font-scale 由 zoom 应用到 .hiword-dict-card */
+  dictFontScale: number;
 }
 
 const DEFAULT_ONLINE: OnlineSettings = {
   enabled: true,
+  popupSource: "offline",
+  dictFontScale: 1.0,
 };
+
+/** 2026-09-07 在线词典卡片字体缩放：滑块索引(0~6) → 倍数(0.8~1.4，步进 0.1) */
+const DICT_SCALE_MAP: Record<number, number> = { 0: 0.8, 1: 0.9, 2: 1.0, 3: 1.1, 4: 1.2, 5: 1.3, 6: 1.4 };
+function dictScaleIndex(scale: number): number {
+  const idx = Math.round((scale - 0.8) / 0.1);
+  return Math.max(0, Math.min(6, idx));
+}
 
 /** 默认词典清单：内置的示例词典（直接为 .mdx 原包，无需转换） */
 const DEFAULT_MANIFEST: DictManifest = {
@@ -261,16 +289,28 @@ export default class RewordPlugin extends Plugin {
   private vocabDictCacheKey = ""; // 缓存对应的词典版本，切换词典时失效
   private topBarIconId!: string;
   private isReady!: boolean;
-  private dockElement!: HTMLElement | null;
-  private dockModel!: any;
+  /** @internal dock/dock-layout.ts 委托访问（P1-5 拆分） */
+  dockElement!: HTMLElement | null;
+  /** @internal dock/dock-layout.ts 委托访问（P1-5 拆分） */
+  dockModel!: any;
   /** 2026-08-22 Dock 管理器：统一注册 / 布局 / 持久化 */
-  private dockManager!: DockManager;
+  /** @internal dock/dock-layout.ts 委托访问（P1-5 拆分） */
+  dockManager!: DockManager;
   /** 独立 Dock 的 element 映射（featureId -> 该 Dock 的根元素） */
-  private standaloneElements = new Map<string, HTMLElement>();
+  /** @internal dock/dock-layout.ts 委托访问（P1-5 拆分） */
+  standaloneElements = new Map<string, HTMLElement>();
   /** 独立 Dock 的 model 映射（featureId -> addDock 返回的 model，用于 showDock 聚焦） */
-  private standaloneModels = new Map<string, any>();
+  /** @internal dock/dock-layout.ts 委托访问（P1-5 拆分） */
+  standaloneModels = new Map<string, any>();
   /** 阅读器（书架 + 阅读面板）控制器 */
-  private readerDock!: ReaderDockController;
+  /** @internal dock/dock-layout.ts 委托访问（P1-5 拆分） */
+  readerDock!: ReaderDockController;
+  /**
+   * 上次启动是否卡死在初始化中（由 localStorage 启动标记判定）。
+   * 为 true 时跳过「重启后恢复阅读 Tab」，避免恢复大书卡死 → 下次又恢复同一本的自锁循环。
+   */
+  /** @internal dock/dock-layout.ts 委托访问（P1-5 拆分） */
+  lastLaunchCrashed = false;
   /** 复习面板当前状态筛选：all/active/archived/ignored */
   private reviewStatusFilter: "all" | "active" | "archived" | "ignored" = "active";
   private dictReady!: boolean;
@@ -280,6 +320,15 @@ export default class RewordPlugin extends Plugin {
   private ttsSettings!: TtsSettings;
   /** 在线词典设置（2026-08-15 新增） */
   private onlineSettings!: OnlineSettings;
+  /** 2026-09-07 查词典功能：侧边栏查词典当前 Tab（离线/在线）；打开面板时从设置初始化，手动切换仅本次生效 */
+  private dictLookupTab: "offline" | "online" = "offline";
+  /**
+   * 2026-09-07 面包屑导航：在线卡片内查词路径（仅查词典面板在线 Tab 消费）。
+   * 路径：手动输入查词时把当前词设为根，卡片内点击跳转（lookup-word）追加层级；
+   * 回跳：点击面包屑层截断其后层级；× 按钮 pop 最后一层并自动重查前一个；
+   * 会话内存上限 10 层（超出淘汰最早一层）。
+   */
+  private dictCrumbs: string[] = [];
   private _floatingPopup: HTMLElement | null = null; // 悬浮词典弹窗引用
   private _floatingPopupMousedown?: (e: MouseEvent) => void; // 弹窗外部点击关闭的全局监听
   private _floatingPopupKeydown?: (e: KeyboardEvent) => void; // 弹窗 ESC 关闭的全局监听
@@ -348,16 +397,6 @@ export default class RewordPlugin extends Plugin {
   /** token 统计持久化键 */
   private static readonly TOKEN_USAGE_KEY = "book-token-usage.json";
 
-  // ===== Copilot 聊天（照抄 copilot 插件，独立第二个 dock）=====
-  private copilotConvo!: ConversationStore; // 会话历史存储
-  private copilotAi!: CopilotAiSettings;    // Copilot AI 设置（persist: copilot-ai.json）
-  private copilotPromptRaw: string = COPILOT_DEFAULT_PROMPTS; // 提示词预设（逗号分隔）
-  private copilotConfig: { enableContext: boolean; enablePrompts: boolean; autoTitle: boolean } = {
-    enableContext: true,
-    enablePrompts: true,
-    autoTitle: true,
-  };
-  private copilotPanel?: CopilotPanel;       // Copilot 面板控制器（入口已禁用，仅保留实例）
   private lastDeepReadBlockId?: string;  // 最近一次精读来源块（句子批注落点）
   private lastDeepReadDocId?: string;    // 最近一次精读来源文档
   private whaleManager?: WhaleAnnotationManager; // 微阅快速批注管理器
@@ -372,7 +411,6 @@ export default class RewordPlugin extends Plugin {
   /** 防抖持久化层（P1 #7/#8：高频变更合并落盘 + 失败重试并上报） */
   private persistVocab!: PersistentStore;
   private persistAnnotations!: PersistentStore;
-  private persistConvo!: PersistentStore;
   /** 词库分类标签库（2026-08-15 拆分：hiword-vocab-labels.json，与批注标签各自独立管理） */
   private persistVocabLabels!: PersistentStore;
   private vocabLabelStore!: LabelStore;
@@ -385,6 +423,8 @@ export default class RewordPlugin extends Plugin {
   /** AI 会话历史（hiword-ai-sessions.json）。2026-09-03 加防抖：原先 store.onChange
    *  直连 saveData，一次流式回复期间数十次变更 = 数十次全量重写整个 JSON。 */
   private persistAiSessions!: PersistentStore;
+  /** 2026-09-04 P0-3：Apple Pencil 墨迹持久化器（hiword-ink.json） */
+  private inkSaver!: InkSaver;
   private aiPresetStore!: AiPresetStore;
   private promptTemplateStore!: PromptTemplateStore;
   /** 词库标签横切筛选（2026-08-14 新增：all=全部） */
@@ -400,8 +440,10 @@ export default class RewordPlugin extends Plugin {
   /** 2026-08-15 新增：批注/词库面板标签筛选区收起状态（持久化 localStorage） */
   private whaleTagsCollapsed = false;
   private vocabTagsCollapsed = false;
-  /** 词库驱动文档高亮总开关(词库面板控制);默认开 */
-  private vocabAutoHighlight = true;
+  // 2026-09-04：文档内自动高亮词库单词功能整体下线
+  // 字段保留（false 占位）以保持类型稳定；setVocabAutoHighlight 退化为 no-op，
+  // loadVocabAutoHighlight 永远返回 false（即便用户之前存过 true 也不再启用）
+  private vocabAutoHighlight = false;
   /** 批注面板排序模式（2026-08-15 新增）：time=时间排序 / doc=按文档筛选 / style=按样式筛选 */
   private whaleSortMode: "time" | "doc" | "style" = "time";
   /** 时间排序方向：desc 默认（从新到旧）/ asc（从旧到新） */
@@ -441,6 +483,13 @@ export default class RewordPlugin extends Plugin {
 
   async onload() {
     getLogger().info("[REword] 插件加载中... (build=2026-08-21-A3-page-v3)");
+    // 启动标记：onload 开头写入，初始化（含阅读 Tab 恢复）走完才清除。
+    // 若本次启动发现标记仍在 → 上次卡死在初始化中，据此跳过会话恢复（自愈）。
+    this.lastLaunchCrashed = consumeLaunchCrash();
+    markLaunchStart();
+    if (this.lastLaunchCrashed) {
+      getLogger().warn("[REword] 上次启动未完成初始化（疑似卡死），本次将跳过阅读 Tab 自动恢复");
+    }
 
     // 2026-08-31 v1.4.5 P5：往思源主窗口注入选区色 CSS，让主文档与阅读器选区色统一跟思源主题联动
     //   - 思源切主题时 --b3-theme-primary 自动变；CSS 用 var() 实时解析，无需监听
@@ -586,10 +635,6 @@ export default class RewordPlugin extends Plugin {
         (d) => this.saveData("hiword-annotations.json", d),
         { onError: () => showMessage("批注保存失败，请检查存储空间", 3000, "error") }
       );
-      this.persistConvo = new PersistentStore(
-        (d) => this.saveData("copilot-conversations.json", d),
-        { onError: () => showMessage("对话保存失败，请检查存储空间", 3000, "error") }
-      );
       this.persistVocabLabels = new PersistentStore(
         (d) => this.saveData("hiword-vocab-labels.json", d),
         { onError: () => showMessage("词库标签保存失败，请检查存储空间", 3000, "error") }
@@ -610,6 +655,21 @@ export default class RewordPlugin extends Plugin {
         (d) => this.saveData("hiword-ai-sessions.json", d),
         { onError: () => showMessage("AI 会话保存失败，请检查存储空间", 3000, "error") }
       );
+      // 2026-09-04 P0-3：Apple Pencil 墨迹持久化器
+      // 内部用 PersistentStore 400ms 防抖 + 3 次退避重试，构造时机必须早于 initAnnotationStore
+      // （ReaderView 可能在 initAnnotationStore 之前就 mount，需要 inkStrokes 已被 seed）
+      this.inkSaver = new InkSaver(
+        (d) => this.saveData(INK_STORAGE_KEY, d),
+        () => this.loadData(INK_STORAGE_KEY)
+      );
+      // 同步加载磁盘墨迹 → seed 全局 inkStrokes store → 订阅自动落盘
+      // 加载失败时 inkSaver 内部已回退空集合，不阻断后续
+      void (async () => {
+        await this.inkSaver.load();
+        this.inkSaver.seedStore(inkStrokesStore);
+        this.inkSaver.attach(inkStrokesStore);
+        getLogger().info(`[REword] 墨迹持久化已就绪（${this.inkSaver.getStrokes().length} 笔）`);
+      })();
       this.vocabStore = new VocabStore(() => this.saveVocab());
       this.annotationStore = new AnnotationStore(() => this.saveAnnotations());
       setAnnotationStore(this.annotationStore); // Phase 2：暴露单例供阅读面板访问
@@ -772,7 +832,7 @@ export default class RewordPlugin extends Plugin {
     try { await this.clearStaleDockCache(); } catch (e) { getLogger().warn("[REword] 清理 Dock 缓存失败", { error: e }); }
     try { this.initDockPanels(); } catch (e) { getLogger().error("侧边栏注册失败", { operation: "初始化-侧边栏", error: e }); }
     // Copilot 聊天 dock（照抄 copilot 插件，作为第二个 dock 引入）
-    try { await this.initCopilot(); } catch (e) { getLogger().error("Copilot 初始化失败", { operation: "初始化-Copilot", error: e }); }
+    try { await this.initAiSessionPersistence(); } catch (e) { getLogger().error("Copilot 初始化失败", { operation: "初始化-Copilot", error: e }); }
     // 阅读器（书架索引加载；面板随 dock 渲染按需初始化）
     try {
       this.readerDock = new ReaderDockController(this);
@@ -788,6 +848,7 @@ export default class RewordPlugin extends Plugin {
     }
     try { this.ttsSettings = await this.loadTtsSettings(); } catch (e) { this.ttsSettings = { ...DEFAULT_TTS }; }
     try { this.onlineSettings = await this.loadOnlineSettings(); } catch (e) { this.onlineSettings = { ...DEFAULT_ONLINE }; }
+    this.applyDictFontScale();
     try { this.fontSize = await this.loadFontSize(); } catch (e) { this.fontSize = "medium"; }
     // 应用字体大小到侧边栏
     this.applyFontSize();
@@ -886,6 +947,15 @@ export default class RewordPlugin extends Plugin {
       () => this.eventBus.on("open-menu-content", this.onOpenContentMenu),
       () => this.eventBus.off("open-menu-content", this.onOpenContentMenu)
     );
+    // 2026-09-06 P2-D：文档树 / 页签右键追加「AI 精读此文档」入口
+    this.disposables.addEventBus(
+      () => this.eventBus.on("open-menu-doctree", this.onOpenDocTreeMenu),
+      () => this.eventBus.off("open-menu-doctree", this.onOpenDocTreeMenu)
+    );
+    this.disposables.addEventBus(
+      () => this.eventBus.on("open-menu-filetab" as any, this.onOpenFileTabMenu),
+      () => this.eventBus.off("open-menu-filetab" as any, this.onOpenFileTabMenu)
+    );
 
     // 2026-08-29：阅读器深链（siyuan://plugins/siyuan-plugin-rewordreader?data={…}）
     // 摘录插入思源文档后，点「回原文」即回到书里对应位置
@@ -901,8 +971,11 @@ export default class RewordPlugin extends Plugin {
     }, 320);
     this.disposables.addTimer(initTimer);
 
-    // 2026-08-22 词库驱动文档高亮：注入 store 依赖并启动观察器
-    // 注意：必须在 vocabStore 已赋值之后（onload 段尾 4.2.1）
+    // 2026-09-04 文档内自动高亮词库单词功能整体下线
+    // 原 vocabHighlighter.start/setEnabled/refreshAll 全部移除；
+    // configureVocabHighlightDeps 也不需要（无消费者）。该块（配置依赖 + 启动计时器）整体 no-op。
+    // 如未来恢复：取消下面注释并恢复 configureVocabHighlightDeps + getVocabHighlighter 调用。
+    /*
     configureVocabHighlightDeps({
       getAllWords: () => this.vocabStore.getAllWords(),
       onLearningStatusChange: (cb) => this.vocabStore.onLearningStatusChange(cb),
@@ -918,6 +991,7 @@ export default class RewordPlugin extends Plugin {
       }
     }, 480);
     this.disposables.addTimer(vocabInitTimer);
+    */
 
     // 正文内联批注点击浮层（查看/编辑/定位/删除）
     this.bindInlineAnnotationClick();
@@ -1155,7 +1229,9 @@ export default class RewordPlugin extends Plugin {
     try {
       this.whaleTagsCollapsed = localStorage.getItem("hiword-whale-tags-collapsed") === "true";
       this.vocabTagsCollapsed = localStorage.getItem("hiword-vocab-tags-collapsed") === "true";
-      this.vocabAutoHighlight = localStorage.getItem("hiword-vocab-autohighlight") !== "false";
+      // 2026-09-04 修复：自动高亮开关状态从 localStorage 迁移到 saveData，
+      // 避免重载插件/重启思源后 localStorage 被清空而自动回退为 true。
+      this.vocabAutoHighlight = await this.loadVocabAutoHighlight();
       // 2026-08-23 新增 / 2026-08-23 改:词库面板状态条按单词独立展开态
       // (旧 key "reword-vocab-status-collapsed" 弃用,新 key "reword-vocab-status-expanded" 存 JSON 数组)
       try {
@@ -1213,6 +1289,16 @@ export default class RewordPlugin extends Plugin {
     } catch {
       this.aiSettings = { ...DEFAULT_AI_SETTINGS };
     }
+    // 2026-09-06 P0 自检：normalize 漏字段 = 用户配置「保存后重启即丢」
+    //   （前科 conciseTranslatePrompt：接口/默认值/消费方三层齐全，唯独持久化层漏了）。
+    //   这里让缺陷在启动时就喊出来，而不是等用户来报"我配的东西又没了"。
+    const normalizeGaps = listNormalizeGaps();
+    if (normalizeGaps.length) {
+      getLogger().warn(
+        "[REword] normalizeAiSettings 缺少字段，相关配置将无法持久化: " + normalizeGaps.join(", "),
+        { operation: "AI设置加载" }
+      );
+    }
     // 加载预设与提示词模板（容错：空/损坏时用默认）
     try {
       this.aiPresetStore.load(await this.loadData("hiword-ai-presets.json"));
@@ -1249,130 +1335,24 @@ export default class RewordPlugin extends Plugin {
     this.aiPanel?.prefillSelection();
   }
 
-  // ===================== Copilot 聊天（照抄 copilot 插件）=====================
+  // ===================== AI 精读会话持久化（原 Copilot 插件会话层，现仅服务 AI 精读）=====================
 
-  /** 初始化 Copilot：加载持久化数据 → 实例化会话存储与面板 → 注册 dock / 顶栏 / 命令 */
-  private async initCopilot(): Promise<void> {
-    const ai = (await this.loadData("copilot-ai.json")) as CopilotAiSettings | null;
-    this.copilotAi = normalizeCopilotSettings(ai ?? COPILOT_DEFAULT_AI);
-
-    const prompts = (await this.loadData("copilot-prompts.json")) as string | null;
-    this.copilotPromptRaw = typeof prompts === "string" && prompts.trim() ? prompts : COPILOT_DEFAULT_PROMPTS;
-
-    const cfg = (await this.loadData("copilot-config.json")) as any;
-    if (cfg && typeof cfg === "object") {
-      this.copilotConfig = {
-        enableContext: typeof cfg.enableContext === "boolean" ? cfg.enableContext : this.copilotConfig.enableContext,
-        enablePrompts: typeof cfg.enablePrompts === "boolean" ? cfg.enablePrompts : this.copilotConfig.enablePrompts,
-        autoTitle: typeof cfg.autoTitle === "boolean" ? cfg.autoTitle : this.copilotConfig.autoTitle,
-      };
-    }
-
-    this.copilotConvo = new ConversationStore(() => {
-      void this.saveCopilotConversations();
-    });
-    const convRaw = (await this.loadData("copilot-conversations.json")) as ConversationData | null;
-    this.copilotConvo.load(convRaw);
-    if (!this.copilotConvo.list().length) this.copilotConvo.createSession();
-
+  /** 初始化 AI 会话持久化：加载历史 → 注册变更防抖落盘（400ms 合并 + 失败重试 + 卸载 flush） */
+  private async initAiSessionPersistence(): Promise<void> {
     // REword AI 会话历史持久化：经防抖层落盘（400ms 合并 + 失败重试 + 卸载 flush）；
-    // 首次进入保证至少有一个会话
-    sessionStore.onChange = () => { this.persistAiSessions.update(sessionStore.toJSON()); };
-    const aiSessRaw = (await this.loadData("hiword-ai-sessions.json")) as AiSessionData | null;
-    sessionStore.load(aiSessRaw);
-    if (!sessionStore.list().length) sessionStore.create();
-
-    const host: CopilotHost = {
-      getStore: () => this.copilotConvo,
-      getSettings: () => this.copilotAi,
-      newSession: () => this.copilotConvo.createSession(),
-      selectSession: (id) => this.copilotConvo.setActive(id),
-      deleteSession: (id) => this.copilotConvo.deleteSession(id),
-      renameSession: (id, t) => this.copilotConvo.renameSession(id, t),
-      togglePin: (id) => this.copilotConvo.togglePin(id),
-      addContextDoc: (doc) => this.copilotAddContextDoc(doc),
-      removeContextDoc: (id) => this.copilotConvo.removeContextDoc(id),
-      getPrompts: () => this.copilotGetPrompts(),
-      sendToAI: (text, stream) => this.copilotSendToAI(text, stream),
-      fetchDocs: () => fetchDocumentList(300),
-      searchDocs: (kw) => fetchDocumentSearch(kw),
-      openSettings: () => this.openCopilotSettings(),
-      copyText: (text) => this.copilotCopy(text),
-      confirmDialog: (msg) => this.copilotConfirmDialog(msg),
-      promptDialog: (msg, def) => this.copilotPromptDialog(msg, def),
+    // 首次进入保证至少有一个会话。
+    // 落盘防抖延迟由 AI 设置「会话落盘节流」驱动：每次变更时同步一次，
+    // 保证用户在设置里改完立即生效（无需重载插件）。
+    sessionStore.onChange = () => {
+      this.persistAiSessions.setDelay(this.aiSettings?.sessionSaveThrottleMs ?? 400);
+      this.persistAiSessions.update(sessionStore.toJSON());
     };
-    this.copilotPanel = new CopilotPanel(host);
-
-    // [已移除] Copilot 对话入口（dock / 顶栏按钮 / 命令）按用户要求于 2026-08-17 删除。
-    // 仅保留上方数据初始化（copilotConvo / sessionStore 等）；AI 精读面板依赖 sessionStore，故不删。
-    getLogger().info("[REword] Copilot 数据初始化完成（对话入口已禁用）");
+    const aiSessRaw = (await this.loadData("hiword-ai-sessions.json")) as AiSessionData | null;
+    sessionStore.load(aiSessRaw, this.aiSettings?.sessionRetentionDays ?? 0);
+    if (!sessionStore.list().length) sessionStore.create();
+    getLogger().info("[REword] AI 会话持久化初始化完成");
   }
 
-  // [已移除] openCopilotDock() —— Copilot dock 入口已禁用（2026-08-17）
-
-  /** 加入上下文文档（受功能开关约束） */
-  private copilotAddContextDoc(doc: CopilotDoc): void {
-    if (!this.copilotConfig.enableContext) {
-      showMessage("文档上下文功能已关闭，请在 ⚙ 设置中开启");
-      return;
-    }
-    this.copilotConvo.addContextDoc(doc);
-  }
-
-  /** 预设提示词（受功能开关约束） */
-  private copilotGetPrompts(): CopilotPrompt[] {
-    if (!this.copilotConfig.enablePrompts) return [];
-    return parseCopilotPrompts(this.copilotPromptRaw);
-  }
-
-  /** 复制文本 */
-  private copilotCopy(text: string): void {
-    navigator.clipboard?.writeText(text).then(
-      () => showMessage("已复制"),
-      () => showMessage("复制失败")
-    );
-  }
-
-  /** 发送一条消息并请求 AI（内部已写入会话存储） */
-  private async copilotSendToAI(
-    userText: string,
-    stream?: import("./copilot/copilot/copilot-host.ts").ChatStream
-  ): Promise<ChatSendResult> {
-    const session = this.copilotConvo.getActive();
-    this.copilotConvo.appendMessage("user", userText, { origin: "chat" });
-
-    let ctxDocs: Awaited<ReturnType<typeof fetchDocContent>>[] = [];
-    if (this.copilotConfig.enableContext && session.contextDocs.length) {
-      try {
-        ctxDocs = await Promise.all(session.contextDocs.map((d) => fetchDocContent(d)));
-      } catch {
-        ctxDocs = [];
-      }
-    }
-
-    const history = this.copilotConvo.get(session.id)?.messages ?? [];
-
-    // 累积流式内容：既回调给面板做实时渲染，也留存用于最终落盘
-    let acc = "";
-    const res = await runCopilotChat(this.copilotAi, ctxDocs, history, undefined, {
-      signal: stream?.signal,
-      onToken: (chunk) => {
-        acc += chunk;
-        stream?.onToken?.(chunk);
-      },
-    });
-
-    if (res.aborted) {
-      // 用户主动停止：保留已生成的部分内容
-      this.copilotConvo.appendMessage("assistant", acc || "（已停止生成）", { origin: "chat" });
-    } else if (res.ok) {
-      this.copilotConvo.appendMessage("assistant", res.content, { origin: "chat" });
-    } else {
-      this.copilotConvo.appendMessage("assistant", "⚠️ 请求失败：" + (res.error || "未知错误"), { origin: "chat" });
-    }
-    await this.saveCopilotConversations();
-    return { ok: res.ok, content: res.content, error: res.error, aborted: res.aborted };
-  }
 
   /**
    * 批量翻译（双语注入核心）：先查按书缓存，未命中走引擎链。
@@ -1392,67 +1372,11 @@ export default class RewordPlugin extends Plugin {
     meta?: { title?: string; author?: string; language?: string; toc?: string } | null,
     opts?: { model?: string; overwrite?: boolean; signal?: AbortSignal; mode?: "default" | "concise"; engine?: string }
   ): Promise<string[]> {
-    if (!Array.isArray(texts) || texts.length === 0) return [];
-    const out: string[] = new Array(texts.length).fill("");
-
-    // 2026-08-30：译文模式（default 直译 / concise 精简）→ 决定查哪条译文池
-    const mode = opts?.mode ?? "default";
-    // 1) 查缓存（按书 + 模式）；overwrite 时跳过缓存，全部当作未命中重新翻译
-    const { hits, misses } = opts?.overwrite
-      ? { hits: {} as Record<number, string>, misses: texts.map((_, i) => i) }
-      : await this.translationCache.getBatch(bookId, texts, mode);
-    for (const k in hits) out[+k] = hits[k];
-    trLog(`translateBatch: 缓存命中 ${Object.keys(hits).length}, 未命中 ${misses.length}/${texts.length}${opts?.overwrite ? " (覆盖缓存)" : ""}`);
-
-    // 2) 未命中部分走引擎链（2026-08-28：AI 首选 + 批量模式；2026-08-30 支持指定 engine）
-    if (misses.length) {
-      const reqTexts = misses.map((i) => texts[i]);
-      // 前文参考需与 misses 对齐（每个未命中索引对应的前文段）
-      const reqCtx = ctxBefore
-        ? misses.map((i) => (ctxBefore[i] ? ctxBefore[i] : null))
-        : undefined;
-      try {
-        trLog("translateBatch: buildProviders...");
-        // 用量预警（黄色）：本轮翻译前，对达到告警阈值的引擎各提示一次
-        this.warnTranslationUsage();
-        const providers = buildProviders(this.aiSettings, {
-          translateOne: (t, f, t2, bid) => this.aiTranslateText(t, f, t2, bid),
-          translateBatch: (ts, f, t2, bid) => this.aiTranslateBatch(ts, f, t2, bid, reqCtx, meta, { ...opts, mode }),
-        }, opts?.engine);
-        // 用量终止（红色）：所有引擎均因达上限被移除 → 直接停止翻译并提示
-        if (providers.length === 0) {
-          this.notifyTranslationQuotaExhausted();
-          return out;
-        }
-        trLog(`translateBatch: ${providers.length} 个引擎, 调用 translateWithFallback...`);
-        const res = await translateWithFallback(providers, { texts: reqTexts, from, to, bookId });
-        const tr = res.texts || [];
-        trLog(`translateBatch: 引擎返回 provider=${res.provider}, ${tr.length} 条译文, 非空 ${tr.filter(t=>t?.trim()).length} 条`);
-        const pairs: Array<[string, string]> = [];
-        misses.forEach((idx, j) => {
-          const translation = (tr[j] || "").trim();
-          out[idx] = translation;
-          if (translation) pairs.push([texts[idx], translation]);
-        });
-        if (pairs.length) await this.translationCache.setBatch(bookId, pairs, mode);
-        // 翻译成功后累计用量（按实际提交字符数 / AI Token 计费）
-        const submitChars = reqTexts.reduce((s, t) => s + t.length, 0);
-        if (res.provider === "tencent") {
-          await this.recordTencentUsage(submitChars);
-        } else if (res.provider === "baidu") {
-          await this.recordBaiduUsage(submitChars);
-        } else if (res.provider === "youdao") {
-          await this.recordYoudaoUsage(submitChars);
-        } else if (res.provider === "ai") {
-          await this.recordAiTokenUsage(this._lastTranslationUsageByMode[mode]?.totalTokens ?? 0);
-        }
-      } catch (e) {
-        console.error("[REword] translateBatch: 引擎链异常:", e);
-        getLogger().error("[REword] 批量翻译失败:", { error: e });
-      }
-    }
-    trLog(`translateBatch: 最终返回 ${out.length} 条, 非空 ${out.filter(t=>t?.trim()).length} 条`);
-    return out;
+    // 2026-09-05 R0：公共核心抽到 translate/run.ts（与 Detailed 版合流，消除 copy-paste）
+    const r = await runTranslate(this.translateRunDeps("translateBatch"), {
+      texts, from, to, bookId, ctxBefore, meta, opts,
+    });
+    return r.texts;
   }
 
   // 用量预警/终止（2026-09-01：让监督中心「告警阈值 / 上限」真正生效）
@@ -1532,6 +1456,38 @@ export default class RewordPlugin extends Plugin {
     await this.saveAiSettings();
   }
 
+  /** runTranslate 宿主依赖（把插件实例能力注入翻译核心；run 层零状态） */
+  private translateRunDeps(tag: string): TranslateRunDeps {
+    return {
+      tag,
+      cache: this.translationCache,
+      aiSettings: this.aiSettings,
+      aiTranslateText: (t, f, t2, bid) => this.aiTranslateText(t, f, t2, bid),
+      aiTranslateBatch: (ts, f, t2, bid, ctx, meta, o) =>
+        this.aiTranslateBatch(ts, f, t2, bid, ctx, meta, o),
+      warnUsage: () => this.warnTranslationUsage(),
+      notifyQuotaExhausted: () => this.notifyTranslationQuotaExhausted(),
+      recordUsage: (provider, chars, mode) => this.recordProviderUsage(provider, chars, mode),
+    };
+  }
+
+  /** 按引擎分流累计用量（原双胞胎内的重复分支收敛至此） */
+  private async recordProviderUsage(
+    provider: string | undefined,
+    submitChars: number,
+    mode: TranslationMode,
+  ): Promise<void> {
+    if (provider === "tencent") {
+      await this.recordTencentUsage(submitChars);
+    } else if (provider === "baidu") {
+      await this.recordBaiduUsage(submitChars);
+    } else if (provider === "youdao") {
+      await this.recordYoudaoUsage(submitChars);
+    } else if (provider === "ai") {
+      await this.recordAiTokenUsage(this._lastTranslationUsageByMode[mode]?.totalTokens ?? 0);
+    }
+  }
+
   /** 重置某免费引擎用量计数 */
   public async resetEngineUsage(engine: string): Promise<void> {
     const s = this.aiSettings;
@@ -1604,57 +1560,10 @@ export default class RewordPlugin extends Plugin {
     meta?: { title?: string; author?: string; language?: string; toc?: string } | null,
     opts?: { model?: string; overwrite?: boolean; signal?: AbortSignal; mode?: "default" | "concise"; engine?: string }
   ): Promise<{ texts: string[]; providers: (string | null)[]; fromCache: boolean[] }> {
-    if (!Array.isArray(texts) || texts.length === 0) {
-      return { texts: [], providers: [], fromCache: [] };
-    }
-    const mode = opts?.mode ?? "default";
-    const { hits, misses, fromCache } = opts?.overwrite
-      ? { hits: {} as Record<number, string>, misses: texts.map((_, i) => i), fromCache: texts.map(() => false) }
-      : await this.translationCache.getBatch(bookId, texts, mode);
-    const out: string[] = new Array(texts.length).fill("");
-    const providers: (string | null)[] = new Array(texts.length).fill(null);
-    for (const k in hits) { out[+k] = hits[k]; providers[+k] = "cache"; }
-    if (misses.length) {
-      const reqTexts = misses.map((i) => texts[i]);
-      const reqCtx = ctxBefore ? misses.map((i) => (ctxBefore[i] ? ctxBefore[i] : null)) : undefined;
-      try {
-        // 用量预警（黄色）：本轮翻译前，对达到告警阈值的引擎各提示一次
-        this.warnTranslationUsage();
-        const providers2 = buildProviders(this.aiSettings, {
-          translateOne: (t, f, t2, bid) => this.aiTranslateText(t, f, t2, bid),
-          translateBatch: (ts, f, t2, bid) => this.aiTranslateBatch(ts, f, t2, bid, reqCtx, meta, { ...opts, mode }),
-        }, opts?.engine);
-        // 用量终止（红色）：所有引擎均因达上限被移除 → 直接停止翻译并提示
-        if (providers2.length === 0) {
-          this.notifyTranslationQuotaExhausted();
-          return { texts: out, providers, fromCache };
-        }
-        const res = await translateWithFallback(providers2, { texts: reqTexts, from, to, bookId });
-        const tr = res.texts || [];
-        const pairs: Array<[string, string]> = [];
-        misses.forEach((idx, j) => {
-          const translation = (tr[j] || "").trim();
-          out[idx] = translation;
-          providers[idx] = translation ? res.provider : null;
-          if (translation) pairs.push([texts[idx], translation]);
-        });
-        if (pairs.length) await this.translationCache.setBatch(bookId, pairs, mode);
-        const submitChars = reqTexts.reduce((s, t) => s + t.length, 0);
-        if (res.provider === "tencent") {
-          await this.recordTencentUsage(submitChars);
-        } else if (res.provider === "baidu") {
-          await this.recordBaiduUsage(submitChars);
-        } else if (res.provider === "youdao") {
-          await this.recordYoudaoUsage(submitChars);
-        } else if (res.provider === "ai") {
-          await this.recordAiTokenUsage(this._lastTranslationUsageByMode[mode]?.totalTokens ?? 0);
-        }
-      } catch (e) {
-        console.error("[REword] translateBatchDetailed: 引擎链异常:", e);
-        getLogger().error("[REword] 批量翻译失败:", { error: e });
-      }
-    }
-    return { texts: out, providers, fromCache };
+    // 2026-09-05 R0：公共核心抽到 translate/run.ts（与 translateBatch 合流）
+    return runTranslate(this.translateRunDeps("translateBatchDetailed"), {
+      texts, from, to, bookId, ctxBefore, meta, opts,
+    });
   }
 
   /**
@@ -2179,6 +2088,32 @@ export default class RewordPlugin extends Plugin {
     }, 60);
   }
 
+  /**
+   * 2026-09-06 P2-D：文档树 / 页签右键「AI 精读此文档」入口。
+   * 按 doc id 拉取整篇正文（沿用 getDocText 的截断上限），打开并聚焦 AI 精读面板后发送；
+   * 若激活的是 learning 预设，sendText 内部自动路由到结构化分块精读。
+   */
+  public async sendDocToAi(docId: string): Promise<void> {
+    if (!docId) return;
+    if (!this.aiSettings?.enabled || !this.aiSettings?.apiKey) {
+      showMessage("AI 未配置：请先在 AI 设置中开启并填写 API", 2600, "info" as any);
+      return;
+    }
+    this.showAiPanel();
+    // 等面板 render 一帧确保输入框就绪（与 translateToAi 一致的节奏）
+    await new Promise((r) => setTimeout(r, 60));
+    try {
+      const text = await this.getDocText(docId);
+      if (!text.trim()) {
+        showMessage("无法读取该文档正文，可能为空文档或无读取权限", 2400, "info" as any);
+        return;
+      }
+      this.aiPanel?.sendText(text);
+    } catch (e) {
+      getLogger().error("[REword] 整篇文档发送到 AI 精读失败:", { error: e });
+    }
+  }
+
   /** 阅读器划词朗读（公开包装 TTS 引擎，自动适配中英文 voice） */
   public speakText(text: string) {
     this.speak(text);
@@ -2234,132 +2169,6 @@ export default class RewordPlugin extends Plugin {
     }
   }
 
-  /* ===================== Copilot 持久化 ===================== */
-  private async saveCopilotConversations(): Promise<void> {
-    this.persistConvo.update(this.copilotConvo.toJSON());
-  }
-  private async saveCopilotAi(): Promise<void> {
-    try { await this.saveData("copilot-ai.json", this.copilotAi); } catch (__swallowErr) { logSwallow(__swallowErr, "index.ts · saveCopilotAi", "error"); }
-  }
-  private async saveCopilotPrompts(): Promise<void> {
-    try { await this.saveData("copilot-prompts.json", this.copilotPromptRaw); } catch (__swallowErr) { logSwallow(__swallowErr, "index.ts · saveCopilotPrompts", "error"); }
-  }
-  private async saveCopilotConfig(): Promise<void> {
-    try { await this.saveData("copilot-config.json", this.copilotConfig); } catch (__swallowErr) { logSwallow(__swallowErr, "index.ts · saveCopilotConfig", "error"); }
-  }
-
-  /** HTML 转义（属性用） */
-  private cpEscAttr(s: string): string {
-    return (s || "").replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-  }
-  private cpEscHtml(s: string): string {
-    return this.cpEscAttr(s);
-  }
-
-  /* ===================== Copilot AI 设置对话框 ===================== */
-  private openCopilotSettings(): void {
-    const s = this.copilotAi;
-    const c = this.copilotConfig;
-    const content = `
-      <div class="cp-set">
-        <div class="cp-set-section">
-          <div class="cp-set-title">AI 配置</div>
-          <label class="cp-set-row">
-            <span>启用 AI</span>
-            <input type="checkbox" id="cp-set-enabled" ${s.enabled ? "checked" : ""}/>
-          </label>
-          <label class="cp-set-row">
-            <span>Base URL</span>
-            <input type="text" id="cp-set-baseurl" value="${this.cpEscAttr(s.baseUrl)}" placeholder="https://api.openai.com/v1"/>
-          </label>
-          <label class="cp-set-row">
-            <span>API Key</span>
-            <input type="password" id="cp-set-key" value="${this.cpEscAttr(s.apiKey)}" placeholder="sk-..."/>
-          </label>
-          <label class="cp-set-row">
-            <span>模型</span>
-            <input type="text" id="cp-set-model" value="${this.cpEscAttr(s.model)}" placeholder="gpt-4o-mini"/>
-          </label>
-          <label class="cp-set-row">
-            <span>温度 (0~2)</span>
-            <input type="number" step="0.1" min="0" max="2" id="cp-set-temp" value="${s.temperature}"/>
-          </label>
-          <label class="cp-set-row">
-            <span>最大 Token</span>
-            <input type="number" step="16" min="16" max="32768" id="cp-set-maxtok" value="${s.maxTokens}"/>
-          </label>
-          <label class="cp-set-row cp-set-row--col">
-            <span>系统提示词</span>
-            <textarea id="cp-set-sys" rows="5">${this.cpEscHtml(s.systemPrompt)}</textarea>
-          </label>
-        </div>
-
-        <div class="cp-set-section">
-          <div class="cp-set-title">功能模块</div>
-          <label class="cp-set-row">
-            <span>文档上下文</span>
-            <input type="checkbox" id="cp-set-ctx" ${c.enableContext ? "checked" : ""}/>
-          </label>
-          <label class="cp-set-row">
-            <span>提示词库</span>
-            <input type="checkbox" id="cp-set-prompt" ${c.enablePrompts ? "checked" : ""}/>
-          </label>
-          <label class="cp-set-row">
-            <span>自动生成标题</span>
-            <input type="checkbox" id="cp-set-autotitle" ${c.autoTitle ? "checked" : ""}/>
-          </label>
-        </div>
-
-        <div class="cp-set-section">
-          <div class="cp-set-title">提示词预设（逗号分隔）</div>
-          <textarea id="cp-set-prompts" rows="3" placeholder="总结要点,翻译,润色…">${this.cpEscHtml(this.copilotPromptRaw)}</textarea>
-          <div class="cp-set-hint">多个提示词用逗号隔开，点击底部「提示词」按钮即可插入。</div>
-        </div>
-
-        <div class="cp-set-actions">
-          <button class="cp-set-btn cp-set-btn--ghost" id="cp-set-cancel">取消</button>
-          <button class="cp-set-btn cp-set-btn--primary" id="cp-set-save">保存</button>
-        </div>
-      </div>
-    `;
-
-    const dialog = new Dialog({
-      title: "Copilot · AI 设置",
-      content,
-      width: responsiveDialogSize(480, "width"),
-      height: "520px",
-    });
-
-    const root = dialog.element;
-    root.querySelector("#cp-set-cancel")?.addEventListener("click", () => dialog.destroy());
-
-    root.querySelector("#cp-set-save")?.addEventListener("click", async () => {
-      const getVal = (id: string) => (root.querySelector("#" + id) as HTMLInputElement | HTMLTextAreaElement)?.value ?? "";
-      const getChk = (id: string) => (root.querySelector("#" + id) as HTMLInputElement)?.checked ?? false;
-
-      this.copilotAi = normalizeCopilotSettings({
-        enabled: getChk("cp-set-enabled"),
-        baseUrl: getVal("cp-set-baseurl"),
-        apiKey: getVal("cp-set-key"),
-        model: getVal("cp-set-model"),
-        temperature: getVal("cp-set-temp"),
-        maxTokens: getVal("cp-set-maxtok"),
-        systemPrompt: getVal("cp-set-sys"),
-        jsonMode: false,
-      });
-      this.copilotConfig.enableContext = getChk("cp-set-ctx");
-      this.copilotConfig.enablePrompts = getChk("cp-set-prompt");
-      this.copilotConfig.autoTitle = getChk("cp-set-autotitle");
-      this.copilotPromptRaw = getVal("cp-set-prompts").trim() || COPILOT_DEFAULT_PROMPTS;
-
-      await Promise.all([this.saveCopilotAi(), this.saveCopilotConfig(), this.saveCopilotPrompts()]);
-      showMessage("设置已保存");
-      dialog.destroy();
-
-      // 注意：Copilot dock 现在由 Svelte AISidebar（initCopilotSidebar）接管，
-      // 其生命周期与设置响应由 Svelte store 自行管理，无需再渲染旧的 CopilotPanel。
-    });
-  }
 
   // ----- AiHost 实现（桥接插件能力到面板）-----
 
@@ -2465,6 +2274,61 @@ export default class RewordPlugin extends Plugin {
     } catch (e) {
       getLogger().debug("[REword] 读取块正文失败（已静默降级）:", { error: e });
       return null;
+    }
+  }
+
+  /**
+   * 读取块正文「范围」（2026-09-08 标题块拖入修复）。
+   *
+   * - 普通块（p / code / table / quote / l / i 等）：直接退化为 fetchBlockText（单块自身）。
+   * - 标题块（type='h'）：自动收集「本标题及下属全部内容，直到下一个同级或更高级标题之前」的
+   *   所有块正文，拼接成一段完整 markdown：
+   *     · 含标题自身；
+   *     · 更低级子标题（如 H3 下的 H4）继续收集，遇同级/更高级（H2/H1）停止；
+   *     · `---` 分隔线、段落、列表、代码块都是普通块，自然被收入；
+   *   收集按**文档树序**（parent_id 重建 + 深度优先遍历）取顺序，单次 SQL 取全部块正文，避免 N 次请求。
+   *   ⚠️ 不能用全局 `ORDER BY sort`：思源 sort 只是同父级兄弟序，跨父级排序会打乱文档顺序，
+   *      导致"被选中标题"落错位置、把上方内容也扫进来（见 ai-intake 排序 bug）。
+   * - 上限：总量超过 MAX_BLOCK_RANGE_TOTAL（=8000，与 ai-refs MAX_BLOCK_TOTAL 一致）时，
+   *   退化为仅标题块自身（避免截到一半的正文误导 AI）。
+   * - 任何异常 / 缺元数据均静默退化为 fetchBlockText（单块自身），绝不抛错、绝不把 ((id)) 发给 AI。
+   */
+  async fetchBlockRangeText(blockId: string): Promise<string | null> {
+    if (!blockId) return null;
+    // 与 ai-refs MAX_BLOCK_TOTAL 对齐（避免跨模块 import 造成循环依赖，此处独立常量）
+    const MAX_BLOCK_RANGE_TOTAL = 8000;
+    try {
+      // 1) 取本块元数据：root_id / type / subtype
+      const meta = await sqlQuery<{ root_id: string; type: string; subtype: string }>(
+        `SELECT root_id, type, subtype FROM blocks WHERE id='${blockId}'`
+      );
+      const self = meta?.[0];
+      // 非标题块 / 缺元数据 → 退化为单块
+      if (!self || !self.root_id || self.type !== "h") return this.fetchBlockText(blockId);
+
+      // 标题级别：subtype 形如 h1~h6 → 数字 1~6
+      const level = headingLevelOf(self.subtype);
+
+      // 2) 取同文档全部块（含 parent_id / sort），重建树序后做范围收集
+      const rows = await sqlQuery<{
+        id: string; parent_id: string; type: string; subtype: string;
+        sort: number; markdown: string; content: string;
+      }>(
+        `SELECT id, parent_id, type, subtype, sort, markdown, content FROM blocks WHERE root_id='${self.root_id}'`
+      );
+      if (!rows?.length) return this.fetchBlockText(blockId);
+
+      // 重建文档真实视觉顺序（不用全局 ORDER BY sort，因 sort 仅是同父级兄弟序）
+      const ordered = orderBlocksByTree(rows, self.root_id);
+      if (!ordered.length) return this.fetchBlockText(blockId);
+
+      // 3) 从标题位置向后收集，遇同级/更高级标题停止
+      const text = collectHeadingRange(ordered, blockId, level, MAX_BLOCK_RANGE_TOTAL);
+      if (text == null) return this.fetchBlockText(blockId);
+      return text;
+    } catch (e) {
+      getLogger().debug("[REword] 标题块范围收集失败，退化为单块:", { error: e });
+      return this.fetchBlockText(blockId);
     }
   }
 
@@ -2740,7 +2604,8 @@ export default class RewordPlugin extends Plugin {
     if (!docId) return null;
     try {
       const { getDocText } = await import("./ai/ai-doc-search.ts");
-      const text = await getDocText(docId);
+      // 2026-09-06 第 3 批：截断上限改为读取设置（面板 → 精读行为 → 「引用正文截断」）
+      const text = await getDocText(docId, this.aiSettings.contextMaxChars);
       if (!text) {
         getLogger().warn("[REword] fetchDocText 返回空: docId=" + docId + " len=" + docId.length);
         return null;
@@ -3113,10 +2978,6 @@ export default class RewordPlugin extends Plugin {
   }
 
   /** 自定义确认弹窗（替代原生 window.confirm，避免阻塞/丑陋的原生对话框） */
-  private copilotConfirmDialog(message: string): Promise<boolean> {
-    return confirmDelete(message);
-  }
-
   /** 自定义输入弹窗（替代原生 window.prompt，返回输入值或 null） */
   private copilotPromptDialog(message: string, defaultValue = ""): Promise<string | null> {
     return new Promise((resolve) => {
@@ -3222,13 +3083,23 @@ export default class RewordPlugin extends Plugin {
 
   // ========== AI 精读 · 模型 / 文档 / 模板 / 预设（P0，对标 Copilot） ==========
 
-  /** 切换当前模型并持久化（header 模型下拉） */
-  async setModel(model: string): Promise<void> {
+  /** 切换当前模型并持久化（header 两级模型选择器）。platformId 非空时同步切换激活平台 */
+  async setModel(model: string, platformId?: string): Promise<void> {
     const m = (model || "").trim();
     if (!m) return;
     this.aiSettings.model = m;
-    // 若不在预设列表，则追加，便于下次下拉直接选择
-    if (!this.aiSettings.models.includes(m)) {
+    // 2026-09-07 改动点 3：切换平台 → 更新激活平台，并把顶层镜像同步到该平台
+    if (platformId && platformId !== this.aiSettings.activePlatformId) {
+      this.aiSettings.activePlatformId = platformId;
+    }
+    const plat = activePlatformOf(this.aiSettings);
+    if (plat) {
+      this.aiSettings.baseUrl = plat.baseUrl;
+      this.aiSettings.apiKey = plat.apiKey;
+      if (!plat.models.includes(m)) plat.models = [m, ...plat.models];
+      this.aiSettings.models = plat.models;
+      this.aiSettings.modelParams = plat.modelParams || {};
+    } else if (!this.aiSettings.models.includes(m)) {
       this.aiSettings.models = [m, ...this.aiSettings.models];
     }
     await this.saveAiSettings();
@@ -3247,7 +3118,8 @@ export default class RewordPlugin extends Plugin {
   /** 读取文档正文（用于添加上下文） */
   async getDocText(docId: string): Promise<string> {
     try {
-      return await getAiDocText(docId, 12000);
+      // 2026-09-06 第 3 批：截断上限改为读取设置（面板 → 精读行为 → 「引用正文截断」）
+      return await getAiDocText(docId, this.aiSettings.contextMaxChars);
     } catch {
       return "";
     }
@@ -3282,7 +3154,12 @@ export default class RewordPlugin extends Plugin {
     return this.aiPresetStore.list();
   }
   getActivePreset(): AiPreset | undefined {
-    return this.aiPresetStore.getActive();
+    // P0-4 兜底：显式激活的角色优先；未激活任何角色时回退设置里的「默认精读角色」，
+    // 让设置面板选了默认角色的用户点「✨AI 精读」直接按该角色执行，而不是掉进自由对话。
+    const active = this.aiPresetStore.getActive();
+    if (active) return active;
+    const fallbackId = this.aiSettings.defaultPresetId;
+    return fallbackId ? this.aiPresetStore.list().find((p) => p.id === fallbackId) : undefined;
   }
   async savePreset(p: AiPreset): Promise<void> {
     await this.aiPresetStore.upsert(p);
@@ -3292,6 +3169,10 @@ export default class RewordPlugin extends Plugin {
   }
   async setActivePreset(id: string): Promise<void> {
     await this.aiPresetStore.setActive(id);
+  }
+  /** T7 拖拽排序 */
+  async reorderPreset(id: string, toIndex: number): Promise<void> {
+    await this.aiPresetStore.moveTo(id, toIndex);
   }
 
   /** 获取词库目标（单词本/主题两级，供批量入库下拉） */
@@ -3410,150 +3291,129 @@ export default class RewordPlugin extends Plugin {
    *  - combined / hidden 功能【不注册】独立 Dock —— 从根上杜绝「所有图标都跑出来」的杂乱。
    * 布局由 this.dockManager 决定，持久化于 hiword-dock-layout.json。
    */
+  /** 注册组合 dock 与独立 dock（幂等）。实现见 dock/dock-layout.ts */
   private initDockPanels() {
-    // 2026-08-29 移动端适配 Phase 5：dock 初始宽度按屏幕尺寸折算
-    // - 桌面 320（沿用旧默认）
-    // - 平板（iPad/Android Tablet）360（更宽一点方便触屏点击）
-    // - 手机（iPhone/Android Phone）取视口宽度的 92%
-    const dockWidth = isSmallMobile()
-      ? Math.round((typeof window !== "undefined" ? window.innerWidth : 320) * 0.92)
-      : isLargeMobile() ? 360 : 320;
-    // ===== 组合 Dock（始终注册，承载 combined 功能的 Tab；保证 this.dockElement 有效）=====
-    try {
-      const combinedIds = this.dockManager.getCombinedFeatureIds();
-      const dockResult: any = this.addDock({
-        config: {
-          position: "RightBottom" as const,
-          size: { width: dockWidth, height: 0 },
-          icon: ICON_REWORD,
-          title: "RE word",
-        },
-        data: {},
-        type: "hiword-sidebar",
-        init: (dock?: any) => {
-          this.dockElement = dock.element;
-          this.renderCombinedDockShell(dock.element, combinedIds);
-        },
-        update: () => { this.refreshActivePanel(); },
-        destroy: () => { destroyAllPreviews(); this.dockElement = null; },
-      });
-      this.dockModel = (dockResult as any)?.model;
-    } catch (e) {
-      getLogger().error("[REword] 组合 Dock 注册失败:", { operation: "初始化-侧边栏", error: e });
-    }
-
-    // ===== 独立 Dock（仅注册非 combined/非 hidden 的功能；按 slot 停靠到对应侧栏）=====
-    for (const { feature, slot } of this.dockManager.getStandaloneFeatures()) {
-      try {
-        this.registerStandaloneDock(feature, slot, dockWidth);
-      } catch (e) {
-        getLogger().error(`[REword] 独立 Dock 注册失败 (${feature.id}):`, { operation: "初始化-侧边栏", error: e });
-      }
-    }
-    // 兜底修正已渲染的独立/组合 dock 图标（缓存乱码双保险）
-    requestAnimationFrame(() => this.fixStandaloneDockIcons());
+    initDockPanels(this);
   }
 
-  /** 注册一个功能的独立 Dock（幂等：已注册则跳过）。用于初始化与「拖出到角落」运行时扩展 */
+  /** 注册一个功能的独立 Dock（幂等：已注册则跳过） */
   private registerStandaloneDock(f: DockableFeature, slot: DockSlot, dockWidth = 320): void {
-    if (this.standaloneElements.has(f.id)) return;
-    if (slot === "combined" || slot === "hidden") return;
-    const dockResult: any = this.addDock({
-      config: {
-        position: slot as any,
-        // 独立 dock 沿用组合 dock 同样的响应式宽度（避免侧栏左右宽度不一致）
-        size: { width: dockWidth, height: 0 },
-        icon: f.icon,
-        title: f.title,
-        show: true,
-      },
-      data: {},
-      type: "hiword-standalone-" + f.id,
-      init: (dock?: any) => {
-        this.standaloneElements.set(f.id, dock.element);
-        dock.element.innerHTML = `<div class="hiword-dock-panel"><div class="hiword-dock-content" id="hiword-dock-content"></div></div>`;
-        this.exposeDockContentDelegation(dock.element);
-        this.renderFeatureInto(f.id, dock.element);
-        this.applyFontSize();
-      },
-      update: () => {
-        const el = this.standaloneElements.get(f.id);
-        if (el) this.renderFeatureInto(f.id, el);
-      },
-      destroy: () => { destroyAllPreviews(); this.standaloneElements.delete(f.id); this.standaloneModels.delete(f.id); },
-    });
-    this.standaloneModels.set(f.id, (dockResult as any)?.model);
+    registerStandaloneDock(this, f, slot, dockWidth);
   }
 
-  /** 渲染组合栏外壳（Tab 栏 + 内容区 + 头部按钮），combined 功能作为 Tab 呈现 */
+  /** 渲染组合栏外壳（Tab 栏 + 内容区 + 头部按钮） */
   private renderCombinedDockShell(dockElement: HTMLElement, combinedIds: string[]) {
-    const tabsHtml = combinedIds.length
-      ? combinedIds.map((id, i) => `<button class="hiword-dock-tab${i === 0 ? " active" : ""}" data-tab="${id}">${this.featureTitle(id)}</button>`).join("")
-      : `<div class="hiword-dock-empty">所有功能已移至独立侧边栏</div>`;
-    dockElement.innerHTML = `
-      <div class="hiword-dock-panel">
-        <div class="hiword-dock-header">
-          <div class="hiword-dock-tabs">${tabsHtml}</div>
-          <div class="hiword-dock-header-actions">
-            <button class="hiword-dock-settings-btn" id="hiword-settings-btn" title="全局设置">⚙️</button>
-            <button class="hiword-dock-settings-btn" id="hiword-dock-layout-btn" title="面板布局管理（可拖拽功能到角落 / 组合栏）">📐</button>
-            <button class="hiword-dock-settings-btn" id="hiword-reload-btn" data-action="reload-plugin" title="重载插件">🔄</button>
-          </div>
-        </div>
-        <div class="hiword-dock-content" id="hiword-dock-content"></div>
-      </div>`;
-
-    dockElement.querySelector(".hiword-dock-tabs")?.addEventListener("click", (e: Event) => {
-      const target = e.target as HTMLElement;
-      if (target.classList.contains("hiword-dock-tab")) {
-        destroyAllPreviews();
-        dockElement.querySelectorAll(".hiword-dock-tab").forEach((t: Element) => t.classList.remove("active"));
-        target.classList.add("active");
-        this.renderFeatureInto(target.dataset.tab!, dockElement);
-      }
-    });
-
-    dockElement.querySelector("#hiword-settings-btn")?.addEventListener("click", () => this.openUnifiedSettings());
-    dockElement.querySelector("#hiword-dock-layout-btn")?.addEventListener("click", () => this.openDockManagerPanel());
-
-    if (combinedIds.length > 0) this.renderFeatureInto(combinedIds[0], dockElement);
-    this.exposeDockContentDelegation(dockElement);
-    this.applyFontSize();
+    renderCombinedDockShell(this, dockElement, combinedIds);
   }
 
   /** 重新渲染组合栏 Tab（功能在组合栏 / 独立栏之间移动后调用） */
   private refreshCombinedDock(): void {
-    if (!this.dockElement) return;
-    const combinedIds = this.dockManager.getCombinedFeatureIds();
-    const activeTab = this.dockElement.querySelector(".hiword-dock-tab.active") as HTMLElement | null;
-    const activeId = activeTab?.dataset.tab ?? undefined;
-    this.renderCombinedDockShell(this.dockElement, combinedIds);
-    // 恢复此前激活的 Tab（若该功能仍在组合栏内），避免拖动功能时组合栏内容乱跳
-    if (activeId && combinedIds.includes(activeId)) {
-      const dockEl = this.dockElement;
-      const tab = dockEl.querySelector(`.hiword-dock-tab[data-tab="${activeId}"]`) as HTMLElement | null;
-      if (tab) {
-        dockEl.querySelectorAll(".hiword-dock-tab").forEach((t: Element) => t.classList.remove("active"));
-        tab.classList.add("active");
-        this.renderFeatureInto(activeId, dockEl);
-      }
-    }
+    refreshCombinedDock(this);
   }
 
-  /** 给某个 Dock 根元素绑定 #hiword-dock-content 的点击委托（词库/批注等交互） */
+  /** 给某个 Dock 根元素绑定 #hiword-dock-content 的点击委托 */
   private exposeDockContentDelegation(dockElement: HTMLElement) {
-    dockElement.querySelector("#hiword-dock-content")?.addEventListener("click", (e: Event) => {
-      this.handleDockClick(e, dockElement);
-    });
+    exposeDockContentDelegation(this, dockElement);
   }
 
   /** 取功能显示名 */
   private featureTitle(id: string): string {
-    return this.dockManager.getFeatures().find((f) => f.id === id)?.title ?? id;
+    return featureTitle(this, id);
+  }
+
+  /** 修正 local-plugin-docks 缓存的过期 icon/title（保留用户布局） */
+  private async clearStaleDockCache(): Promise<void> {
+    await clearStaleDockCache(this);
+  }
+
+  /** 修正已渲染 dock 图标的兜底（与 clearStaleDockCache 双保险） */
+  private fixStandaloneDockIcons(): void {
+    fixStandaloneDockIcons(this);
+  }
+
+  /** 按 local-plugin-docks 缓存把 Dock 图标恢复到上次保存的分组位置 */
+  private restoreDockOrderFromCache(): void {
+    restoreDockOrderFromCache(this);
+  }
+
+  /** 一次性面板布局迁移（v2）：布局重置为「全部收入组合栏」 */
+  private async migrateDockLayoutOnce(): Promise<void> {
+    await migrateDockLayoutOnce(this);
+  }
+
+  /** 根据 data-type 找到承载该 dock 的思源 Dock 实例 */
+  private findDockByType(type: string): any {
+    return findDockByType(this, type);
+  }
+
+  /** 仅控制独立 dock 栏图标的显隐 */
+  private setStandaloneDockVisible(id: string, visible: boolean): void {
+    setStandaloneDockVisible(this, id, visible);
+  }
+
+  /** 强制关闭某功能的独立 dock 面板 */
+  private closeStandaloneDockPanel(id: string): void {
+    closeStandaloneDockPanel(this, id);
+  }
+
+  /** 解析 slot 对应的思源 Dock 实例与分栏 index */
+  private resolveTargetDock(slot: DockSlot): { dock: any; index: number } {
+    return resolveTargetDock(this, slot);
+  }
+
+  /** 把思源缓存里的 position 字符串映射回本插件的 DockSlot */
+  private positionToSlot(position: string): DockSlot | null {
+    return positionToSlot(this, position);
+  }
+
+  /** 运行时即时移动某功能 dock 到目标位置（无需重载思源） */
+  private moveFeatureToSlot(id: string, slot: DockSlot): "moved" | "reload-needed" {
+    return moveFeatureToSlot(this, id, slot);
+  }
+
+  /** 布局完全就绪后，隐藏「组合栏/隐藏」功能的独立 dock 图标（SiYuan 生命周期入口） */
+  public onLayoutReady() {
+    onLayoutReady(this);
+  }
+
+  /** 聚焦某功能的承载 Dock */
+  private focusFeatureDock(id: string) {
+    focusFeatureDock(this, id);
+  }
+
+  /** 取某功能当前承载它的 Dock 根元素 */
+  private getFeatureElement(id: string): HTMLElement | null {
+    return getFeatureElement(this, id);
+  }
+
+  /** 刷新某功能（在其承载 Dock 中重绘） */
+  private refreshFeature(id: string) {
+    refreshFeature(this, id);
+  }
+
+  /** 面板布局管理（Phase 2 + Phase 3） */
+  private openDockManagerPanel() {
+    openDockManagerPanel(this);
+  }
+
+  /** 显示拖拽落区 overlay（全屏六角） */
+  private showDockDropZones() {
+    showDockDropZones(this);
+  }
+
+  /** 隐藏拖拽落区 overlay */
+  private hideDockDropZones() {
+    hideDockDropZones(this);
+  }
+
+  /** slot 的中文标签 */
+  private slotLabel(slot: DockSlot): string {
+    return slotLabel(this, slot);
   }
 
   /** 将指定功能渲染进给定 Dock 元素（各功能共用 #hiword-dock-content 结构） */
-  private renderFeatureInto(id: string, dockElement: HTMLElement) {
+  /** @internal dock/dock-layout.ts 回调入口（P1-5 拆分） */
+  public renderFeatureInto(id: string, dockElement: HTMLElement) {
     let contentEl = dockElement.querySelector("#hiword-dock-content") as HTMLElement | null;
     if (!contentEl) {
       dockElement.innerHTML = `<div class="hiword-dock-panel"><div class="hiword-dock-content" id="hiword-dock-content"></div></div>`;
@@ -3573,425 +3433,6 @@ export default class RewordPlugin extends Plugin {
     }
   }
 
-  /**
-   * 修正【本插件】在「local-plugin-docks」中的缓存，保留用户自定义的图标顺序/位置，
-   * 只覆盖可能过期的 icon / title 字段，避免旧版本残留 id 导致侧边栏图标乱码。
-   *
-   * 为什么不能清空：
-   * local-plugin-docks 同时保存了思源侧栏的图标顺序（index）与停靠位置（position）。
-   * 之前「每次清空」会导致用户拖拽的图标顺序在重启后丢失，全部回到默认位置。
-   * 改为只修正 icon/title，即可在消除乱码的同时保留用户布局。
-   */
-  private async clearStaleDockCache(): Promise<void> {
-    try {
-      const root = (window as any).siyuan?.storage?.["local-plugin-docks"];
-      if (!root || typeof root !== "object" || !root[this.name] || typeof root[this.name] !== "object") return;
-      const pluginDocks = root[this.name];
-      for (const type of Object.keys(pluginDocks)) {
-        const cfg = pluginDocks[type];
-        if (!cfg || typeof cfg !== "object") continue;
-        if (type === "hiword-sidebar") {
-          cfg.icon = ICON_REWORD;
-          cfg.title = "RE word";
-        } else if (type.startsWith("hiword-standalone-")) {
-          const fid = type.slice("hiword-standalone-".length);
-          const f = this.dockManager.getFeatures().find((x) => x.id === fid);
-          if (f) {
-            cfg.icon = f.icon;
-            cfg.title = f.title;
-          }
-        }
-      }
-      getLogger().info("[REword] 已修正本插件 Dock 缓存图标（local-plugin-docks），保留布局顺序");
-    } catch (e) {
-      getLogger().warn("[REword] 修正 Dock 缓存失败", { error: e });
-    }
-  }
-
-  /** 修正已渲染 dock 图标的兜底：强制把 <use> 指向本功能正确的 symbol id，
-   *  并把正确 icon/title 写回 local-plugin-docks，防止下次启动时思源用旧缓存覆盖。
-   *  与 clearStaleDockCache 双保险，覆盖「插件热重载不重跑 In」的场景。 */
-  private fixStandaloneDockIcons(): void {
-    const root = (window as any).siyuan?.storage?.["local-plugin-docks"];
-    const pluginDocks = root?.[this.name];
-    const apply = (type: string, iconId: string, title?: string) => {
-      // 1. 修正当前 DOM
-      const use = document.querySelector(`.dock__item[data-type="${type}"] svg use`) as SVGUseElement | null;
-      if (use) {
-        const href = "#" + iconId;
-        use.setAttribute("xlink:href", href);
-        use.setAttribute("href", href);
-      }
-      // 2. 同步写回缓存，避免下次 In 时旧缓存覆盖
-      const shortType = type.slice(this.name.length);
-      const cfg = pluginDocks?.[shortType];
-      if (cfg && typeof cfg === "object") {
-        cfg.icon = iconId;
-        if (title) cfg.title = title;
-      }
-    };
-    const prefix = this.name;
-    for (const { feature } of this.dockManager.getStandaloneFeatures()) {
-      apply(prefix + "hiword-standalone-" + feature.id, feature.icon, feature.title);
-    }
-    apply(prefix + "hiword-sidebar", ICON_REWORD, "RE word");
-  }
-
-  /**
-   * 布局就绪后，按 local-plugin-docks 缓存把本插件 Dock 图标恢复到上次保存的分组位置。
-   * 思源的 In 渲染通常已自动恢复，但这里做兜底：若某图标未落到缓存记录的位置/分组，
-   * 显式调用 Dock.add() 把它放回去，确保重启后用户自定义顺序不丢失。
-   */
-  private restoreDockOrderFromCache(): void {
-    try {
-      const pluginDocks = (window as any).siyuan?.storage?.["local-plugin-docks"]?.[this.name];
-      if (!pluginDocks || typeof pluginDocks !== "object") return;
-      const prefix = this.name;
-      for (const type of Object.keys(pluginDocks)) {
-        const cfg = pluginDocks[type];
-        if (!cfg || typeof cfg !== "object") continue;
-        if (type !== "hiword-sidebar" && !type.startsWith("hiword-standalone-")) continue;
-        const fullType = prefix + type;
-        const item = document.querySelector(`.dock__item[data-type="${fullType}"]`) as HTMLElement | null;
-        if (!item) continue;
-        const slot = this.positionToSlot(cfg.position);
-        if (!slot) continue;
-        const { dock, index } = this.resolveTargetDock(slot);
-        if (!dock) continue;
-        // 若已在目标 dock 的对应分组内，跳过
-        const currentDockEl = item.closest(".dock") as HTMLElement | null;
-        const targetDockEl = dock.element as HTMLElement | null;
-        if (currentDockEl && targetDockEl && currentDockEl === targetDockEl) {
-          const group = item.parentElement;
-          const groupIndex = group ? Array.from(group.children).indexOf(item) : -1;
-          if (groupIndex === index) continue;
-        }
-        try {
-          dock.add(index, item);
-        } catch (e) {
-          getLogger().warn(`[REword] 恢复 Dock 顺序失败 (${type})`, { error: e });
-        }
-      }
-    } catch (e) {
-      getLogger().warn("[REword] 恢复 Dock 顺序失败", { error: e });
-    }
-  }
-
-  /**
-   * 一次性面板布局迁移（v2）：将布局重置为「全部收入组合栏」的干净状态。
-   * 解决此前「所有功能独立图标都跑出来、侧边栏杂乱」的问题——组合栏是功能的默认归宿，
-   * 只有用户主动拖出到角落时才生成独立 Dock。旧布局（hiword-dock-layout.json）可能残留
-   * standalone 配置导致杂乱，重置一次即可让新的默认值（全部 combined）生效。
-   */
-  private async migrateDockLayoutOnce(): Promise<void> {
-    const marker = "hiword-dock-layout-migrated-v2";
-    let done = false;
-    try { done = !!(await this.loadData(marker)); } catch (__swallowErr) { logSwallow(__swallowErr, "index.ts · migrateDockLayoutOnce", "debug"); }
-    if (done) return;
-    try {
-      await this.saveData("hiword-dock-layout.json", {});
-      getLogger().info("[REword] 已重置面板布局为组合栏默认（全部功能收入组合栏）");
-    } catch (e) {
-      getLogger().warn("[REword] 面板布局迁移失败", { error: e });
-    }
-    try { await this.saveData(marker, true); } catch (__swallowErr) { logSwallow(__swallowErr, "index.ts · migrateDockLayoutOnce", "error"); }
-  }
-
-  /** 根据 data-type 找到承载该 dock 的思源 Dock 实例（left/right/bottom） */
-  private findDockByType(type: string): any {
-    const layout = (window as any).siyuan?.layout;
-    if (!layout) return null;
-    for (const d of [layout.leftDock, layout.rightDock, layout.bottomDock]) {
-      if (d && d.data && d.data[type]) return d;
-    }
-    return null;
-  }
-
-  /** 仅控制独立 dock 栏图标的显隐（不触碰面板内容，避免误开/误关） */
-  private setStandaloneDockVisible(id: string, visible: boolean): void {
-    const type = this.name + "hiword-standalone-" + id;
-    const item = document.querySelector(`.dock__item[data-type="${type}"]`) as HTMLElement | null;
-    if (!item) return;
-    if (visible) {
-      item.classList.remove("fn__none");
-      item.style.display = "";
-    } else {
-      item.classList.add("fn__none");
-      item.style.display = "none";
-    }
-  }
-
-  /** 强制关闭某功能的独立 dock 面板 */
-  private closeStandaloneDockPanel(id: string): void {
-    const type = this.name + "hiword-standalone-" + id;
-    const dock = this.findDockByType(type);
-    if (!dock) return;
-    try {
-      // 思源 toggleModel(ge, xe, Ze, at, ot)：关闭逻辑位于 `if (pt.active || at)` 内，
-      // 仅传 (type,false,true) 时 at=false，面板未处于 active 则整段跳过 → 关不掉（死面板）。
-      // 第 4 参 at=true 强制进入关闭分支，无论面板当前是否 active。
-      dock.toggleModel?.(type, false, true, true);
-    } catch (e) {
-      getLogger().warn(`[REword] 关闭独立 Dock 面板失败 (${id})`, { error: e });
-    }
-  }
-
-  /** 解析 slot 对应的思源 Dock 实例与分栏 index（0=上/左分组，1=下/右分组） */
-  private resolveTargetDock(slot: DockSlot): { dock: any; index: number } {
-    const layout = (window as any).siyuan?.layout;
-    switch (slot) {
-      case "LeftTop": return { dock: layout.leftDock, index: 0 };
-      case "LeftBottom": return { dock: layout.leftDock, index: 1 };
-      case "RightTop": return { dock: layout.rightDock, index: 0 };
-      case "RightBottom": return { dock: layout.rightDock, index: 1 };
-      // 底部栏「底部」落区：与 registerStandaloneDock 用 position:"Bottom"（经思源 genButton 得 index 0）保持一致，
-      // 统一落在底部左侧，避免「首次拖放=左下、再次拖放=右下」的左右跳变。
-      case "Bottom": return { dock: layout.bottomDock, index: 0 };
-      default: return { dock: layout.rightDock, index: 1 };
-    }
-  }
-
-  /** 把思源缓存里的 position 字符串映射回本插件的 DockSlot */
-  private positionToSlot(position: string): DockSlot | null {
-    switch (position) {
-      case "LeftTop":
-      case "LeftBottom":
-      case "RightTop":
-      case "RightBottom":
-      case "Bottom":
-        return position;
-      case "Left":
-        return "LeftTop";
-      case "Right":
-        return "RightBottom";
-      default:
-        return null;
-    }
-  }
-
-  /**
-   * 运行时即时移动某功能 dock 到目标位置（无需重载思源）。
-   * - combined / hidden：隐藏独立 dock（若存在），并刷新组合栏 Tab 将其收纳为组合栏入口；
-   * - Left/Right/Bottom：确保独立 dock 已注册（combined → 角落时按需创建），再用思源原生
-   *   Dock.add() 跨栏迁移图标与面板（自动持久化）。
-   * 返回 "moved" 表示即时生效；"reload-needed" 表示无法运行时完成。
-   */
-  private moveFeatureToSlot(id: string, slot: DockSlot): "moved" | "reload-needed" {
-    const f = this.dockManager.getFeatures().find((x) => x.id === id);
-    if (!f) return "reload-needed";
-    if (slot === "combined" || slot === "hidden") {
-      // 收入组合栏 / 隐藏：先关闭可能仍打开的独立面板，再隐藏图标，最后把功能作为 Tab 收纳进组合栏
-      this.closeStandaloneDockPanel(id);
-      this.setStandaloneDockVisible(id, false);
-      this.refreshCombinedDock();
-      return "moved";
-    }
-    // 独立停靠：确保独立 Dock 已注册（combined → 角落时按需创建），再跨栏迁移
-    const alreadyRegistered = this.standaloneElements.has(id);
-    try {
-      this.registerStandaloneDock(f, slot);
-    } catch (e) {
-      getLogger().warn(`[REword] 注册独立 Dock 失败 (${id} -> ${slot})`, { error: e });
-      return "reload-needed";
-    }
-    this.setStandaloneDockVisible(id, true);
-    // 移动后立即兜底修正图标（覆盖思源 local-plugin-docks 缓存污染的 icon）
-    requestAnimationFrame(() => this.fixStandaloneDockIcons());
-    if (alreadyRegistered) {
-      const type = this.name + "hiword-standalone-" + id;
-      const item = document.querySelector(`.dock__item[data-type="${type}"]`) as HTMLElement | null;
-      const { dock: targetDock, index } = this.resolveTargetDock(slot);
-      if (item && targetDock) {
-        try {
-          targetDock.add(index, item);
-        } catch (e) {
-          getLogger().warn(`[REword] 移动 Dock 失败 (${id} -> ${slot})`, { error: e });
-        }
-      }
-    }
-    // 若原在组合栏，刷新移除其 Tab
-    this.refreshCombinedDock();
-    return "moved";
-  }
-
-  /** 布局完全就绪后，隐藏「组合栏/隐藏」功能的独立 dock 图标（避免与组合栏总览重复显示） */
-  public onLayoutReady() {
-    try {
-      for (const f of this.dockManager.getFeatures()) {
-        const slot = this.dockManager.getSlot(f.id);
-        if (slot === "combined" || slot === "hidden") {
-          // 关闭残留的独立面板（避免「有面板没图标」的死面板），再隐藏图标
-          this.closeStandaloneDockPanel(f.id);
-          this.setStandaloneDockVisible(f.id, false);
-        }
-      }
-      // 布局就绪后再兜底修正一次独立 Dock 图标（缓存污染兜底），并恢复用户自定义顺序
-      requestAnimationFrame(() => {
-        this.fixStandaloneDockIcons();
-        this.restoreDockOrderFromCache();
-      });
-      // 重启思源后自动恢复上次打开的阅读 Tab（思源不会自动恢复自定义插件 Tab）
-      try { void this.readerDock?.tabController?.restoreSession?.(); } catch (__e) { logSwallow(__e, "index.ts · restoreReaderTabs", "debug"); }
-    } catch (e) {
-      getLogger().warn("[REword] onLayoutReady 隐藏组合栏独立 Dock 失败", { error: e });
-    }
-  }
-
-  /** 聚焦某功能的承载 Dock（组合栏切 Tab / 独立 Dock 调 showDock） */
-  private focusFeatureDock(id: string) {
-    const slot = this.dockManager.getSlot(id);
-    if (slot !== "combined" && slot !== "hidden") {
-      this.standaloneModels.get(id)?.showDock?.();
-    } else {
-      this.dockModel?.showDock?.();
-      const tab = this.dockElement?.querySelector(`.hiword-dock-tab[data-tab="${id}"]`) as HTMLElement | null;
-      tab?.click();
-    }
-  }
-
-  /** 取某功能当前承载它的 Dock 根元素（独立 Dock 优先，否则组合栏） */
-  private getFeatureElement(id: string): HTMLElement | null {
-    const slot = this.dockManager.getSlot(id);
-    if (slot !== "combined" && slot !== "hidden") {
-      return this.standaloneElements.get(id) ?? this.dockElement;
-    }
-    return this.dockElement;
-  }
-
-  /** 刷新某功能（在其承载 Dock 中重绘；组合栏仅在对应 Tab 激活时才重绘，避免覆盖其它 Tab） */
-  private refreshFeature(id: string) {
-    const slot = this.dockManager.getSlot(id);
-    if (slot !== "combined" && slot !== "hidden") {
-      const el = this.standaloneElements.get(id);
-      if (el) this.renderFeatureInto(id, el);
-      return;
-    }
-    if (this.dockElement) {
-      const activeTab = this.dockElement.querySelector(".hiword-dock-tab.active") as HTMLElement | null;
-      if (!activeTab || activeTab.dataset.tab === id) {
-        this.renderFeatureInto(id, this.dockElement);
-      }
-    }
-  }
-
-  /**
-   * 面板布局管理（Phase 2 + Phase 3）：
-   *  - 每个功能用下拉框选择停靠位置，改动即时生效（无需重载）；
-   *  - 也可直接拖动功能行到屏幕对应角落（主侧边栏 / 左上 / 左下 / 右上 / 右下 / 底部）即时停靠。
-   */
-  private openDockManagerPanel() {
-    const features = this.dockManager.getFeatures();
-    const rows = features.map((f) => {
-      const cur = this.dockManager.getSlot(f.id);
-      const opts = SLOT_LABELS
-        .map((s) => `<option value="${s.value}"${s.value === cur ? " selected" : ""}>${s.label}</option>`)
-        .join("");
-      return `<div class="hiword-dm-row" draggable="true" data-feature="${f.id}">
-        <span class="hiword-dm-drag" title="拖动到屏幕角落以停靠">⠿</span>
-        <span class="hiword-dm-name"><span class="hiword-dm-icon" data-feature="${f.id}"></span>${f.title}</span>
-        <select class="hiword-dm-select b3-select" data-feature="${f.id}">${opts}</select>
-      </div>`;
-    }).join("");
-    const dialog = new Dialog({
-      title: "面板布局管理",
-      content: `<div class="hiword-dm">
-        <div class="hiword-dm-tip">选择停靠位置<strong>即时生效</strong>，无需重载；也可直接<strong>拖动功能行到屏幕对应角落</strong>（主侧边栏 / 左上 / 左下 / 右上 / 右下 / 底部）。同侧多个面板在思源中为堆叠互斥，需同时查看请分到不同侧。</div>
-        ${rows}
-        <div class="hiword-dm-actions">
-          <button class="b3-button b3-button--outline hiword-dm-close" id="hiword-dm-close">关闭</button>
-        </div>
-      </div>`,
-      width: responsiveDialogSize(460, "width"),
-    });
-    const content = dialog.element.querySelector(".hiword-dm") as HTMLElement;
-
-    // 为每个功能名渲染对应图标（管理器内也能区分）
-    content?.querySelectorAll<HTMLElement>(".hiword-dm-icon").forEach((ico) => {
-      const fid = ico.dataset.feature!;
-      const f = features.find((x) => x.id === fid);
-      if (f) ico.innerHTML = `<svg class="hiword-dm-inline-icon"><use xlink:href="#${f.icon}"></use></svg>`;
-    });
-
-    // 下拉框：即时移动
-    content?.querySelectorAll(".hiword-dm-select").forEach((sel) => {
-      sel.addEventListener("change", async (e: Event) => {
-        const target = e.target as HTMLSelectElement;
-        const fid = target.dataset.feature!;
-        const slot = target.value as DockSlot;
-        await this.dockManager.setSlot(fid, slot);
-        const res = this.moveFeatureToSlot(fid, slot);
-        showMessage(res === "moved" ? "布局已即时应用" : "需重载思源生效", 1800, "info" as any);
-      });
-    });
-
-    // 拖拽停靠：功能行可拖到屏幕角落
-    content?.addEventListener("dragstart", (e: DragEvent) => {
-      const row = (e.target as HTMLElement).closest(".hiword-dm-row") as HTMLElement | null;
-      if (!row) return;
-      (e.dataTransfer as any)?.setData("text/plain", row.dataset.feature || "");
-      if (e.dataTransfer) e.dataTransfer.effectAllowed = "move";
-      this.showDockDropZones();
-    });
-    content?.addEventListener("dragend", () => this.hideDockDropZones());
-
-    content?.querySelector("#hiword-dm-close")?.addEventListener("click", () => dialog.destroy());
-  }
-
-  /** 显示拖拽落区 overlay（全屏六角） */
-  private showDockDropZones() {
-    let overlay = document.getElementById("hiword-dock-zones") as HTMLElement | null;
-    if (!overlay) {
-      overlay = document.createElement("div");
-      overlay.id = "hiword-dock-zones";
-      overlay.className = "hiword-dock-zones";
-      overlay.innerHTML = `
-        <div class="hiword-dz hiword-dz-combined" data-slot="combined"><span>主侧边栏</span><em>组合栏总览</em></div>
-        <div class="hiword-dz hiword-dz-lt" data-slot="LeftTop"><span>左上</span></div>
-        <div class="hiword-dz hiword-dz-lb" data-slot="LeftBottom"><span>左下</span></div>
-        <div class="hiword-dz hiword-dz-rt" data-slot="RightTop"><span>右上</span></div>
-        <div class="hiword-dz hiword-dz-rb" data-slot="RightBottom"><span>右下</span></div>
-        <div class="hiword-dz hiword-dz-bottom" data-slot="Bottom"><span>底部</span></div>`;
-      document.body.appendChild(overlay);
-      overlay.querySelectorAll<HTMLElement>(".hiword-dz").forEach((zone) => {
-        zone.addEventListener("dragover", (e: DragEvent) => {
-          e.preventDefault();
-          if (e.dataTransfer) e.dataTransfer.dropEffect = "move";
-          zone.classList.add("hiword-dz--over");
-        });
-        zone.addEventListener("dragleave", () => zone.classList.remove("hiword-dz--over"));
-        zone.addEventListener("drop", async (e: DragEvent) => {
-          e.preventDefault();
-          zone.classList.remove("hiword-dz--over");
-          const fid = (e.dataTransfer as any)?.getData("text/plain") || "";
-          const slot = zone.dataset.slot as DockSlot;
-          this.hideDockDropZones();
-          if (fid && slot) {
-            await this.dockManager.setSlot(fid, slot);
-            const res = this.moveFeatureToSlot(fid, slot);
-            const sel = document.querySelector(`.hiword-dm-select[data-feature="${fid}"]`) as HTMLSelectElement | null;
-            if (sel) sel.value = slot;
-            showMessage(
-              res === "moved"
-                ? `${this.featureTitle(fid)} 已停靠到${this.slotLabel(slot)}`
-                : "需重载思源生效",
-              2000, "info" as any);
-          }
-        });
-      });
-    }
-    requestAnimationFrame(() => overlay!.classList.add("hiword-dz-show"));
-  }
-
-  /** 隐藏拖拽落区 overlay */
-  private hideDockDropZones() {
-    const overlay = document.getElementById("hiword-dock-zones");
-    if (overlay) overlay.classList.remove("hiword-dz-show");
-  }
-
-  /** slot 的中文标签 */
-  private slotLabel(slot: DockSlot): string {
-    return SLOT_LABELS.find((s) => s.value === slot)?.label ?? slot;
-  }
 
   /**
    * 刷新词库面板（词典就绪后调用，确保简洁模式能显示实时释义）
@@ -4008,7 +3449,8 @@ export default class RewordPlugin extends Plugin {
    * 智能刷新当前活跃 Tab 面板（词典切换/设置变更后调用）
    * 检测当前选中的 Tab 按钮，只重绘对应面板，避免词库内容覆盖查词典/AI 等界面
    */
-  private refreshActivePanel() {
+  /** @internal dock/dock-layout.ts 委托访问（P1-5 拆分） */
+  refreshActivePanel() {
     // 组合栏：刷新当前激活 Tab
     if (this.dockElement) {
       destroyAllPreviews();   // 各 Tab 共用 #hiword-dock-content，刷新前先销毁只读预览防 detached 崩溃
@@ -4083,14 +3525,7 @@ export default class RewordPlugin extends Plugin {
           .join("")}
         ${currentBookIsAll ? "" : `<span class="hiword-vb-addtheme" id="hiword-vb-add-theme" title="新建主题">＋</span>`}
       </div>
-      <!-- 2026-08-23 新增：文档内自动高亮词库单词开关 -->
-      <div class="hiword-vb-autohighlight-row">
-        <label class="hiword-vb-switch">
-          <input type="checkbox" id="hiword-vb-autohighlight" ${this.vocabAutoHighlight ? "checked" : ""} />
-          <span class="hiword-vb-switch-graph"></span>
-        </label>
-        <span class="hiword-vb-autohighlight-label">文档内自动高亮词库单词</span>
-      </div>
+      <!-- 2026-09-04 移除：文档内自动高亮词库单词开关（功能整体下线） -->
       <!-- 2026-08-14 新增：标签横切筛选（不限词本/主题） -->
       ${this.renderVocabLabelFilterRow()}
       <div class="hiword-vb-toolbar">
@@ -4130,11 +3565,7 @@ export default class RewordPlugin extends Plugin {
       }
       this.renderVocabPanel(dockElement);
     });
-    // 文档内自动高亮开关(2026-08-23)
-    contentEl.querySelector("#hiword-vb-autohighlight")?.addEventListener("change", (e) => {
-      const on = (e.target as HTMLInputElement).checked;
-      this.setVocabAutoHighlight(on);
-    });
+    // 2026-09-04 移除：文档内自动高亮开关的事件监听（功能下线）
     // 新建单词本（2026-08-14 改：window.prompt 在思源 Electron 中常被禁用，改用自定义弹窗）
     contentEl.querySelector("#hiword-vb-add-book")?.addEventListener("click", async () => {
       const name = await this.copilotPromptDialog("新建单词本名称：", "我的单词本");
@@ -4834,13 +4265,15 @@ export default class RewordPlugin extends Plugin {
   }
 
   /** 2026-08-23 新增:词库驱动文档高亮总开关(词库面板控制) */
-  private setVocabAutoHighlight(on: boolean): void {
-    this.vocabAutoHighlight = on;
-    try {
-      localStorage.setItem("hiword-vocab-autohighlight", String(on));
-    } catch {}
-    const hl = getVocabHighlighter();
-    hl.setEnabled(on);
+  // 2026-09-04：功能整体下线，方法保留为 no-op 以避免外部旧调用报错
+  private setVocabAutoHighlight(_on: boolean): void {
+    /* no-op：功能已下线 */
+  }
+
+  /** 读取并迁移词库自动高亮开关状态（localStorage → saveData 一次性迁移） */
+  // 2026-09-04：功能下线，永远返回 false（不再读取已保存的旧状态，强制关闭）
+  private async loadVocabAutoHighlight(): Promise<boolean> {
+    return false;
   }
 
   /** 按当前标签筛选过滤单词（all=全部；no-label=无标签） */
@@ -5283,6 +4716,7 @@ export default class RewordPlugin extends Plugin {
 
   /**
    * 渲染词典查询面板
+   * 2026-09-07 查词典功能：Tab 化（离线查词 / 在线查词）+「设置」（小窗默认词典源，联动默认 Tab）。
    */
   private renderDictPanel(dockElement: HTMLElement) {
     const contentEl = dockElement.querySelector("#hiword-dock-content") as HTMLElement;
@@ -5291,6 +4725,9 @@ export default class RewordPlugin extends Plugin {
     const dictStatus = dictEngine.getStatus();
     const activeInfo = dictEngine.listDicts().find((d) => d.active);
 
+    // 默认 Tab 与设置联动：打开面板时从设置初始化；手动切 Tab 仅本次生效
+    this.dictLookupTab = this.onlineSettings?.popupSource === "online" ? "online" : "offline";
+
     // 「管理词典」「朗读设置」按钮与搜索框始终显示，确保任何状态下都能进入词典管理
     contentEl.innerHTML = `
       <div class="hiword-dict-head">
@@ -5298,14 +4735,26 @@ export default class RewordPlugin extends Plugin {
         <button class="b3-button b3-button--outline b3-button--small" id="hiword-dict-manage" title="管理词典">管理词典</button>
         <button class="b3-button b3-button--outline b3-button--small" id="hiword-tts-setting" title="朗读设置">🔊</button>
       </div>
+      <div class="hiword-dict-tabbar">
+        <button class="hiword-dict-tab ${this.dictLookupTab === "offline" ? "is-active" : ""}" data-dtab="offline" title="离线词典查询（本地 MDX / StarDict）">📖 离线查词</button>
+        <button class="hiword-dict-tab ${this.dictLookupTab === "online" ? "is-active" : ""}" data-dtab="online" title="在线词典查询（词海 corp.dict.cn）">🌐 在线查词</button>
+        <span class="hiword-dict-tabbar-spacer"></span>
+        <div class="hiword-dict-crumbbox is-empty" id="hiword-dict-crumbbox" title="跳转路径（点击层级回跳）">
+          <span class="hiword-dict-crumb-scroll" id="hiword-dict-crumb-scroll"></span>
+          <button class="hiword-dict-crumb-clear" id="hiword-dict-crumb-clear" data-action="dict-crumb-clear" title="清空导航路径">×</button>
+        </div>
+        <button class="hiword-dict-tab-setting" id="hiword-dict-src-setting" title="设置：单词小窗默认词典源">⚙️</button>
+      </div>
       <div class="hiword-dict-search">
         <input class="b3-text-field" id="hiword-dict-input" placeholder="输入单词查询..." autofocus />
         <button class="b3-button" id="hiword-dict-btn" title="查询单词">查询</button>
       </div>
       <div class="hiword-dict-result" id="hiword-dict-result">
-        ${dictStatus === "ready"
-          ? `<p class="hiword-dict-hint">输入单词后按回车或点击查询</p>`
-          : dictRenderer.renderInitRequired()}
+        ${this.dictLookupTab === "online"
+          ? `<p class="hiword-dict-hint">在线查询「词海」，输入单词后按回车</p>`
+          : dictStatus === "ready"
+            ? `<p class="hiword-dict-hint">输入单词后按回车或点击查询</p>`
+            : dictRenderer.renderInitRequired()}
       </div>
     `;
 
@@ -5317,6 +4766,35 @@ export default class RewordPlugin extends Plugin {
     // 绑定「朗读设置」按钮：2026-08-27 起统一跳主设置「朗读设置」页（旧版独立小窗已删除）
     const ttsBtn = contentEl.querySelector("#hiword-tts-setting");
     ttsBtn?.addEventListener("click", () => this.openUnifiedSettings("tts"));
+
+    // 2026-09-07：Tab 切换（离线/在线），手动切换仅本次生效不回写设置
+    const applyTab = (tab: "offline" | "online") => {
+      this.dictLookupTab = tab;
+      contentEl.querySelectorAll(".hiword-dict-tab").forEach((t) => {
+        t.classList.toggle("is-active", (t as HTMLElement).dataset.dtab === tab);
+      });
+      // 面包屑仅在线 Tab 消费：切到离线时隐藏方框（路径保留，切回在线恢复显示）
+      this.renderDictCrumbbox(contentEl);
+      // 已有查询词时切 Tab 立即重查，减少一次点击
+      const cur = (contentEl.querySelector("#hiword-dict-input") as HTMLInputElement | null)?.value?.trim();
+      if (cur) this.doDictLookup(cur, contentEl);
+    };
+    contentEl.querySelectorAll(".hiword-dict-tab").forEach((t) => {
+      t.addEventListener("click", () => applyTab((t as HTMLElement).dataset.dtab === "online" ? "online" : "offline"));
+    });
+
+    // 2026-09-07：「设置」——单词小窗默认词典源（与默认 Tab 联动），持久化 hiword-online.json
+    contentEl.querySelector("#hiword-dict-src-setting")?.addEventListener("click", () => {
+      this.openDictSourceSetting(() => {
+        // 设置变更后：默认 Tab 跟随设置（联动），并按新 Tab 重查当前词
+        this.dictLookupTab = this.onlineSettings?.popupSource === "online" ? "online" : "offline";
+        contentEl.querySelectorAll(".hiword-dict-tab").forEach((t) => {
+          t.classList.toggle("is-active", (t as HTMLElement).dataset.dtab === this.dictLookupTab);
+        });
+        const cur = (contentEl.querySelector("#hiword-dict-input") as HTMLInputElement | null)?.value?.trim();
+        if (cur) this.doDictLookup(cur, contentEl);
+      });
+    });
 
     // 绑定搜索事件
     const input = contentEl.querySelector("#hiword-dict-input") as HTMLInputElement;
@@ -5343,20 +4821,139 @@ export default class RewordPlugin extends Plugin {
 
     input?.focus();
 
+    // 2026-09-07 面包屑：面板重建后恢复跳转路径显示（会话内存，跨面板重开仍在）
+    this.renderDictCrumbbox(contentEl);
+
     // 绑定「去导入词典」按钮（词典未就绪时显示的空状态区域）
     const importBtn = contentEl.querySelector("#hiword-dict-manage-btn");
     importBtn?.addEventListener("click", () => this.openDictManager());
   }
 
   /**
-   * 执行词典查询并渲染结果
+   * 2026-09-07 面包屑导航：渲染查词典面板 Tab 栏右侧的跳转路径方框。
+   *  - 无历史或当前处于离线 Tab → 整体隐藏（is-empty）
+   *  - 路径包含手动输入的原始词根 + 每次点击跳转追加的层级；最后一层是当前词
+   *  - 除最后一层外可点击回跳（handleDockClick 的 dict-crumb-jump）；× 按钮回退一步
+   *  - 渲染后横向滚动到最右端，保证最新层级始终可见
    */
-  private doDictLookup(word: string, container: HTMLElement) {
+  private renderDictCrumbbox(contentEl: HTMLElement): void {
+    const box = contentEl.querySelector("#hiword-dict-crumbbox") as HTMLElement | null;
+    const scroll = contentEl.querySelector("#hiword-dict-crumb-scroll") as HTMLElement | null;
+    if (!box || !scroll) return;
+    const crumbs = this.dictCrumbs;
+    if (!crumbs.length || this.dictLookupTab !== "online") {
+      box.classList.add("is-empty");
+      scroll.innerHTML = "";
+      return;
+    }
+    box.classList.remove("is-empty");
+    scroll.innerHTML = crumbs
+      .map((w, i) => {
+        const isCur = i === crumbs.length - 1;
+        const wEsc = this.escapeAttr(w);
+        return (
+          (i > 0 ? `<span class="hiword-dict-crumb-sep">›</span>` : "") +
+          (isCur
+            ? `<span class="hiword-dict-crumb is-current" title="当前词">${this.escapeHtml(w)}</span>`
+            : `<span class="hiword-dict-crumb" data-action="dict-crumb-jump" data-word="${wEsc}" title="跳回 ${wEsc}">${this.escapeHtml(w)}</span>`)
+        );
+      })
+      .join("");
+    scroll.scrollLeft = scroll.scrollWidth;
+  }
+
+  /**
+   * 2026-09-07 查词典功能：「设置」小弹窗——单词小窗默认词典源（离线/在线）。
+   * 持久化到 hiword-online.json 的 popupSource；同时决定查词典界面默认 Tab（联动）。
+   */
+  private openDictSourceSetting(onSaved?: () => void) {
+    const dlg = new Dialog({
+      title: "查词典设置",
+      width: responsiveDialogSize(360, "width"),
+      height: "auto",
+      content: `
+        <div class="hiword-dict-src-setting" style="padding:14px 18px 18px;">
+          <div class="fn__flex-1 b3-label" style="padding:6px 0;">
+            <div style="font-weight:600;margin-bottom:8px;">单词小窗默认词典源</div>
+            <label style="display:flex;align-items:center;gap:8px;padding:5px 0;cursor:pointer;">
+              <input type="radio" name="hiword-dict-src" value="offline" ${this.onlineSettings?.popupSource !== "online" ? "checked" : ""} />
+              <span>📖 先使用离线词典</span>
+            </label>
+            <label style="display:flex;align-items:center;gap:8px;padding:5px 0;cursor:pointer;">
+              <input type="radio" name="hiword-dict-src" value="online" ${this.onlineSettings?.popupSource === "online" ? "checked" : ""} />
+              <span>🌐 先使用在线词典（词海）</span>
+            </label>
+            <p class="b3-label__note" style="margin-top:8px;">同时决定侧边栏「查词典」打开时默认所在的页签；🌐 按钮可随时临时切换。</p>
+          </div>
+          <div class="fn__flex-1 b3-label" style="padding:10px 0 2px;">
+            <div style="font-weight:600;margin-bottom:6px;">在线词典卡片字体大小</div>
+            <div class="hiword-fs-slider-wrap" style="margin:2px 0;">
+              <span class="hiword-fs-label">小</span>
+              <div class="hiword-fs-track-wrap">
+                <input id="hiword-dss-scale" class="hiword-fs-slider" type="range" min="0" max="6" step="1" value="${dictScaleIndex(this.onlineSettings?.dictFontScale ?? 1.0)}" />
+                <output class="hiword-fs-thumblabel" id="hiword-dss-scale-label" style="left:${dictScaleIndex(this.onlineSettings?.dictFontScale ?? 1.0) / 6 * 100}%">${Math.round((this.onlineSettings?.dictFontScale ?? 1.0) * 100)}%</output>
+              </div>
+              <span class="hiword-fs-label">大</span>
+            </div>
+            <p class="b3-label__note" style="margin-top:6px;">缩放范围 80%~140%，默认 100%；拖动即时预览，保存后生效。</p>
+          </div>
+          <div class="fn__flex" style="justify-content:flex-end;gap:8px;margin-top:10px;">
+            <button class="b3-button b3-button--text" id="hiword-dss-cancel">取消</button>
+            <button class="b3-button b3-button--text" id="hiword-dss-save">保存</button>
+          </div>
+        </div>
+      `,
+    });
+    const el = dlg.element;
+    el.querySelector("#hiword-dss-cancel")?.addEventListener("click", () => dlg.destroy());
+    // 2026-09-07 字体缩放：拖动即时预览（仅改 CSS 变量，不落盘）
+    const dssScale = el.querySelector("#hiword-dss-scale") as HTMLInputElement | null;
+    const dssScaleLabel = el.querySelector("#hiword-dss-scale-label") as HTMLElement | null;
+    dssScale?.addEventListener("input", () => {
+      const idx = parseInt(dssScale.value, 10);
+      const scale = DICT_SCALE_MAP[idx] ?? 1.0;
+      if (dssScaleLabel) {
+        dssScaleLabel.textContent = `${Math.round(scale * 100)}%`;
+        dssScaleLabel.style.left = `${(idx / 6) * 100}%`;
+      }
+      this.applyDictFontScale(scale);
+    });
+    el.querySelector("#hiword-dss-save")?.addEventListener("click", async () => {
+      const v = (el.querySelector('input[name="hiword-dict-src"]:checked') as HTMLInputElement | null)?.value;
+      const popupSource: "offline" | "online" = v === "online" ? "online" : "offline";
+      const scaleIdx = dssScale ? parseInt(dssScale.value, 10) : dictScaleIndex(this.onlineSettings?.dictFontScale ?? 1.0);
+      const dictFontScale = DICT_SCALE_MAP[scaleIdx] ?? 1.0;
+      if (popupSource !== this.onlineSettings?.popupSource || dictFontScale !== (this.onlineSettings?.dictFontScale ?? 1.0)) {
+        await this.saveOnlineSettings({ ...(this.onlineSettings || { ...DEFAULT_ONLINE }), enabled: this.onlineSettings?.enabled ?? true, popupSource, dictFontScale });
+      }
+      dlg.destroy();
+      showMessage("已保存：查词典设置", 1800, "success" as any);
+      onSaved?.();
+    });
+  }
+
+  /**
+   * 执行词典查询并渲染结果（侧边栏查词典面板，详细展示）
+   * 2026-09-07 Tab 化：mode 缺省取当前 Tab（dictLookupTab）。
+   *  - offline：离线优先；离线查不到且开启在线兜底 → doOnlineDictFallback（自动转在线，保持原体验）
+   *  - online：直接查词海（doOnlineDictLookup）
+   */
+  private doDictLookup(word: string, container: HTMLElement, mode?: "offline" | "online") {
     // 复习信号：每次查词都记录一次查询次数（仅对词库内单词生效，调度优先级最高信号）
     void this.vocabStore?.recordQuery(word);
 
+    // 2026-09-07 面包屑：手动输入/切 Tab 触发的查询 = 开新链，
+    // 把当前词设为路径根（显示在面包屑中），点击跳转再追加层级。
+    this.dictCrumbs = [word];
+    this.renderDictCrumbbox(container);
+
     const resultEl = container.querySelector("#hiword-dict-result");
     if (!resultEl) return;
+    const m = mode ?? this.dictLookupTab;
+    if (m === "online") {
+      void this.doOnlineDictLookup(word, resultEl as HTMLElement);
+      return;
+    }
 
     resultEl.innerHTML = dictRenderer.renderLoading();
 
@@ -5408,9 +5005,32 @@ export default class RewordPlugin extends Plugin {
   }
 
   /**
+   * 2026-09-07 查词典功能：在线查词 Tab（词海，详细展示）。
+   * 与 doOnlineDictFallback 区别：这是用户主动选「在线查词」页签的显式查询——
+   * 失败时不回退离线候选，而是提示未收录（用户可切回离线页签）。
+   */
+  private async doOnlineDictLookup(word: string, resultEl: HTMLElement): Promise<void> {
+    resultEl.innerHTML = `<div class="hiword-online-loading">🌐 在线词典查询中…</div>`;
+    const r = await fetchOnlineDict(word);
+    if (!resultEl.isConnected) return;
+    if (r) {
+      resultEl.innerHTML = renderOnlineDictCard(r, this.vocabStore.hasWord(word));
+      return;
+    }
+    showMessage(`「${word}」在线词典未收录`, 2200, "info");
+    resultEl.innerHTML =
+      `<div class="hiword-dict-notfound">` +
+        `<div class="hiword-dict-notfound-icon">🌐</div>` +
+        `<p>在线词典未收录 "<strong>${this.escapeHtml(word)}</strong>"</p>` +
+        `<p class="hiword-dict-hint">可切到「📖 离线查词」页签查询本地词典</p>` +
+      `</div>`;
+  }
+
+  /**
    * 处理侧边栏点击事件
    */
-  private async handleDockClick(e: Event, dockElement: HTMLElement) {
+  /** @internal dock/dock-layout.ts 委托访问（P1-5 拆分） */
+  async handleDockClick(e: Event, dockElement: HTMLElement) {
     const rawTarget = e.target as HTMLElement;
     // 关键修复：用 closest 向上查找带 data-action 的祖先元素
     // 否则点到按钮内部的 span/文字等子元素时，target 没有 action，导致 toggle 失效
@@ -5564,6 +5184,67 @@ export default class RewordPlugin extends Plugin {
     } else if (action === "vocab-star" && word) {
       // 侧边栏查词卡片的收藏星：两级选择（词本→子类），内部已就地刷新星态
       await this.toggleVocabStar(word, target);
+    } else if (action === "dict-group-toggle") {
+      // 2026-09-07 在线全信息卡：点击组标题 → 整组收起/展开
+      const group = target.closest(".hiword-dict-group") as HTMLElement | null;
+      if (group) group.classList.toggle("is-collapsed");
+    } else if (action === "dict-pane-switch") {
+      // 2026-09-07 在线全信息卡：组内页签切换（一次只显示一个 pane）
+      const paneId = target.dataset.pane;
+      const group = target.closest(".hiword-dict-group") as HTMLElement | null;
+      if (paneId && group) {
+        group.querySelectorAll(".hiword-dict-group-tab").forEach((t) => {
+          t.classList.toggle("is-active", (t as HTMLElement).dataset.pane === paneId);
+        });
+        group.querySelectorAll(".hiword-dict-pane").forEach((p) => {
+          (p as HTMLElement).hidden = p.id !== paneId;
+        });
+      }
+    } else if (action === "lookup-word" && word) {
+      // 2026-09-07 在线卡可点击词（词形/搭配/近反义/临近词）：查词典面板内在线跳转 + 面包屑入栈
+      // （此前近反义词 chips 有 data-action 但分发器缺分支，点击无响应——本分支顺带接上）
+      const inDictResult = target.closest("#hiword-dict-result") as HTMLElement | null;
+      if (inDictResult) {
+        if (this.dictCrumbs[this.dictCrumbs.length - 1] !== word) {
+          this.dictCrumbs.push(word);
+          if (this.dictCrumbs.length > 10) this.dictCrumbs.shift();
+        }
+        this.renderDictCrumbbox(dockElement);
+        void this.doOnlineDictLookup(word, inDictResult);
+      } else {
+        // 查词典面板之外的在线卡（如词库详情面板）→ 退回全局查词
+        this.lookupWordInDock(word);
+      }
+    } else if (action === "dict-crumb-jump" && word) {
+      // 2026-09-07 面包屑回跳：截断其后层级并在线重查该词
+      const idx = this.dictCrumbs.lastIndexOf(word);
+      if (idx >= 0) {
+        this.dictCrumbs.length = idx + 1;
+        this.renderDictCrumbbox(dockElement);
+        const resultEl = dockElement.querySelector("#hiword-dict-result") as HTMLElement | null;
+        if (resultEl) void this.doOnlineDictLookup(word, resultEl);
+      }
+    } else if (action === "dict-crumb-clear") {
+      // 2026-09-07 面包屑：× 按钮不再一键清空，而是“回退一步”。
+      // 多层时 pop 最后一个并自动重查前一个；只剩根时清空并回到初始状态。
+      if (this.dictCrumbs.length <= 1) {
+        this.dictCrumbs = [];
+        this.renderDictCrumbbox(dockElement);
+        const input = dockElement.querySelector("#hiword-dict-input") as HTMLInputElement | null;
+        if (input) input.value = "";
+        const resultEl = dockElement.querySelector("#hiword-dict-result") as HTMLElement | null;
+        if (resultEl) {
+          resultEl.innerHTML = this.dictLookupTab === "online"
+            ? `<p class="hiword-dict-hint">在线查询「词海」，输入单词后按回车</p>`
+            : `<p class="hiword-dict-hint">输入单词后按回车或点击查询</p>`;
+        }
+      } else {
+        this.dictCrumbs.pop();
+        const prev = this.dictCrumbs[this.dictCrumbs.length - 1];
+        this.renderDictCrumbbox(dockElement);
+        const resultEl = dockElement.querySelector("#hiword-dict-result") as HTMLElement | null;
+        if (resultEl && prev) void this.doOnlineDictLookup(prev, resultEl);
+      }
     }
   }
 
@@ -5766,7 +5447,10 @@ export default class RewordPlugin extends Plugin {
     try {
       const s = await this.loadData("hiword-online.json");
       if (s && typeof s.enabled === "boolean") {
-        return { ...DEFAULT_ONLINE, ...s };
+        const merged = { ...DEFAULT_ONLINE, ...s };
+        // 2026-09-07 查词典功能：popupSource 容错（非法值回退离线）
+        if (merged.popupSource !== "online") merged.popupSource = "offline";
+        return merged;
       }
     } catch (__swallowErr) { logSwallow(__swallowErr, "index.ts · loadOnlineSettings", "debug"); }
     return { ...DEFAULT_ONLINE };
@@ -5775,11 +5459,18 @@ export default class RewordPlugin extends Plugin {
   /** 保存在线词典设置（2026-08-15 新增） */
   private async saveOnlineSettings(s: OnlineSettings) {
     this.onlineSettings = s;
+    this.applyDictFontScale();
     try {
       await this.saveData("hiword-online.json", s);
     } catch (e) {
       getLogger().error("[REword] 保存在线词典设置失败:", { error: e });
     }
+  }
+
+  /** 2026-09-07 在线词典卡片字体缩放：把倍数写入 CSS 变量，zoom 即时应用到 .hiword-dict-card（即时热更新，不重载思源） */
+  private applyDictFontScale(scale?: number) {
+    const s = scale ?? this.onlineSettings?.dictFontScale ?? 1.0;
+    document.documentElement.style.setProperty("--hw-dict-font-scale", String(s));
   }
 
   /** 加载字体大小设置 */
@@ -5804,7 +5495,8 @@ export default class RewordPlugin extends Plugin {
   }
 
   /** 应用字体大小到侧边栏面板（通过 CSS class 切换） */
-  private applyFontSize() {
+  /** @internal dock/dock-layout.ts 委托访问（P1-5 拆分） */
+  applyFontSize() {
     // 2026-08-22：多 Dock 下需覆盖组合栏 + 所有独立 Dock 的面板
     const panels = document.querySelectorAll(".hiword-dock-panel") as NodeListOf<HTMLElement>;
     panels.forEach((panel) => {
@@ -6171,6 +5863,78 @@ export default class RewordPlugin extends Plugin {
   }
 
   /**
+   * 2026-09-07 查词典功能：单词小窗双源渲染（简化版卡片）。
+   *  - mode="offline"：离线优先（简化卡）；查不到且开启在线兜底时自动转在线（沿用原兜底体验）。
+   *  - mode="online"：直接查海词（简化卡）；失败给出「切离线」按钮。
+   * 🌐 切换由 bindDictPopupClick 的 dict-switch-* action 触发，mode 记录在弹窗 dataset.sourceMode。
+   */
+  private async renderPopupDictBody(
+    body: HTMLElement,
+    word: string,
+    mode: "offline" | "online",
+    opts: { showStar?: boolean } = {}
+  ): Promise<void> {
+    const popup = body.closest(".hiword-float-popup, .hiword-hover-popup") as HTMLElement | null;
+    if (popup) popup.dataset.sourceMode = mode;
+    /** 过期检查：hover 弹窗跨词复用同一 DOM，异步结果返回时若已切到别的词则丢弃 */
+    const isStale = (): boolean =>
+      !body.isConnected || (popup ? (popup.dataset.word || "").toLowerCase() !== word.toLowerCase() : false);
+
+    if (mode === "offline") {
+      const status = dictEngine.getStatus();
+      if (status !== "ready") {
+        body.innerHTML = dictRenderer.renderInitRequired();
+        body.querySelector("#hiword-dict-manage-btn")?.addEventListener("click", () => {
+          this.closeFloatingPopup();
+          this.closeHoverPopup();
+          this.openDictManager();
+        });
+        return;
+      }
+      const entry = dictEngine.lookupSmart(word);
+      if (entry) {
+        const parsed = dictRenderer.parseDictEntry(entry);
+        body.innerHTML = dictRenderer.renderDictCardSimple(parsed, {
+          showStar: opts.showStar !== false,
+          inVocab: this.vocabStore.hasWord(word),
+          queryCount: this.vocabStore.getQueryCount(word),
+        });
+        // P4 在线音标兜底：离线无音标时异步补写（受设置开关控制）
+        if (this.onlineSettings?.enabled) maybeFillPhonetic(body, word);
+        return;
+      }
+      // 离线查不到 → 开启兜底时自动转在线（保持原有兜底体验）
+      if (this.onlineSettings?.enabled) {
+        body.innerHTML = `<div class="hiword-online-loading">🌐 离线未收录，在线词典查询中…</div>`;
+        const r = await fetchOnlineDict(word);
+        if (isStale()) return;
+        body.innerHTML = r
+          ? renderOnlineDictCardSimple(r, { showStar: opts.showStar !== false, inVocab: this.vocabStore.hasWord(word) })
+          : dictRenderer.renderNotFound(word);
+        return;
+      }
+      const candidates = dictEngine.searchCandidates(word, 3);
+      body.innerHTML = dictRenderer.renderDictSuggestions(word, candidates);
+      return;
+    }
+
+    // online 模式：直接查海词
+    body.innerHTML = `<div class="hiword-online-loading">🌐 在线词典查询中…</div>`;
+    const r = await fetchOnlineDict(word);
+    if (isStale()) return;
+    if (r) {
+      body.innerHTML = renderOnlineDictCardSimple(r, { showStar: opts.showStar !== false, inVocab: this.vocabStore.hasWord(word) });
+      return;
+    }
+    body.innerHTML =
+      `<div class="hiword-dict-notfound">` +
+        `<div class="hiword-dict-notfound-icon">🌐</div>` +
+        `<p>在线词典未收录「<strong>${this.escapeHtml(word)}</strong>」</p>` +
+        `<button class="b3-button b3-button--small" data-action="dict-switch-offline" title="切换到离线词典">🌐 切换到离线词典查询</button>` +
+      `</div>`;
+  }
+
+  /**
    * 显示悬浮词典弹窗（在工具栏按钮附近）
    */
   private showFloatingDictPopup(word: string, anchor?: HTMLElement) {
@@ -6217,40 +5981,12 @@ export default class RewordPlugin extends Plugin {
     // 拖拽移动（2026-08-14 新增：工具栏唤起弹窗可拖动）
     this.bindFloatingPopupDrag(popup);
 
-    // 查询词典
+    // 查询词典（2026-09-07 双源：默认源由设置 popupSource 决定，🌐 可切换）
     setTimeout(() => {
       const body = popup.querySelector("#hiword-float-body");
       if (!body) return;
-      const status = dictEngine.getStatus();
-      if (status !== "ready") {
-        body.innerHTML = dictRenderer.renderInitRequired();
-        body.querySelector("#hiword-dict-manage-btn")?.addEventListener("click", () => {
-          this.closeFloatingPopup();
-          this.openDictManager();
-        });
-        return;
-      }
-      const entry = dictEngine.lookupSmart(word);
-      if (entry) {
-        const parsed = dictRenderer.parseDictEntry(entry);
-        body.innerHTML = dictRenderer.renderDictCard(parsed, {
-          showStar: false,
-          queryCount: this.vocabStore.getQueryCount(word),
-        });
-        // P4 在线音标兜底（悬浮弹窗，受设置开关控制）
-        if (this.onlineSettings?.enabled) maybeFillPhonetic(body as HTMLElement, word);
-      } else {
-        // 悬浮弹窗离线查不到 → 在线词典兜底（2026-08-15 新增）
-        if (this.onlineSettings?.enabled) {
-          body.innerHTML = `<div class="hiword-online-loading">🌐 在线词典查询中…</div>`;
-          fetchOnlineDict(word).then((r) => {
-            if (!body.isConnected) return;
-            body.innerHTML = r ? renderOnlineDictCard(r, false) : dictRenderer.renderNotFound(word);
-          });
-        } else {
-          body.innerHTML = dictRenderer.renderNotFound(word);
-        }
-      }
+      const mode = this.onlineSettings?.popupSource === "online" ? "online" : "offline";
+      void this.renderPopupDictBody(body as HTMLElement, word, mode, { showStar: false });
     }, 80);
 
     // 绑定事件（点击交互逻辑抽成 bindDictPopupClick，悬浮弹窗与 hover 弹窗共用）
@@ -6310,12 +6046,21 @@ export default class RewordPlugin extends Plugin {
         await this.toggleVocabStar(starWord, target);
       } else if (action === "lookup-in-sidebar" || action === "open-in-sidebar") {
         // 弹窗 → 侧边栏：一键把当前查询词送到侧边栏查词卡，即时展示完整释义（不打断编辑状态）
+        // 2026-09-07：把小窗当前显示的源（online/offline，存于 popup.dataset.sourceMode）一并带上，
+        // 让呼出的侧边栏面板跟随切到对应 Tab（在线小窗→在线面板，离线小窗→离线面板）。
         const sendWord = target.dataset.word || popup.dataset.word || word || "";
-        this.openWordInSidebar(sendWord);
+        const srcMode = (popup.dataset.sourceMode as "offline" | "online") || undefined;
+        this.openWordInSidebar(sendWord, srcMode);
       } else if (action === "dict-jump" || action === "lookup-candidate") {
         // 相关词 / 相似词跳转：在同类弹窗内重新查询
         const jumpWord = target.dataset.word || popup.dataset.word || "";
         if (jumpWord) this.relookupInPopup(popup, jumpWord);
+      } else if (action === "dict-switch-online" || action === "dict-switch-offline") {
+        // 2026-09-07 双源：🌐 切换在线↔离线，就地重渲染（简化卡）
+        const newMode: "offline" | "online" = action === "dict-switch-online" ? "online" : "offline";
+        const body = popup.querySelector(".hiword-float-popup-body, .hiword-hover-popup-body, #hiword-float-body") as HTMLElement | null;
+        const curWord = popup.dataset.word || word || "";
+        if (body && curWord) void this.renderPopupDictBody(body, curWord, newMode);
       } else if (action === "toggle-senses") {
         // 「查看全部 N 个义项」按钮：全量列表显隐 + 初始列表同步隐藏
         const full = target.nextElementSibling as HTMLElement | null;
@@ -6350,27 +6095,10 @@ export default class RewordPlugin extends Plugin {
   private relookupInPopup(popup: HTMLElement, word: string): void {
     const body = popup.querySelector(".hiword-float-popup-body, .hiword-hover-popup-body") as HTMLElement | null;
     if (!body) return;
-    // 若弹窗带独立关闭按钮（hover 无），保持；否则仅替换释义区
     void this.vocabStore?.recordQuery(word);
-    const entry = dictEngine.lookupSmart(word);
-    if (entry) {
-      const parsed = dictRenderer.parseDictEntry(entry);
-      // 相似词 / 相关词跳转后重渲染：与原窗口保持一致，必须带收藏星（showStar:true）
-      // 并据词库归属显示 ★/☆，否则新窗口缺失星标、无法收藏（用户反馈）。
-      body.innerHTML = dictRenderer.renderDictCard(parsed, {
-        showStar: true,
-        inVocab: this.vocabStore.hasWord(word),
-        queryCount: this.vocabStore.getQueryCount(word),
-      });
-    } else if (this.onlineSettings?.enabled) {
-      body.innerHTML = `<div class="hiword-online-loading">🌐 在线词典查询中…</div>`;
-      fetchOnlineDict(word).then((r) => {
-        if (!body.isConnected) return;
-        body.innerHTML = r ? renderOnlineDictCard(r, false) : dictRenderer.renderNotFound(word);
-      });
-    } else {
-      body.innerHTML = dictRenderer.renderNotFound(word);
-    }
+    // 2026-09-07 双源：沿用弹窗当前源模式（🌐 切换记录在 dataset.sourceMode）
+    const mode = popup.dataset.sourceMode === "online" ? "online" : "offline";
+    void this.renderPopupDictBody(body, word, mode);
     // 更新弹窗标题与查询词上下文
     const wordEl = popup.querySelector(".hiword-float-popup-word, .hiword-hover-popup-word") as HTMLElement | null;
     if (wordEl) wordEl.textContent = word;
@@ -6804,25 +6532,11 @@ export default class RewordPlugin extends Plugin {
         this.openDictManager();
       });
     } else {
-      const entry = dictEngine.lookupSmart(word);
-      if (entry) {
-        const parsed = dictRenderer.parseDictEntry(entry);
-        body.innerHTML = dictRenderer.renderDictCard(parsed, {
-          showStar: true,
-          inVocab: this.vocabStore.hasWord(word),
-          queryCount: this.vocabStore.getQueryCount(word),
-        });
-        if (this.onlineSettings?.enabled) maybeFillPhonetic(body, word);
-      } else if (this.onlineSettings?.enabled) {
-        body.innerHTML = `<div class="hiword-online-loading">🌐 在线词典查询中…</div>`;
-        fetchOnlineDict(word).then((r) => {
-          // 跨词切换后可能已不是当前词，丢弃过期结果
-          if (!body.isConnected || this._hoverWord !== word) return;
-          body.innerHTML = r ? renderOnlineDictCard(r, false) : dictRenderer.renderNotFound(word);
-        });
-      } else {
-        body.innerHTML = dictRenderer.renderNotFound(word);
-      }
+      // 2026-09-07 双源：默认源由设置 popupSource 决定，🌐 可切换（简化小窗卡）
+      const mode = this.onlineSettings?.popupSource === "online" ? "online" : "offline";
+      void this.renderPopupDictBody(body, word, mode).then(() => {
+        // 跨词切换后可能已不是当前词的结果已由 fetchOnlineDict 侧 isConnected/_hoverWord 检查兜住
+      });
     }
     // 记录查询次数（仅词库内单词生效）；仅在切到新词时调用（同词分支已提前返回）
     void this.vocabStore?.recordQuery(word);
@@ -6859,7 +6573,13 @@ export default class RewordPlugin extends Plugin {
    * → 切到「查词典」Tab → 填充输入框 → 执行查询渲染。
    * 侧边栏展示内容与弹窗同源（renderDictCard），且支持继续输入其他单词切换查询。
    */
-  private openWordInSidebar(w: string) {
+  /**
+   * 弹窗 → 侧边栏：把当前查询词送到侧边栏「查词典」面板，即时展示完整释义。
+   * @param mode 可选，小窗当前显示的词典源（online/offline）。
+   *              若提供，侧边栏面板跟随切到对应 Tab（而非沿用 popupSource 设置），
+   *              解决「小窗已切在线但呼出面板仍是离线」的不一致。
+   */
+  private openWordInSidebar(w: string, mode?: "offline" | "online") {
     this.closeFloatingPopup();
     const dockEl = this.dockElement;
     if (!dockEl) return;
@@ -6877,10 +6597,17 @@ export default class RewordPlugin extends Plugin {
     tabBtn?.click();
 
     setTimeout(() => {
+      // 2026-09-07：小窗指定了源时，面板跟随切到对应 Tab 并同步高亮
+      if (mode) {
+        this.dictLookupTab = mode;
+        dockEl.querySelectorAll(".hiword-dict-tab").forEach((t) => {
+          t.classList.toggle("is-active", (t as HTMLElement).dataset.dtab === mode);
+        });
+      }
       const input = dockEl.querySelector("#hiword-dict-input") as HTMLInputElement;
       if (input) {
         input.value = w;
-        this.doDictLookup(w, dockEl);
+        this.doDictLookup(w, dockEl, mode);
       }
     }, 60);
   }
@@ -6964,7 +6691,9 @@ export default class RewordPlugin extends Plugin {
       }
       const json = await res.json();
       // OpenAI 兼容格式：{ data: [{ id: "..." }, ...] }
-      const data = json?.data;
+      // R4（2026-09-07）：兼容非标平台直接返回顶层数组 [{ id }]（LM Studio 旧版 /
+      // 部分自建网关的形态），能解析就不让用户白填一次地址。
+      const data = Array.isArray(json) ? json : json?.data;
       if (!Array.isArray(data) || data.length === 0) {
         return { ok: false, error: "未返回模型数据（响应格式可能不兼容）" };
       }
@@ -7784,12 +7513,24 @@ export default class RewordPlugin extends Plugin {
               </div>
 
               <div class="hiword-up-group">
-                <div class="hiword-up-group-label"><span class="hiword-up-group-name">在线词典兜底</span><span class="hiword-up-group-desc">离线词典查不到时自动抓取欧路词典网页版</span></div>
+                <div class="hiword-up-group-label"><span class="hiword-up-group-name">在线词典（词海）</span><span class="hiword-up-group-desc">离线词典查不到时自动查询词海 corp.dict.cn（2026-09-07 起数据源为海词）</span></div>
                 <div class="hiword-up-field">
                   <label class="hiword-up-switch-row">
                     <input type="checkbox" id="up-online-enabled" class="b3-switch" ${this.onlineSettings?.enabled ? "checked" : ""} />
-                    <span>启用在线词典兜底</span>
+                    <span>启用在线词典（词海）</span>
                   </label>
+                </div>
+                <div class="hiword-up-field" style="margin-top:10px;">
+                  <label class="hiword-up-field-label" for="up-dict-font-scale">在线词典卡片字体大小</label>
+                  <div class="hiword-fs-slider-wrap">
+                    <span class="hiword-fs-label">小</span>
+                    <div class="hiword-fs-track-wrap">
+                      <input id="up-dict-font-scale" class="hiword-fs-slider" type="range" min="0" max="6" step="1" value="${dictScaleIndex(this.onlineSettings?.dictFontScale ?? 1.0)}" />
+                      <output class="hiword-fs-thumblabel" id="up-dict-scale-label" style="left:${dictScaleIndex(this.onlineSettings?.dictFontScale ?? 1.0) / 6 * 100}%">${Math.round((this.onlineSettings?.dictFontScale ?? 1.0) * 100)}%</output>
+                    </div>
+                    <span class="hiword-fs-label">大</span>
+                  </div>
+                  <p class="b3-label__note" style="margin-top:6px;">缩放范围 80%~140%，默认 100%；拖动即时预览，保存后生效。</p>
                 </div>
                 <button class="b3-button b3-button--outline b3-button--small" id="up-online-test">测试在线词典（查 "mastery"）</button>
               </div>
@@ -7919,6 +7660,19 @@ export default class RewordPlugin extends Plugin {
         if (previewCard) previewCard.style.fontSize = size === "small" ? "0.85em" : size === "large" ? "1.25em" : size === "xlarge" ? "1.4em" : "1em";
       });
 
+      // 2026-09-07 在线词典卡片字体缩放：拖动即时预览（仅改 CSS 变量，保存时落盘）
+      const upDictScaleSlider = dlg.querySelector("#up-dict-font-scale") as HTMLInputElement;
+      const upDictScaleLabel = dlg.querySelector("#up-dict-scale-label") as HTMLElement;
+      upDictScaleSlider?.addEventListener("input", () => {
+        const v = parseInt(upDictScaleSlider.value, 10);
+        const scale = DICT_SCALE_MAP[v] ?? 1.0;
+        if (upDictScaleLabel) {
+          upDictScaleLabel.textContent = `${Math.round(scale * 100)}%`;
+          upDictScaleLabel.style.left = `${(v / 6) * 100}%`;
+        }
+        this.applyDictFontScale(scale);
+      });
+
       // ========== Tab 1: 朗读 - TTS 设置 ==========
       const upVoiceSel = dlg.querySelector("#up-tts-voice") as HTMLSelectElement;
       if (upVoiceSel && "speechSynthesis" in window) {
@@ -7998,109 +7752,13 @@ export default class RewordPlugin extends Plugin {
       // ========== Tab 2: 词典管理（延迟渲染） ==========
       // 渲染在 nav 切换时触发
 
-      // ========== Tab 3: AI - 平台配置事件 ==========
-      // API Key 显示/隐藏
-      dlg.querySelector("#up-ai-toggle-key")?.addEventListener("click", () => {
-        const inp = dlg.querySelector("#up-ai-apikey") as HTMLInputElement;
-        if (inp) { inp.type = inp.type === "password" ? "text" : "password"; }
-      });
-
-      // 模型搜索过滤
-      const upModelSearch = dlg.querySelector("#up-ai-model-search") as HTMLInputElement;
-      const upModelList = dlg.querySelector("#up-ai-model-list") as HTMLElement;
-      upModelSearch?.addEventListener("input", () => {
-        const q = upModelSearch.value.toLowerCase().trim();
-        upModelList.querySelectorAll(".hiword-ai-model-item").forEach(item => {
-          (item as HTMLElement).style.display = (!q || (item as HTMLElement).textContent!.toLowerCase().includes(q)) ? "" : "none";
-        });
-      });
-
-      // 获取模型按钮
-      dlg.querySelector("#up-ai-fetch-models")?.addEventListener("click", async () => {
-        const baseUrl = (dlg.querySelector("#up-ai-baseurl") as HTMLInputElement)?.value?.trim();
-        const apiKey = (dlg.querySelector("#up-ai-apikey") as HTMLInputElement)?.value?.trim();
-        if (!baseUrl || !apiKey) { this.setTestMsg(dlg, "请先填写 API 地址与 API Key", "error"); return; }
-        const btn = dlg.querySelector("#up-ai-fetch-models") as HTMLButtonElement;
-        btn.disabled = true; btn.textContent = "获取中…";
-        try {
-          const r = await this.fetchModelsFromApi(baseUrl, apiKey);
-          if (r.ok && r.models && r.models.length > 0) {
-            // 显示模型选择浮层
-            const existing = new Set(Array.from(upModelList.querySelectorAll(".hiword-ai-model-item")).map(el => (el as HTMLElement).dataset.model || ""));
-            const available = r.models.filter(m => !existing.has(m));
-            if (available.length > 0) this.showModelPickerOverlay(dlg, available, upModelList);
-            else this.setTestMsg(dlg, `已获取 ${r.models.length} 个模型，但全部已在列表中`, "ok");
-          } else {
-            this.setTestMsg(dlg, "未获取到任何模型" + (r.error ? "：" + r.error : ""), "error");
-          }
-        } catch (e: any) {
-          this.setTestMsg(dlg, "获取失败：" + (e.message || String(e)), "error");
-        } finally { btn.disabled = false; btn.textContent = "🔍 获取模型"; }
-      });
-
-      // 手动添加模型
-      dlg.querySelector("#up-ai-model-add")?.addEventListener("click", () => {
-        const name = prompt("输入模型名称（如 gpt-4o-mini）：");
-        if (!name?.trim()) return;
-        const existing = Array.from(upModelList.querySelectorAll(".hiword-ai-model-name")).some(el => el.textContent === name.trim());
-        if (existing) { showMessage("该模型已在列表中", 2000, "info"); return; }
-        const div = document.createElement("div");
-        div.className = "hiword-ai-model-item";
-        div.dataset.model = name.trim();
-        div.innerHTML = `<span class="hiword-ai-model-name">${this.escapeHtml(name.trim())}</span><button class="hiword-ai-model-del" title="删除">&times;</button>`;
-        div.querySelector(".hiword-ai-model-del")?.addEventListener("click", () => div.remove());
-        upModelList.appendChild(div);
-      });
-
-      // 模型列表删除
-      upModelList?.addEventListener("click", e => {
-        const target = e.target as HTMLElement;
-        if (target.classList.contains("hiword-ai-model-del")) target.closest(".hiword-ai-model-item")?.remove();
-      });
-
-      // 温度滑块值
-      dlg.querySelector("#up-ai-temp")?.addEventListener("input", () => {
-        const val = dlg.querySelector("#up-ai-temp-val");
-        if (val) val.textContent = (dlg.querySelector("#up-ai-temp") as HTMLInputElement).value;
-      });
-
-      // 模型变化时自动推断上下文窗口（仅在用户未手动修改过时）
-      const upModelInput = dlg.querySelector("#up-ai-model") as HTMLInputElement;
-      const upCtxWindowInput = dlg.querySelector("#up-ai-ctxwindow") as HTMLInputElement;
-      let upCtxWindowTouched = false;
-      upCtxWindowInput?.addEventListener("input", () => { upCtxWindowTouched = true; });
-      upModelInput?.addEventListener("change", () => {
-        if (upCtxWindowTouched) return;
-        const inferred = inferContextWindow(upModelInput.value);
-        if (upCtxWindowInput) upCtxWindowInput.value = String(inferred);
-      });
-
-      // 测试连接
-      dlg.querySelector("#up-ai-test")?.addEventListener("click", async () => {
-        const cfg = this.readAiSettingsFromDlg(dlg, "up-ai-");
-        if (!cfg.apiKey) { this.setTestMsg(dlg, "请先填写 API Key", "error"); return; }
-        const testBtn = dlg.querySelector("#up-ai-test") as HTMLButtonElement;
-        testBtn.disabled = true; testBtn.textContent = "测试中…";
-        this.setTestMsg(dlg, "正在连接…", "");
-        const r = await this.testAiConnection(cfg);
-        testBtn.disabled = false; testBtn.textContent = "测试连接";
-        this.setTestMsg(dlg, r.ok ? "连接成功 ✓" : ("失败：" + (r.error || "请检查配置")), r.ok ? "ok" : "error");
-      });
-
-      // ========== Tab 3: AI - 学习模式事件 ==========
-      // SOUL 验证
-      dlg.querySelector("#up-ai-soul-verify")?.addEventListener("click", async () => {
-        const soulId = (dlg.querySelector("#up-ai-soul-id") as HTMLInputElement)?.value?.trim() || "";
-        const soulStatus = dlg.querySelector("#up-ai-soul-status") as HTMLElement;
-        if (!soulId) { soulStatus.innerHTML = '<span style="color:var(--b3-theme-error,#e00)">请输入文档 ID</span>'; return; }
-        soulStatus.innerHTML = '<span style="color:#888">验证中…</span>';
-        try {
-          const block = await getBlockKramdown(soulId);
-          if (block) soulStatus.innerHTML = '<span style="color:#2e7d32;font-weight:500">✓ 有效文档</span>';
-          else soulStatus.innerHTML = '<span style="color:#e00">✗ 未找到该文档</span>';
-        } catch { soulStatus.innerHTML = '<span style="color:#e00">✗ 验证失败</span>'; }
-      });
-
+      // 2026-09-06 第 1 批：原「Tab 3: AI 平台配置事件」整段（约 100 行）已删除。
+      //   AI Tab 内容现由 Svelte 组件 AiSettingsPanel 渲染（见 renderAiSettingsInto），
+      //   原先这些 #up-ai-* 的 querySelector 绑定全都找不到元素，已全部失效。
+      //   甄别结果：①「模型变化自动推断上下文窗口」对应的 contextWindow 字段早在
+      //     2026-08-21 精简时删除，其 #ais-ctxwindow / #up-ai-ctxwindow 本就是死代码；
+      //   ②「API Key 显隐」「模型搜索/获取/添加」「测试连接」「SOUL 验证」四项
+      //     已由 AiSettingRow / AiModelList 组件实现，无需保留旧绑定。
       // 2026-08-22 许可证已封存：原「Tab 3: 许可证」事件绑定（renderLicenseStatus / 复制设备码 / 激活 / 解除激活）已移除
 
       // ========== 底部：保存 / 取消 ==========
@@ -8118,7 +7776,10 @@ export default class RewordPlugin extends Plugin {
 
         // --- 保存在线词典 ---
         const onlineEnabled = (dlg.querySelector("#up-online-enabled") as HTMLInputElement)?.checked ?? true;
-        await this.saveOnlineSettings({ enabled: onlineEnabled });
+        // 2026-09-07 查词典功能：保留 popupSource（小窗默认源，另在查词典面板「设置」中管理）；同时持久化字体缩放倍数
+        const dictScaleSlider = dlg.querySelector("#up-dict-font-scale") as HTMLInputElement;
+        const dictFontScale = DICT_SCALE_MAP[dictScaleSlider ? parseInt(dictScaleSlider.value, 10) : 2] ?? 1.0;
+        await this.saveOnlineSettings({ enabled: onlineEnabled, popupSource: this.onlineSettings?.popupSource ?? "offline", dictFontScale });
 
         // --- 保存字体 ---
         const fsVal = upFsSlider ? parseInt(upFsSlider.value, 10) : 1;
@@ -8184,6 +7845,7 @@ export default class RewordPlugin extends Plugin {
       <div class="hiword-dm-hint">选中文本后按 <kbd>⌥⌘L</kbd> 可一键在右侧边栏查词 · <kbd>⌥⌘E</kbd> 框选提取单词</div>
       ${renderGroup("英文词典", "🔤", enDicts)}
       ${renderGroup("中文词典", "🀄", zhDicts)}
+      ${this.renderOnlineDictSectionHtml()}
       ${this.lastDictError ? `<div class="hiword-dm-diag"><details open><summary>🔍 诊断信息</summary><pre class="hiword-dm-diag-body">${this.escapeHtml(this.getDiagnosticInfo())}</pre></details></div>` : ""}
       <div class="hiword-dm-add">
         <button class="hiword-dm-add-btn" id="up-dm-add-mdx"><span class="hiword-dm-add-ico">📥</span><span class="hiword-dm-add-body"><span class="hiword-dm-add-t">导入 MDX 词典</span><span class="hiword-dm-add-d">选择 .mdx 原包</span></span></button>
@@ -8199,6 +7861,8 @@ export default class RewordPlugin extends Plugin {
     const addMdxBtn = container.querySelector("#up-dm-add-mdx") as HTMLButtonElement;
     const mdxInput = container.querySelector("#up-dm-file-mdx") as HTMLInputElement;
     addMdxBtn?.addEventListener("click", () => mdxInput?.click());
+    // 2026-09-07：词海在线条目开关
+    this.bindOnlineDictToggle(container);
     mdxInput?.addEventListener("change", async () => {
       const file = mdxInput.files?.[0]; if (file) await this.onDictFileChosen(file, dialog); mdxInput.value = "";
     });
@@ -8678,7 +8342,6 @@ export default class RewordPlugin extends Plugin {
       "hiword-vocab.json", "hiword-annotations.json", "hiword-vocab-labels.json",
       "hiword-annotation-labels.json", "hiword-labels.json", "hiword-ai.json",
       "hiword-ai-presets.json", "hiword-ai-prompts.json", "hiword-ai-sessions.json",
-      "copilot-ai.json", "copilot-prompts.json", "copilot-config.json", "copilot-conversations.json",
       "hiword-review-config.json", "hiword-annotation-config.json", "hiword-reader-settings.json",
       "hiword-dock-layout.json", "hiword-dicts.json", "hiword-tts.json",
     ];
@@ -8799,643 +8462,159 @@ export default class RewordPlugin extends Plugin {
    * @param host 渲染容器（清空后填充）
    * @param onClose 关闭回调：独立对话框模式销毁弹窗；嵌入主设置模式不传（保存后停留在面板）
    */
+  /**
+   * 2026-09-06 第 1 批：540 行 innerHTML + querySelector 手工绑定
+   * → Svelte 组件（src/ai/settings/AiSettingsPanel.svelte）。
+   *
+   * 改后加一个设置项只需在 ai-settings-items.ts 的声明数组里加一条
+   * （旧实现要改 HTML / 绑定 / 读取 / normalize 四处，P0-6 就是这么漏的）。
+   *
+   * 保存路径沿用第 0 批的 merge 语义：**绝不**整体替换 aiSettings。
+   */
   private renderAiSettingsInto(host: HTMLElement, onClose?: () => void) {
     if (!host) return;
     // 嵌入主设置时容器跨 Tab 持久存在：已渲染过则跳过（避免切 Tab 往返丢失未保存的编辑）
-    if ((host as HTMLElement).dataset.rendered === "1" && onClose == null) return;
-    (host as HTMLElement).dataset.rendered = "1";
-    const s = this.aiSettings;
+    if (host.dataset.rendered === "1" && onClose == null) return;
+    host.dataset.rendered = "1";
+
     // 2026-09-03 P0：记录打开设置时的输入框模式，便于「取消」时还原
-    const originalUseProtyle = !!s.useProtyleInput;
-    const dlg = host;
-    dlg.innerHTML = `
-        <div class="hiword-ai-settings-panel">
-          <!-- 左侧导航 -->
-          <nav class="hiword-ai-settings-nav">
-            <div class="hiword-ai-settings-tab active" data-tab="general">通用</div>
-            <div class="hiword-ai-settings-tab" data-tab="service">AI 服务</div>
-            <div class="hiword-ai-settings-tab" data-tab="prompt">精读提示词</div>
-            <div class="hiword-ai-settings-tab" data-tab="memory">记忆与导出</div>
-            <!-- 2026-08-22 调整：许可证已迁到总设置面板 -->
-            <!-- 2026-08-31：原「翻译引擎」Tab 已拆除为阅读器顶栏 ⚙ 双语设置独立弹窗 -->
-          </nav>
-          <!-- 右侧内容区 -->
-          <main class="hiword-ai-settings-main">
+    const originalUseProtyle = !!this.aiSettings.useProtyleInput;
+    let comp: AiSettingsPanel | null = null;
 
-            <!-- ===== Tab 1: 精读提示词 ===== -->
-            <section class="hiword-ai-settings-page" data-page="prompt" style="display:none;">
-              <div class="hiword-ai-setting-group">
-                <div class="hiword-ai-setting-label">
-                  <span class="hiword-ai-setting-name">精读系统提示词</span>
-                  <span class="hiword-ai-setting-desc">变量：&#123;&#123;text&#125;&#125;（原文）&#123;&#123;title&#125;&#125;（标题）</span>
-                </div>
-                <textarea id="ais-prompt" class="hiword-ai-setting-textarea" spellcheck="false">${this.escapeHtml(s.promptTemplate)}</textarea>
-              </div>
-              <div class="hiword-ai-setting-group">
-                <div class="hiword-ai-setting-label">
-                  <span class="hiword-ai-setting-name">输出模式</span>
-                </div>
-                <div class="hiword-ai-setting-row">
-                  <label class="hiword-ai-switch">
-                    <input type="checkbox" id="ais-json" ${s.jsonMode ? "checked" : ""} />
-                    <span class="hiword-ai-switch-track"></span>
-                  </label>
-                  <span>结构化 JSON（关闭则直出 Markdown）</span>
-                </div>
-              </div>
-              <div class="hiword-ai-setting-group">
-                <div class="hiword-ai-setting-label">
-                  <span class="hiword-ai-setting-name">阅读器「翻译」预置提示词</span>
-                  <span class="hiword-ai-setting-desc">在阅读器选中文本点「翻译」时，此提示词会预填进 AI 精读输入框并自动发送</span>
-                </div>
-                <textarea id="ais-translate-prompt" class="hiword-ai-setting-textarea" spellcheck="false">${this.escapeHtml(s.translatePrompt)}</textarea>
-              </div>
-            </section>
+    const destroyComp = () => {
+      comp?.$destroy();
+      comp = null;
+      // 清空标记：保存/取消后容器若还活着（嵌入主设置），下次进入要重新渲染出新值
+      host.dataset.rendered = "";
+    };
 
-            <!-- ===== Tab 2: AI 服务 ===== -->
-            <section class="hiword-ai-settings-page" data-page="service" style="display:none;">
-              <div class="hiword-ai-setting-group">
-                <div class="hiword-ai-setting-label">
-                  <span class="hiword-ai-setting-name">API 地址</span>
-                </div>
-                <div class="hiword-ai-field">
-                  <input id="ais-baseurl" class="hiword-ai-input" value="${this.escapeAttr(s.baseUrl)}" placeholder="https://api.openai.com/v1" />
-                  <span class="hiword-ai-field-hint">以 / 结尾忽略 v1；以 # 结尾强制使用输入地址</span>
-                </div>
-              </div>
-              <!-- 2026-08-21 精简：删除「接口格式」「上下文窗口」「Top P/频率惩罚/存在惩罚」「超时」「截断自动续传」「流式传输模式」字段(用代码默认) -->
-              <div class="hiword-ai-setting-group">
-                <div class="hiword-ai-setting-label">
-                  <span class="hiword-ai-setting-name">API Key</span>
-                </div>
-                <div class="hiword-ai-field">
-                  <div class="hiword-ai-input-wrap">
-                    <input id="ais-apikey" class="hiword-ai-input" type="password" value="${this.escapeAttr(s.apiKey)}" placeholder="sk-..." />
-                    <button class="hiword-ai-icon-btn" id="ais-toggle-key" title="显示/隐藏">👁</button>
-                  </div>
-                </div>
-              </div>
-              <div class="hiword-ai-setting-group">
-                <div class="hiword-ai-setting-label">
-                  <span class="hiword-ai-setting-name">当前模型</span>
-                </div>
-                <div class="hiword-ai-field">
-                  <input id="ais-model" class="hiword-ai-input" value="${this.escapeAttr(s.model)}" placeholder="gpt-4o-mini" />
-                </div>
-              </div>
-              <div class="hiword-ai-setting-group">
-                <div class="hiword-ai-setting-label">
-                  <span class="hiword-ai-setting-name">模型列表</span>
-                </div>
-                <div class="hiword-ai-model-mgr">
-                  <div class="hiword-ai-model-search">
-                    <input id="ais-model-search" class="hiword-ai-input" placeholder="搜索模型..." />
-                    <button class="hiword-ai-btn hiword-ai-btn--ghost hiword-ai-btn--sm" id="ais-fetch-models">获取模型</button>
-                    <button class="hiword-ai-btn hiword-ai-btn--ghost hiword-ai-btn--sm" id="ais-model-add">+ 添加</button>
-                  </div>
-                  <div class="hiword-ai-model-list" id="ais-model-list">
-                    ${(s.models || DEFAULT_MODELS).map(m => `
-                      <div class="hiword-ai-model-item" data-model="${this.escapeAttr(m)}">
-                        <span class="hiword-ai-model-name">${this.escapeHtml(m)}</span>
-                        <button class="hiword-ai-model-del" title="删除">&times;</button>
-                      </div>
-                    `).join("")}
-                  </div>
-                </div>
-              </div>
-              <div class="hiword-ai-setting-group">
-                <div class="hiword-ai-setting-label">
-                  <span class="hiword-ai-setting-name">生成参数</span>
-                </div>
-                <div class="hiword-ai-field-row">
-                  <div class="hiword-ai-field half">
-                    <label class="hiword-ai-field-label" for="ais-temp">温度 <em id="ais-temp-val">${s.temperature}</em></label>
-                    <input id="ais-temp" class="hiword-ai-slider" type="range" min="0" max="2" step="0.1" value="${s.temperature}" />
-                  </div>
-                  <div class="hiword-ai-field half">
-                    <label class="hiword-ai-field-label" for="ais-maxtok">最大 Token</label>
-                    <input id="ais-maxtok" class="hiword-ai-input" type="number" min="16" max="32768" step="16" value="${s.maxTokens}" />
-                  </div>
-                </div>
-              </div>
-              <div class="hiword-ai-test-row">
-                <button class="b3-button b3-button--outline" id="ais-test">测试连接</button>
-                <span class="hiword-ai-test-msg" id="ais-test-msg"></span>
-              </div>
-            </section>
-
-            <!-- ===== Tab 3: 通用 ===== -->
-            <section class="hiword-ai-settings-page" data-page="general">
-              <div class="hiword-ai-setting-group">
-                <div class="hiword-ai-setting-row">
-                  <label class="hiword-ai-switch">
-                    <input type="checkbox" id="ais-enabled" ${s.enabled ? "checked" : ""} />
-                    <span class="hiword-ai-switch-track"></span>
-                  </label>
-                  <span>启用 AI 精读</span>
-                </div>
-              </div>
-              <!-- 2026-08-21 精简：删除「发送快捷键」「默认模式」字段(用思源约定 + jsonMode 控制) -->
-              <div class="hiword-ai-setting-group">
-                <div class="hiword-ai-setting-label">
-                  <span class="hiword-ai-setting-name">消息字号</span>
-                </div>
-                <div class="hiword-ai-field">
-                  <input id="ais-fontsize" class="hiword-ai-input" type="number" min="10" max="24" step="1" value="${s.fontSize}" />
-                </div>
-              </div>
-              <div class="hiword-ai-setting-group">
-                <div class="hiword-ai-setting-label">
-                  <span class="hiword-ai-setting-name">输入框字号</span>
-                </div>
-                <div class="hiword-ai-field">
-                  <input id="ais-input-fontsize" class="hiword-ai-input" type="number" min="10" max="24" step="1" value="${s.inputFontSize}" />
-                </div>
-              </div>
-              <!-- 2026-09-03 P0：AI 输入框实现选择。默认关闭（contenteditable 稳定路径），
-                   开启为实验性 Protyle 富文本输入框。切换即时重建输入框，无需重载思源。 -->
-              <div class="hiword-ai-setting-group">
-                <div class="hiword-ai-setting-label">
-                  <span class="hiword-ai-setting-name">启用 Protyle 富文本输入框</span>
-                  <span class="hiword-ai-setting-desc">关闭（默认）使用更稳定的纯文本框，规避 SiYuan 内核 Protyle 初始化失败导致输入框无法输入；开启可获得块引用卡片等原生富文本能力（实验性）</span>
-                </div>
-                <div class="hiword-ai-setting-row">
-                  <label class="hiword-ai-switch">
-                    <input type="checkbox" id="ais-use-protyle-input" ${s.useProtyleInput ? "checked" : ""} />
-                    <span class="hiword-ai-switch-track"></span>
-                  </label>
-                  <span>启用 Protyle 输入框（实验性）</span>
-                </div>
-              </div>
-            </section>
-
-            <!-- ===== Tab 4: 记忆与导出 ===== -->
-            <section class="hiword-ai-settings-page" data-page="memory" style="display:none;">
-              <div class="hiword-ai-setting-group">
-                <div class="hiword-ai-setting-label">
-                  <span class="hiword-ai-setting-name">SOUL 文档</span>
-                  <span class="hiword-ai-setting-desc">用于持久化记忆上下文的思源文档 ID</span>
-                </div>
-                <div class="hiword-ai-soul-row">
-                  <input id="ais-soul-id" class="hiword-ai-input" value="${this.escapeAttr(s.soulDocId)}" placeholder="输入思源文档 ID" />
-                  <button class="b3-button b3-button--outline" id="ais-soul-verify">验证</button>
-                </div>
-                <div class="hiword-ai-soul-status" id="ais-soul-status"></div>
-              </div>
-              <div class="hiword-ai-setting-group">
-                <div class="hiword-ai-setting-label">
-                  <span class="hiword-ai-setting-name">导出笔记本</span>
-                </div>
-                <div class="hiword-ai-field">
-                  <select id="ais-export-nb" class="hiword-ai-select">
-                    <option value="" ${!s.exportNotebookId ? "selected" : ""}>收集箱「待整理」</option>
-                  </select>
-                </div>
-              </div>
-              <div class="hiword-ai-setting-group">
-                <div class="hiword-ai-setting-label">
-                  <span class="hiword-ai-setting-name">导出路径模板</span>
-                  <span class="hiword-ai-setting-desc">支持 sprig 语法，如 /&#123;&#123;now | date "2006/200601"&#125;&#125;/</span>
-                </div>
-                <div class="hiword-ai-field">
-                  <input id="ais-export-path" class="hiword-ai-input" value="${this.escapeAttr(s.exportSavePath)}" placeholder="留空则使用当前文档路径" />
-                </div>
-              </div>
-            </section>
-
-
-          </main>
-        </div>
-      `;
-      const nav = dlg.querySelector(".hiword-ai-settings-nav") as HTMLElement;
-      const pages = dlg.querySelectorAll(".hiword-ai-settings-page");
-      const tabs = dlg.querySelectorAll(".hiword-ai-settings-tab");
-
-      // ---- Tab 切换 ----
-      nav.addEventListener("click", (e) => {
-        const target = (e.target as HTMLElement)?.closest(".hiword-ai-settings-tab") as HTMLElement | null;
-        if (!target || !target.dataset.tab) return;
-        const tab = target.dataset.tab;
-        tabs.forEach(t => t.classList.toggle("active", t === target));
-        pages.forEach(p => {
-          const pe = p as HTMLElement;
-          pe.style.display = (pe as any).dataset?.page === tab ? "" : "none";
-        });
-      });
-
-      // 2026-08-22 调整：许可证已移到总设置面板(openUnifiedSettings)
-
-      // ---- Tab 1: 提示词（无需额外事件） ----
-
-      // ---- Tab 2: 平台管理 ----
-      // API Key 显示/隐藏切换
-      const apiKeyInput = dlg.querySelector("#ais-apikey") as HTMLInputElement;
-      const toggleKeyBtn = dlg.querySelector("#ais-toggle-key") as HTMLButtonElement;
-      toggleKeyBtn?.addEventListener("click", () => {
-        const isPassword = apiKeyInput.type === "password";
-        apiKeyInput.type = isPassword ? "text" : "password";
-        toggleKeyBtn.textContent = isPassword ? "🙈" : "👁";
-      });
-
-      // 温度滑块实时值
-      const tempSlider = dlg.querySelector("#ais-temp") as HTMLInputElement;
-      const tempVal = dlg.querySelector("#ais-temp-val") as HTMLElement;
-      tempSlider?.addEventListener("input", () => { if (tempVal) tempVal.textContent = tempSlider.value; });
-
-
-      // 模型变化时自动推断上下文窗口（仅在用户未手动修改过时）
-      const aisModelInput = dlg.querySelector("#ais-model") as HTMLInputElement;
-      const aisCtxWindowInput = dlg.querySelector("#ais-ctxwindow") as HTMLInputElement;
-      let aisCtxWindowTouched = false;
-      aisCtxWindowInput?.addEventListener("input", () => { aisCtxWindowTouched = true; });
-      aisModelInput?.addEventListener("change", () => {
-        if (aisCtxWindowTouched) return;
-        const inferred = inferContextWindow(aisModelInput.value);
-        if (aisCtxWindowInput) aisCtxWindowInput.value = String(inferred);
-      });
-
-      // 模型列表：删除
-      const modelList = dlg.querySelector("#ais-model-list") as HTMLElement;
-      modelList?.querySelectorAll(".hiword-ai-model-del").forEach(btn => {
-        btn.addEventListener("click", () => {
-          const item = btn.closest(".hiword-ai-model-item") as HTMLElement;
-          item?.remove();
-        });
-      });
-
-      // 模型列表：手动添加
-      const addModelBtn = dlg.querySelector("#ais-model-add") as HTMLButtonElement;
-      addModelBtn?.addEventListener("click", () => {
-        const name = prompt("请输入模型名称（如 gpt-4o）：");
-        if (!name?.trim()) return;
-        const trimmed = name.trim();
-        // 检查重复
-        if (modelList.querySelector(`[data-model="${trimmed}"]`)) { showMessage("模型已存在", 1500, "warning" as any); return; }
-        const el = document.createElement("div");
-        el.className = "hiword-ai-model-item";
-        el.dataset.model = trimmed;
-        el.innerHTML = `<span class="hiword-ai-model-name">${this.escapeHtml(trimmed)}</span><button class="hiword-ai-model-del" title="删除">&times;</button>`;
-        el.querySelector(".hiword-ai-model-del")?.addEventListener("click", () => el.remove());
-        modelList.appendChild(el);
-      });
-
-      // 模型搜索过滤
-      const modelSearch = dlg.querySelector("#ais-model-search") as HTMLInputElement;
-      modelSearch?.addEventListener("input", () => {
-        const q = modelSearch.value.toLowerCase();
-        modelList.querySelectorAll(".hiword-ai-model-item").forEach(item => {
-          const name = (item as HTMLElement).dataset.model?.toLowerCase() || "";
-          (item as HTMLElement).style.display = name.includes(q) ? "" : "none";
-        });
-      });
-
-      // 获取模型（从 API /models 接口拉取）
-      const fetchModelsBtn = dlg.querySelector("#ais-fetch-models") as HTMLButtonElement;
-      fetchModelsBtn?.addEventListener("click", async () => {
-        const baseUrl = (dlg.querySelector("#ais-baseurl") as HTMLInputElement)?.value?.trim() || "";
-        const apiKey = (dlg.querySelector("#ais-apikey") as HTMLInputElement)?.value?.trim() || "";
-        if (!baseUrl) { showMessage("请先填写 API 地址", 1500, "warning" as any); return; }
-        if (!apiKey) { showMessage("请先填写 API Key", 1500, "warning" as any); return; }
-        fetchModelsBtn.disabled = true;
-        fetchModelsBtn.textContent = "获取中…";
-        this.setTestMsg(dlg, "正在获取模型列表…", "");
-        const r = await this.fetchModelsFromApi(baseUrl, apiKey);
-        fetchModelsBtn.disabled = false;
-        fetchModelsBtn.textContent = "🔍 获取模型";
-        if (!r.ok || !r.models) {
-          this.setTestMsg(dlg, "获取失败: " + (r.error || "未知错误"), "error");
-          return;
-        }
-        // 显示模型选择弹窗
-        const existing = new Set(
-          Array.from(modelList.querySelectorAll(".hiword-ai-model-item"))
-            .map(el => (el as HTMLElement).dataset.model || "")
-        );
-        const available = r.models.filter(m => !existing.has(m));
-        if (available.length === 0) {
-          this.setTestMsg(dlg, `已获取 ${r.models.length} 个模型，但全部已在列表中`, "ok");
-          return;
-        }
-        // 创建选择浮层
-        const picker = document.createElement("div");
-        picker.className = "hiword-ai-model-picker-overlay";
-        picker.innerHTML = `
-          <div class="hiword-ai-model-picker">
-            <div class="hiword-ai-picker-header">
-              <span>获取到 ${r.models.length} 个模型</span>
-              <span class="hiword-ai-picker-sub">可选 ${available.length} 个新模型</span>
-              <button class="hiword-ai-picker-close">&times;</button>
-            </div>
-            <div class="hiword-ai-picker-search">
-              <input placeholder="筛选模型..." value="" />
-            </div>
-            <div class="hiword-ai-picker-actions">
-              <button class="hiword-ai-btn hiword-ai-btn--primary hiword-ai-btn--sm" data-act="select-all">全选</button>
-              <button class="hiword-ai-btn hiword-ai-btn--outline hiword-ai-btn--sm" data-act="deselect-all">取消全选</button>
-              <button class="hiword-ai-btn hiword-ai-btn--primary" data-act="confirm">添加选中 (0)</button>
-            </div>
-            <div class="hiword-ai-picker-list">
-              ${available.map(m => `
-                <label class="hiword-ai-picker-item" data-model="${this.escapeAttr(m)}">
-                  <input type="checkbox" />
-                  <span class="hiword-ai-picker-name">${this.escapeHtml(m)}</span>
-                </label>
-              `).join("")}
-            </div>
-          </div>`;
-        dlg.appendChild(picker);
-
-        const pickerList = picker.querySelector(".hiword-ai-picker-list") as HTMLElement;
-        const confirmBtn = picker.querySelector("[data-act='confirm']") as HTMLButtonElement;
-        const pickerSearch = picker.querySelector(".hiword-ai-picker-search input") as HTMLInputElement;
-
-        // 筛选
-        pickerSearch?.addEventListener("input", () => {
-          const q = pickerSearch.value.toLowerCase();
-          pickerList.querySelectorAll(".hiword-ai-picker-item").forEach(item => {
-            const name = (item as HTMLElement).dataset.model?.toLowerCase() || "";
-            (item as HTMLElement).style.display = name.includes(q) ? "" : "none";
-          });
-        });
-        // 全选（仅可见项）
-        picker.querySelector("[data-act='select-all']")?.addEventListener("click", () => {
-          pickerList.querySelectorAll(".hiword-ai-picker-item").forEach(item => {
-            if ((item as HTMLElement).style.display !== "none") {
-              const cb = item.querySelector("input") as HTMLInputElement;
-              cb.checked = true;
-              item.classList.add("checked");
-            }
-          });
-          updateConfirmText();
-        });
-        // 取消全选（仅可见项）
-        picker.querySelector("[data-act='deselect-all']")?.addEventListener("click", () => {
-          pickerList.querySelectorAll(".hiword-ai-picker-item").forEach(item => {
-            if ((item as HTMLElement).style.display !== "none") {
-              const cb = item.querySelector("input") as HTMLInputElement;
-              cb.checked = false;
-              item.classList.remove("checked");
-            }
-          });
-          updateConfirmText();
-        });
-        // 单项切换
-        pickerList.querySelectorAll(".hiword-ai-picker-item input").forEach(cb => {
-          cb.addEventListener("change", () => {
-            (cb as HTMLElement).closest(".hiword-ai-picker-item")?.classList.toggle("checked", (cb as HTMLInputElement).checked);
-            updateConfirmText();
-          });
-        });
-        const updateConfirmText = () => {
-          const checked = pickerList.querySelectorAll(".hiword-ai-picker-item input:checked").length;
-          confirmBtn.textContent = `添加选中 (${checked})`;
-        };
-        // 关闭
-        picker.querySelector(".hiword-ai-picker-close")?.addEventListener("click", () => picker.remove());
-        // 确认添加
-        confirmBtn?.addEventListener("click", () => {
-          const toAdd: string[] = [];
-          pickerList.querySelectorAll(".hiword-ai-picker-item input:checked").forEach(cb => {
-            const item = (cb as HTMLElement).closest(".hiword-ai-picker-item") as HTMLElement;
-            const m = item.dataset.model || "";
-            if (m && !modelList.querySelector(`[data-model="${m}"]`)) {
-              toAdd.push(m);
-            }
-          });
-          toAdd.forEach(m => {
-            const el = document.createElement("div");
-            el.className = "hiword-ai-model-item";
-            el.dataset.model = m;
-            el.innerHTML = `<span class="hiword-ai-model-name">${this.escapeHtml(m)}</span><button class="hiword-ai-model-del" title="删除">&times;</button>`;
-            el.querySelector(".hiword-ai-model-del")?.addEventListener("click", () => el.remove());
-            modelList.appendChild(el);
-          });
-          this.setTestMsg(dlg, `已添加 ${toAdd.length} 个模型`, "ok");
-          picker.remove();
-        });
-      });
-
-      // 测试连接
-      const testBtn = dlg.querySelector("#ais-test") as HTMLButtonElement;
-      testBtn?.addEventListener("click", async () => {
-        const cfg = this.readAiSettingsFromDlg(dlg, "ais-");
-        if (!cfg.apiKey) { this.setTestMsg(dlg, "请先填写 API Key", "error"); return; }
-        testBtn.disabled = true;
-        testBtn.textContent = "测试中…";
-        this.setTestMsg(dlg, "正在连接…", "");
-        const r = await this.testAiConnection(cfg);
-        testBtn.disabled = false;
-        testBtn.textContent = "测试连接";
-        this.setTestMsg(dlg, r.ok ? "连接成功 ✓" : ("失败：" + (r.error || "请检查配置")), r.ok ? "ok" : "error");
-      });
-
-      // ---- Tab 5: SOUL 文档验证 ----
-      const soulVerifyBtn = dlg.querySelector("#ais-soul-verify") as HTMLButtonElement;
-      const soulStatus = dlg.querySelector("#ais-soul-status") as HTMLElement;
-      soulVerifyBtn?.addEventListener("click", async () => {
-        const soulId = (dlg.querySelector("#ais-soul-id") as HTMLInputElement)?.value?.trim() || "";
-        if (!soulId) { soulStatus.innerHTML = '<span style="color:var(--b3-theme-error,#e00)">请输入文档 ID</span>'; return; }
-        soulStatus.innerHTML = '<span style="color:#888">验证中…</span>';
-        try {
-          const block = await getBlockKramdown(soulId);
-          if (block) {
-            soulStatus.innerHTML = '<span style="color:#2e7d32;font-weight:500">✓ 有效文档</span>';
-          } else {
-            soulStatus.innerHTML = '<span style="color:#e00">✗ 未找到该文档</span>';
+    comp = new AiSettingsPanel({
+      target: host,
+      props: {
+        settings: this.aiSettings,
+        // 「默认精读角色」下拉的动态选项：来自预设库（设置项声明里只有「无」静态项）
+        presetOptions: this.aiPresetStore.list().map((p) => ({ value: p.id, label: p.name })),
+        // 2026-09-06 P0：merge 而非整体替换（见 readAiSettingsFromDlg 注释）。
+        // 保存路径同样过一遍 normalize（此前只在加载时跑），避免脏值直接落盘。
+        onSave: (patch: Partial<AiSettings>) => {
+          this.aiSettings = normalizeAiSettings({ ...this.aiSettings, ...patch });
+          this.saveAiSettings();
+          showMessage("AI 设置已保存", 2000, "success" as any);
+          onClose?.();
+          destroyComp();
+        },
+        onCancel: () => {
+          // 2026-09-03 P0：撤销未保存的输入框模式热切换
+          if ((!!this.aiSettings.useProtyleInput) !== originalUseProtyle) {
+            this.aiSettings.useProtyleInput = originalUseProtyle;
+            this.aiPanel?.remountInput?.();
           }
-        } catch {
-          soulStatus.innerHTML = '<span style="color:#e00">✗ 验证失败（网络错误或 ID 无效）</span>';
-        }
-      });
-
-      // 2026-08-22 调整：许可证事件已迁到总设置面板(openUnifiedSettings)
-
-      // ---- 保存按钮（放在右侧内容区底部，Copilot 风格内联） ----
-      const saveBar = document.createElement("div");
-      saveBar.className = "hiword-ai-settings-savebar";
-      saveBar.innerHTML = `
-        <button class="b3-button b3-button--outline" id="ais-cancel">取消</button>
-        <button class="b3-button b3-button--primary" id="ais-save">保存设置</button>
-      `;
-      dlg.querySelector(".hiword-ai-settings-main")?.appendChild(saveBar);
-
-      dlg.querySelector("#ais-save")?.addEventListener("click", () => {
-        this.aiSettings = this.readAiSettingsFromDlg(dlg, "ais-");
-        this.saveAiSettings();
-        onClose?.();
-        showMessage("AI 设置已保存", 2000, "success" as any);
-      });
-      dlg.querySelector("#ais-cancel")?.addEventListener("click", () => {
-        // 2026-09-03 P0：撤销未保存的输入框模式热切换（若切过则按已保存设置重建）
-        if ((!!this.aiSettings.useProtyleInput) !== originalUseProtyle) {
-          this.aiSettings.useProtyleInput = originalUseProtyle;
-          this.aiPanel?.remountInput?.();
-        }
-        onClose?.();
-      });
-
-      // 2026-09-03 P0：通用 Tab 中切换「Protyle 输入框」即时热重建，无需重载思源
-      const useProtyleInputCb = dlg.querySelector("#ais-use-protyle-input") as HTMLInputElement | null;
-      useProtyleInputCb?.addEventListener("change", () => {
-        const on = !!useProtyleInputCb.checked;
-        if (on === (!!this.aiSettings.useProtyleInput)) return;
-        this.aiSettings.useProtyleInput = on;
-        this.aiPanel?.remountInput?.();
-      });
+          onClose?.();
+          destroyComp();
+        },
+        // 标 live 的项：改了立即生效，不必等保存（无需重载思源）
+        onLive: (key: string, v: unknown) => {
+          if (key === "useProtyleInput") {
+            this.aiSettings.useProtyleInput = !!v;
+            this.aiPanel?.remountInput?.();
+          } else if (key === "fontSize" || key === "inputFontSize") {
+            (this.aiSettings as unknown as Record<string, unknown>)[key] = v;
+            this.aiPanel?.applyAiFontSize?.();
+          } else if (key === "enabled") {
+            this.aiSettings.enabled = !!v;
+          }
+        },
+        testConnection: (cfg: AiSettings) => this.testAiConnection(cfg),
+        fetchModels: (baseUrl: string, apiKey: string) => this.fetchModelsFromApi(baseUrl, apiKey),
+        verifySoulDoc: async (id: string) => {
+          try {
+            const block = await getBlockKramdown(id);
+            return !!block;
+          } catch {
+            return false;
+          }
+        },
+      },
+    });
   }
 
   /** 独立 AI 设置入口（顶栏 cog / 命令 / whale 面板桥接）：薄壳包一层 Dialog，内容复用 renderAiSettingsInto */
   public openAiSettings() {
     const dialog = new Dialog({
       title: "AI 精读设置",
-      width: responsiveDialogSize(720, "width"),
-      height: "520px",
+      // 2026-09-07 用户拍板：800×700（原 720×520 偏挤，模型列表要展开两行控件）
+      width: responsiveDialogSize(800, "width"),
+      height: responsiveDialogSize(700, "height"),
       content: `<div class="hw-ai-settings-host"></div>`,
     });
     const host = dialog.element.querySelector(".hw-ai-settings-host") as HTMLElement;
     if (host) this.renderAiSettingsInto(host, () => dialog.destroy());
   }
 
-  /** 从 AI 设置对话框读取值（prefix 区分统一设置 vs 独立对话框的 ID） */
-  private readAiSettingsFromDlg(dlg: HTMLElement, prefix: string = "us-ai-"): AiSettings {
-    const q = (sel: string) => dlg.querySelector("#" + prefix + sel) as HTMLElement | null;
-    const inputVal = (sel: string) => (q(sel) as HTMLInputElement)?.value?.trim() || "";
-    const selectVal = (sel: string) => (q(sel) as HTMLSelectElement)?.value || "";
-    const checkboxVal = (sel: string) => !!(q(sel) as HTMLInputElement)?.checked;
-
-    // 模型列表：从 DOM 列表项读取
-    const modelListEl = dlg.querySelector("#" + prefix + "model-list") as HTMLElement | null;
-    const models: string[] = [];
-    if (modelListEl) {
-      modelListEl.querySelectorAll(".hiword-ai-model-item").forEach(item => {
-        const name = (item as HTMLElement).dataset.model?.trim();
-        if (name) models.push(name);
-      });
-    }
-
-    return {
-      enabled: checkboxVal("enabled"),
-      baseUrl: inputVal("baseurl") || DEFAULT_AI_SETTINGS.baseUrl,
-      apiKey: inputVal("apikey"),
-      // 2026-08-21 精简：删除 chatApi 字段保存(默认 openai-completion 唯一)
-      model: inputVal("model") || DEFAULT_AI_SETTINGS.model,
-      models: models.length ? models : [...DEFAULT_MODELS],
-      temperature: parseFloat(inputVal("temp")) || DEFAULT_AI_SETTINGS.temperature,
-      maxTokens: parseInt(inputVal("maxtok"), 10) || DEFAULT_AI_SETTINGS.maxTokens,
-      // 2026-08-21 精简：contextWindow/topP/frequencyPenalty/presencePenalty 已删除(自动推断或用默认)
-      // 2026-08-21 精简：timeoutSec/autoContinue/transportMode 已删除(用代码默认)
-      jsonMode: checkboxVal("json"),
-      promptTemplate: (q("prompt") as HTMLTextAreaElement)?.value || DEFAULT_AI_SETTINGS.promptTemplate,
-      // 显示与操作
-      fontSize: parseInt(inputVal("fontsize"), 10) || DEFAULT_AI_SETTINGS.fontSize,
-      inputFontSize: parseInt(inputVal("input-fontsize"), 10) || DEFAULT_AI_SETTINGS.inputFontSize,
-      // 2026-09-03 P0：AI 输入框模式（默认 contenteditable，Protyle 实验性）
-      useProtyleInput: checkboxVal("use-protyle-input"),
-      // 2026-08-21 精简：sendShortcut 已删除(用思源约定 Ctrl/⌘+Enter)
-      // 对话导出
-      exportNotebookId: selectVal("export-nb"),
-      exportSavePath: inputVal("export-path"),
-      // 记忆文档
-      soulDocId: inputVal("soul-id"),
-    } as AiSettings;
-  }
-
-  /** 设置测试消息 */
-  private setTestMsg(dlg: HTMLElement, text: string, cls: string): void {
-    const el = dlg.querySelector(".hiword-ai-test-msg") as HTMLElement;
-    if (el) { el.textContent = text; el.className = "hiword-ai-test-msg" + (cls ? " " + cls : ""); }
-  }
-
-  /** 显示模型选择浮层（从 API 获取的可用模型中选择添加） */
-  private showModelPickerOverlay(dlg: HTMLElement, available: string[], modelList: HTMLElement): void {
-    const picker = document.createElement("div");
-    picker.className = "hiword-ai-model-picker-overlay";
-    picker.innerHTML = `
-      <div class="hiword-ai-model-picker">
-        <div class="hiword-ai-picker-header">
-          <span>获取到 ${available.length} 个可用模型</span>
-          <button class="hiword-ai-picker-close">&times;</button>
-        </div>
-        <div class="hiword-ai-picker-search"><input placeholder="筛选模型..." value="" /></div>
-        <div class="hiword-ai-picker-actions">
-          <button class="hiword-ai-btn hiword-ai-btn--primary hiword-ai-btn--sm" data-act="select-all">全选</button>
-          <button class="hiword-ai-btn hiword-ai-btn--outline hiword-ai-btn--sm" data-act="deselect-all">取消全选</button>
-          <button class="hiword-ai-btn hiword-ai-btn--primary" data-act="confirm">添加选中 (0)</button>
-        </div>
-        <div class="hiword-ai-picker-list">
-          ${available.map(m => `
-            <label class="hiword-ai-picker-item" data-model="${this.escapeAttr(m)}">
-              <input type="checkbox" />
-              <span class="hiword-ai-picker-name">${this.escapeHtml(m)}</span>
-            </label>
-          `).join("")}
-        </div>
-      </div>`;
-    dlg.appendChild(picker);
-
-    const pickerList = picker.querySelector(".hiword-ai-picker-list") as HTMLElement;
-    const confirmBtn = picker.querySelector("[data-act='confirm']") as HTMLButtonElement;
-    const pickerSearch = picker.querySelector(".hiword-ai-picker-search input") as HTMLInputElement;
-
-    pickerSearch?.addEventListener("input", () => {
-      const q = pickerSearch.value.toLowerCase();
-      pickerList.querySelectorAll(".hiword-ai-picker-item").forEach(item => {
-        const name = ((item as HTMLElement).dataset.model || "").toLowerCase();
-        (item as HTMLElement).style.display = name.includes(q) ? "" : "none";
-      });
-    });
-    picker.querySelector("[data-act='select-all']")?.addEventListener("click", () => {
-      pickerList.querySelectorAll(".hiword-ai-picker-item").forEach(item => {
-        if ((item as HTMLElement).style.display !== "none") {
-          (item.querySelector("input") as HTMLInputElement).checked = true;
-          item.classList.add("checked");
-        }
-      });
-      updateConfirmText();
-    });
-    picker.querySelector("[data-act='deselect-all']")?.addEventListener("click", () => {
-      pickerList.querySelectorAll(".hiword-ai-picker-item").forEach(item => {
-        if ((item as HTMLElement).style.display !== "none") {
-          (item.querySelector("input") as HTMLInputElement).checked = false;
-          item.classList.remove("checked");
-        }
-      });
-      updateConfirmText();
-    });
-    pickerList.querySelectorAll(".hiword-ai-picker-item input").forEach(cb => {
-      cb.addEventListener("change", () => {
-        (cb as HTMLElement).closest(".hiword-ai-picker-item")?.classList.toggle("checked", (cb as HTMLInputElement).checked);
-        updateConfirmText();
-      });
-    });
-    const updateConfirmText = () => {
-      const checked = pickerList.querySelectorAll(".hiword-ai-picker-item input:checked").length;
-      confirmBtn.textContent = `添加选中 (${checked})`;
-    };
-    picker.querySelector(".hiword-ai-picker-close")?.addEventListener("click", () => picker.remove());
-    confirmBtn?.addEventListener("click", () => {
-      const toAdd: string[] = [];
-      pickerList.querySelectorAll(".hiword-ai-picker-item input:checked").forEach(cb => {
-        const item = (cb as HTMLElement).closest(".hiword-ai-picker-item") as HTMLElement;
-        const m = item.dataset.model || "";
-        if (m && !modelList.querySelector(`[data-model="${m}"]`)) toAdd.push(m);
-      });
-      toAdd.forEach(m => {
-        const div = document.createElement("div");
-        div.className = "hiword-ai-model-item";
-        div.dataset.model = m;
-        div.innerHTML = `<span class="hiword-ai-model-name">${this.escapeHtml(m)}</span><button class="hiword-ai-model-del" title="删除">&times;</button>`;
-        div.querySelector(".hiword-ai-model-del")?.addEventListener("click", () => div.remove());
-        modelList.appendChild(div);
-      });
-      this.setTestMsg(dlg, `已添加 ${toAdd.length} 个模型`, "ok");
-      picker.remove();
-    });
-  }
+  // 2026-09-06 第 1 批：readAiSettingsFromDlg 已删除（零调用点）。
+  //   它是 innerHTML 面板时代的产物：从 DOM 里 querySelector 出 14 个字段，
+  //   只产出 Partial 却曾伪装成完整 AiSettings —— 这正是 P0-1「每次保存都抹掉
+  //   20+ 个翻译引擎字段」的根因。面板改为 Svelte 组件后，值由组件直接以 patch
+  //   对象产出，本方法连同统一设置面板里那 104 行 #up-ai-* 绑定一起退场。
+  // 2026-09-06 第 1 批：setTestMsg / showModelPickerOverlay 已删除（均零调用点）。
+  //   两者服务于已退役的 innerHTML 面板：前者写 .hiword-ai-test-msg，
+  //   后者是「从 /models 拉取后弹出的模型多选浮层」。
+  //   浮层逻辑已迁进 Svelte 组件 AiModelList.svelte；状态文案改由
+  //   AiSettingRow 的 msg / msgKind prop 渲染。index.less 里对应的
+  //   .hiword-ai-model-picker-* / .hiword-ai-test-msg 样式保留（组件仍在复用前者）。
 
   /**
    * 渲染词典管理对话框内容
    */
+  /**
+   * 2026-09-07 查词典功能：词典管理「在线词典」分区（词海 corp.dict.cn）。
+   * 在线条目无需下载文件，开关即 onlineSettings.enabled（与统一设置「在线词典兜底」同一数据源）。
+   */
+  private renderOnlineDictSectionHtml(): string {
+    const on = this.onlineSettings?.enabled ?? true;
+    return `
+      <div class="hiword-dm-section hiword-dm-section--online">
+        <div class="hiword-dm-section-title">🌐 在线词典 (1)</div>
+        <div class="hiword-dm-list">
+          <div class="hiword-dm-row" data-id="haici-online">
+            <div class="hiword-dm-ico">🌐</div>
+            <div class="hiword-dm-info">
+              <span class="hiword-dm-name">词海</span>
+              <span class="hiword-dm-meta">在线 · 免费无需 Key（corp.dict.cn）· 无需下载文件</span>
+            </div>
+            <div class="hiword-dm-right">
+              <span class="hiword-dm-count ${on ? "is-loaded" : "is-unloaded"}">在线</span>
+              <label class="hiword-dm-toggle ${on ? "is-active" : ""}" title="点击启用/停用">
+                <input type="checkbox" data-action="toggle-online-dict" ${on ? "checked" : ""} />
+                <span>${on ? "已启用" : "未启用"}</span>
+              </label>
+            </div>
+          </div>
+        </div>
+      </div>`;
+  }
+
+  /** 绑定词海在线条目的开关（两处词典管理 UI 共用）；即时持久化并同步统一设置面板同名开关 */
+  private bindOnlineDictToggle(container: Element): void {
+    const cb = container.querySelector('input[data-action="toggle-online-dict"]') as HTMLInputElement | null;
+    cb?.addEventListener("change", async () => {
+      const enabled = cb.checked;
+      await this.saveOnlineSettings({
+        ...(this.onlineSettings || { ...DEFAULT_ONLINE }),
+        popupSource: this.onlineSettings?.popupSource ?? "offline",
+        enabled,
+      });
+      // 同步统一设置面板里的「在线词典兜底」开关（若同屏打开）
+      const up = document.querySelector("#up-online-enabled") as HTMLInputElement | null;
+      if (up) up.checked = enabled;
+      const toggle = cb.closest(".hiword-dm-toggle");
+      toggle?.classList.toggle("is-active", enabled);
+      const label = toggle?.querySelector("span");
+      if (label) label.textContent = enabled ? "已启用" : "未启用";
+      showMessage(enabled ? "已启用在线词典（词海）" : "已停用在线词典（词海）", 1600, "info" as any);
+    });
+  }
+
   private renderDictManagerContent(dialog: Dialog) {
     const container = dialog.element.querySelector("#hiword-dict-manager");
     if (!container) return;
@@ -9504,6 +8683,7 @@ export default class RewordPlugin extends Plugin {
       </div>
       ${renderGroup("英文词典", "🔤", enDicts)}
       ${renderGroup("中文词典", "🀄", zhDicts)}
+      ${this.renderOnlineDictSectionHtml()}
       ${this.lastDictError ? `
       <div class="hiword-dm-diag">
         <details open>
@@ -9544,6 +8724,8 @@ export default class RewordPlugin extends Plugin {
     const addMdxBtn = container.querySelector("#hiword-dm-add-mdx") as HTMLButtonElement;
     const mdxInput = container.querySelector("#hiword-dm-file-mdx") as HTMLInputElement;
     addMdxBtn?.addEventListener("click", () => mdxInput?.click());
+    // 2026-09-07：词海在线条目开关
+    this.bindOnlineDictToggle(container);
     mdxInput?.addEventListener("change", async () => {
       const file = mdxInput.files?.[0];
       if (file) await this.onDictFileChosen(file, dialog);
@@ -9978,6 +9160,9 @@ export default class RewordPlugin extends Plugin {
     try {
       document.getElementById("reword-global-selection")?.remove();
     } catch { /* 忽略：head 不存在时 */ }
+    // 2026-09-05：正常卸载即视为本次启动已善终，清掉启动标记（反向：卡死强杀时
+    // onunload 不会执行，标记得以保留，下次据此跳过阅读 Tab 自动恢复）。
+    clearLaunchMarker();
     // 逆序释放全部托管资源：全局监听 + eventBus 订阅 + 定时器
     this.disposables.dispose();
     // 各子模块独立持有的全局/文档级监听器
@@ -9993,7 +9178,6 @@ export default class RewordPlugin extends Plugin {
       });
     } catch (__swallowErr) { logSwallow(__swallowErr, "index.ts · onunload", "debug"); }
     this.aiPanel?.destroy();
-    this.copilotPanel?.destroy();
     // 阅读器：销毁挂载组件（触发 foliate-view close 释放 blob URL）
     try { this.readerDock?.dispose(); } catch (__swallowErr) { logSwallow(__swallowErr, "index.ts · onunload", "debug"); }
     // 彻底断开预览实例池与 IntersectionObserver（2026-08-18）
@@ -10005,12 +9189,13 @@ export default class RewordPlugin extends Plugin {
     dictEngine.dispose();
     void this.persistVocab.flush();
     void this.persistAnnotations.flush();
-    void this.persistConvo.flush();
     void this.persistVocabLabels.flush();
     void this.persistAnnotationLabels.flush();
     void this.persistAiPresets.flush();
     void this.persistAiPrompts.flush();
     void this.persistAiSessions.flush();
+    // 2026-09-04 P0-3：墨迹持久化层强制落盘（防抖中数据兜底）
+    void this.inkSaver?.flush();
     // 2026-09-02：日志已改为缓冲异步落盘，卸载时必须同步刷一次，
     // 否则最后 1 秒内的日志（含上面这几条「插件卸载」）会随渲染进程退出而丢失。
     try { getLogger().flushSync(); } catch { /* 落盘失败不阻断卸载 */ }
@@ -10044,6 +9229,35 @@ export default class RewordPlugin extends Plugin {
       meaning = parsed.plainText.slice(0, 80);
     }
     return { phonetic: parsed.phonetic, pos, meaning, senseCount, senses: allSenses, preferredDefinitions: [] };
+  }
+
+  /**
+   * 2026-09-07 查词典功能：收藏元数据双源化。
+   * 先走离线 lookupSmart（原逻辑）；离线查不到且开启在线兜底时，用海词结果映射出同等 meta，
+   * 让在线查到的词收藏后词库卡片/释义偏好/复习卡不再是空卡（复习链路消费存量文本，无需改动）。
+   */
+  private async extractWordMetaSmart(word: string): Promise<{
+    phonetic: string; pos: string; meaning: string;
+    senseCount?: number; labels?: string[];
+    senses: SenseItem[];
+    preferredDefinitions: string[];
+  }> {
+    const entry = dictEngine.lookupSmart(word);
+    if (entry || !this.onlineSettings?.enabled) return this.extractWordMeta(word);
+    const r = await fetchOnlineDict(word);
+    if (!r || (!r.phonetic && r.meanings.length === 0)) return this.extractWordMeta(word);
+    const senses: SenseItem[] = r.meanings
+      .filter((m) => (m.zh || "").trim())
+      .map((m, i) => ({ num: `${i + 1}.`, zh: m.zh.trim(), pos: m.pos || "" }));
+    const meaning = senses.map((s) => `${s.num ? s.num + " " : ""}${s.zh}`).join("　");
+    return {
+      phonetic: r.phonetic,
+      pos: senses.find((s) => s.pos)?.pos || "",
+      meaning,
+      senseCount: senses.length || undefined,
+      senses,
+      preferredDefinitions: [],
+    };
   }
 
   /** 2026-08-22 缓存最近一次查词结果,供查词卡片渲染时拿 preferredDefinitions / senses */
@@ -10237,7 +9451,8 @@ export default class RewordPlugin extends Plugin {
   private async toggleVocabStar(word: string, starEl?: HTMLElement | null, labels?: string[]): Promise<void> {
     const cleanWord = word.toLowerCase().trim();
     if (!cleanWord || !this.isReady) return;
-    const meta = this.extractWordMeta(cleanWord);
+    // 2026-09-07 双源化：离线查不到时用海词在线结果补全 meta（在线收藏不再是空卡）
+    const meta = await this.extractWordMetaSmart(cleanWord);
     if (labels?.length) meta.labels = labels;
 
     // 已在词库 → 移出
@@ -12420,7 +11635,9 @@ export default class RewordPlugin extends Plugin {
       this.ensureAnnotationObserver();
       const t = setTimeout(() => this.applyAnnotationBlockMarks(), 280);
       this.disposables.addTimer(t);
-      // 2026-08-22 词库高亮:切文档时重启 highlighter(绑到新 protyle DOM)+ 立即全扫
+      // 2026-09-04 文档内自动高亮词库单词功能整体下线
+      // 切文档时不再重启 vocabHighlighter（无消费者），对应 setTimeout 整体 no-op
+      /*
       const t2 = setTimeout(() => {
         const wysiwyg = document.querySelector(".protyle-wysiwyg") as HTMLElement | null;
         if (wysiwyg) {
@@ -12431,6 +11648,7 @@ export default class RewordPlugin extends Plugin {
         }
       }, 360);
       this.disposables.addTimer(t2);
+      */
     }
   };
 
@@ -12453,6 +11671,59 @@ export default class RewordPlugin extends Plugin {
       });
     } catch (err) {
       getLogger().warn("[REword] 右键菜单注入失败:", { error: err });
+    }
+  };
+
+  /**
+   * P2-D：文档树右键菜单（open-menu-doctree）注入「AI 精读此文档」入口。
+   * 仅当右键对象是文档（type=doc / docs）时追加；doc id 取自 detail.items[0].id
+   * （官方事件契约，2024+ 版本均携带 items 数组）。
+   */
+  private onOpenDocTreeMenu = (e: CustomEvent): void => {
+    try {
+      const detail = (e as any)?.detail;
+      const type = detail?.type;
+      if (type !== "doc" && type !== "docs") return; // 笔记本/多选中非文档节点不注入
+      const menu = detail?.menu;
+      if (!menu || typeof menu.addItem !== "function") return;
+      const docId =
+        detail?.items?.[0]?.id ||
+        detail?.elements?.[0]?.dataset?.nodeId ||
+        "";
+      if (!docId) return;
+      menu.addItem({
+        icon: "iconREword",
+        label: "📖 AI 精读此文档（REword）",
+        click: () => { void this.sendDocToAi(docId); },
+      });
+    } catch (err) {
+      getLogger().warn("[REword] 文档树菜单注入失败:", { error: err });
+    }
+  };
+
+  /**
+   * P2-D：页签右键菜单（open-menu-filetab）注入「AI 精读此文档」入口。
+   * doc id 取自 detail.protyle 当前编辑块的根文档 ID；非编辑器页签（PDF/挂件等）
+   * protyle 为空 → docId 取不到 → 不注入，安全跳过。
+   */
+  private onOpenFileTabMenu = (e: CustomEvent): void => {
+    try {
+      const detail = (e as any)?.detail;
+      const menu = detail?.menu;
+      if (!menu || typeof menu.addItem !== "function") return;
+      const protyle = detail?.protyle;
+      const docId =
+        protyle?.protyle?.block?.rootID ||
+        protyle?.block?.rootID ||
+        "";
+      if (!docId) return;
+      menu.addItem({
+        icon: "iconREword",
+        label: "📖 AI 精读此文档（REword）",
+        click: () => { void this.sendDocToAi(docId); },
+      });
+    } catch (err) {
+      getLogger().warn("[REword] 页签菜单注入失败:", { error: err });
     }
   };
 

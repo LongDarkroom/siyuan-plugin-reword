@@ -1,9 +1,11 @@
 /**
- * 在线音标兜底（P4 · 2026-08-14 新增）
+ * 在线音标兜底（P4 · 2026-08-14 新增，2026-09-07 切换至海词）
  * ------------------------------------------------------------------
  * 离线音标覆盖（NCECD <pron> + CMU phon_extra.json）达 76-78%，短语/生僻词缺口
- * 纯离线不可补。这里提供「欧路词典网页」在线兜底：
- *   GET https://dict.eudic.net/dicts/en/{word} → 解析英/美音标
+ * 纯离线不可补。这里提供「海词词典网页」在线兜底：
+ *   GET https://corp.dict.cn/search?q={word} → 解析英/美音标
+ *
+ * 2026-09-07 数据源从欧路切换至海词：与 online-dict.ts 共享同一个数据源（一致性好）
  *
  * 设计（用户选定的最小版）：
  *  - 内存 Map 缓存（2.4：含正/负 TTL，负缓存 30s 后可重试，避免一次网络抖动锁死整次会话）
@@ -20,9 +22,9 @@ export type PhoneticTransport = (url: string) => Promise<{ status: number; body:
 import { forwardProxyRaw } from "../siyuan/api.ts";
 import { getLogger } from "../core/logger.ts";
 
-/** 欧路词典页面 URL */
+/** 欧路词典页面 URL（2026-09-07 切换：现指向海词，与 online-dict.ts 保持单一数据源） */
 function eudicUrl(word: string): string {
-  return `https://dict.eudic.net/dicts/en/${encodeURIComponent(word)}`;
+  return `https://corp.dict.cn/search?q=${encodeURIComponent(word)}`;
 }
 
 // ============ 内存缓存与并发去重 ============
@@ -122,20 +124,23 @@ async function doFetch(word: string, transport: PhoneticTransport): Promise<stri
 }
 
 /**
- * 解析欧路词典网页 HTML，提取美/英双音标。
- * 页面结构（已验证）：
- *   <span class="phontype">英</span><span class="Phonitic">/hə'ləʊ/</span>
- *   <span class="phontype">美</span><span class="Phonitic">/hə'loʊ/</span>
+ * 解析海词词典网页 HTML，提取英/美双音标。
+ * 页面结构（2026-09-07 验证 borrow）：
+ *   <span>英 <bdo lang="EN-US">['bɒrəʊ]</bdo></span>
+ *   <span>美 <bdo lang="EN-US">['bɑːroʊ]</bdo></span>
+ * 与欧路格式（/.../）不同：海词用 ['xxx'] 方括号+单引号包裹 IPA。
  * 返回格式化字符串「英式 /x/ 美式 /y/」；无音标返回 null。纯函数。
  */
 export function parseEudicHtml(html: string): string | null {
   if (!html) return null;
-  const re = /<span class="phontype">(英|美)<\/span><span class="Phonitic">\/([^/]+)\//g;
+  // 词海格式：方括号 + 单引号 + IPA（内部可能含撇号）+ 闭合方括号
+  // 关键：捕获组 [^]]+ 允许内部撇号（hə'ləʊ 否则会被截断成 hə）
+  const re = /<span>\s*([英美])\s*<bdo[^>]*>\['([^\]]+)[']?\]<\/bdo>/g;
   let uk = "";
   let us = "";
   let m: RegExpExecArray | null;
   while ((m = re.exec(html))) {
-    const ph = m[2].trim().replace(/\s+/g, "");
+    const ph = m[2].trim();
     if (!ph) continue;
     if (m[1] === "英" && !uk) uk = ph;
     else if (m[1] === "美" && !us) us = ph;

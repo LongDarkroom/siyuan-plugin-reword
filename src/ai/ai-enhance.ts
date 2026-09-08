@@ -85,6 +85,59 @@ export function ensureHljs(): Promise<boolean> {
   return hljsLoading;
 }
 
+/**
+ * P2-C 代码块工具条：为每个 <pre> 顶部叠加「语言标签 + 复制按钮」。
+ * 幂等（data-cb-toolbar 标记），可安全重复调用；复制走 navigator.clipboard，
+ * 失败时回退到 execCommand 兼容老环境。样式在 index.less 的 .hiword-ai-code-toolbar。
+ */
+function escapeHtmlAttr(s: string): string {
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+}
+export function applyCodeToolbars(container: HTMLElement): void {
+  container.querySelectorAll("pre:not([data-cb-toolbar])").forEach((pre: any) => {
+    const code = pre.querySelector("code");
+    if (!code) return;
+    pre.setAttribute("data-cb-toolbar", "true");
+    const langMatch = (code.getAttribute("data-language") || code.className || "").match(/language-([\w-]+)/);
+    const lang = langMatch?.[1] || (code.getAttribute("data-language") || "");
+    const bar = document.createElement("div");
+    bar.className = "hiword-ai-code-toolbar";
+    bar.innerHTML =
+      `<span class="hiword-ai-code-lang">${escapeHtmlAttr(lang || "code")}</span>` +
+      `<button type="button" class="hiword-ai-code-copy" data-act="copy">复制</button>`;
+    const copyBtn = bar.querySelector("[data-act='copy']") as HTMLButtonElement;
+    copyBtn.addEventListener("click", (ev) => {
+      ev.stopPropagation();
+      const text = code.textContent || "";
+      const done = (ok: boolean) => {
+        copyBtn.textContent = ok ? "已复制" : "复制失败";
+        setTimeout(() => (copyBtn.textContent = "复制"), 1500);
+      };
+      if (navigator.clipboard?.writeText) {
+        navigator.clipboard.writeText(text).then(() => done(true), () => fallbackCopy(text, done));
+      } else {
+        fallbackCopy(text, done);
+      }
+    });
+    pre.insertBefore(bar, pre.firstChild);
+  });
+}
+function fallbackCopy(text: string, done: (ok: boolean) => void): void {
+  try {
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.style.position = "fixed";
+    ta.style.opacity = "0";
+    document.body.appendChild(ta);
+    ta.select();
+    const ok = document.execCommand("copy");
+    ta.remove();
+    done(ok);
+  } catch {
+    done(false);
+  }
+}
+
 /** 渲染容器内所有数学公式（行内 / 块级 / 兼容旧 data-subtype 格式） */
 export function applyMath(element: HTMLElement): void {
   const katex = (window as any).katex;
@@ -145,6 +198,7 @@ export function enhanceSiYuanRender(container: HTMLElement): void {
     if (!container.isConnected) return; // 元素已被移除（如流式替换），跳过避免无效工作
     applyMath(container);
     applyCode(container);
+    applyCodeToolbars(container);
     ensureKatex().then((ok) => {
       if (ok && container.isConnected) applyMath(container);
     });

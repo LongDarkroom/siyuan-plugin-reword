@@ -8,7 +8,7 @@
  * 纯函数 + 单测友好：不依赖任何运行时 API（token 估算复用 ai-client 的 estimateTokens）。
  */
 
-import { estimateTokens } from "../copilot/ai/ai-client.ts";
+import { estimateTokens } from "./ai-client.ts";
 
 /** 单条对话（与 ai-panel.chatHistory 同构：仅 user/assistant） */
 export interface ChatTurn {

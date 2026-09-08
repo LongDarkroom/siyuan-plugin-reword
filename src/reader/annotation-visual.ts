@@ -84,6 +84,23 @@ export function eraseOverlayKey(view: any, cfi: string): number {
   return removed;
 }
 
+/**
+ * R3 刷新单通道：补绘判定（纯函数，可单测）。
+ * 给定活跃批注集合与「该 cfi 是否已绘制」探测函数，返回其中未绘制的条目子集。
+ * 探测端应使用 cfiMatch 宽松匹配（与 onShowAnnotation 一致），
+ * 这里不做归一化——匹配语义完全由 hasKey 决定，保持本函数纯粹。
+ */
+export function missingDrawItems<T extends { cfi?: string }>(items: readonly T[], hasKey: (cfi: string) => boolean): T[] {
+  const out: T[] = [];
+  for (const it of items) {
+    if (!it.cfi) continue;
+    let drawn = false;
+    try { drawn = !!hasKey(it.cfi); } catch { drawn = false; }
+    if (!drawn) out.push(it);
+  }
+  return out;
+}
+
 interface BookAnnotationsLike {
   getByBook(bookId: string): Array<{ cfi?: string; deletedAt?: string }>;
 }

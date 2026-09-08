@@ -9,28 +9,11 @@
   import { DEFAULT_TRANSLATE_PROMPT, DEFAULT_TRANSLATE_PROMPT_NATURAL } from "../ai/ai-settings";
   import RWSelect from "../ui/controls/RWSelect.svelte";
   import RWSwitch from "../ui/controls/RWSwitch.svelte";
+  // 2026-09-05 设置统一：语言选项与预翻译弹窗同源（共享常量）；确认弹窗走项目统一组件
+  import { SOURCE_LANG_OPTIONS, TARGET_LANG_OPTIONS } from "./bilingual-langs";
+  import { confirmDelete } from "../annotation/whale-confirm";
 
-  // L1 控件工厂样板：语言下拉选项（原 bset-select 内联 <option> 提取为数据）
-  const SOURCE_LANG_OPTIONS = [
-    { value: "en", label: "英语（默认）" },
-    { value: "auto", label: "自动检测" },
-    { value: "ja", label: "日语" },
-    { value: "fr", label: "法语" },
-    { value: "de", label: "德语" },
-    { value: "ko", label: "韩语" },
-    { value: "ru", label: "俄语" },
-  ];
-  const TARGET_LANG_OPTIONS = [
-    { value: "zh", label: "中文（简体）" },
-    { value: "zh-Hant", label: "中文（繁体）" },
-    { value: "en", label: "英语" },
-    { value: "ja", label: "日语" },
-    { value: "ko", label: "韩语" },
-    { value: "fr", label: "法语" },
-    { value: "de", label: "德语" },
-    { value: "es", label: "西班牙语" },
-    { value: "ru", label: "俄语" },
-  ];
+  // L1 控件工厂样板：语言下拉选项已抽到 bilingual-langs.ts（与 ReaderView 预翻译弹窗共用）
 
   export let settingsStore: any; // ReaderSettingsStore（含 get/update/subscribe）
   export let getAiSettings: () => any;
@@ -204,6 +187,10 @@
   let cacheLoaded = false;
   let cacheSearch = "";
   let cacheSort: "count" | "title" | "recent" = "count";
+  /** RWSelect 回调（Svelte 模板禁 as 断言，类型收窄放这里） */
+  function setCacheSort(v: string) {
+    if (v === "count" || v === "title" || v === "recent") cacheSort = v;
+  }
   // 段数总计（顶部摘要）
   $: totalSegments = books.reduce((n, b) => n + (b.count || 0), 0);
   // 搜索：书名 + bookId 均可命中
@@ -267,7 +254,9 @@
     const b = books.find((x) => x.bookId === bid);
     const label = b?.title || `ID ${bid}`;
     const n = b?.count || 0;
-    if (!confirm(`确定删除「${label}」的翻译缓存？\n共 ${n} 段，删除后再次翻译会重新消耗额度。`)) return;
+    // 2026-09-05：原生 confirm() → 项目统一确认弹窗（与批注/AI 面板同风格）
+    const ok = await confirmDelete(`删除「${label}」的翻译缓存？\n共 ${n} 段，删除后再次翻译会重新消耗额度。`);
+    if (!ok) return;
     await clearTranslationCache(bid);
     cacheMsg = `已删除「${label}」的缓存（${n} 段）`;
     await loadCache();
@@ -280,7 +269,8 @@
     await loadCache();
   }
   async function clearAllCache() {
-    if (!confirm(`确定清空全部 ${books.length} 本书的翻译缓存（共 ${totalSegments} 段）？\n此操作不可撤销。`)) return;
+    const ok = await confirmDelete(`清空全部 ${books.length} 本书的翻译缓存（共 ${totalSegments} 段）？\n此操作不可撤销。`);
+    if (!ok) return;
     for (const b of books) {
       try {
         await clearTranslationCache(b.bookId);
@@ -352,13 +342,15 @@
     newGlossSrc = ""; newGlossDst = ""; newGlossCase = false;
     persistGlossary();
   }
-  function removeGlossTerm(i: number) {
-    if (!confirm("删除该术语？")) return;
+  async function removeGlossTerm(i: number) {
+    const ok = await confirmDelete("删除该术语？");
+    if (!ok) return;
     glossary = glossary.filter((_, idx) => idx !== i);
     persistGlossary();
   }
-  function clearGlossary() {
-    if (!confirm("清空全部术语表？此操作不可撤销。")) return;
+  async function clearGlossary() {
+    const ok = await confirmDelete("清空全部术语表？此操作不可撤销。");
+    if (!ok) return;
     glossary = [];
     persistGlossary();
   }
@@ -386,7 +378,6 @@
       bilingualStyle: v,
       translatePrompt: v === "natural" ? DEFAULT_TRANSLATE_PROMPT_NATURAL : DEFAULT_TRANSLATE_PROMPT,
     });
-    glossMsg = "";
   }
 
   // ----- 显示与界面（新增子页） -----
@@ -435,7 +426,7 @@
       <div class="bset-seg">
         <button
           class="bset-seg-btn"
-          class:active={$settingsStore.bilingualDefaultMode !== "whole-book" && $settingsStore.bilingualDefaultMode !== "progressive"}
+          class:active={($settingsStore.bilingualDefaultMode || "ask") === "ask"}
           on:click={() => patchSettings({ bilingualDefaultMode: "ask" })}>询问我</button>
         <button
           class="bset-seg-btn"
@@ -471,17 +462,7 @@
           </div>
           <div class="bset-row">
             <span class="bset-label">目标语言</span>
-            <select class="bset-select" value={$settingsStore.bilingualTarget || "zh"} on:change={(e) => patchSettings({ bilingualTarget: e.target.value })}>
-              <option value="zh">中文（简体）</option>
-              <option value="zh-Hant">中文（繁体）</option>
-              <option value="en">英语</option>
-              <option value="ja">日语</option>
-              <option value="ko">韩语</option>
-              <option value="fr">法语</option>
-              <option value="de">德语</option>
-              <option value="es">西班牙语</option>
-              <option value="ru">俄语</option>
-            </select>
+            <RWSelect options={TARGET_LANG_OPTIONS} value={$settingsStore.bilingualTarget || "zh"} onChange={(v) => patchSettings({ bilingualTarget: v })} />
           </div>
           <div class="bset-row">
             <span class="bset-label" title="翻译时跳过已缓存段落，避免重复消耗">跳过已缓存</span>
@@ -489,18 +470,12 @@
           </div>
           <div class="bset-row">
             <span class="bset-label" title="边译边显示译文；关闭则纯后台缓存">实时预览译文</span>
-            <label class="bset-switch"><input type="checkbox" checked={$settingsStore.bilingualRealtimePreview !== false} on:change={(e) => patchSettings({ bilingualRealtimePreview: e.target.checked })} /><span class="bset-track"></span></label>
+            <RWSwitch checked={$settingsStore.bilingualRealtimePreview !== false} onChange={(c) => patchSettings({ bilingualRealtimePreview: c })} />
           </div>
-          <div class="bset-grid2">
-            <div class="bset-row">
-              <span class="bset-label">每批段数</span>
-              <input class="bset-input" type="number" min="1" max="30" step="1" bind:value={localAi.trBatchSize} on:change={() => saveAi({ trBatchSize: parseInt(localAi.trBatchSize) || 8 })} />
-            </div>
-            <div class="bset-row">
-              <span class="bset-label">并发请求数</span>
-              <input class="bset-input" type="number" min="1" max="8" step="1" bind:value={localAi.trConcurrency} on:change={() => saveAi({ trConcurrency: parseInt(localAi.trConcurrency) || 2 })} />
-            </div>
-          </div>
+          <p class="bset-desc" style="margin-top:10px">
+            整书预翻译的节奏（并发列数 / 每列块数）在阅读器内点击「整书预翻译」弹窗中按次选择；
+            AI 兜底的批处理参数在「引擎设置 → AI 翻译」卡片中调整。
+          </p>
         </div>
       {/if}
 
@@ -509,29 +484,28 @@
         <div class="bset-card">
           <div class="bset-card-title">渐进式翻译</div>
           <p class="bset-desc">
-            只翻译「当前页 + 后续 N 页」窗口内的段落并缓存，随阅读进度自动向前补译。
+            只翻译「当前分节 + 后续 N 分节」窗口内的段落并缓存，随阅读进度自动向前补译。
             轻量、即时，适合只想边读边看译文、不想整本烧 Token 的场景。
           </p>
           <div class="bset-row">
-            <span class="bset-label" title="当前页之后额外预译并缓存的「页」数（默认 2）">窗口页数</span>
+            <span class="bset-label" title="当前分节之后额外预译并注入的分节数（默认 2）；渐进取段与注入闸门共用此值">预取分节数</span>
             <div class="bset-stepper">
               <button class="bset-mini" on:click={() => patchSettings({ bilingualPrefetchPages: Math.max(0, ($settingsStore.bilingualPrefetchPages ?? 2) - 1) })}>-</button>
-              <span class="bset-value">{$settingsStore.bilingualPrefetchPages ?? 2} 页</span>
-              <button class="bset-mini" on:click={() => patchSettings({ bilingualPrefetchPages: ($settingsStore.bilingualPrefetchPages ?? 2) + 1 })}>+</button>
+              <span class="bset-value">{$settingsStore.bilingualPrefetchPages ?? 2} 分节</span>
+              <button class="bset-mini" on:click={() => patchSettings({ bilingualPrefetchPages: Math.min(4, ($settingsStore.bilingualPrefetchPages ?? 2) + 1) })}>+</button>
             </div>
           </div>
           <div class="bset-row">
             <span class="bset-label" title="翻页时自动补译当前窗口">翻页自动补译</span>
-            <label class="bset-switch"><input type="checkbox" checked={$settingsStore.bilingualProgressiveAuto !== false} on:change={(e) => patchSettings({ bilingualProgressiveAuto: e.target.checked })} /><span class="bset-track"></span></label>
+            <RWSwitch checked={$settingsStore.bilingualProgressiveAuto !== false} onChange={(c) => patchSettings({ bilingualProgressiveAuto: c })} />
           </div>
           <div class="bset-row">
             <span class="bset-label">跳过已缓存</span>
-            <label class="bset-switch"><input type="checkbox" checked={$settingsStore.bilingualSkipCached !== false} on:change={(e) => patchSettings({ bilingualSkipCached: e.target.checked })} /><span class="bset-track"></span></label>
+            <RWSwitch checked={$settingsStore.bilingualSkipCached !== false} onChange={(c) => patchSettings({ bilingualSkipCached: c })} />
           </div>
           <div class="bset-row">
-            <span class="bset-label" title="达到用量上限即停止预取，避免超额">用量告警阈值</span>
-            <input class="bset-range" type="range" min="0.5" max="1" step="0.05" value={$settingsStore.bilingualAlertRatio ?? 0.8} on:change={(e) => patchSettings({ bilingualAlertRatio: parseFloat(e.target.value) })} />
-            <span class="bset-value">{Math.round(($settingsStore.bilingualAlertRatio ?? 0.8) * 100)}%</span>
+            <span class="bset-label" title="翻译失败的段落按 5s→30s 退避最多重试 2 次；关闭后等下一轮翻页窗口自然重试">失败自动重试</span>
+            <RWSwitch checked={$settingsStore.bilingualRetry !== false} onChange={(c) => patchSettings({ bilingualRetry: c })} />
           </div>
         </div>
       {/if}
@@ -576,6 +550,17 @@
                   <div class="bset-row">
                     <span class="bset-label">最大 Token</span>
                     <input class="bset-input" type="number" min="16" max="32768" step="16" bind:value={localAi.maxTokens} on:change={() => saveAi({ maxTokens: parseInt(localAi.maxTokens) || 2048 })} />
+                  </div>
+                </div>
+                <!-- 2026-09-05 F2：AI 兜底批处理参数从「整书预翻译」迁来（它只影响 AI 引擎的批次合并，与预翻译节奏无关） -->
+                <div class="bset-grid2">
+                  <div class="bset-row">
+                    <span class="bset-label" title="AI 兜底请求合并的段数上限（只影响 AI 引擎，不控制整书预翻译节奏）">AI 每批段数</span>
+                    <input class="bset-input" type="number" min="1" max="30" step="1" bind:value={localAi.trBatchSize} on:change={() => saveAi({ trBatchSize: parseInt(localAi.trBatchSize) || 8 })} />
+                  </div>
+                  <div class="bset-row">
+                    <span class="bset-label" title="AI 兜底同时发出的请求数">AI 并发请求数</span>
+                    <input class="bset-input" type="number" min="1" max="8" step="1" bind:value={localAi.trConcurrency} on:change={() => saveAi({ trConcurrency: parseInt(localAi.trConcurrency) || 2 })} />
                   </div>
                 </div>
                 <div class="bset-row bset-row-col">
@@ -643,21 +628,21 @@
         <div class="bset-card">
           <div class="bset-card-title">翻译缓存管理</div>
           <p class="bset-desc">译文按书缓存于本地（JSON + 可选思源 SQLite）。删除缓存后再次翻译会重新消耗额度。</p>
-          <!-- 译文归档：一键关闭并清理 -->
-          <div style="margin:14px 0;padding:12px 14px;border:1px solid var(--b3-theme-surface-lighter,#e5e5e5);border-radius:8px;background:var(--b3-theme-background,#fafafa);">
-            <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:6px;">
-              <span style="font-weight:600;font-size:13px;">译文归档（思源 SQLite）</span>
+          <!-- 译文归档：一键关闭并清理（2026-09-05 样式收进 <style>，色值全部走 --b3 变量） -->
+          <div class="bset-archive">
+            <div class="bset-archive-head">
+              <span class="bset-archive-title">译文归档（思源 SQLite）</span>
               {#if $settingsStore.translationArchiveEnabled}
-                <span style="font-size:12px;color:#d97706;background:rgba(217,119,6,.12);padding:2px 8px;border-radius:999px;">已开启</span>
+                <span class="bset-archive-badge on">已开启</span>
               {:else}
-                <span style="font-size:12px;color:#16a34a;background:rgba(22,163,74,.12);padding:2px 8px;border-radius:999px;">已关闭</span>
+                <span class="bset-archive-badge off">已关闭</span>
               {/if}
             </div>
             <p class="bset-desc">开启后译文会额外写入思源文档「REword 译文归档」，可被搜索 / SQL 查询 / 同步；关闭后仅保留本地 JSON 缓存，书籍译文不受影响。</p>
             {#if $settingsStore.translationArchiveEnabled || $settingsStore.translationArchiveDocId}
               <button class="bset-btn bset-btn-danger" on:click={cleanArchive}>关闭并清理归档文档</button>
             {:else}
-              <span style="font-size:12px;color:var(--b3-theme-on-surface,#999);">归档已关闭，无需清理</span>
+              <span class="bset-archive-hint">归档已关闭，无需清理</span>
             {/if}
           </div>
 
@@ -668,12 +653,16 @@
             <button class="bset-mini" on:click={loadCache}>刷新</button>
           </div>
           <div class="bset-cache-tools">
-            <input class="bset-input" type="text" placeholder="🔍 搜索书名 / bookId" bind:value={cacheSearch} />
-            <select class="bset-input bset-select" bind:value={cacheSort}>
-              <option value="count">按段数（多→少）</option>
-              <option value="title">按书名</option>
-              <option value="recent">按最近缓存</option>
-            </select>
+            <input class="bset-input" type="text" placeholder="搜索书名 / bookId" bind:value={cacheSearch} />
+            <RWSelect
+              options={[
+                { value: "count", label: "按段数（多→少）" },
+                { value: "title", label: "按书名" },
+                { value: "recent", label: "按最近缓存" },
+              ]}
+              value={cacheSort}
+              onChange={setCacheSort}
+            />
             <button class="bset-btn" on:click={cleanOrphan}>清理无效缓存</button>
             <button class="bset-btn bset-btn-danger" on:click={clearAllCache}>清空全部</button>
           </div>
@@ -976,4 +965,16 @@
     font-size: 12px; line-height: 1.6; white-space: pre-wrap; word-break: break-word;
     max-height: 200px; overflow-y: auto; width: 100%;
   }
+  /* 2026-09-05：译文归档块样式收进 <style>（原为整段 inline style，硬编码色值在暗色主题下失控） */
+  .bset-archive {
+    margin: 14px 0; padding: 12px 14px; border-radius: 8px;
+    border: 1px solid var(--b3-theme-surface-lighter, var(--b3-border-color, #e5e5e5));
+    background: var(--b3-theme-background, #fafafa);
+  }
+  .bset-archive-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 6px; }
+  .bset-archive-title { font-weight: 600; font-size: 13px; }
+  .bset-archive-badge { font-size: 12px; padding: 2px 8px; border-radius: 999px; border: 1px solid currentColor; }
+  .bset-archive-badge.on { color: var(--b3-theme-warning, #e8a33d); }
+  .bset-archive-badge.off { color: var(--b3-theme-success, #4caf72); }
+  .bset-archive-hint { font-size: 12px; color: var(--b3-theme-on-surface, #999); }
 </style>

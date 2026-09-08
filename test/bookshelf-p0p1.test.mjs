@@ -24,7 +24,11 @@ import { dirname, join } from "node:path";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
-const storeSrc = readFileSync(join(__dirname, "..", "src", "reader", "bookshelf-store.ts"), "utf-8");
+const typesSrc = readFileSync(join(__dirname, "..", "src", "reader", "library", "library-types.ts"), "utf-8");
+const persistSrc = readFileSync(join(__dirname, "..", "src", "reader", "library", "library-persist.ts"), "utf-8");
+// R2 重构：类型与常量已抽取到 library/ 层，这里合并三处源码供正则断言（保持测试语义不变）
+const storeSrc = readFileSync(join(__dirname, "..", "src", "reader", "bookshelf-store.ts"), "utf-8")
+  + "\n" + typesSrc + "\n" + persistSrc;
 const viewSrc = readFileSync(join(__dirname, "..", "src", "reader", "BookshelfView.svelte"), "utf-8");
 
 /* ================= 数据层：类型 ================= */
@@ -73,11 +77,13 @@ test("[兼容] 分组走独立索引文件，书架索引仍是纯数组", () =>
   const grp = storeSrc.match(/const GROUPS_KEY\s*=\s*"([^"]+)"/);
   assert.ok(idx && grp, "两个 key 都应存在");
   assert.notEqual(idx[1], grp[1], "两个索引文件名不能相同");
-  // 书架索引读取仍用 Array.isArray 判定（说明格式未变）
-  assert.ok(/loadData\(INDEX_KEY\)/.test(storeSrc), "应仍从 INDEX_KEY 读书架");
-  assert.ok(/Array\.isArray\(data\)\s*\)\s*this\.books = data/.test(storeSrc), "书架索引应仍按数组解析");
-  assert.ok(/loadData\(GROUPS_KEY\)/.test(storeSrc), "应从 GROUPS_KEY 读分组");
-  assert.ok(/saveData\(GROUPS_KEY/.test(storeSrc), "应持久化分组到 GROUPS_KEY");
+  // R2 重构：书架/分组索引改为委托 library-persist（loadLibraryIndex/saveLibraryIndex），
+  // 仍以 INDEX_KEY / GROUPS_KEY 为键，数组格式不变（解析在 library-persist 内做 Array.isArray 校验）
+  assert.ok(/loadLibraryIndex<BookMeta>\([^)]*INDEX_KEY/.test(storeSrc), "应仍从 INDEX_KEY 读书架（委托 loadLibraryIndex）");
+  assert.ok(/loadLibraryIndex<BookGroup>\([^)]*GROUPS_KEY/.test(storeSrc), "应从 GROUPS_KEY 读分组（委托 loadLibraryIndex）");
+  assert.ok(/saveLibraryIndex<BookMeta>\([^)]*INDEX_KEY/.test(storeSrc), "应持久化书架到 INDEX_KEY（委托 saveLibraryIndex）");
+  assert.ok(/saveLibraryIndex<BookGroup>\([^)]*GROUPS_KEY/.test(storeSrc), "应持久化分组到 GROUPS_KEY（委托 saveLibraryIndex）");
+  assert.ok(/Array\.isArray/.test(storeSrc), "书架索引解析仍按数组（library-persist 内 Array.isArray 校验）");
 });
 
 /* ================= 数据层：query ================= */

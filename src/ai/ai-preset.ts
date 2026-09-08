@@ -122,6 +122,24 @@ export class AiPresetStore {
     }
   }
 
+  /**
+   * 2026-09-07 T7：拖拽排序——把 id 移到「第 targetItemIndex 个项目现在所处的位置」。
+   * 调用方保证 index 在列表当前顺序内（面板在搜索过滤态禁用拖拽，
+   * 所以这里拿到的 index 一定对应 store 真实顺序，不需要做过滤映射）。
+   * 经典偏移修正：先摘除源项，若源在目标之前，目标会左移一位 → 插入点减一，
+   * 从上往下拖时落点正好是目标项原位置；从下往上拖不受影响。
+   */
+  async moveTo(id: string, targetItemIndex: number): Promise<boolean> {
+    const from = this.data.presets.findIndex((p) => p.id === id);
+    if (from < 0) return false;
+    let target = Math.max(0, Math.min(this.data.presets.length - 1, Math.round(targetItemIndex)));
+    if (from < target) target -= 1;
+    const [item] = this.data.presets.splice(from, 1);
+    this.data.presets.splice(target, 0, item);
+    await this.persist();
+    return true;
+  }
+
   async remove(id: string): Promise<boolean> {
     const idx = this.data.presets.findIndex((p) => p.id === id);
     if (idx < 0) return false;

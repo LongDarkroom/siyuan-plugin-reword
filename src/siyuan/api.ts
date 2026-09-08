@@ -17,7 +17,19 @@
  * API 文档见 [API_zh_CN.md](https://github.com/siyuan-note/siyuan/blob/master/API_zh_CN.md)
  */
 
-import { fetchPost, fetchSyncPost, IWebSocketData, openTab, Constants, platformUtils, openMobileFileById } from "siyuan";
+import { fetchPost, fetchSyncPost, IWebSocketData, openTab, platformUtils, openMobileFileById } from "siyuan";
+
+/**
+ * 思源运行时常量表。
+ *
+ * 不写 `import { Constants } from "siyuan"`：siyuan 类型包（1.2.6）的 siyuan.d.ts
+ * 并未导出 Constants，tsc 会报 TS2305，把整个 `npm run check` 卡死在这一行。
+ * 与 src/ai/drag-block-ids.ts 同法——从运行时 `window.siyuan.Constants` 读，
+ * 该对象由内核在启动后注入，读它还能在内核下次改名时自动跟上。
+ */
+function siyuanConstants(): Record<string, any> {
+  return ((globalThis as any)?.siyuan?.Constants ?? {}) as Record<string, any>;
+}
 import { getLogger } from "../core/logger.ts";
 import { isMobile } from "../core/env.ts";
 
@@ -58,18 +70,20 @@ export interface Notebook {
 
 // **************************************** Riff (闪卡) ****************************************
 
-export async function addRiffCards(blockIDs: string[], deckID: string = Constants.QUICK_DECK_ID): Promise<any> {
+export async function addRiffCards(blockIDs: string[], deckID?: string): Promise<any> {
+    const deck = deckID ?? siyuanConstants().QUICK_DECK_ID;
     let data = {
-        deckID: deckID,
+        deckID: deck,
         blockIDs: blockIDs
     };
     let url = '/api/riff/addRiffCards';
     return request(url, data);
 }
 
-export async function removeRiffCards(blockIDs: string[], deckID: string = Constants.QUICK_DECK_ID): Promise<any> {
+export async function removeRiffCards(blockIDs: string[], deckID?: string): Promise<any> {
+    const deck = deckID ?? siyuanConstants().QUICK_DECK_ID;
     let data = {
-        deckID: deckID,
+        deckID: deck,
         blockIDs: blockIDs
     };
     let url = '/api/riff/removeRiffCards';

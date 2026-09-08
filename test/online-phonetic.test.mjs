@@ -3,6 +3,9 @@
  * 验证：parseEudicHtml 纯函数 / 缓存命中不再二次请求 / 并发同词只发一次 /
  *       失败负缓存 / maybeFillPhonetic 补写与 XSS 安全。
  * 环境：Node --experimental-strip-types + jsdom。
+ *
+ * 2026-09-07 数据源切换至海词：所有 sample HTML / mock body 改用海词 bdo 格式。
+ * 函数名仍叫 parseEudicHtml（API 兼容），内部正则已切到海词 ['xxx] 格式。
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -21,18 +24,23 @@ globalThis.HTMLElement = win.HTMLElement;
 const mod = await import("../src/dict/online-phonetic.ts");
 const { parseEudicHtml, fetchOnlinePhonetic, maybeFillPhonetic, resetOnlinePhoneticCache } = mod;
 
+// 海词音标格式 helper（少打字）
+const haiciPhon = (uk, us) => {
+  const parts = [];
+  if (uk) parts.push(`<span>英 <bdo lang="EN-US">['${uk}]</bdo></span>`);
+  if (us) parts.push(`<span>美 <bdo lang="EN-US">['${us}]</bdo></span>`);
+  return parts.join("");
+};
+
 // ---- parseEudicHtml 纯函数 ----
 
 test("parseEudicHtml：提取英/美双音标", () => {
-  const html = `
-    <span class="phontype">英</span><span class="Phonitic">/hə'ləʊ/</span>
-    <span class="phontype">美</span><span class="Phonitic">/hə'loʊ/</span>
-  `;
+  const html = haiciPhon("hə'ləʊ", "hə'loʊ");
   assert.equal(parseEudicHtml(html), "英 /hə'ləʊ/ 美 /hə'loʊ/");
 });
 
 test("parseEudicHtml：只含英音", () => {
-  const html = `<span class="phontype">英</span><span class="Phonitic">/wɜːd/</span>`;
+  const html = haiciPhon("wɜːd", null);
   assert.equal(parseEudicHtml(html), "英 /wɜːd/");
 });
 
@@ -57,10 +65,7 @@ function mockTransport(html) {
 
 test("fetchOnlinePhonetic：成功解析并缓存，二次调用不再请求", async () => {
   resetOnlinePhoneticCache();
-  const { transport, calls } = mockTransport(`
-    <span class="phontype">英</span><span class="Phonitic">/hə'ləʊ/</span>
-    <span class="phontype">美</span><span class="Phonitic">/hə'loʊ/</span>
-  `);
+  const { transport, calls } = mockTransport(haiciPhon("hə'ləʊ", "hə'loʊ"));
   const r1 = await fetchOnlinePhonetic("Hello", transport);
   assert.equal(r1, "英 /hə'ləʊ/ 美 /hə'loʊ/");
   const r2 = await fetchOnlinePhonetic("hello", transport); // 大小写归一
@@ -85,7 +90,7 @@ test("fetchOnlinePhonetic：并发同词只发一次请求", async () => {
   const transport = async () => {
     calls++;
     await new Promise((r) => setTimeout(r, 20)); // 模拟延迟
-    return { status: 200, body: `<span class="phontype">英</span><span class="Phonitic">/kən'kʌrənt/</span>` };
+    return { status: 200, body: haiciPhon("kən'kʌrənt", null) };
   };
   const [a, b, c] = await Promise.all([
     fetchOnlinePhonetic("concurrent", transport),
@@ -106,7 +111,7 @@ test("maybeFillPhonetic：空音标元素被异步补写", async () => {
   container.innerHTML = `<strong class="hiword-dict-word">hello</strong><em class="hiword-dict-phonetic"></em>`;
   doc.body.appendChild(container);
   // 预热缓存（mock 只含美音）
-  const transport = async () => ({ status: 200, body: `<span class="phontype">美</span><span class="Phonitic">/hə'loʊ/</span>` });
+  const transport = async () => ({ status: 200, body: haiciPhon(null, "hə'loʊ") });
   await fetchOnlinePhonetic("hello", transport);
   await maybeFillPhonetic(container, "hello");
   const el = container.querySelector(".hiword-dict-phonetic");
@@ -119,7 +124,7 @@ test("maybeFillPhonetic：已有音标文本 → 跳过不覆盖", async () => {
   const container = doc.createElement("div");
   container.innerHTML = `<strong class="hiword-dict-word">offline</strong><em class="hiword-dict-phonetic">/ɒf'laɪn/</em>`;
   doc.body.appendChild(container);
-  const transport = async () => ({ status: 200, body: `<span class="phontype">美</span><span class="Phonitic">/əf'laɪn/</span>` });
+  const transport = async () => ({ status: 200, body: haiciPhon(null, "əf'laɪn") });
   await fetchOnlinePhonetic("offline", transport);
   await maybeFillPhonetic(container, "offline");
   const el = container.querySelector(".hiword-dict-phonetic");

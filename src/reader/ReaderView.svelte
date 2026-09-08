@@ -1,5 +1,6 @@
 <script lang="ts">
   import { logSwallow } from "../core/safe.ts";
+import { getLogger } from "../core/logger.ts";
   /**
    * 阅读器 - 阅读面板（P0 + P1 打磨）
    * ---------------------------------------------------------------
@@ -18,11 +19,13 @@
   // 此前 PDF 与 EPUB 共用同一套模板、靠散落的 isPdfBook() 拼装控件，两类格式互相干扰。
   // 现在 PDF 专属控件收进 PdfToolbar / PdfSettings / PdfOverlay，图书专属控件收进 BookToolbar，
   // 本文件只负责按 readerMode 决定挂载哪一套。
-  import { resolveReaderMode, isPdfFormat, type ReaderMode } from "./reader-mode.ts";
+  import { resolveReaderMode, isPdfFormat, type ReaderMode, bookTypeFromFormat, matchBookType, type BookType } from "./reader-mode.ts";
   import BookToolbar from "./BookToolbar.svelte";
   import PdfToolbar from "./PdfToolbar.svelte";
   import PdfSettings from "./PdfSettings.svelte";
   import PdfOverlay from "./PdfOverlay.svelte";
+  // 2026-09-04 P1：PDF 文本标注自建覆盖层（高亮/下划线/波浪线单一视觉真源）
+  import PdfTextHlLayer from "./PdfTextHlLayer.svelte";
   // [REword 2026-09-01] 笔记导出绑定拖拽框（阅读摘录 / 书图谱目标文档绑定）
   import BindDropzone from "./BindDropzone.svelte";
   import {
@@ -37,6 +40,8 @@
     inkContext,
     isInkMode,
     addStroke,
+    // 2026-09-04 P0-3：墨迹删除（侧栏合并后允许通过统一入口删墨迹，触发 inkSaver 自动落盘）
+    removeStroke,
     setInkContext,
     setInkMode,
   } from "./ink/store";
@@ -48,7 +53,7 @@
   import type { InkStroke, InkPoint } from "./ink/types";
   // @ts-ignore - foliate-js 为纯 ES 模块 vendor（副作用：注册 reword-foliate-view / reword-foliate-paginator / reword-foliate-fxl / reword-foliate-quoteimage）
   import "../reader/vendor/foliate-js/view-light.js";
-  import { makeTextBook, isTextBookFile } from "../reader/book-adapters";
+  import { DocumentLoader } from "./document-loader.ts";
   // 脚注检测 + 抽取（scoped 模块，不依赖 foliate vendor 内核）
   import { isFootnoteRef, extractFootnote } from "./footnote";
   // v1.3.0：本书前提上下文编辑器（思源原生 lite Protyle）+ token 估算
@@ -59,7 +64,7 @@
   import type { ZoomState } from "../reader/bookshelf-store";
   import { ZOOM_PRESETS } from "../reader/bookshelf-store";
   // [2026-09-01] Phase 1:PDF 大纲 / 页码提取(对齐 Obsidian PDF++ outline)
-  import { loadPdfOutline, extractPdfCurrentPage } from "../reader/pdf-outline";
+  import { extractPdfCurrentPage } from "../reader/pdf-outline";
   import {
     ReaderSettingsStore,
     READER_DEFAULT_SETTINGS,
@@ -120,6 +125,10 @@
   import { type BilingualHandle, type PretranslateProgress, type PretranslateOptions } from "./bilingual-types";
   import { createBilingualV2 } from "./bilingual-v2/bilingual-v2";
   import { telemetry, engineLabel } from "./bilingual-v2/telemetry";
+  // 2026-09-05 R5：双语四层架构 —— L2 英文书籍识别（双语前置门槛，纯逻辑可单测）
+  import { detectBookLanguage, collectSampleTexts } from "./bilingual/runtime/detector.ts";
+  // 2026-09-05 设置统一：目标语言选项与设置弹窗同源（共享常量）
+  import { TARGET_LANG_OPTIONS } from "./bilingual-langs";
   // 2026-08-30：预翻译弹窗读取可用引擎/模型
   import { isEngineAvailable } from "../translate/engine";
   import {
@@ -132,15 +141,19 @@
   import { lookupSmart, searchCandidates } from "../dict/dict-engine";
   import {
     parseDictEntry,
-    renderDictCard,
+    renderDictCardSimple,
     renderDictSuggestions,
     renderLoading,
   } from "../dict/dict-renderer";
+  // 2026-09-07 查词典功能：弹窗双源（🌐 切在线词海）
+  import { fetchOnlineDict, renderOnlineDictCardSimple } from "../dict/online-dict";
   import { togglePosCollapsed } from "../dict/pos-toggle";
   // Phase 2：划词高亮 + 批注（阅读器 / foliate 集成）
   // @ts-ignore - foliate-js 为纯 JS vendor（无类型声明）
   import { Overlayer } from "../reader/vendor/foliate-js/overlayer.js";
   import { getAnnotationStore } from "../annotation/store-singleton";
+  // 2026-09-04 P1：PDF 自建覆盖层归一化矩形类型
+  import type { PdfRect, AnnotationStore } from "../annotation/annotation-store.ts";
   // 标注/批注区分：isEmptyNoteContent(rec) → 无笔记=纯标注（进编辑工具栏），有笔记=批注（进查看卡片）
   import { classifyAnnotation } from "../annotation/whale-renderer";
   import {
@@ -165,6 +178,7 @@
   import {
     eraseOverlayKey,
     hasOverlayKey,
+    missingDrawItems,
     syncVisualWithStore,
     nukeAndRedrawOverlays,
     subscribeAnnotationsChanged,
@@ -373,7 +387,7 @@
   let ptProgress: PretranslateProgress = { done: 0, total: 0, cached: 0, pending: 0, status: "idle" };
   let ptAbort: AbortController | null = null;
   // 弹窗表单（细化选项）
-  let ptForm = { to: "zh", model: "", engine: "auto", batchSize: 8, concurrency: 1, overwrite: false, tencentLockWan: 400 };
+  let ptForm = { to: "zh", model: "", engine: "auto", batchSize: 5, concurrency: 2, overwrite: false, tencentLockWan: 400 };
   // 若当前选中引擎在可用列表中失效或被锁定，自动回退到 auto
   $: {
     const opts = ptEngineOptions();
@@ -385,6 +399,9 @@
   // 打开弹窗时展示的初始统计（总数/已缓存/待译/预估 token）
   let ptStats = { total: 0, cached: 0, pending: 0, estTokens: 0 };
   let bilingualInitDone = false; // 设置恢复只执行一次
+  // 2026-09-05 F3：持久化 bilingual=true 的恢复挂起标记——等书籍内容加载后再跑语言判定，
+  // 堵住「onMount 时 view 未就绪 → 判定 unknown → 绕过英语门槛」的绕行路径
+  let bilingualPendingRestore = false;
   // 2026-08-28：最近一次双语翻译的 AI token 用量（null = 无数据 / 未走 AI）
   let bilingualTokenUsage: { promptTokens: number; completionTokens: number; totalTokens: number } | null = null;
   // 2026-08-30 v2：引擎状态 / 成本看板（订阅 Telemetry 总线实时聚合）
@@ -481,23 +498,26 @@
   /* 2026-08-29 UI 全面优化 · 读者外框：进度条章节标记 */
   let chapterMarks: { left: number; title: string }[] = []; // 章节起始位置（0–100）
   /* ---- 2026-08-29 新增：书签 + 摘录汇总抽屉（对齐 Obsidian weave 的摘录沉淀链） ---- */
-  let showBookmarks = false; // 书签抽屉（保留兼容：被 activeDrawer 驱动）
+  /**
+   * 2026-09-03「半分半合」改造：目录单列（☰），书签 + 摘录合并为「我的标记」抽屉（📝）。
+   * 两个子列表（书签 / 摘录）共用一个抽屉，渲染时各自按 bookType 双重保险过滤。
+   */
+  let showMarks = false; // 「我的标记」抽屉（书签 + 摘录合并）
   let bookmarks: BookMark[] = [];
-  let showAnnots = false; // 摘录汇总抽屉（保留兼容：被 activeDrawer 驱动）
   let annotsList: any[] = [];
 
   /**
-   * 2026-08-30 改造：3 个抽屉（目录/书签/摘录）合并为单一互斥状态机。
+   * 2026-09-03 改造：抽屉简化为两个互斥状态（目录 / 我的标记）。
    * - 一次只能开一个（防止视口拥挤）
    * - 同图标再点 = 关
    * - 不同图标 = 自动切到新的
-   * - 关联底层 `showToc` / `showBookmarks` / `showAnnots` 三态（保持兼容）
+   * - 关联底层 `showToc` / `showMarks` 两态
    */
-  type DrawerKind = "toc" | "bookmarks" | "annots";
+  type DrawerKind = "toc" | "marks";
   let activeDrawer: DrawerKind | null = null;
-  // 2026-08-30 改造：抽屉角标（小尾巴）横向位置，由 JS 按对应锚点图标中心动态计算
+  // 抽屉角标（小尾巴）横向位置，由 JS 按对应锚点图标中心动态计算
   let tailLeft = 30;
-  const fallbackTailLeft: Record<DrawerKind, number> = { toc: 30, bookmarks: 64, annots: 100 };
+  const fallbackTailLeft: Record<DrawerKind, number> = { toc: 30, marks: 64 };
 
   function computeDrawerTail(kind: DrawerKind) {
     if (!readerViewEl) {
@@ -516,18 +536,19 @@
 
   const toggleDrawer = async (kind: DrawerKind) => {
     activeDrawer = activeDrawer === kind ? null : kind;
-    // 同步到旧 flag（功能模块还引用这些字段名）
+    // 同步到抽屉 flag（功能模块还引用这些字段名）
     showToc = activeDrawer === "toc";
-    showBookmarks = activeDrawer === "bookmarks";
-    showAnnots = activeDrawer === "annots";
+    showMarks = activeDrawer === "marks";
     // 打开任意抽屉时收起搜索 / 设置浮层（保持原 toggleToc 互斥行为，避免浮层叠放拥挤）
     if (activeDrawer) {
       showSearch = false;
       showSettings = false;
     }
-    // 打开抽屉时确保数据已加载（2026-09-01 修复：reloadBookmarks/reloadAnnots 是死引用,改用真实存在的函数）
-    if (activeDrawer === "bookmarks") refreshBookmarks();
-    if (activeDrawer === "annots") refreshAnnotsList();
+    // 打开「我的标记」时同时刷新书签 + 摘录两份数据（2026-09-03 半分半合：两者合并到同一抽屉）
+    if (activeDrawer === "marks") {
+      refreshBookmarks();
+      refreshAnnotsList();
+    }
     // 等 DOM 渲染出抽屉后再算尾巴位置，保证指向对应图标中心
     if (activeDrawer) {
       await tick();
@@ -936,9 +957,16 @@
         if (r?.render) r.render();
       } catch (__e) { logSwallow(__e, "ReaderView.svelte · applyStyles forceRelayout", "debug"); }
     };
-    requestAnimationFrame(forceRelayout);
-    // 兜底：首次开书时 #views 可能尚未就绪导致 render() 空转，延迟再补一次确保对齐。
-    setTimeout(forceRelayout, 120);
+    // 2026-09-05 调整：原为 rAF + setTimeout(120) 各一次 = 开书后全量重排 2 次，
+    // 大书上这是启动卡死的放大器之一。改为**只在空闲窗口重排一次**：
+    // 仍保留上面 09-02 的首次对齐修复，但不再紧跟启动密集布局期，也不重复排第二次。
+    const idleCb = (globalThis as any)?.requestIdleCallback;
+    if (typeof idleCb === "function") {
+      try { idleCb.call(globalThis, forceRelayout, { timeout: 600 }); }
+      catch (__e) { logSwallow(__e, "ReaderView.svelte · applyStyles idle", "debug"); }
+    } else {
+      requestAnimationFrame(forceRelayout);
+    }
     // 同步容器兜底背景（深色模式切换时避免透出旧色/黑底闪屏）
     applyContainerBg();
     // 字体关键词重写（接管书内 serif/sans-serif/monospace 关键词，覆盖 div/span 布局的正文）：
@@ -1451,16 +1479,22 @@
     hoverWord = word;
     dictPopupSource = "hover";
     dictPopup = { visible: true, x, y, html: renderLoading(), word, source: "hover" };
-    setTimeout(() => {
+    setTimeout(async () => {
       // 期间来源/单词已切换则丢弃旧结果
       if (dictPopupSource !== "hover" || hoverWord !== word) return;
-      const entry = lookupSmart(word);
       let html: string;
-      if (entry) {
-        html = renderDictCard(parseDictEntry(entry), { showStar: true, inVocab: isInVocab?.(word) ?? false });
+      if (dictPopupMode === "online") {
+        const r = await fetchOnlineDict(word);
+        html = r
+          ? renderOnlineDictCardSimple(r, { inVocab: isInVocab?.(word) ?? false })
+          : renderDictSuggestions(word, searchCandidates(word, 3));
       } else {
-        const cands = searchCandidates(word, 3);
-        html = renderDictSuggestions(word, cands);
+        const entry = lookupSmart(word);
+        if (entry) {
+          html = renderDictCardSimple(parseDictEntry(entry), { showStar: true, inVocab: isInVocab?.(word) ?? false });
+        } else {
+          html = renderDictSuggestions(word, searchCandidates(word, 3));
+        }
       }
       dictPopup = { ...dictPopup, html };
     }, 30);
@@ -1602,15 +1636,48 @@
 
   /* ================= 打开书籍 ================= */
 
+  /**
+   * 2026-09-05 诊断：开书看门狗。
+   * 打开大书时若主线程被独占，logger 的 1 秒心跳会断流、排查不到卡在哪一步。
+   * 这里每 300ms 打一条「当前停留在哪个阶段」，卡死后**最后一条日志**即指示卡死区间。
+   * 只在开书期间运行（start/stop 成对），不会平时刷日志。
+   */
+  let openStage = "";
+  let openWatchdog: any = null;
+  let openT0 = 0;
+  function markStage(s: string) {
+    openStage = s;
+    getLogger().info(`[REword] 开书阶段 → ${s}（累计 ${Date.now() - openT0}ms）`);
+  }
+  function startOpenWatchdog() {
+    stopOpenWatchdog();
+    openT0 = Date.now();
+    openWatchdog = setInterval(() => {
+      getLogger().info(`[REword] 开书看门狗：仍停留在「${openStage}」，已 ${Date.now() - openT0}ms`);
+    }, 300);
+  }
+  function stopOpenWatchdog() {
+    if (openWatchdog) {
+      clearInterval(openWatchdog);
+      openWatchdog = null;
+    }
+  }
+
   async function openBook() {
     errorMsg = "";
     console.log("[REword] openBook 开始", { bookId });
+    startOpenWatchdog();
+    markStage("取书籍文件");
     try {
       const blob = await store.getBlob(bookId);
       meta = store.get(bookId);
       if (!blob || !meta) throw new Error("书籍不存在或文件丢失");
       console.log("[REword] openBook blob 就绪", { size: blob.size, format: meta.format });
       title = meta.title;
+      // 2026-09-04 P0-3：开书立即设置 ink 上下文，让 currentPageStrokes 派生
+      // 在用户首次 pointerdown 之前就能正确过滤出当前 bookId 的笔触，
+      // 否则翻页后看到的是全部墨迹（其他书的也混进来）。
+      if (bookId) setInkContext(bookId, 0);
       const name = `${meta.id}.${meta.format === "md" ? "md" : meta.format}`;
       const file = new File([blob], name, {
         type: /epub$/i.test(name) ? "application/epub+zip" : "",
@@ -1688,17 +1755,36 @@
           // 用最新设置（用户可能在书架改过 clickToTurn/flow）
           attachAllContentDocs();
         }
+        // 2026-09-05 F3：持久化恢复的双语在此复核语言门槛（与 toggleBilingual 同一判定）
+        if (bilingualPendingRestore) {
+          bilingualPendingRestore = false;
+          try {
+            const detection = detectBookLanguage({
+              metaLanguage: meta?.language || undefined,
+              sampleTexts: collectSampleTexts(getContentDocs(), { maxChars: 2000 }),
+            });
+            if (detection.verdict === "other") {
+              settingsStore.update({ bilingual: false });
+              toast("本书未识别为英文书籍，已自动关闭双语对照", 2800, "info" as any);
+              getLogger().info(
+                `[REword][双语] 恢复复核拦截非英文书：bookId=${bookId} source=${detection.source} conf=${detection.confidence}`,
+              );
+            } else {
+              enableBilingual();
+            }
+          } catch (err) {
+            // 判定异常时保守放行（unknown 语义），避免恢复流程卡死
+            console.warn("[REword] 双语恢复语言判定异常（已放行）:", err);
+            enableBilingual();
+          }
+        }
         // 2026-08-27 重设计：翻页 / 加载新内容后，双语译文按需补注入
         bilingualHandle?.onViewLoad();
       });
 
-      let book: any;
-      if (isTextBookFile(name)) {
-        book = await makeTextBook(file, meta.title);
-        await view.open(book);
-      } else {
-        await view.open(file);
-      }
+      markStage("foliate view.open（解析书籍文件）");
+      // R1 收敛：按格式打开统一走 DocumentLoader → 适配器（行为等价于旧 view.open 分支）
+      await DocumentLoader.openView(view, { bookId, name, file, title: meta.title });
       // 2026-09-02：中和书内 @font-face 的非法 scheme src（如 tt001a.ttf →
       // ERR_UNKNOWN_URL_SCHEME），避免浏览器请求坏字体报 console 错，并让
       // document.fonts.ready 干净解析。挂在 foliate 的书内 CSS 转换钩子
@@ -1715,6 +1801,7 @@
         }
       } catch (__e) { logSwallow(__e, "openBook fontFaceNeutralize", "debug"); }
       console.log("[REword] openBook view.open 完成");
+      markStage("view.init（定位+首次渲染）");
       const saved = store.getProgress(bookId);
       if (saved?.fraction) {
         await view.init({ lastLocation: { fraction: saved.fraction }, showTextStart: false });
@@ -1724,18 +1811,16 @@
       console.log("[REword] openBook view.init 完成", {
         sections: view.book?.sections?.length ?? 0,
       });
+      markStage("构建目录/章节标记");
       try {
         // [2026-09-01] Phase 1:PDF 与 EPUB 走不同数据源,但 tocItems 形态一致
-        if (isPdfBook()) {
-          // PDF:从 PDF.js getOutline() 拿 → 转 {title, href, level} 与 EPUB 同构
-          const pdfResult = await loadPdfOutline(file as Blob);
-          pdfTotalPages = pdfResult.totalPages;
-          tocItems = pdfResult.nodes;
-        } else {
-          // EPUB/TXT/MD:foliate 的目录是属性 book.toc(嵌套树),递归展开为扁平列表
-          const toc = view.book?.toc;
-          tocItems = flattenToc(Array.isArray(toc) ? toc : []);
-        }
+        // R1 收敛：目录 / 分节 / PDF 大纲抽取统一走适配器（行为等价于旧分支）
+        const loadedModel = await DocumentLoader.buildBookDoc(
+          { bookId, name, file, title: meta.title },
+          view
+        );
+        pdfTotalPages = loadedModel.book.pdfTotalPages ?? 0;
+        tocItems = loadedModel.book.toc as any;
         totalChars = Array.isArray(view.book?.sections)
           ? view.book.sections.reduce((s: number, x: any) => s + (x.size || 0), 0)
           : 0;
@@ -1745,6 +1830,7 @@
         chapterMarks = [];
         pdfTotalPages = 0;
       }
+      markStage("应用样式/排版");
       settings = settingsStore.get();
       applyStyles();
       applyFlow();
@@ -1775,6 +1861,7 @@
       opened = true;
       // [REword patch 2026-08-29] 确认是 PDF → 给页面四周留白区补上滚轮缩放监听
       if (isPdfBook()) bindStageWheel();
+      markStage("附加内容文档/刷新列表");
       attachAllContentDocs();
       attachTimer1 = setTimeout(attachAllContentDocs, 400);
       attachTimer2 = setTimeout(attachAllContentDocs, 1200);
@@ -1795,6 +1882,9 @@
       } else {
         errorMsg = e?.message || "打开失败，请检查文件格式是否正确。";
       }
+    } finally {
+      stopOpenWatchdog();
+      getLogger().info(`[REword] 开书流程结束（末阶段=${openStage}，总耗时 ${Date.now() - openT0}ms，opened=${opened}）`);
     }
   }
 
@@ -1887,20 +1977,7 @@
 
   /* ================= TOC 展开 / 阅读统计 ================= */
 
-  /** foliate toc 是嵌套树，递归展开为扁平列表并记录层级 */
-  function flattenToc(
-    items: any[],
-    level = 0,
-    out: { title: string; href: string; level: number }[] = []
-  ): { title: string; href: string; level: number }[] {
-    if (!Array.isArray(items)) return out;
-    for (const it of items) {
-      if (!it) continue;
-      if (it.href) out.push({ title: it.label ?? it.title ?? it.href, href: it.href, level });
-      if (it.subitems?.length) flattenToc(it.subitems, level + 1, out);
-    }
-    return out;
-  }
+  /** foliate toc 展开已收进适配器层（flattenFoliateToc），此处不再保留本地副本 */
 
   /** 剩余阅读时间估算（全书字符 × 进度 → 剩余字符 ÷ 实测/默认速度） */
   function updateEta(frac: number) {
@@ -2333,7 +2410,10 @@
   }
 
   function refreshBookmarks() {
-    bookmarks = store?.getBookmarks?.(bookId) ?? [];
+    const all = store?.getBookmarks?.(bookId) ?? [];
+    // 2026-09-03 双保险：只显示与当前书籍 bookType 一致的书签（旧数据无字段则放行）
+    const cur = currentBookType();
+    bookmarks = all.filter((b: BookMark) => matchBookType(b.bookType, cur));
   }
 
   /**
@@ -2346,15 +2426,38 @@
    */
   function refreshAnnotsList() {
     if (!annStore) { try { annStore = getAnnotationStore(); } catch { annStore = null; } }
-    if (!annStore || !bookId) { annotsList = []; return; }
-    const list = (annStore.getByBook(bookId) || []).filter((it: any) => !it.deletedAt);
-    list.sort((a: any, b: any) => String(b.createdAt ?? "").localeCompare(String(a.createdAt ?? "")));
-    annotsList = list;
+    if (!bookId) { annotsList = []; return; }
+    const cur = currentBookType();
+    // 文本摘录（现有 annStore）
+    const anns: any[] = annStore
+      ? (annStore.getByBook(bookId) || []).filter((it: any) => !it.deletedAt && matchBookType(it.bookType, cur))
+      : [];
+    // 2026-09-04 P0-3 改造：把墨迹笔触合并进同侧栏，统一按 createdAt 倒序。
+    // 墨迹没有文本，title 用"墨迹 · p{N}"替代，跳转靠 pageIndex。
+    // 标记 kind 字段供模板区分渲染（墨迹展示路径预览/笔刷，文本展示文字）。
+    const inkItems: any[] = ($inkStrokes || [])
+      .filter((s) => s.bookId === bookId)
+      .map((s) => ({
+        kind: "ink" as const,
+        id: s.id,
+        page: s.pageIndex,
+        color: s.color,
+        brush: s.brush,
+        style: s.style,
+        createdAt: s.createdAt,
+        selectedText: "",
+        sentence: `墨迹 · p${s.pageIndex + 1}`,
+        note: "",
+        // 墨迹不可导出为文本 markdown，但 exportAnnots 走 selectedText 路径，
+        // 留空串即可被 filter 过滤掉
+      }));
+    const combined = [...anns, ...inkItems];
+    combined.sort((a: any, b: any) => Number(b.createdAt ?? 0) - Number(a.createdAt ?? 0));
+    annotsList = combined;
   }
 
   function closeOtherPanels(except: string) {
-    if (except !== "bm") showBookmarks = false;
-    if (except !== "ann") showAnnots = false;
+    if (except !== "marks") showMarks = false;
     if (except !== "toc") showToc = false;
     if (except !== "search") showSearch = false;
     if (except !== "settings") showSettings = false;
@@ -2371,13 +2474,14 @@
       cfi,
       label: chapterLabel || "",
       excerpt: (progressText || "").trim(),
+      bookType: currentBookType(),
     });
     bookmarks = res.list;
     toast(res.added ? "已添加书签" : "已移除书签");
   }
 
   async function jumpBookmark(bm: BookMark) {
-    showBookmarks = false;
+    showMarks = false;
     try {
       await (view as any)?.goTo(bm.cfi);
     } catch (__swallowErr) { logSwallow(__swallowErr, "ReaderView.svelte · jumpBookmark", "warn"); }
@@ -2388,11 +2492,22 @@
   }
 
   async function jumpAnnot(it: any) {
-    if (!it?.cfi) return;
-    showAnnots = false;
-    try {
-      await (view as any)?.goTo(it.cfi);
-    } catch (__swallowErr) { logSwallow(__swallowErr, "ReaderView.svelte · jumpAnnot", "warn"); }
+    showMarks = false;
+    // 2026-09-03 修复：PDF 标注可能无 CFI，回落到 page 页码跳转（goPdfPage 仅 PDF 有效）
+    if (it?.cfi) {
+      try {
+        await (view as any)?.goTo(it.cfi);
+        return;
+      } catch (__swallowErr) { logSwallow(__swallowErr, "ReaderView.svelte · jumpAnnot(cfi)", "warn"); }
+    }
+    if (isPdfBook() && it?.page && it.page > 0) {
+      try {
+        // 2026-09-04 P0-3：墨迹 kind 时 page 是 0-based pageIndex，需 +1 转为 1-based 页码
+        // （文本标注 page 已是 1-based，goPdfPage 期望 1-based）
+        const targetPage = it.kind === "ink" ? it.page + 1 : it.page;
+        await goPdfPage(targetPage);
+      } catch (__swallowErr) { logSwallow(__swallowErr, "ReaderView.svelte · jumpAnnot(page)", "warn"); }
+    }
   }
 
   async function removeAnnot(it: any) {
@@ -2401,13 +2516,26 @@
     toast("已删除");
   }
 
+  /** 2026-09-04 P0-3：墨迹删除入口。直接调 store 的 removeStroke 触发 inkSaver 订阅自动落盘 */
+  function removeInkStroke(it: any) {
+    if (!it?.id) return;
+    removeStroke(it.id);
+    // inkStrokes 订阅会自动调 refreshAnnotsList，无需手动
+  }
+
   /** 导出本书全部摘录为 Markdown（写入剪贴板，可直接粘贴进思源文档） */
   function exportAnnots() {
     if (!annotsList.length) {
       toast("本书还没有摘录");
       return;
     }
-    const body = annotsList
+    // 2026-09-04 P0-3：跳过墨迹（无文本，导出无意义）—— 只导文本摘录
+    const textOnly = annotsList.filter((it: any) => it.kind !== "ink");
+    if (!textOnly.length) {
+      toast("没有可导出的文本摘录（墨迹不导出）");
+      return;
+    }
+    const body = textOnly
       .map((it: any) => {
         const text = String(it.selectedText || it.sentence || "").trim();
         const note = String(it.note || "").trim();
@@ -2417,7 +2545,7 @@
     const md = `# 《${title || "阅读"}》摘录\n\n${body}\n`;
     try {
       navigator.clipboard?.writeText(md);
-      toast(`已导出 ${annotsList.length} 条摘录到剪贴板`);
+      toast(`已导出 ${textOnly.length} 条摘录到剪贴板`);
     } catch (__swallowErr) {
       logSwallow(__swallowErr, "ReaderView.svelte · exportAnnots", "warn");
       toast("导出失败，请检查剪贴板权限");
@@ -2458,6 +2586,20 @@
    */
   function isPdfBook(): boolean {
     return isPdfFormat(meta?.format);
+  }
+
+  /** 2026-09-03：当前书籍的 bookType（pdf/epub/other），用于「我的标记」抽屉双重保险过滤 */
+  function currentBookType(): BookType {
+    return bookTypeFromFormat(meta?.format);
+  }
+
+  /** 2026-09-04 P2：PDF 文本标注类型开关判定（EPUB 恒开；PDF 按设置过滤）。
+   *  highlight=背景高亮；underline=直线段/波浪线；annotate=带批注内容气泡。 */
+  function pdfAnnotEnabled(kind: "highlight" | "underline" | "annotate"): boolean {
+    if (!isPdfBook()) return true;
+    if (kind === "highlight") return settings.pdfAnnotHighlight !== false;
+    if (kind === "underline") return settings.pdfAnnotUnderline !== false;
+    return settings.pdfAnnotAnnotate !== false;
   }
 
   // [REword patch 2026-08-29] 移动端 PDF 适配 Phase 1
@@ -3162,6 +3304,17 @@
     settings = settingsStore.update({ pdfInvert: (e.target as HTMLInputElement).checked });
   }
 
+  // 2026-09-04 P2：PDF 文本标注类型开关
+  function setPdfAnnotHighlight(e: Event) {
+    settings = settingsStore.update({ pdfAnnotHighlight: (e.target as HTMLInputElement).checked });
+  }
+  function setPdfAnnotUnderline(e: Event) {
+    settings = settingsStore.update({ pdfAnnotUnderline: (e.target as HTMLInputElement).checked });
+  }
+  function setPdfAnnotAnnotate(e: Event) {
+    settings = settingsStore.update({ pdfAnnotAnnotate: (e.target as HTMLInputElement).checked });
+  }
+
   function setLineHeight(lh: number) {
     settings = settingsStore.update({ lineHeight: lh });
     applyStyles();
@@ -3212,10 +3365,10 @@
     applyParagraphHover();
   }
 
-  /** 双语预取页数（0–8，默认 2；值越大越省翻页等待但越费 token） */
+  /** 预取分节数（0–4 整数，默认 2；渐进窗口与注入闸门共用；值越大越省翻页等待但越费 token） */
   function setBilingualPrefetchPages(v: number) {
     settings = settingsStore.update({
-      bilingualPrefetchPages: clamp(Math.round(v * 10) / 10, 0, 8),
+      bilingualPrefetchPages: clamp(Math.round(v), 0, 4),
     });
     // 预取窗口变化后，下一轮 injectAll（relocate/load）会自动按新值补译；
     // 若已开启双语，立即触发一次增量刷新让后面新范围入缓存。
@@ -3255,6 +3408,8 @@
   }
 
   let askModeOpen = false;
+  // 2026-09-05 F4：询问弹窗的「记住本书的选择」复选框（默认勾选，保持既有自动记忆行为）
+  let askRemember = true;
   // 2026-09-01 P0：首次询问弹窗展示的本书缓存状态（total / cached / pending）
   let askCacheStats: { total: number; cached: number; pending: number } | null = null;
   /* ================= 本书前提上下文（v1.3.0：lite Protyle 富文本编辑） ================= */
@@ -3410,8 +3565,9 @@
       to: settingsStore.get().bilingualTarget || "zh",
       model: "",
       engine: "auto",
-      batchSize: 8,
-      concurrency: 1,
+      // 2026-09-05 统一为新运行时默认：2 列 × 每列 5 块（PRETRANSLATE_DEFAULTS）
+      batchSize: 5,
+      concurrency: 2,
       overwrite: false,
       tencentLockWan: Math.max(0, Math.round((ai?.tencentCharsLock ?? 4_000_000) / 10_000)),
     };
@@ -3984,8 +4140,7 @@
    */
   function closeAllPopovers() {
     showToc = false;
-    showBookmarks = false;
-    showAnnots = false;
+    showMarks = false;
     activeDrawer = null;
     showSettings = false;
     showSearch = false;
@@ -4011,7 +4166,7 @@
     }
     // 2026-08-30 修复：守卫必须覆盖三个抽屉（此前只查 showToc，导致书签/摘录抽屉
     // 开着时点空白不会收起）；activeDrawer 也纳入，避免状态残留时漏关
-    if (!showToc && !showBookmarks && !showAnnots && !showSettings && !showSearch && !showFootnote && !selToolbar.visible && !noteEditor.visible && !activeDrawer) return;
+    if (!showToc && !showMarks && !showSettings && !showSearch && !showFootnote && !selToolbar.visible && !noteEditor.visible && !activeDrawer) return;
     const t = _e.target as Element | null;
     if (!t) return;
     dbg.event("onContainerMouseDown", "▶ 入口", { target: t.tagName + "." + (typeof t.className === "string" ? t.className : ""), selVisible: selToolbar.visible, mode: selToolbar.mode });
@@ -4077,7 +4232,7 @@
   // 选区可能落在 foliate 渲染进 iframe 的内容文档里，因此需扫描 view.renderer.getContents()
   // （每项含 { index, doc }），并对 iframe 偏移做坐标换算。
   interface SelRect { left: number; top: number; right: number; bottom: number; }
-  interface ReaderSel { text: string; rect: SelRect; index: number; cfi: string | null; range: Range | null; }
+  interface ReaderSel { text: string; rect: SelRect; index: number; cfi: string | null; range: Range | null; pdfRects?: PdfRect[] | null; }
   // 2026-08-29 四向避让：工具栏可置于选区的 上/下/左/右 四个方向，
   // 优先上下（视线不跳变），上下均无空间时退到右/左（垂直居中于选区），彻底避开选中文本。
   type ToolbarPlace = "above" | "below" | "left" | "right";
@@ -4126,7 +4281,7 @@
   // 此标志告诉选区路径"本次点击已由 show-annotation 接管，不要弹创建工具栏"。
   let suppressNextCreateToolbar = false;
   // 当前选区的锚点信息（Phase 2 高亮 / 批注 / 导出思源将复用）
-  let selInfo: { index: number; cfi: string | null; range: Range | null } | null = null;
+  let selInfo: { index: number; cfi: string | null; range: Range | null; pdfRects?: PdfRect[] | null } | null = null;
   // 当前选区矩形（已换算到主文档坐标），供批注编辑器/查看气泡定位使用
   let lastSelRect: SelRect | null = null;
   let dictPopup: { visible: boolean; x: number; y: number; html: string; word?: string; source?: "sel" | "hover" | null } = { visible: false, x: 0, y: 0, html: "", word: "", source: null };
@@ -4142,7 +4297,8 @@
 
   // ===== Phase 2：书籍批注（高亮 + 批注）状态 =====
   // 批注数据层单例（index.ts 初始化后注入；懒取，容错）
-  let annStore: any = null;
+  // R3 类型收口：any → AnnotationStore | null（upsert 签名已放宽为 Partial，局部更新无需 as any）
+  let annStore: AnnotationStore | null = null;
   // cfi → 渲染记录（show-annotation 时反查 note / id）
   // annByValue 只存 {id, cfi, color}：note/style 一律以 annStore 为唯一真源。
   // 避免三处 note 拷贝不一致（2026-08-24 重构）。
@@ -4325,9 +4481,24 @@
       // 内容可能在 iframe 内：把 iframe 在视口中的位置换算进主文档坐标
       let left = endRect.left, top = endRect.top, right = endRect.right, bottom = endRect.bottom;
       const frame = (win as any).frameElement as HTMLElement | null;
+      let fr: DOMRect | null = null;
       if (frame) {
-        const fr = frame.getBoundingClientRect();
+        fr = frame.getBoundingClientRect();
         left += fr.left; top += fr.top; right += fr.left; bottom += fr.top;
+      }
+      // 2026-09-04 P1：PDF 文本标注归一化矩形（相对当前页 iframe 框，0-1），供自建覆盖层重绘
+      let pdfRects: PdfRect[] | null = null;
+      if (isPdfBook() && frame && fr) {
+        const fw = fr.width || 1;
+        const fh = fr.height || 1;
+        const norm: PdfRect[] = [];
+        for (const rc of rects) {
+          const x = rc.left / fw, y = rc.top / fh, w = rc.width / fw, h = rc.height / fh;
+          if (Number.isFinite(x) && Number.isFinite(y) && Number.isFinite(w) && Number.isFinite(h) && w > 0 && h > 0) {
+            norm.push({ x: Math.min(1, Math.max(0, x)), y: Math.min(1, Math.max(0, y)), w: Math.min(1, Math.max(0, w)), h: Math.min(1, Math.max(0, h)), page: (c.index ?? 0) + 1 });
+          }
+        }
+        pdfRects = norm.length ? norm : null;
       }
       let cfi: string | null = null;
       try {
@@ -4335,7 +4506,7 @@
           cfi = view.getCFI(c.index, range);
         }
       } catch (__swallowErr) { logSwallow(__swallowErr, "ReaderView.svelte · try { if (typeof c.index === \"number\" && typeof view.getCFI ===…", "debug"); }
-      return { text, rect: { left, top, right, bottom }, index: c.index, cfi, range };
+      return { text, rect: { left, top, right, bottom }, index: c.index, cfi, range, pdfRects };
     }
     return null;
   }
@@ -4811,7 +4982,7 @@
 
   function setSelFrom(sel: ReaderSel | null) {
     if (sel) {
-      selInfo = { index: sel.index, cfi: sel.cfi, range: sel.range };
+      selInfo = { index: sel.index, cfi: sel.cfi, range: sel.range, pdfRects: sel.pdfRects };
       showToolbarFor(sel);
     } else {
       closeSelToolbar();
@@ -4864,7 +5035,18 @@
     if (selToolbar.visible) closeSelToolbar();
     if (noteEditor.visible) noteEditor = { ...noteEditor, visible: false, mode: "create", id: null };
   }
-  function onMainSelectionChange() { scheduleReadSelection(); }
+  // 2026-09-05（性能）：selectionchange 在拖动/输入光标移动时会高频触发，
+  // 而 readReaderSelection() 要跨 iframe 遍历所有内容 doc 并取 getBoundingClientRect
+  // （跨 iframe 强制 layout，重的）。这里用 rAF 合并同一帧内的重复触发，每帧最多读一次。
+  // 注：mouseup 路径（onContentMouseUp）不走这里，仍保留其重试梯子，行为不变。
+  let selReadRaf: number | null = null;
+  function onMainSelectionChange() {
+    if (selReadRaf != null) return;
+    selReadRaf = requestAnimationFrame(() => {
+      selReadRaf = null;
+      scheduleReadSelection();
+    });
+  }
 
   /**
    * 2026-08-24 修复（P0 #3）：首次选中文本时，foliate 的 overlay/内容 doc 可能尚未
@@ -4988,22 +5170,31 @@
     toastTimer = setTimeout(() => { toastMsg = ""; toastUndo = false; }, 3000);
   }
 
-  // 查词 → 弹窗渲染卡片（同源 renderDictCard）
+  // 查词 → 弹窗渲染卡片（同源简化版小窗卡）
   // opts.x/opts.y 指定弹窗容器相对坐标；opts.source 标记来源（sel=划词工具栏, hover=Option 悬浮）
+  // 2026-09-07 双源：dictPopupMode 决定离线/在线词海，🌐 按钮切换
+  let dictPopupMode: "offline" | "online" = "offline";
   function runDictLookup(word: string, opts?: { x?: number; y?: number; source?: "sel" | "hover" }) {
     const x = opts?.x ?? selToolbar.x;
     const y = opts?.y ?? (selToolbar.y + toolbarH);
     const source = opts?.source ?? "sel";
     dictPopupSource = source;
     dictPopup = { visible: true, x, y, html: renderLoading(), word, source };
-    setTimeout(() => {
-      const entry = lookupSmart(word);
+    setTimeout(async () => {
       let html: string;
-      if (entry) {
-        html = renderDictCard(parseDictEntry(entry), { showStar: true, inVocab: isInVocab?.(word) ?? false });
+      if (dictPopupMode === "online") {
+        const r = await fetchOnlineDict(word);
+        html = r
+          ? renderOnlineDictCardSimple(r, { inVocab: isInVocab?.(word) ?? false })
+          : renderDictSuggestions(word, searchCandidates(word, 3));
       } else {
-        const cands = searchCandidates(word, 3);
-        html = renderDictSuggestions(word, cands);
+        const entry = lookupSmart(word);
+        if (entry) {
+          html = renderDictCardSimple(parseDictEntry(entry), { showStar: true, inVocab: isInVocab?.(word) ?? false });
+        } else {
+          const cands = searchCandidates(word, 3);
+          html = renderDictSuggestions(word, cands);
+        }
       }
       // 仅当来源未切换时更新（避免悬浮→划词切换时旧异步请求覆盖新弹窗）
       if (dictPopupSource === source) {
@@ -5343,8 +5534,11 @@
     closeFootnote();
   }
 
+  /** R3 类型收口：绘制 overlay 所需的最小入参（真源是 annStore，此处只取画图相关字段） */
+  type AnnDrawInput = { id?: string; cfi?: string; color?: string; style?: unknown; note?: string; deletedAt?: string };
+
   /** 把单条批注绘制进 foliate（异步；用返回 index 回填 cfi→章节缓存） */
-  async function addReaderAnnotation(it: any): Promise<void> {
+  async function addReaderAnnotation(it: AnnDrawInput): Promise<void> {
     dbgHud.addAnnotationTries++;
     if (!it.cfi || !it.color || !view) return;
     if (it.deletedAt) return; // 软删除项不重绘（最终一致保障：翻页后已删高亮彻底消失）
@@ -5631,9 +5825,23 @@
       type: type || (note && note.trim() ? "annotate" : "highlight"), // 缺省按有无 note 推断
       group: group || "未分组",
       scope: style === "highlight" ? "word" : "sentence",
+      // 2026-09-03 双保险：记录媒体类型 + PDF 页码兜底（无 CFI 时跳转用）
+      // 2026-09-04 P1：PDF 用 selInfo.index+1（= foliate 分节号）而非 pdfCurrentPage，
+      // 与自建覆盖层 getContents() 遍历用的页码一致；并携带归一化矩形供覆盖层重绘。
+      bookType: currentBookType(),
+      page: isPdfBook() ? ((selInfo?.index ?? 0) + 1) : undefined,
+      pdfRects: isPdfBook() ? (selInfo?.pdfRects ?? undefined) : undefined,
     };
-    const created = annStore.upsert(input);
+    // 2026-09-05 R3 修复：upsert 是 async，此前漏 await 导致 created 是 Promise、
+    // created.id 恒为 undefined（annByValue 存进假 id，靠 getByBook 宽松匹配兜底掩盖）。
+    const created = await annStore.upsert(input);
     annByValue.set(cfi, { id: created.id, cfi, color });
+    if (isPdfBook()) {
+      // PDF 文本标注视觉全交自建覆盖层 PdfTextHlLayer（foliate 原生 addAnnotation 在 PDF 下不可靠，
+      // 且会与覆盖层重叠画两次）。数据已落库，覆盖层经 annStore.subscribe 自动重绘。
+      // R3：列表刷新/侧边栏广播也由 annStore.subscribe 单通道统一触发，此处不再手动调用。
+      return;
+    }
     // foliate 原生绘制：addAnnotation 内部 resolveNavigation + 找 overlayer + emit draw-annotation。
     // 若当前章节 overlay 已就绪立即画出；否则等 create-overlay 事件补绘（数据已落库，不回滚）。
     try {
@@ -5641,10 +5849,7 @@
     } catch (err) {
       console.warn("[REword] 绘制失败（批注数据已保存，高亮稍后由 create-overlay 补绘）:", err);
     }
-    // 2026-09-01 修复：创建标注后必须刷新「本书摘录」面板（之前只 dispatchAnnotationChanged
-    // 通知侧边栏，但 ReaderView 内部的 annotsList 没更新，导致摘录抽屉永远显示空列表）
-    refreshAnnotsList();
-    dispatchAnnotationChanged();
+    // R3：列表刷新 + 侧边栏广播已由 annStore.subscribe 单通道触发，不再手动调用。
   }
 
   // 复制选中文本到剪贴板
@@ -5799,7 +6004,8 @@
     if (stored) delCfi = stored.cfi ?? delCfi;
     if (annStore) await annStore.remove(delId);
     if (delCfi) { await eraseAnnotationVisual(delCfi); annByValue.delete(delCfi); }
-    if (annStore) syncVisualWithStore(view, annStore, bookId);
+    // R3：删除后的残留 reconcile + 列表刷新 + 侧边栏广播均由 annStore.subscribe 单通道触发；
+    // 上面的 eraseAnnotationVisual 仅负责本条即时擦除（不等防抖窗口）。
     try {
       const contents = view?.renderer?.getContents?.() || [];
       for (const c of contents) {
@@ -5807,9 +6013,6 @@
         if (win) { const sel = win.getSelection(); if (sel) sel.removeAllRanges(); }
       }
     } catch (__swallowErr) { logSwallow(__swallowErr, "ReaderView.svelte · nc", "debug"); }
-    // 2026-09-01：删除后刷新「本书摘录」面板 + 通知侧边栏
-    refreshAnnotsList();
-    dispatchAnnotationChanged();
   }
 
   // 查看态「删除」
@@ -5839,16 +6042,17 @@
         group,
         type: noteVal ? "annotate" : "highlight",
       });
-      // 重绘视觉：擦旧 → 画新（样式/颜色/笔记变化），均走 foliate 原生管线
-      await eraseAnnotationVisual(cfi);
-      await addReaderAnnotation({ id, cfi, color, style, note: noteVal });
-      annByValue.set(cfi, { id, cfi, color });
+      // 重绘视觉：擦旧 → 画新（样式/颜色/笔记变化）
+      if (!isPdfBook()) {
+        // PDF 文本标注走自建覆盖层（PdfTextHlLayer），不调 foliate 原生管线，避免双重绘制
+        await eraseAnnotationVisual(cfi);
+        await addReaderAnnotation({ id, cfi, color, style, note: noteVal });
+        annByValue.set(cfi, { id, cfi, color });
+      }
       noteEditor = { ...noteEditor, visible: false, mode: "create", id: null };
       closeSelToolbar();
       toast("已更新批注");
-      // 2026-09-01：编辑批注后刷新「本书摘录」面板(笔记/样式/颜色可能变化)
-      refreshAnnotsList();
-      dispatchAnnotationChanged(); // 通知侧边栏刷新
+      // R3：列表刷新 + 侧边栏广播由 annStore.subscribe 单通道触发，不再手动调用
       onProtectTab?.(); // 已修改/批注：固定阅读 Tab，避免被数量超限回收顶掉
     } else {
       await saveHighlight(cfi, text, style, color, noteVal, group, "annotate");
@@ -5879,9 +6083,7 @@
       annByValue.set(cfi, { id: noteEditor.id, cfi, color });
     }
     noteEditor = { ...noteEditor, color };
-    // 2026-09-01：改色后刷新「本书摘录」面板(色点要更新)
-    refreshAnnotsList();
-    dispatchAnnotationChanged(); // 通知侧边栏刷新
+    // R3：列表刷新 + 侧边栏广播由 annStore.subscribe 单通道触发
   }
 
   // 查看态/高亮态：点样式 → 即时改样式（与改色同理；highlight 面板复用）
@@ -5897,9 +6099,7 @@
       annByValue.set(cfi, { id: noteEditor.id, cfi, color: noteEditor.color });
     }
     noteEditor = { ...noteEditor, style };
-    // 2026-09-01：改样式后刷新「本书摘录」面板
-    refreshAnnotsList();
-    dispatchAnnotationChanged(); // 通知侧边栏刷新
+    // R3：列表刷新 + 侧边栏广播由 annStore.subscribe 单通道触发
   }
 
   // edit 态样式条：点样式 → 即时改已有标注的样式（readest 编辑态：样式条常显在工具栏下方）。
@@ -5931,7 +6131,7 @@
       try {
         const existing = annStore.get(effId);
         if (existing) await annStore.upsert({ ...existing, style });
-        else await annStore.upsert({ id: effId, cfi, style, color, bookId } as any);
+        else await annStore.upsert({ id: effId, cfi, style, color, bookId, bookType: currentBookType() });
       } catch (e) {
         console.error("[REword] applyEditStyle upsert 失败:", e);
       }
@@ -5954,9 +6154,7 @@
       if (effId) annByValue.set(cfi, { id: effId, cfi, color });
     }
     selToolbar = { ...selToolbar, annStyle: style, annId: effId || selToolbar.annId, annCfi: cfi };
-    // 2026-09-01：edit 态改样式后刷新「本书摘录」面板(色点 / 文本保持不变但列表要同步)
-    refreshAnnotsList();
-    dispatchAnnotationChanged(); // 通知侧边栏刷新
+    // R3：列表刷新 + 侧边栏广播由 annStore.subscribe 单通道触发
   }
 
   // edit 态样式条：点颜色 → 即时改已有标注的颜色。
@@ -5983,7 +6181,7 @@
       try {
         const existing = annStore.get(effId);
         if (existing) await annStore.upsert({ ...existing, color });
-        else await annStore.upsert({ id: effId, cfi, style, color, bookId } as any);
+        else await annStore.upsert({ id: effId, cfi, style, color, bookId, bookType: currentBookType() });
       } catch (e) {
         console.error("[REword] applyEditColor upsert 失败:", e);
       }
@@ -6005,9 +6203,7 @@
       if (effId) annByValue.set(cfi, { id: effId, cfi, color });
     }
     selToolbar = { ...selToolbar, annColor: color, annId: effId || selToolbar.annId, annCfi: cfi };
-    // 2026-09-01：edit 态改色后刷新「本书摘录」面板
-    refreshAnnotsList();
-    dispatchAnnotationChanged(); // 通知侧边栏刷新
+    // R3：列表刷新 + 侧边栏广播由 annStore.subscribe 单通道触发
   }
 
   // ============================================================
@@ -6289,6 +6485,39 @@
     settingsStore.update({ bilingualHidden: map });
   }
 
+  /**
+   * 取 foliate 当前已加载的内容文档数组（L1：内容适配）。
+   *
+   * 2026-08-28 致命修复：foliate 的 getContents() 返回的是
+   * [{index, overlayer, doc}, ...]，真正的 Document 在 .doc 字段
+   * （见 vendor/foliate-js/view.js:288/544/688 均以 { doc } 解构）。
+   * 原代码直接把数组元素当 Document 用 → doc.querySelectorAll 抛
+   * TypeError → injectAll 在收集段落阶段崩溃 → 译文全空、按钮却绿。
+   *
+   * 2026-09-05 R5：抽成组件级函数，供双语 handle 与「英文书籍识别」共用；
+   * 这份映射写错会让整条双语链路静默失效，只能有一份实现。
+   */
+  function getContentDocs(): Document[] {
+    try {
+      const raw = (view?.renderer?.getContents?.() as any[]) || [];
+      const mapped = raw.map((c) => c?.doc).filter(Boolean) as Document[];
+      if (mapped.length === 0) {
+        console.warn("[REword] 双语 getContents: 返回空文档数组", {
+          hasView: !!view,
+          hasRenderer: !!(view?.renderer),
+          rawLength: raw.length,
+          rawKeys: raw[0] ? Object.keys(raw[0]) : [],
+        });
+      } else {
+        console.log(`[REword] 双语 getContents: ${raw.length} 个分节 → ${mapped.length} 个有效文档`);
+      }
+      return mapped;
+    } catch (e) {
+      console.error("[REword] 双语 getContents 异常:", e);
+      return [];
+    }
+  }
+
   function ensureBilingualHandle(): BilingualHandle {
     if (bilingualHandle) return bilingualHandle;
     // 2026-08-31：载入本书已隐藏译文集合（关闭/重开双语后保持隐藏）
@@ -6296,31 +6525,8 @@
     const target = settingsStore.get().bilingualTarget || "zh";
     bilingualHandle = createBilingualV2({
       bookId,
-      getContents: () => {
-        try {
-          // 2026-08-28 致命修复：foliate 的 getContents() 返回的是
-          // [{index, overlayer, doc}, ...]，真正的 Document 在 .doc 字段
-          // （见 vendor/foliate-js/view.js:288/544/688 均以 { doc } 解构）。
-          // 原代码直接把数组元素当 Document 用 → doc.querySelectorAll 抛
-          // TypeError → injectAll 在收集段落阶段崩溃 → 译文全空、按钮却绿。
-          const raw = (view?.renderer?.getContents?.() as any[]) || [];
-          const mapped = raw.map((c) => c?.doc).filter(Boolean) as Document[];
-          if (mapped.length === 0) {
-            console.warn("[REword] 双语 getContents: 返回空文档数组", {
-              hasView: !!view,
-              hasRenderer: !!(view?.renderer),
-              rawLength: raw.length,
-              rawKeys: raw[0] ? Object.keys(raw[0]) : [],
-            });
-          } else {
-            console.log(`[REword] 双语 getContents: ${raw.length} 个分节 → ${mapped.length} 个有效文档`);
-          }
-          return mapped;
-        } catch (e) {
-          console.error("[REword] 双语 getContents 异常:", e);
-          return [];
-        }
-      },
+      // 2026-09-05 R5：映射逻辑已抽到 getContentDocs()，与「英文书籍识别」共用同一份实现
+      getContents: getContentDocs,
       translateBatch: (texts, from, to, _bookId, ctx, meta, extra) =>
         onTranslateBatch ? onTranslateBatch(texts, from, to, ctx, meta, extra) : Promise.resolve([]),
       // 2026-08-30 详细翻译（回传 provider / fromCache）供成本与引擎统计；未提供时回落 translateBatch
@@ -6352,8 +6558,27 @@
           ? tocItems.map((t, i) => `${i + 1}. ${t.title}`).join("\n").slice(0, 1500)
           : undefined,
       }),
-      // 2026-08-28：预取页数动态读设置（用户可在面板调 0~8；默认 2）
+      // 2026-09-05 复活：预取分节数动态读设置（0–4 整数；渐进窗口 + 注入闸门共用）
       getPrefetchPages: () => settingsStore.get().bilingualPrefetchPages ?? 2,
+      // 2026-09-05 新增：失败自动重试开关（关闭 = 失败段不进入退避重试）
+      getRetryEnabled: () => settingsStore.get().bilingualRetry !== false,
+      // R6：全书分节（full 预翻译做真全书枚举用）。foliate 的 book.sections
+      // 每项自带 createDocument()，正好符合运行时要求的形状。
+      getSections: () => {
+        const secs = (view as any)?.book?.sections as any[] | undefined;
+        if (!Array.isArray(secs)) return [];
+        return secs.map((s, i) => ({
+          index: typeof s?.index === "number" ? s.index : i,
+          createDocument: () => s.createDocument(),
+        }));
+      },
+      // R6：当前所在分节。foliate getContents() 的原始元素带 index 字段
+      // （getContentDocs 已把它剥成纯 doc 数组，这里另取一次原始数组）。
+      getCurrentSection: () => {
+        const raw = (view as any)?.renderer?.getContents?.() as any[] | undefined;
+        const idx = raw?.[0]?.index;
+        return typeof idx === "number" && Number.isFinite(idx) ? idx : 0;
+      },
       // 2026-08-31 Phase 3：段落级「✨ 用 AI 重译」入口。
       // 仅在 AI 已配置时渲染按钮，否则用户点了也白点。
       showAiRedo: !!onTranslateBatch,
@@ -6454,12 +6679,32 @@
   /** 顶栏「双语」按钮：切换并持久化到阅读设置 */
   async function toggleBilingual(): Promise<void> {
     console.log("[REword] 双语按钮点击, 当前状态:", bilingualOn);
+    getLogger().info(`[REword][双语] 按钮点击，当前 bilingualOn=${bilingualOn}，bookId=${bookId}`);
     try {
       if (bilingualOn) {
         disableBilingual();
         settingsStore.update({ bilingual: false });
         return;
       }
+      // 2026-09-05 R5：双语只对英文书开放 —— 非英文书不进入切分 / 送译 / 注入链路，
+      // 避免中文书白跑一遍翻译、白烧 token。判定顺序：元数据 dc:language 优先，
+      // 缺失（TXT/MD/PDF 常没有）时采样正文；两者都无结论（unknown）则放行，
+      // 宁可让用户自己试，也不误杀一本真英文书。
+      const detection = detectBookLanguage({
+        metaLanguage: meta?.language || undefined,
+        sampleTexts: collectSampleTexts(getContentDocs(), { maxChars: 2000 }),
+      });
+      if (detection.verdict === "other") {
+        getLogger().info(
+          `[REword][双语] 非英文书籍，不开启双语：bookId=${bookId} source=${detection.source} conf=${detection.confidence}`,
+        );
+        toast("未识别为英文书籍，双语对照暂不可用", 2600, "info" as any);
+        return;
+      }
+      getLogger().info(
+        `[REword][双语] 语言判定通过：bookId=${bookId} verdict=${detection.verdict} source=${detection.source} conf=${detection.confidence}`,
+      );
+
       const configured = !isTranslationConfigured || isTranslationConfigured();
       console.log("[REword] 双语: 开启检查, isTranslationConfigured=", configured);
       if (!configured) {
@@ -6504,16 +6749,16 @@
   function chooseProgressive(): void {
     askModeOpen = false;
     enableBilingual();
-    // 2026-08-31 Task A：记住本书选法，下次开同书不再弹窗
-    void setBilingualBookMode?.(bookId, "progressive");
+    // 2026-08-31 Task A：记住本书选法，下次开同书不再弹窗（2026-09-05 F4：可取消勾选不记住）
+    if (askRemember) void setBilingualBookMode?.(bookId, "progressive");
   }
 
   /** 2026-08-31 Phase 4：询问弹窗 → 选「整书预翻译」：开启双语 + 后台整书预翻译 */
   function chooseWholeBook(): void {
     askModeOpen = false;
     enableBilingual();
-    // 2026-08-31 Task A：记住本书选法，下次开同书不再弹窗
-    void setBilingualBookMode?.(bookId, "whole-book");
+    // 2026-08-31 Task A：记住本书选法，下次开同书不再弹窗（2026-09-05 F4：可取消勾选不记住）
+    if (askRemember) void setBilingualBookMode?.(bookId, "whole-book");
     openPretranslateDialog();
   }
 
@@ -6870,6 +7115,20 @@
       return;
     }
 
+    // ── 2026-09-07 双源：🌐 切换在线词海 / 离线，就地重查当前词 ──
+    if (action === "dict-switch-online" || action === "dict-switch-offline") {
+      dictPopupMode = action === "dict-switch-online" ? "online" : "offline";
+      const w = dictPopup.word;
+      if (w) runDictLookup(w, { x: dictPopup.x, y: dictPopup.y, source: (dictPopupSource as any) ?? "hover" });
+      return;
+    }
+
+    // ── 2026-09-07 简化小窗卡：🔍 送侧边栏查词典（详细释义） ──
+    if (action === "lookup-in-sidebar") {
+      sendToSidebar();
+      return;
+    }
+
     // ── 词性区块折叠/展开 ──
     if (action === "toggle-pos") {
       const block = target.closest(".hiword-vb-pos-block") as HTMLElement | null;
@@ -6943,6 +7202,36 @@
   let unsubAnnStore: (() => void) | undefined;
   /** 标记是否已订阅 annStore(避免重复订阅) */
   let annStoreSubscribed = false;
+  // 2026-09-04 P0-3：inkStrokes 订阅——笔触新增/删除时同步刷新合并列表
+  // （inkStrokes 是全局 Svelte store，多个 ReaderView Tab 共享同一份数据）
+  let unsubInkStrokes: (() => void) | undefined;
+  // R3 刷新单通道：数据变更后的 EPUB 视觉 reconcile 定时器（防抖合并连续写操作）
+  let annReconcileTimer: ReturnType<typeof setTimeout> | null = null;
+  /**
+   * R3 刷新单通道（数据 → 视觉唯一入口）：由 annStore.subscribe 触发（防抖）。
+   *  - 残留清理：syncVisualWithStore 强制移除「数据中已不存在/已软删」的 overlay；
+   *  - 缺失补绘：活跃但未绘制（hasOverlayKey=false）的条目 → addReaderAnnotation；
+   *  - PDF 不走此路径：PdfTextHlLayer 自带 annStore.subscribe 自绘，避免双重绘制；
+   *  - 编辑态的样式/颜色原子替换仍由各编辑函数就地完成（foliate addAnnotation 语义），
+   *    reconcile 只兜底创建/删除/旁路变更三类场景。
+   */
+  function scheduleAnnVisualReconcile() {
+    if (isPdfBook()) return;
+    if (annReconcileTimer != null) clearTimeout(annReconcileTimer);
+    annReconcileTimer = setTimeout(() => {
+      annReconcileTimer = null;
+      if (!annStore || !bookId || !view) return;
+      try {
+        syncVisualWithStore(view, annStore, bookId);
+        const active = (annStore.getByBook(bookId) || []).filter((it: any) => it.cfi && !it.deletedAt);
+        for (const it of missingDrawItems(active, (cfi) => hasOverlayKey(view, cfi))) {
+          void addReaderAnnotation(it);
+        }
+      } catch (err) {
+        console.warn("[REword] 批注视觉 reconcile 失败:", err);
+      }
+    }, 60);
+  }
   /** annStore 单例可能晚于 onMount 才注入(插件初始化时序),需要延迟订阅 */
   function ensureAnnStoreSubscription() {
     if (annStoreSubscribed) return;
@@ -6952,8 +7241,11 @@
     annStore = store; // 顺手捕获(让 refreshAnnotsList 后续调用不必再 try/catch)
     annStoreSubscribed = true;
     unsubAnnStore = store.subscribe(() => {
-      // 任何写操作 → 立即同步面板
+      // R3 刷新单通道：任何写操作 → 列表刷新 + 侧边栏广播 + EPUB 视觉 reconcile。
+      // 此前各 mutation 路径手动重复调用前两者（双通道易漂移），现统一收口到这里。
       refreshAnnotsList();
+      dispatchAnnotationChanged();
+      scheduleAnnVisualReconcile();
     });
     // 订阅成功后立即拉一次(此时 store 已就绪,annStore 变量也同步了)
     refreshAnnotsList();
@@ -6964,14 +7256,22 @@
       settings = s;
       applyContainerBg();
       if (view) applyStyles();
-      // 2026-08-27：双语状态从设置一次性恢复（仅首次订阅时）
+      // 2026-08-27：双语状态从设置一次性恢复（仅首次订阅时）。
+      // 2026-09-05 F3：不再直接 enableBilingual —— onMount 时 view/meta 尚未就绪，
+      // 语言判定必然 unknown 而放行，非英文书重启后会绕过门槛直接进双语。
+      // 改为挂起标记，等书籍内容加载完（load 事件）再跑 detectBookLanguage 复核。
       if (!bilingualInitDone) {
         bilingualInitDone = true;
-        if (s.bilingual) enableBilingual();
+        if (s.bilingual) bilingualPendingRestore = true;
       }
     });
     unsubAnnChanged = subscribeAnnotationsChanged((bid) => {
       if (bid === bookId && view) syncVisualWithStore(view, annStore, bookId);
+    });
+    // 2026-09-04 P0-3：订阅 inkStrokes，笔触变化时立即刷新合并列表
+    // （inkStrokes 是全局 store，加订阅时已含盘上数据，无需额外 load 等待）
+    unsubInkStrokes = inkStrokes.subscribe(() => {
+      refreshAnnotsList();
     });
     // 2026-09-01：先尝试订阅(可能 annStore 已就绪);否则起一个轮询兜底
     ensureAnnStoreSubscription();
@@ -7083,6 +7383,10 @@
     if (unsubAnnChanged) unsubAnnChanged();
     // 2026-09-01：注销 annStore 订阅(避免组件销毁后回调仍被触发)
     if (unsubAnnStore) unsubAnnStore();
+    // 2026-09-04 P0-3：注销 inkStrokes 订阅（避免组件销毁后回调仍被触发）
+    if (unsubInkStrokes) unsubInkStrokes();
+    // R3：注销后取消挂起的视觉 reconcile（防抖窗口内的定时器不能再触发已销毁组件）
+    if (annReconcileTimer != null) { clearTimeout(annReconcileTimer); annReconcileTimer = null; }
     if (saveTimer) clearTimeout(saveTimer);
     if (selReadTimer) clearTimeout(selReadTimer);
     if (timeTimer) clearInterval(timeTimer);
@@ -7118,6 +7422,11 @@
     if (readerRelayoutTimer) clearTimeout(readerRelayoutTimer);
     if (typeof document !== "undefined") {
       document.removeEventListener("selectionchange", onMainSelectionChange);
+      // 2026-09-05：清掉选区读取的 rAF 节流句柄（组件销毁后回调不该再跑）
+      if (selReadRaf != null) {
+        if (typeof cancelAnimationFrame === "function") cancelAnimationFrame(selReadRaf);
+        selReadRaf = null;
+      }
       // 2026-08-29 修复：注销 main document capture 阶段 keydown 监听
       document.removeEventListener("keydown", onGlobalKey, true);
       // 注销双击缩放
@@ -7160,6 +7469,12 @@
     teardownAnnotationLayer();
     detachAllContentDocs();
     try { view?.clearSearch?.(); } catch (__swallowErr) { logSwallow(__swallowErr, "ReaderView.svelte · try { view?.clearSearch?.(); }", "debug"); }
+    // 2026-09-05：PDF 必须显式销毁。foliate 的 view.close() 只销毁 renderer，
+    // **不会**调用 book.destroy()，导致 pdf.js 的 loadingTask / worker 线程 / 每页 blob URL
+    // 全部泄漏（每开关一次 PDF 泄漏一份）。必须在 close() 之前调用（close 后 book 已不可用）。
+    try {
+      (view?.book as any)?.destroy?.();
+    } catch (__swallowErr) { logSwallow(__swallowErr, "ReaderView.svelte · book.destroy", "debug"); }
     try {
       view?.close?.();
     } catch (__swallowErr) { logSwallow(__swallowErr, "ReaderView.svelte · try { view?.close?.(); }", "debug"); }
@@ -7195,17 +7510,10 @@
       >☰</button>
       <button
         class="reader-btn reader-drawer-anchor"
-        data-drawer-anchor="bookmarks"
-        title="书签（点空白收起）"
-        class:reader-btn-active={showBookmarks}
-        on:click={() => toggleDrawer("bookmarks")}
-      >🔖</button>
-      <button
-        class="reader-btn reader-drawer-anchor"
-        data-drawer-anchor="annots"
-        title="摘录汇总（点空白收起）"
-        class:reader-btn-active={showAnnots}
-        on:click={() => toggleDrawer("annots")}
+        data-drawer-anchor="marks"
+        title="我的标记（书签 + 摘录，点空白收起）"
+        class:reader-btn-active={showMarks}
+        on:click={() => toggleDrawer("marks")}
       >📝</button>
     </div>
     <!-- 中：书名 + 章节（真正居中）。
@@ -7353,59 +7661,72 @@
     </div>
   {/if}
 
-  {#if showBookmarks}
-    <div class="reader-popover reader-bookmarks" style="--tail-left:{tailLeft}px" on:wheel|stopPropagation>
-      <div class="reader-popover-title">
-        书签
-        {#if bookmarks.length}
-          <span class="reader-toc-count">{bookmarks.length} 条</span>
-        {/if}
+  {#if showMarks}
+    <div class="reader-popover reader-marks" style="--tail-left:{tailLeft}px" on:wheel|stopPropagation>
+      <!-- 子区 1：书签 -->
+      <div class="reader-marks-section">
+        <div class="reader-popover-title">
+          书签
+          {#if bookmarks.length}
+            <span class="reader-toc-count">{bookmarks.length} 条</span>
+          {/if}
+        </div>
+        <div class="reader-bm-list">
+          <button class="reader-bm-add" on:click={toggleCurrentBookmark}>＋ 在当前页加书签</button>
+          {#each bookmarks as bm (bm.id)}
+            <div class="reader-bm-item">
+              <button class="reader-bm-main" title="跳转到书签" on:click={() => jumpBookmark(bm)}>
+                <span class="reader-bm-label">{bm.label || "书签"}</span>
+                {#if bm.excerpt}
+                  <span class="reader-bm-excerpt">{bm.excerpt}</span>
+                {/if}
+              </button>
+              <button class="reader-mini-btn" title="删除书签" on:click={() => removeBookmark(bm)}>✕</button>
+            </div>
+          {:else}
+            <div class="reader-toc-empty">还没有书签，点上面按钮在当前页加一个</div>
+          {/each}
+        </div>
       </div>
-      <div class="reader-bm-list">
-        <button class="reader-bm-add" on:click={toggleCurrentBookmark}>＋ 在当前页加书签</button>
-        {#each bookmarks as bm (bm.id)}
-          <div class="reader-bm-item">
-            <button class="reader-bm-main" title="跳转到书签" on:click={() => jumpBookmark(bm)}>
-              <span class="reader-bm-label">{bm.label || "书签"}</span>
-              {#if bm.excerpt}
-                <span class="reader-bm-excerpt">{bm.excerpt}</span>
-              {/if}
-            </button>
-            <button class="reader-mini-btn" title="删除书签" on:click={() => removeBookmark(bm)}>✕</button>
-          </div>
-        {:else}
-          <div class="reader-toc-empty">还没有书签，点上面按钮在当前页加一个</div>
-        {/each}
-      </div>
-    </div>
-  {/if}
 
-  {#if showAnnots}
-    <div class="reader-popover reader-annots" style="--tail-left:{tailLeft}px" on:wheel|stopPropagation>
-      <div class="reader-popover-title">
-        本书摘录
-        {#if annotsList.length}
-          <span class="reader-toc-count">{annotsList.length} 条</span>
-          <button class="reader-mini-btn" title="导出全部为 Markdown 到剪贴板" on:click={exportAnnots}>导出</button>
-        {/if}
-      </div>
-      <div class="reader-annots-list">
-        {#each annotsList as it (it.id)}
-          <div class="reader-annot-item">
-            <span class="reader-annot-dot" style="background:{it.color || '#06b6d4'}"></span>
-            <button class="reader-annot-main" title="跳转到原文" on:click={() => jumpAnnot(it)}>
-              <span class="reader-annot-text">
-                {String(it.selectedText || it.sentence || "").trim() || "（无文本）"}
-              </span>
-              {#if String(it.note || "").trim()}
-                <span class="reader-annot-note">{String(it.note || "").trim()}</span>
-              {/if}
-            </button>
-            <button class="reader-mini-btn" title="删除这条摘录" on:click={() => removeAnnot(it)}>✕</button>
-          </div>
-        {:else}
-          <div class="reader-toc-empty">本书还没有摘录，划选文本后点「标注」或「批注」</div>
-        {/each}
+      <!-- 子区 2：摘录（含墨迹） -->
+      <!-- 2026-09-04 P0-3：墨迹笔触与文本摘录合并展示，按 createdAt 倒序。
+           kind === "ink" 的项展示笔触色点 + 笔刷信息 + 跳页；其他走文本路径。 -->
+      <div class="reader-marks-section">
+        <div class="reader-popover-title">
+          本书摘录
+          {#if annotsList.length}
+            <span class="reader-toc-count">{annotsList.length} 条</span>
+            <button class="reader-mini-btn" title="导出文本摘录为 Markdown 到剪贴板（墨迹不导出）" on:click={exportAnnots}>导出</button>
+          {/if}
+        </div>
+        <div class="reader-annots-list">
+          {#each annotsList as it (it.id)}
+            <div class="reader-annot-item" class:reader-annot-item-ink={it.kind === "ink"}>
+              <span class="reader-annot-dot" style="background:{it.color || '#06b6d4'}"></span>
+              <button class="reader-annot-main" title={it.kind === "ink" ? "跳转到墨迹所在页" : "跳转到原文"} on:click={() => jumpAnnot(it)}>
+                <span class="reader-annot-text">
+                  {#if it.kind === "ink"}
+                    <span class="reader-annot-ink-tag">✎ {it.sentence}</span>
+                    <span class="reader-annot-ink-meta">{it.brush} · {it.style}</span>
+                  {:else}
+                    {String(it.selectedText || it.sentence || "").trim() || "（无文本）"}
+                  {/if}
+                </span>
+                {#if it.kind !== "ink" && String(it.note || "").trim()}
+                  <span class="reader-annot-note">{String(it.note || "").trim()}</span>
+                {/if}
+              </button>
+              <button
+                class="reader-mini-btn"
+                title={it.kind === "ink" ? "删除这条墨迹" : "删除这条摘录"}
+                on:click={() => it.kind === "ink" ? removeInkStroke(it) : removeAnnot(it)}
+              >✕</button>
+            </div>
+          {:else}
+            <div class="reader-toc-empty">本书还没有摘录，划选文本后点「标注」或「批注」</div>
+          {/each}
+        </div>
       </div>
     </div>
   {/if}
@@ -8118,6 +8439,9 @@
           onSetPdfViewMode={onSetPdfViewMode}
           onSetPdfScrollDir={onSetPdfScrollDir}
           onSetPdfInvert={setPdfInvert}
+          onSetPdfAnnotHighlight={setPdfAnnotHighlight}
+          onSetPdfAnnotUnderline={setPdfAnnotUnderline}
+          onSetPdfAnnotAnnotate={setPdfAnnotAnnotate}
         />
       {/if}
 
@@ -8188,20 +8512,18 @@
           <div class="reword-pt-field">
             <label>目标语言</label>
             <select bind:value={ptForm.to} disabled={ptRunning}>
-              <option value="zh">中文（简体）</option>
-              <option value="en">English</option>
-              <option value="ja">日本語</option>
-              <option value="ko">한국어</option>
-              <option value="fr">Français</option>
+              {#each TARGET_LANG_OPTIONS as opt}
+                <option value={opt.value}>{opt.label}</option>
+              {/each}
             </select>
           </div>
           <div class="reword-pt-field">
-            <label>每批段数</label>
-            <input type="number" min="1" max="32" bind:value={ptForm.batchSize} disabled={ptRunning} />
+            <label title="每个并发列每次取走的块数；新运行时默认 2 列 × 每列 5 块">每列块数</label>
+            <input type="number" min="1" max="16" bind:value={ptForm.batchSize} disabled={ptRunning} />
           </div>
           <div class="reword-pt-field">
-            <label>并发数</label>
-            <input type="number" min="1" max="6" bind:value={ptForm.concurrency} disabled={ptRunning} />
+            <label title="同时送译的列数">并发列数</label>
+            <input type="number" min="1" max="4" bind:value={ptForm.concurrency} disabled={ptRunning} />
           </div>
           <label class="reword-pt-overwrite">
             <input type="checkbox" bind:checked={ptForm.overwrite} disabled={ptRunning} />
@@ -8287,8 +8609,13 @@
           <button class="reword-pt-btn reword-pt-btn-primary" on:click={chooseWholeBook}>整书预翻译</button>
           <button class="reword-pt-btn" on:click={chooseProgressive}>渐进式翻译</button>
         </div>
-        <p style="color:var(--b3-theme-on-surface,#999);font-size:11px;line-height:1.55;margin-top:14px;">
-          整书：后台翻译全书并写入缓存，翻页 / 重开秒出；渐进式：只译当前页 + 后续窗口，随读随译、更省额度。
+        <!-- 2026-09-05 F4：记忆行为透明化（此前选一次就永久记住但用户不知情） -->
+        <label style="display:flex;align-items:center;gap:6px;margin-top:12px;font-size:12px;color:var(--b3-theme-on-surface,#777);cursor:pointer;">
+          <input type="checkbox" bind:checked={askRemember} />
+          <span>记住本书的选择，下次不再询问（可在 设置 → 显示与界面 清除）</span>
+        </label>
+        <p style="color:var(--b3-theme-on-surface,#999);font-size:11px;line-height:1.55;margin-top:10px;">
+          整书：后台翻译全书并写入缓存，翻页 / 重开秒出；渐进式：只译当前分节 + 后续窗口，随读随译、更省额度。
         </p>
       </div>
     </div>
@@ -8310,6 +8637,8 @@
     <!-- [REword 2026-09-02] PDF 界面专属浮层：Apple Pencil 墨迹批注（SVG 层 + 工具栏） -->
     {#if readerMode === "pdf"}
       <PdfOverlay opened={opened} />
+      <!-- 2026-09-04 P1：PDF 文本标注覆盖层（与 PdfOverlay 同处 PDF 分支） -->
+      <PdfTextHlLayer bookId={bookId} {view} {opened} {pdfCurrentPage} />
     {/if}
     {#if opened && !errorMsg}
       <div class="reader-side-tap" aria-hidden="false">
@@ -8460,6 +8789,7 @@
         <div class="reader-sel-strip" bind:this={selStripEl}>
           <div class="reader-style-row">
             {#each ANNOTATION_PANEL_STYLES as s}
+              {#if pdfAnnotEnabled(s === "highlight" ? "highlight" : "underline")}
               <button
                 class="reader-style-btn"
                 class:active={(selToolbar.mode === "edit" ? selToolbar.annStyle : lastStyle) === s}
@@ -8467,6 +8797,7 @@
                 on:click={() => selToolbar.mode === "edit" ? applyEditStyle(s) : onSelCreate(s, lastColor)}>
                 <span class="reader-style-glyph style-{s}" style="--sc:{selToolbar.mode === 'edit' ? (selToolbar.annColor || lastColor) : lastColor}">{ANNOTATION_STYLES[s].icon}</span>
               </button>
+              {/if}
             {/each}
           </div>
           <div class="reader-color-row">
@@ -8497,9 +8828,11 @@
           <button class="reader-sel-item" title="复制" on:click={onSelCopy}>
             <span class="reader-sel-ico">{@html SEL_ICONS.copy}</span><span class="reader-sel-txt">复制</span>
           </button>
+          {#if pdfAnnotEnabled("annotate")}
           <button class="reader-sel-item" title="批注：升级为带笔记标注" on:click={onEditAnnotate}>
             <span class="reader-sel-ico">{@html SEL_ICONS.annotate}</span><span class="reader-sel-txt">批注</span>
           </button>
+          {/if}
           <button class="reader-sel-item" title="词典" on:click={onSelDict}>
             <span class="reader-sel-ico">{@html SEL_ICONS.dict}</span><span class="reader-sel-txt">词典</span>
           </button>
@@ -8522,6 +8855,7 @@
                右段 ▼=仅在想改样式/颜色时才展开样式条。
                两者拆开是为了让「默认路径零点击成本」，同时保留改样式入口。
                注意：Svelte4 模板禁用 `as` 类型断言与 ?./??，故文案全部在 script 里预计算。 -->
+          {#if pdfAnnotEnabled("highlight")}
           <div class="reader-sel-split">
             <button
               class="reader-sel-item reader-sel-item-accent reader-sel-split-main"
@@ -8538,12 +8872,15 @@
               aria-label="展开样式条"
               on:click={toggleStyleStrip}>▾</button>
           </div>
+          {/if}
+          {#if pdfAnnotEnabled("annotate")}
           <button
             class="reader-sel-item reader-sel-item-accent"
             title="批注：打开批注编辑气泡（样式+颜色+笔记）"
             on:click={openNoteEditor}>
             <span class="reader-sel-ico">{@html SEL_ICONS.annotate}</span><span class="reader-sel-txt">批注</span>
           </button>
+          {/if}
           <button class="reader-sel-item" title="词典" on:click={onSelDict}>
             <span class="reader-sel-ico">{@html SEL_ICONS.dict}</span><span class="reader-sel-txt">词典</span>
           </button>
@@ -9843,7 +10180,8 @@
      抽屉在 top-level 渲染（不是 toolbar 子元素），所以仍用 .reader-view 作定位上下文 */
   .reader-toc,
   .reader-bookmarks,
-  .reader-annots {
+  .reader-annots,
+  .reader-marks {
     top: 36px;       /* 略大于工具栏底缘（toolbar 内边距 6+6=12 + 按钮行高 ~18 = 30 + 8 角标） */
     left: 8px;
     max-height: 70vh;
@@ -9868,7 +10206,8 @@
      并通过 translateX(-50%) 让三角中心对准变量，按钮宽度/间距变化也不偏移。 */
   .reader-toc::before,
   .reader-bookmarks::before,
-  .reader-annots::before {
+  .reader-annots::before,
+  .reader-marks::before {
     content: "";
     position: absolute;
     top: -7px;
@@ -9934,10 +10273,17 @@
    * 2026-08-30 改造：.reader-toc/.reader-bookmarks/.reader-annots 已合并为一套定位规则
    * （见上 8762 行附近），这里只覆盖宽度差异。 */
   .reader-bookmarks,
-  .reader-annots {
+  .reader-annots,
+  .reader-marks {
     width: 320px;
     min-width: 280px;
     max-width: 360px;
+  }
+  /* 2026-09-03 半分半合：书签 + 摘录合并到同一抽屉，用分隔线区分两个子区 */
+  .reader-marks-section + .reader-marks-section {
+    margin-top: 10px;
+    padding-top: 10px;
+    border-top: 1px solid var(--b3-border-color, rgba(0, 0, 0, 0.12));
   }
   .reader-bm-list,
   .reader-annots-list {

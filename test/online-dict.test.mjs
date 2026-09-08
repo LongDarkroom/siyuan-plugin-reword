@@ -1,42 +1,49 @@
 /**
- * 在线完整词典解析单测（2026-08-15 新增）。
- * 验证 parseEudicFullHtml 纯函数：音标提取 + 释义提取 + 词性前缀拆分 + 兜底 null。
+ * 在线完整词典解析单测（2026-08-15 新增，2026-09-07 切换至海词）。
+ * 验证 parseEudicFullHtml 别名（=parseHaiciLiteHtml）：音标 / 简释+词性 / 兜底 null。
+ *
+ * 2026-09-07 切换数据源后，本文件 sample HTML 全部从欧路格式改为海词格式；
+ * 函数名仍叫 parseEudicFullHtml（保持 API 兼容），内部已转发至 parseHaiciLiteHtml。
  */
 import test from "node:test";
 import assert from "node:assert/strict";
 import { parseEudicFullHtml, renderOnlineDictCard } from "../src/dict/online-dict.ts";
 
-// 构造欧路网页真实结构的最小样本
+// 构造海词网页真实结构的最小样本（mastery 模式）
 const SAMPLE = `
-<div id="translate">
-  <div id="ExpFC" class="explain_wrap">
-    <div class="expHead"><span class="explain_collapse"></span>英汉-汉英词典</div>
-    <div id="ExpFCchild" class="expDiv">
-      <div class="exp">n. 精通；优势；统治权；征服；掌握</div>
-    </div>
-  </div>
+<div class="phonetic">
+  <span>英 <bdo lang="EN-US">['mɑːstəri]</bdo></span>
+  <span>美 <bdo lang="EN-US">['mæstəri]</bdo></span>
 </div>
-<span class="phontype">英</span><span class="Phonitic">/'mɑːstəri/</span>
-<span class="phontype">美</span><span class="Phonitic">/'mæstəri/</span>
+<div class="basic clearfix">
+  <ul class="dict-basic-ul">
+    <li><span>n.</span><strong>精通；优势；统治权；征服；掌握</strong></li>
+  </ul>
+</div>
 `;
 
 test("parseEudicFullHtml: 提取英/美音标 + 词性释义", () => {
   const r = parseEudicFullHtml(SAMPLE, "mastery");
   assert.ok(r, "应解析出结果");
   assert.equal(r.word, "mastery");
-  assert.match(r.phonetic, /英 \/'mɑːstəri\//);
-  assert.match(r.phonetic, /美 \/'mæstəri\//);
+  assert.match(r.phonetic, /英 \/mɑːstəri\//);
+  assert.match(r.phonetic, /美 \/mæstəri\//);
   assert.equal(r.meanings.length, 1);
   assert.equal(r.meanings[0].pos, "n.");
   assert.match(r.meanings[0].zh, /精通；优势/);
-  assert.equal(r.source, "eudic");
+  assert.equal(r.source, "haici");
 });
 
-test("parseEudicFullHtml: 多词性多 exp div 各自拆分", () => {
+test("parseEudicFullHtml: 多词性多 basic-ul li 各自拆分", () => {
+  // 海词格式：每个词性 = 一个 <li>，li 内 <span>X.</span> + <strong>释义</strong>
   const html = `
-    <div class="exp">n. 精通；掌握</div>
-    <div class="exp">vt. 征服；统治</div>
-    <div class="exp">adj. 熟练的</div>
+    <div class="basic clearfix">
+      <ul class="dict-basic-ul">
+        <li><span>n.</span><strong>精通；掌握</strong></li>
+        <li><span>vt.</span><strong>征服；统治</strong></li>
+        <li><span>adj.</span><strong>熟练的</strong></li>
+      </ul>
+    </div>
   `;
   const r = parseEudicFullHtml(html, "x");
   assert.ok(r);
@@ -47,7 +54,8 @@ test("parseEudicFullHtml: 多词性多 exp div 各自拆分", () => {
 });
 
 test("parseEudicFullHtml: 无词性前缀时整行作释义", () => {
-  const html = `<div class="exp">熟练，精通</div>`;
+  // 海词无 pos span 的场景：strong 内直接中文
+  const html = `<ul class="dict-basic-ul"><li><strong>熟练，精通</strong></li></ul>`;
   const r = parseEudicFullHtml(html, "x");
   assert.ok(r);
   assert.equal(r.meanings[0].pos, "");
@@ -55,7 +63,7 @@ test("parseEudicFullHtml: 无词性前缀时整行作释义", () => {
 });
 
 test("parseEudicFullHtml: 释义含 HTML 标签时正确 strip", () => {
-  const html = `<div class="exp">n. <a href="/x">精通</a>；<i>优势</i></div>`;
+  const html = `<ul class="dict-basic-ul"><li><span>n.</span><strong><a href="/x">精通</a>；<i>优势</i></strong></li></ul>`;
   const r = parseEudicFullHtml(html, "x");
   assert.ok(r);
   assert.equal(r.meanings[0].pos, "n.");
@@ -71,7 +79,7 @@ test("renderOnlineDictCard: 含来源徽标 + 词头 + 音标 + 释义 + 收藏�
   const r = parseEudicFullHtml(SAMPLE, "mastery");
   assert.ok(r, "应解析出结果");
   const html = renderOnlineDictCard(r, false);
-  assert.match(html, /🌐 在线词典（欧路）/, "应有在线来源徽标");
+  assert.match(html, /🌐 在线词典（海词）/, "2026-09-07 切换后徽标改为「海词」");
   assert.match(html, /mastery/, "应显示词头");
   assert.match(html, /hiword-dict-phonetic/, "应显示音标");
   assert.match(html, /hiword-online-meaning/, "应有释义行");
@@ -80,7 +88,7 @@ test("renderOnlineDictCard: 含来源徽标 + 词头 + 音标 + 释义 + 收藏�
 });
 
 test("renderOnlineDictCard: XSS 转义", () => {
-  const r = { word: "<script>", phonetic: "", meanings: [{ pos: "n.", zh: '<img onerror=alert(1)>' }], source: "eudic" };
+  const r = { word: "<script>", phonetic: "", meanings: [{ pos: "n.", zh: '<img onerror=alert(1)>' }], inflections: [], synonyms: [], antonyms: [], source: "haici" };
   const html = renderOnlineDictCard(r, false);
   assert.doesNotMatch(html, /<script>/, "词头应转义");
   assert.doesNotMatch(html, /<img onerror=alert/, "释义应转义");

@@ -26,8 +26,14 @@ const viewSrc = readFileSync(join(__dirname, "..", "src", "reader", "ReaderView.
 /* ================= 修复:核心 7 路径都得有 refreshAnnotsList ================= */
 
 /**
- * 检查「函数 X 写完 annStore 后必须 refreshAnnotsList」契约
- * 实现:从函数体里找到下一个顶级 `}`(粗略),断言这段里至少有一次 refreshAnnotsList
+ * 检查「函数 X 写完 annStore 后必须刷新「本书摘录」」契约
+ *
+ * 2026-09-05 R3 刷新单通道：此前 7 个写路径各自手动调 refreshAnnotsList + dispatchAnnotationChanged，
+ * 与 annStore.subscribe 自动刷新双通道并存、易漂移；现统一收口到 subscribe 回调。
+ * 契约因此从「必须直接调 refreshAnnotsList」升级为「必须能触达刷新」：
+ *   - 形态 A（旧）：函数体内直接调 refreshAnnotsList()
+ *   - 形态 B（R3）：函数体写 annStore（upsert/remove），由 subscribe 单通道覆盖刷新
+ * 两者任一成立即满足，语义比旧契约更强（任何写操作都无法绕过刷新）。
  */
 function assertRefreshInFn(fnName, label) {
   // 找函数定义开始
@@ -37,7 +43,13 @@ function assertRefreshInFn(fnName, label) {
   const start = m.index;
   // 找函数体:从 { 开始,到下一个匹配的 } 结束(简化:用 5000 字符窗口)
   const body = viewSrc.slice(start, start + 5000);
-  assert.ok(/refreshAnnotsList\(\)/.test(body), `${label}: ${fnName} 写完 annStore 后必须调 refreshAnnotsList()`);
+  const directRefresh = /refreshAnnotsList\(\)/.test(body);
+  const writesStore = /annStore\.(upsert|remove)\s*\(/.test(body);
+  const singleChannel = /store\.subscribe\(\s*\(\s*\)\s*=>\s*\{[\s\S]{0,400}refreshAnnotsList\(\)/.test(viewSrc);
+  assert.ok(
+    directRefresh || (writesStore && singleChannel),
+    `${label}: ${fnName} 写完 annStore 后必须能刷新「本书摘录」（直接调 refreshAnnotsList，或由 annStore.subscribe 单通道覆盖）`,
+  );
 }
 
 test("[核心] saveHighlight 创建标注后必须刷「本书摘录」", () => {
@@ -70,32 +82,23 @@ test("[核心] applyEditColor edit 态改色后必须刷", () => {
 
 /* ================= 修复:打开抽屉时兜底刷新 ================= */
 
-test("[抽屉] toggleDrawer 打开 annots 时必须 refreshAnnotsList", () => {
-  // 找 toggleDrawer 函数
+test("[抽屉] toggleDrawer 打开 marks 时必须同时 refreshAnnotsList + refreshBookmarks", () => {
+  // 2026-09-04 对齐：书签/摘录合并进「我的标记」后，打开 marks 一次刷两份
   const m = viewSrc.match(/const toggleDrawer\s*=\s*async\s*\(\s*kind\s*:\s*DrawerKind\s*\)\s*=>\s*\{/);
   assert.ok(m, "应有 toggleDrawer 函数");
   const body = viewSrc.slice(m.index, m.index + 2000);
   assert.ok(
-    /activeDrawer\s*===\s*"annots"[\s\S]{0,200}refreshAnnotsList\(\)/.test(body),
-    "打开 annots 抽屉时应 refreshAnnotsList()"
+    /activeDrawer\s*===\s*"marks"[\s\S]{0,200}refreshAnnotsList\(\)/.test(body),
+    "打开 marks 抽屉时应 refreshAnnotsList()"
+  );
+  assert.ok(
+    /activeDrawer\s*===\s*"marks"[\s\S]{0,200}refreshBookmarks\(\)/.test(body),
+    "打开 marks 抽屉时应 refreshBookmarks()"
   );
   // 不应再调死引用 reloadAnnots
   assert.ok(
-    !/activeDrawer\s*===\s*"annots"[\s\S]{0,200}reloadAnnots\(/.test(body),
+    !/reloadAnnots\(/.test(body),
     "不能再调死引用 reloadAnnots()"
-  );
-});
-
-test("[抽屉] toggleDrawer 打开 bookmarks 时必须 refreshBookmarks", () => {
-  const m = viewSrc.match(/const toggleDrawer\s*=\s*async\s*\(\s*kind\s*:\s*DrawerKind\s*\)\s*=>\s*\{/);
-  const body = viewSrc.slice(m.index, m.index + 2000);
-  assert.ok(
-    /activeDrawer\s*===\s*"bookmarks"[\s\S]{0,200}refreshBookmarks\(\)/.test(body),
-    "打开 bookmarks 抽屉时应 refreshBookmarks()"
-  );
-  assert.ok(
-    !/activeDrawer\s*===\s*"bookmarks"[\s\S]{0,200}reloadBookmarks\(/.test(body),
-    "不能再调死引用 reloadBookmarks()"
   );
 });
 
