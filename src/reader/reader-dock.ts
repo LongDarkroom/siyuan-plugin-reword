@@ -11,7 +11,7 @@ import { logSwallow } from "../core/safe.ts";
 // @ts-ignore - Svelte 组件
 import BookshelfView from "./BookshelfView.svelte";
 import { BookshelfStore } from "./bookshelf-store";
-import { ReaderSettingsStore, READER_DEFAULT_SETTINGS } from "./reader-settings";
+import { ReaderSettingsStore } from "./reader-settings";
 import { FontStore } from "./reader-fonts";
 import { ReaderTabController } from "./reader-tab";
 import { isSupportedBookFile } from "./book-adapters";
@@ -67,9 +67,9 @@ export class ReaderDockController {
     return this.tabs;
   }
 
-  /** 重置阅读器样式为出厂默认（数据面板「重置阅读设置」调用） */
+  /** 重置阅读器样式为出厂默认（数据面板「重置阅读设置」调用）；2026-09-09 双分家：book/pdf 一起重置 */
   resetReaderSettings(): void {
-    this.settingsStore.update({ ...READER_DEFAULT_SETTINGS });
+    this.settingsStore.resetAll();
   }
 
   /** 渲染书架面板（组合栏 Tab / 独立 Dock 共用入口） */

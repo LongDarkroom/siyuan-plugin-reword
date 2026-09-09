@@ -158,8 +158,8 @@ test("[封面] PDF 分支写 cover 路径 + putFile", () => {
   const pdfBlock = src.match(/else if \(ext === "pdf"\) \{([\s\S]*?)\n  \}/);
   assert.ok(pdfBlock, "PDF 分支应存在");
   const block = pdfBlock[1];
-  assert.ok(/covers/.test(block) && /\$\{id\}/.test(block), "应有 covers/${id} 路径");
-  assert.ok(/meta\.cover\.ext/.test(block), "应有 meta.cover.ext 扩展名");
+  assert.ok(/coverBlob = meta\.cover/.test(block), "PDF 分支应把 extractPdfMeta 的封面交给 coverBlob");
+  assert.ok(/covers/.test(block) && /\$\{id\}\.\$\{coverBlob\.ext\}/.test(block), "应有 covers/${id}.${coverBlob.ext} 路径");
   assert.ok(/putFile\(coverPath/.test(block), "应 putFile cover");
 });
 

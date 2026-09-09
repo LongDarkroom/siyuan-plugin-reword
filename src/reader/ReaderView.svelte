@@ -66,7 +66,6 @@ import { getLogger } from "../core/logger.ts";
   // [2026-09-01] Phase 1:PDF 大纲 / 页码提取(对齐 Obsidian PDF++ outline)
   import { extractPdfCurrentPage } from "../reader/pdf-outline";
   import {
-    ReaderSettingsStore,
     READER_DEFAULT_SETTINGS,
     THEME_PRESETS,
     LINE_WIDTH_PRESETS,
@@ -84,6 +83,7 @@ import { getLogger } from "../core/logger.ts";
     LAYOUT_PRESETS,
     detectLayoutPreset,
     type ReaderSettings,
+    type ReaderSettingsLike,
     type ReaderLayoutPreset,
     type ReaderTheme,
     type ReaderFontMode,
@@ -136,7 +136,11 @@ import { getLogger } from "../core/logger.ts";
   } from "../ai/ai-settings";
   // 2026-08-28：连续朗读控制器（参考 Readest：多引擎 system/youdao/edge + 句子高亮 + 控制条）
   import { ReaderTtsController, DEFAULT_REWORD_TTS, type RewordTtsSettings, type TtsState } from "./reader-tts";
-  import { getFileBlob } from "../siyuan/api";
+  import { getFileBlob, putFile, removeFile } from "../siyuan/api";
+  // 2026-09-09 P1：矩形框选标注默认色
+  import { DEFAULT_ANNOTATION_COLOR } from "../annotation/annotation-store.ts";
+  // 2026-09-08 启动卡死修复：onMount 自动开书前等空闲窗口（与 restoreSession 同一套闸门）
+  import { waitForLaunchIdle } from "./reader-launch.ts";
   // Phase 1：划词即时词典——复用现有离线词典引擎与卡片渲染（与「查词典」Tab 同源）
   import { lookupSmart, searchCandidates } from "../dict/dict-engine";
   import {
@@ -154,6 +158,8 @@ import { getLogger } from "../core/logger.ts";
   import { getAnnotationStore } from "../annotation/store-singleton";
   // 2026-09-04 P1：PDF 自建覆盖层归一化矩形类型
   import type { PdfRect, AnnotationStore } from "../annotation/annotation-store.ts";
+  // 2026-09-09 P1.3：矩形框选纯函数（页命中/归一化/markdown 构造），单测直连
+  import { collectPageHits, normalizeSelToRect, buildRectMarkdown, dedupeNestedRects, RECT_MIN_PX, type SelRect, type RectMdEntry } from "./pdf-rect-util.ts";
   // 标注/批注区分：isEmptyNoteContent(rec) → 无笔记=纯标注（进编辑工具栏），有笔记=批注（进查看卡片）
   import { classifyAnnotation } from "../annotation/whale-renderer";
   import {
@@ -225,8 +231,11 @@ import { getLogger } from "../core/logger.ts";
 
   export let bookId: string;
   export let store: BookshelfStore;
-  export let settingsStore: ReaderSettingsStore;
+  // 2026-09-09 P0 设置双分家：reader-tab 按书类型传入 scopeView（book/pdf 各一份设置），接口不变
+  export let settingsStore: ReaderSettingsLike;
   export let fontStore: FontStore;
+  /** 2026-09-08 启动卡死修复：上次启动未完成初始化时为 true，禁止 onMount 自动开书（断自锁，改手动打开） */
+  export let launchCrashed: boolean = false;
   export let onBack: () => void;
   /** 独立 Tab 模式：关闭当前 Tab（未提供时 ‹ 退化为 onBack） */
   export let onCloseTab: (() => void) | undefined = undefined;
@@ -234,8 +243,8 @@ import { getLogger } from "../core/logger.ts";
   export let onTitleChange: ((title: string) => void) | undefined = undefined;
   /** 朗读选中文本（委托插件 TTS 引擎，自动适配中英文 voice） */
   export let onSpeak: ((text: string) => void) | undefined = undefined;
-  /** 将选区发送到设置笔记本（委托 plugin.saveToNote） */
-  export let onSendToNote: ((opts: { markdown: string; title: string }) => Promise<string> | void) | undefined = undefined;
+  /** 将选区发送到设置笔记本（委托 plugin.saveToNote）；2026-09-09 双分家：带 readerType 供发送端路由对应分片的绑定文档 */
+  export let onSendToNote: ((opts: { markdown: string; title: string; readerType?: "book" | "pdf" }) => Promise<string> | void) | undefined = undefined;
   /** 插入到当前思源文档（2026-08-24 新增，可选） */
   export let onInsertToCurrentDoc: ((markdown: string) => Promise<string> | void) | undefined = undefined;
   /** 翻译选中文本并直接发送到 AI 精读面板（委托 plugin.translateToAi） */
@@ -725,14 +734,34 @@ import { getLogger } from "../core/logger.ts";
   let dragging = false;
 
   let saveTimer: any = null;
+  // 2026-09-09 修复：待落盘进度改为合并式。缩放路径（applyZoom / scheduleZoomPersist）
+  // 只传 { zoom }，此前 saveProgress 是整体替换（meta.progress = progress），缩放一次
+  // 就把已存的 cfi/fraction 抹掉（存储实锤出现 progress 只剩 zoom 的记录）→ 恢复丢位。
+  let pendingSave: any = null;
   // 开书后延迟重绑内容文档的定时器（须在 onDestroy 取消，避免组件销毁后仍重绑到已死的 doc）
   let attachTimer1: any = null;
   let attachTimer2: any = null;
   function scheduleProgressSave(p: any) {
+    pendingSave = { ...(pendingSave || {}), ...p };
     if (saveTimer) clearTimeout(saveTimer);
     saveTimer = setTimeout(() => {
-      if (bookId) store.saveProgress(bookId, p).catch(() => {});
+      saveTimer = null;
+      const payload = pendingSave;
+      pendingSave = null;
+      if (bookId && payload) store.saveProgress(bookId, payload).catch(() => {});
     }, 600);
+  }
+  /** 2026-09-09 修复：关闭/销毁时立即落盘挂起的进度。
+   *  此前 onDestroy 只 clearTimeout 丢弃 pending——连续快速翻页后立即关闭，
+   *  最后 600ms 内的位置（往往就是用户实际停的页）从未写盘 → 恢复落后几页。 */
+  async function flushProgressSave(): Promise<void> {
+    if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; }
+    const payload = pendingSave;
+    pendingSave = null;
+    if (bookId && payload) {
+      try { await store.saveProgress(bookId, payload); }
+      catch (__swallowErr) { logSwallow(__swallowErr, "ReaderView.svelte · flushProgressSave", "debug"); }
+    }
   }
 
   /** 读取思源笔记实际 CSS 变量（用于「跟随思源」主题的背景/文字色同步） */
@@ -936,7 +965,24 @@ import { getLogger } from "../core/logger.ts";
     );
   }
 
+  // 2026-09-08 冻结根治：applyStyles 同步重入守卫。
+  // applySiyuanDocMargin → settingsStore.update → _store.set（同步）→ 订阅回调
+  // （本文件 7337）→ if (view) applyStyles() 会形成同步递归环；启动恢复期宿主
+  // protyle 的 computed padding 持续变化时递归达数千层，且每层 setStyles 都
+  // 排队一个 fontsReady→expand 微任务（paginator.js），栈清空后 expand 风暴
+  // 把主线程占死 = 「重启后阅读 Tab 自动开书即冻结」的真凶。
+  // 手动开书时 padding 稳定，环转 1-2 轮自停，故此前只在重启恢复时复现。
+  let applyingStyles = false;
   function applyStyles() {
+    if (applyingStyles) return; // 拒绝同步重入（异步调用不受影响：同步段结束即释放）
+    applyingStyles = true;
+    try {
+      applyStylesInner();
+    } finally {
+      applyingStyles = false;
+    }
+  }
+  function applyStylesInner() {
     // 跟随思源文档边距：开时把宿主 .protyle-wysiwyg 的水平 padding 同步为阅读器左右边距
     applySiyuanDocMargin();
     if (view?.renderer?.setStyles) {
@@ -1636,6 +1682,15 @@ import { getLogger } from "../core/logger.ts";
 
   /* ================= 打开书籍 ================= */
 
+  // 2026-09-08 启动卡死修复：上次启动卡死 → 暂停自动开书，等用户手动点「重新打开」。
+  // 自愈标记（lastLaunchCrashed）只拦 restoreSession，拦不住思源直接重建 Tab 走本组件，
+  // 不禁止会形成「恢复 → 卡死 → 再恢复」自锁循环。
+  let pausedByCrash = false;
+  async function manualReopen() {
+    pausedByCrash = false;
+    await openBook();
+  }
+
   /**
    * 2026-09-05 诊断：开书看门狗。
    * 打开大书时若主线程被独占，logger 的 1 秒心跳会断流、排查不到卡在哪一步。
@@ -1647,7 +1702,10 @@ import { getLogger } from "../core/logger.ts";
   let openT0 = 0;
   function markStage(s: string) {
     openStage = s;
+    // 2026-09-08 冻结诊断：同步落盘——logger 默认异步缓冲，主线程冻结瞬间
+    // 缓冲里的日志会丢；开书打点仅几条，同步写的开销可忽略（诊断期专用）。
     getLogger().info(`[REword] 开书阶段 → ${s}（累计 ${Date.now() - openT0}ms）`);
+    getLogger().flushSync();
   }
   function startOpenWatchdog() {
     stopOpenWatchdog();
@@ -1661,6 +1719,15 @@ import { getLogger } from "../core/logger.ts";
       clearInterval(openWatchdog);
       openWatchdog = null;
     }
+  }
+  /** [开书细步] 2026-09-08 冻结诊断：应用样式/排版 区间内逐函数同步打点（落盘即消失风险零）。
+   *  上轮证明冻结发生在此区间（「应用样式/排版」已打、「附加内容文档」未打、finally 未达），
+   *  但区间内有 8 个调用无法定位是哪个。诊断结束后整体删除。 */
+  function diagMark(step: string) {
+    try {
+      getLogger().info(`[REword] [开书细步] ${step}（累计 ${Date.now() - openT0}ms）`);
+      getLogger().flushSync();
+    } catch { /* ignore */ }
   }
 
   async function openBook() {
@@ -1742,7 +1809,12 @@ import { getLogger } from "../core/logger.ts";
         updateEta(frac);
         // [REword patch 2026-08-29] PDF 缩放状态一并保存
         const savePayload: any = { cfi: d?.cfi, fraction: frac };
-        if (isPdfBook()) savePayload.zoom = currentZoom;
+        if (isPdfBook()) {
+          savePayload.zoom = currentZoom;
+          // 2026-09-09 修复：显式页码（1-based）。fraction 在 fixed-layout 下是页尾
+          // 边界语义，恢复端反解会 +1 页；恢复改按页码精确换算（见 openBook 恢复分支）。
+          savePayload.page = pdfCurrentPage;
+        }
         scheduleProgressSave(savePayload);
         attachAllContentDocs();
         // 2026-08-28：滚动 / 跳转（relocate）也触发双语按需补译（内部 300ms 防抖）
@@ -1803,7 +1875,17 @@ import { getLogger } from "../core/logger.ts";
       console.log("[REword] openBook view.open 完成");
       markStage("view.init（定位+首次渲染）");
       const saved = store.getProgress(bookId);
-      if (saved?.fraction) {
+      // 2026-09-09 修复 PDF 进度恢复偏移（实锤机制）：fixed-layout 每次 relocate 固定
+      // 上报 { fraction: 0, size: 1 } → SectionProgress.getProgress 把 fraction 算成
+      // 「当前页的结尾边界」((index+1)/N)；恢复端 getSection 反解恰好落到下一页。
+      // 每次开合会话 +1 页，多次累积即用户看到的「往后跳几页」。
+      // PDF 改用显式页码恢复：fraction = (page-1)/N（PDF 每页 section.size=1000 均一），
+      // getSection 精确回到该页起点。无 page 字段的旧数据回落 fraction（仍偏差 1 页内）。
+      const pdfTotalSections = isPdfBook() ? (view.book?.sections?.length ?? 0) : 0;
+      if (isPdfBook() && saved?.page && saved.page > 0 && pdfTotalSections > 0) {
+        const frac = Math.min((saved.page - 1) / pdfTotalSections, 0.999);
+        await view.init({ lastLocation: { fraction: frac }, showTextStart: false });
+      } else if (saved?.fraction) {
         await view.init({ lastLocation: { fraction: saved.fraction }, showTextStart: false });
       } else {
         await view.init({ showTextStart: true });
@@ -1832,14 +1914,19 @@ import { getLogger } from "../core/logger.ts";
       }
       markStage("应用样式/排版");
       settings = settingsStore.get();
+      diagMark("applyStyles 前");
       applyStyles();
+      diagMark("applyStyles 后 / applyFlow 前");
       applyFlow();
+      diagMark("applyFlow 后 / applyTurnStyle 前");
       applyTurnStyle();
-      // [REword patch 2026-08-29] PDF 显示设置（spread / scroll-direction / 反色）
+      diagMark("applyTurnStyle 后 / applyPdfViewMode 前");
       applyPdfViewMode();
       applyPdfScrollDir();
       applyPdfInvert();
-      // [REword patch 2026-08-29] PDF 缩放：恢复保存的缩放状态
+      diagMark("PDF 视图属性后 / 恢复缩放前");
+      // [REword patch 2026-08-29] PDF 显示设置（spread / scroll-direction / 反色）
+      // applyPdfViewMode/applyPdfScrollDir/applyPdfInvert 已上移至 PDF 视图属性细步
       // saved.zoom 是 per-file 持久化（ReadingProgress.zoom）
       if (isPdfBook()) {
         const savedZoom = store.getProgress(bookId)?.zoom;
@@ -1853,6 +1940,7 @@ import { getLogger } from "../core/logger.ts";
           applyZoom(initialZoom, { silent: true });
         }, 0);
       }
+      diagMark("恢复缩放排程后 / prepareHostFontBlobs 前");
       // 问题 2：异步预热宿主字体 blob（完成后自动重刷 iframe 样式）
       prepareHostFontBlobs();
       try {
@@ -1861,6 +1949,7 @@ import { getLogger } from "../core/logger.ts";
       opened = true;
       // [REword patch 2026-08-29] 确认是 PDF → 给页面四周留白区补上滚轮缩放监听
       if (isPdfBook()) bindStageWheel();
+      diagMark("bindStageWheel 后 / 附加内容前");
       markStage("附加内容文档/刷新列表");
       attachAllContentDocs();
       attachTimer1 = setTimeout(attachAllContentDocs, 400);
@@ -1937,6 +2026,248 @@ import { getLogger } from "../core/logger.ts";
     // 方案 C:lastLocation 注入
     if (view.lastLocation) {
       view.lastLocation = { ...view.lastLocation, index: targetPage - 1 };
+    }
+  }
+
+  /* ========= 2026-09-09 P1：矩形框选标注（图表/排版块 → 跳转链接 + 图片快照） =========
+   * 参照思源内置 PDF 矩形标注：框选 → 落库(kind:"rect"，复用 pdfRects 归一化管线)
+   * → 复制 markdown（链接行 + 图片行）→ 文档内点击链接深链回跳 → 矩形闪烁强调。
+   * 框选交互在 stage 上的捕获层完成（覆盖 iframe，规避跨 iframe 事件不通）。 */
+
+  let pdfRectMode = false;
+  let pdfRectBusy = false;
+  /** 拖拽中的预览矩形（stage 相对坐标） */
+  let pdfRectDrag: { x0: number; y0: number; x1: number; y1: number } | null = null;
+  /** PdfTextHlLayer 组件引用（跳转后闪烁强调用） */
+  let pdfHlLayerComp: { flashRect(annId: string): Promise<void> } | null = null;
+
+  function togglePdfRectMode(): void {
+    pdfRectMode = !pdfRectMode;
+    if (!pdfRectMode) pdfRectDrag = null;
+  }
+
+  function stagePoint(e: MouseEvent): { x: number; y: number } {
+    const r = readerStageEl.getBoundingClientRect();
+    return { x: e.clientX - r.left, y: e.clientY - r.top };
+  }
+
+  function onRectCaptureMouseDown(e: MouseEvent): void {
+    if (e.button !== 0 || !pdfRectDrag || pdfRectBusy) return;
+    e.preventDefault();
+    const move = (ev: MouseEvent) => {
+      const q = stagePoint(ev);
+      pdfRectDrag = { ...pdfRectDrag!, x1: q.x, y1: q.y };
+    };
+    const up = (ev: MouseEvent) => {
+      window.removeEventListener("mousemove", move);
+      window.removeEventListener("mouseup", up);
+      const q = stagePoint(ev);
+      void finishPdfRect({ x0: pdfRectDrag!.x0, y0: pdfRectDrag!.y0, x1: q.x, y1: q.y });
+    };
+    window.addEventListener("mousemove", move);
+    window.addEventListener("mouseup", up);
+  }
+
+  function onRectCaptureMouseDownStart(e: MouseEvent): void {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    const p = stagePoint(e);
+    pdfRectDrag = { x0: p.x, y0: p.y, x1: p.x, y1: p.y };
+    onRectCaptureMouseDown(e);
+  }
+
+  $: pdfRectPreviewCss = pdfRectDrag
+    ? `left:${Math.min(pdfRectDrag.x0, pdfRectDrag.x1)}px;top:${Math.min(pdfRectDrag.y0, pdfRectDrag.y1)}px;width:${Math.abs(pdfRectDrag.x1 - pdfRectDrag.x0)}px;height:${Math.abs(pdfRectDrag.y1 - pdfRectDrag.y0)}px;`
+    : "";
+
+  /** 2026-09-09 P1.3 高清快照：用 pdfjs 按「显示尺寸 × dpr × 2」重渲整页后按归一化矩形裁剪。
+   *  依赖 vendored pdf.js 暴露的 view.book.rewordPdf；不可用或渲染失败返回 null，
+   *  调用方回落原生 canvas 裁剪。面积上限 16M px，避免一次性占爆内存。 */
+  async function renderHiResRectSnapshot(pageNo: number, r: { x: number; y: number; w: number; h: number }, tlCssW: number): Promise<Blob | null> {
+    try {
+      const pdfDoc = (view as any)?.book?.rewordPdf;
+      if (!pdfDoc || typeof pdfDoc.getPage !== "function" || !(tlCssW > 0)) return null;
+      const page = await pdfDoc.getPage(pageNo);
+      if (!page || typeof page.render !== "function") return null;
+      const vp1 = page.getViewport({ scale: 1 });
+      if (!vp1 || !(vp1.width > 0)) return null;
+      let scale = (tlCssW / vp1.width) * (window.devicePixelRatio || 1) * 2;
+      const area = vp1.width * vp1.height * scale * scale;
+      const MAX_PX = 16000000;
+      if (area > MAX_PX) scale *= Math.sqrt(MAX_PX / area);
+      const vp = page.getViewport({ scale });
+      const cv = document.createElement("canvas");
+      cv.width = Math.max(1, Math.floor(vp.width));
+      cv.height = Math.max(1, Math.floor(vp.height));
+      const ctx = cv.getContext("2d");
+      if (!ctx) return null;
+      await page.render({ canvasContext: ctx, viewport: vp }).promise;
+      const sx = Math.round(r.x * cv.width), sy = Math.round(r.y * cv.height);
+      const sw = Math.max(1, Math.round(r.w * cv.width)), sh = Math.max(1, Math.round(r.h * cv.height));
+      const out = document.createElement("canvas");
+      out.width = sw; out.height = sh;
+      const octx = out.getContext("2d");
+      if (!octx) return null;
+      octx.drawImage(cv, sx, sy, sw, sh, 0, 0, sw, sh);
+      cv.width = 0; cv.height = 0; // 释放重渲画布位图内存
+      return await new Promise<Blob | null>((res) => out.toBlob(res, "image/png"));
+    } catch (e) {
+      console.warn("[REword] 高清快照渲染失败，回落原生裁剪:", e);
+      return null;
+    }
+  }
+
+  /** 原生 canvas 裁剪（回落路径）：框选矩形（主文档坐标）∩ 页面 canvas（经 frame 偏移换算）→ PNG。
+   *  2026-09-09 坐标系混用修复的换算保留在此；拿不到 canvas 或区域过小返回 null。 */
+  async function cropCanvasRectSnapshot(doc: Document, fr: DOMRect, sel: SelRect): Promise<Blob | null> {
+    try {
+      const canvas = doc.querySelector("#canvas canvas") as HTMLCanvasElement | null;
+      const cRect = canvas?.getBoundingClientRect();
+      if (!canvas || !cRect || cRect.width <= 0) return null;
+      const cTop = {
+        left: fr.left + cRect.left, top: fr.top + cRect.top,
+        right: fr.left + cRect.left + cRect.width, bottom: fr.top + cRect.top + cRect.height,
+      };
+      const ix = {
+        left: Math.max(sel.left, cTop.left), top: Math.max(sel.top, cTop.top),
+        right: Math.min(sel.right, cTop.right), bottom: Math.min(sel.bottom, cTop.bottom),
+      };
+      const sx = Math.round((ix.left - cTop.left) * (canvas.width / cTop.width));
+      const sy = Math.round((ix.top - cTop.top) * (canvas.height / cTop.height));
+      const sw = Math.round((ix.right - ix.left) * (canvas.width / cTop.width));
+      const sh = Math.round((ix.bottom - ix.top) * (canvas.height / cTop.height));
+      if (sw <= 2 || sh <= 2) return null;
+      const out = document.createElement("canvas");
+      out.width = sw; out.height = sh;
+      const ctx = out.getContext("2d");
+      if (!ctx) return null;
+      ctx.drawImage(canvas, sx, sy, sw, sh, 0, 0, sw, sh);
+      return await new Promise<Blob | null>((res) => out.toBlob(res, "image/png"));
+    } catch (e) {
+      console.warn("[REword] 矩形快照失败（跳过图片行）:", e);
+      return null;
+    }
+  }
+
+  /** 2026-09-09 P1.3：右键菜单「复制链接」——按当前标注重建 markdown（链接行 + 图片行） */
+  async function copyRectLink(annId: string): Promise<void> {
+    if (!annId || !annStore || !bookId) return;
+    const it = annStore.get(annId);
+    if (!it || it.kind !== "rect") return;
+    const page = it.pdfRects?.[0]?.page ?? it.page ?? 0;
+    if (!page) return;
+    const md = buildRectMarkdown(bookId, title, [{ page, id: it.id, assetPath: it.snapshotPath || "" }]);
+    try {
+      await navigator.clipboard.writeText(md);
+      toast("链接已复制，粘贴到文档即可");
+    } catch {
+      toast("剪贴板复制失败");
+    }
+  }
+
+  /** 框选完成：收集命中页 → 每页归一化（与高亮/重绘同基准）+ 快照 + 落库 → 汇总复制 markdown。
+   *  2026-09-09 P1.3：支持跨页框选（每页各存一段标注 + 快照 + 链接行）；
+   *  快照优先 pdfjs 2x 重渲（清晰度），失败回落原生 canvas 裁剪。 */
+  async function finishPdfRect(d: { x0: number; y0: number; x1: number; y1: number }): Promise<void> {
+    pdfRectDrag = null;
+    const left = Math.min(d.x0, d.x1), top = Math.min(d.y0, d.y1);
+    const width = Math.abs(d.x1 - d.x0), height = Math.abs(d.y1 - d.y0);
+    if (width < RECT_MIN_PX || height < RECT_MIN_PX) return; // 误触
+    if (!view || !bookId || pdfRectBusy) return;
+    const stageRect = readerStageEl.getBoundingClientRect();
+    const sel: SelRect = {
+      left: stageRect.left + left, top: stageRect.top + top,
+      right: stageRect.left + left + width, bottom: stageRect.top + top + height,
+    };
+    let contents: any[] = [];
+    try { contents = (view as any)?.renderer?.getContents?.() || []; } catch { contents = []; }
+    if (!contents.length) { toast("PDF 未就绪"); return; }
+
+    // 收集页信息 + 命中页（重叠两个方向都 > 8px 才算）
+    const frames: Array<{ index: number; c: any; fr: DOMRect; rect: SelRect }> = [];
+    for (const c of contents) {
+      const frame = c.doc?.defaultView?.frameElement as HTMLElement | null;
+      if (!frame) continue;
+      const fr = frame.getBoundingClientRect();
+      frames.push({ index: c.index ?? 0, c, fr, rect: { left: fr.left, top: fr.top, right: fr.right, bottom: fr.bottom } });
+    }
+    const hits = collectPageHits(sel, frames);
+    if (!hits.length) { toast("框选区域不在页面上"); return; }
+
+    if (!annStore) { try { annStore = getAnnotationStore(); } catch { annStore = null; } }
+    if (!annStore) { toast("批注存储不可用"); return; }
+
+    const hitIndexSet = new Set(hits.map((h) => h.index));
+    const entries: RectMdEntry[] = [];
+    pdfRectBusy = true;
+    try {
+      for (const f of frames) {
+        if (!hitIndexSet.has(f.index)) continue;
+        const doc: Document = f.c.doc;
+        // 归一化基准与高亮/重绘两端统一：相对 iframe 内 .textLayer（取不到回落 frame 框）
+        let tl: DOMRect | null = null;
+        try { tl = (doc.querySelector(".textLayer") as HTMLElement | null)?.getBoundingClientRect() ?? null; } catch { tl = null; }
+        const baseLeft = f.fr.left + (tl ? tl.left : 0);
+        const baseTop = f.fr.top + (tl ? tl.top : 0);
+        const bw = (tl && tl.width > 0 ? tl.width : f.fr.width) || 1;
+        const bh = (tl && tl.height > 0 ? tl.height : f.fr.height) || 1;
+        const norm = normalizeSelToRect(sel, baseLeft, baseTop, bw, bh);
+        if (!norm) continue;
+        const page = f.index + 1;
+        const pdfRect: PdfRect = { ...norm, page };
+
+        // 1. 快照：优先 pdfjs 2x 重渲（清晰度），失败回落原生 canvas 裁剪
+        let assetPath = "";
+        let blob = await renderHiResRectSnapshot(page, pdfRect, tl ? tl.width : 0);
+        if (!blob) blob = await cropCanvasRectSnapshot(doc, f.fr, sel);
+        if (blob) {
+          // putFile 路径必须带 /data 前缀；失败返回 null（不抛异常），此时跳过图片行
+          const fname = `reword-rect-${Date.now()}-${page}.png`;
+          const putOk = await putFile(`/data/assets/${fname}`, false, blob);
+          if (putOk != null) assetPath = `assets/${fname}`;
+          else console.warn("[REword] 矩形快照写入 assets 失败（跳过图片行）: putFile 返回空");
+        }
+
+        // 2. 落库（kind:"rect"，复用 pdfRects 存储与重绘管线；snapshotPath 供删除时连带清图）
+        const created = await annStore.upsert({
+          blockId: `book:${bookId}`,
+          docId: bookId,
+          bookId,
+          cfi: "",
+          sentence: `矩形框选 · P${page}`,
+          selectedText: "",
+          note: "",
+          origin: "manual",
+          color: DEFAULT_ANNOTATION_COLOR,
+          style: "highlight",
+          type: "highlight",
+          kind: "rect",
+          group: "未分组",
+          scope: "sentence",
+          bookType: currentBookType(),
+          page,
+          pdfRects: [pdfRect],
+          snapshotPath: assetPath || undefined,
+        });
+        entries.push({ page, id: created.id, assetPath });
+      }
+
+      if (!entries.length) { toast("框选区域不在页面上"); return; }
+
+      // 3. 复制 markdown：每页一节（链接行 + 图片行），标题「书名 · 第 N 页」不带 id
+      const md = buildRectMarkdown(bookId, title, entries);
+      try {
+        await navigator.clipboard.writeText(md);
+        const hasImg = entries.some((e) => e.assetPath);
+        const tail = hasImg ? "（链接 + 截图）" : "（链接）";
+        toast(entries.length > 1
+          ? `跨 ${entries.length} 页框选已复制${tail}，粘贴到文档即可`
+          : `矩形标注已复制${tail}，粘贴到文档即可`);
+      } catch {
+        toast("标注已保存，但剪贴板复制失败");
+      }
+    } finally {
+      pdfRectBusy = false;
     }
   }
 
@@ -2091,6 +2422,13 @@ import { getLogger } from "../core/logger.ts";
       } catch (__swallowErr) { logSwallow(__swallowErr, "ReaderView.svelte · onGlobalKey End", "debug"); }
       return;
     }
+    // 2026-09-09 C：Cmd/Ctrl + Z 撤销最近一次标注删除（矩形 / 文本 / 摘录共用撤销窗口）。
+    // 仅当存在未过期的待撤销项时才消费按键；否则一律放行，不影响思源编辑器内原生撤销。
+    if ((e.metaKey || e.ctrlKey) && !e.altKey && e.key.toLowerCase() === "z" && pendingDelete) {
+      e.preventDefault();
+      void undoDelete();
+      return;
+    }
     // [REword patch 2026-08-29] PDF 缩放快捷键
     // Cmd/Ctrl + = / - / 0 / 1 / 2 / 3  跟 Obsidian PDF++ 风格一致
     // 注意：EPUB 模式下 Cmd+= / - 仍走 changeFont（保持现有字号快捷键不破坏）
@@ -2154,6 +2492,8 @@ import { getLogger } from "../core/logger.ts";
     }
     // Esc 关闭全部浮层（此前完全没有处理：开了目录/搜索只能再点一次按钮才能关）
     if (e.key === "Escape") {
+      // 2026-09-09 P1：矩形框选模式下 Esc 先退出框选
+      if (pdfRectMode) { togglePdfRectMode(); return; }
       closeAllPopovers();
       return;
     }
@@ -2494,7 +2834,10 @@ import { getLogger } from "../core/logger.ts";
   async function jumpAnnot(it: any) {
     showMarks = false;
     // 2026-09-03 修复：PDF 标注可能无 CFI，回落到 page 页码跳转（goPdfPage 仅 PDF 有效）
-    if (it?.cfi) {
+    // 2026-09-09 B：PDF 的 CFI 语义是整页 section，goTo(cfi) 只能到页且不带页内定位，
+    // 故 PDF 一律走下方「页码跳转 + flashRect」路径（文本标注也获得闪烁定位）；
+    // EPUB 仍走 goTo(cfi)。
+    if (it?.cfi && !isPdfBook()) {
       try {
         await (view as any)?.goTo(it.cfi);
         return;
@@ -2506,14 +2849,42 @@ import { getLogger } from "../core/logger.ts";
         // （文本标注 page 已是 1-based，goPdfPage 期望 1-based）
         const targetPage = it.kind === "ink" ? it.page + 1 : it.page;
         await goPdfPage(targetPage);
+        // 2026-09-09 P1.3：矩形标注跳页后闪烁定位（与深链回跳行为一致）
+        // 2026-09-09 B：扩展到文本标注——覆盖层矩形都带 data-ann-id，
+        // flashRect 对高亮/直线/波浪/批注同样生效（墨迹无矩形元素，跳过）。
+        if (it.kind !== "ink") void pdfHlLayerComp?.flashRect(it.id);
       } catch (__swallowErr) { logSwallow(__swallowErr, "ReaderView.svelte · jumpAnnot(page)", "warn"); }
     }
   }
 
   async function removeAnnot(it: any) {
+    // 2026-09-09 C：删除进统一撤销窗口（矩形快照延迟到窗口结束才清理，撤销则保留）。
+    // 记录先取快照（软删后仍需读到 snapshotPath），再交给 armUndoFor。
+    if (!annStore) { try { annStore = getAnnotationStore(); } catch { annStore = null; } }
+    const rec = annStore?.get?.(it?.id) ? { ...annStore.get(it?.id) } : null;
     // 2026-09-01 修复：removeAnnotationById 内部已调 refreshAnnotsList,这里去重
     await removeAnnotationById(it?.id ?? null, it?.cfi ?? "");
-    toast("已删除");
+    armUndoFor(rec);
+  }
+
+  /**
+   * 2026-09-09 B：「标注与摘录」条目类型标识。
+   * 墨迹 ✎ / 矩形 ▭ / 批注 💬 / 文本按样式 ▮ 高亮 ━ 直线 ﹏ 波浪。
+   * 此前混在「本书摘录」里一律只显示文字，高亮与批注分辨不出。
+   */
+  function annotGlyph(it: any): string {
+    if (it?.kind === "ink") return "✎";
+    if (it?.kind === "rect") return "▭";
+    if (String(it?.type || "") === "annotate") return "💬";
+    return ANNOTATION_STYLES[normalizeAnnotationStyle(it?.style)]?.icon || "▮";
+  }
+
+  /** 2026-09-09 B：条目类型文案（tooltip 用，说明这是什么标注） */
+  function annotKindLabel(it: any): string {
+    if (it?.kind === "ink") return "墨迹";
+    if (it?.kind === "rect") return "矩形框选";
+    if (String(it?.type || "") === "annotate") return "批注";
+    return ANNOTATION_STYLES[normalizeAnnotationStyle(it?.style)]?.label || "高亮";
   }
 
   /** 2026-09-04 P0-3：墨迹删除入口。直接调 store 的 removeStroke 触发 inkSaver 订阅自动落盘 */
@@ -2761,14 +3132,28 @@ import { getLogger } from "../core/logger.ts";
    * 滚轮连续缩放灵敏度：factor = exp(-deltaY * k)。
    * 0.0018（原 0.0025 偏跳）→ 鼠标一格（截断后 deltaY≈60）约 ±10%，
    * 触控板捏合（deltaY≈10）约 ±1.8%，连续滚动更细腻。
+   * 2026-09-08 四调：实测手感 OK 但每格步进偏小，0.0018 → 0.0026（约 ±14%/格）。
    */
-  const WHEEL_ZOOM_SENSITIVITY = 0.0018;
+  const WHEEL_ZOOM_SENSITIVITY = 0.0026;
   /** 单个 wheel 事件的 delta 上限：不同鼠标/驱动的 deltaY 差异极大（几十到几百都有），
    *  不截断的话一格滚轮能直接跳 30%+，手感很突兀。截断后靠连续滚动累积达到目标倍率。 */
   const WHEEL_MAX_DELTA = 60;
   /** 滚动模式：滚轮停止多久后才提交真实渲染（ms）。
    *  连续缩放期间靠 CSS transform 预览，停手才真正重绘页面 canvas。 */
   const SCROLL_ZOOM_COMMIT_DELAY = 180;
+  /** 2026-09-08 缩放丝滑度修复：预览倍数指数平滑系数——每帧向目标靠近的比例。
+   *  Mac Mouse Fix 等工具注入的 wheel delta 高频且不均匀，直接逐帧应用会导致
+   *  预览倍数锯齿状跳变（画面抖动）。0.35 ≈ 每帧收敛 35%，6~8 帧（约 120ms）
+   *  内贴合目标，肉眼呈连续曲线。纯 CSS transform，零重绘开销。 */
+  // 2026-09-08 三调（借鉴 Mac Mouse Fix 动量手感）：固定 ease 无法兼顾「跟手」与「停手滑行」。
+  // 输入期（距上次 wheel <120ms）用大 ease 快追目标 → 跟手；
+  // 停手后切小 ease → 指数衰减长尾滑行，模拟触控板/浏览器 pinch 的动量收尾。
+  const WHEEL_PINCH_EASE_ACTIVE = 0.30;
+  const WHEEL_PINCH_EASE_GLIDE = 0.12;
+  /** 最近一次 wheel 输入时间戳（performance.now），用于区分输入期 / 滑行期 */
+  let lastWheelInputAt = 0;
+  /** 提交推迟次数（预览未贴合时等贴合再提交，限 8 次防呆，约 +480ms 上限） */
+  let wheelCommitDeferrals = 0;
 
   function clampPdfZoom(n: number): number {
     if (!isFinite(n) || n <= 0) return 1;
@@ -3069,21 +3454,79 @@ import { getLogger } from "../core/logger.ts";
 
   // 滚动模式专用：pinch 预览状态（机制见 commitScrollWheelZoom 注释）
   let wheelPinchBase = 1;        // 本轮连续缩放开始时的缩放基准
-  let wheelPinchRatio = 1;       // 累积预览倍数（相对基准）
+  let wheelPinchRatio = 1;       // 累积预览倍数（相对基准）＝目标值
   let wheelPinchActive = false;  // 是否处于「已预览、未提交」状态
   let wheelCommitTimer: any = null;
+  // 2026-09-08 丝滑度修复：预览显示值（平滑后）与它的 rAF 缓动循环
+  let wheelPinchShown = 1;       // 当前实际应用到 transform 的倍数（向目标缓动）
+  let wheelEaseRafId: number | null = null;
+
+  /** 预览倍数指数平滑循环：每帧把 wheelPinchShown 向目标（wheelPinchRatio）推进
+   *  动态 ease 比例（输入期 ACTIVE / 滑行期 GLIDE），直到贴合。期间目标可被后续
+   *  wheel 事件继续更新，循环始终追最新目标。只改 CSS transform，零重绘。 */
+  function easeWheelPinchLoop() {
+    if (wheelEaseRafId != null) return; // 已有循环在追，不必重启
+    const step = () => {
+      wheelEaseRafId = null;
+      const r = view?.renderer as any;
+      if (!wheelPinchActive || !r || typeof r.pinchZoom !== "function") return;
+      const diff = wheelPinchRatio - wheelPinchShown;
+      try {
+        if (Math.abs(diff) < 0.0008) {
+          wheelPinchShown = wheelPinchRatio;
+          r.pinchZoom(wheelPinchShown);
+          return; // 已贴合，停循环（目标再变会重新启动）
+        }
+        // MMF 式动态缓动：输入期快追（跟手），停手后小步长长尾滑行（动量收尾）
+        const ease = (performance.now() - lastWheelInputAt) < 120
+          ? WHEEL_PINCH_EASE_ACTIVE
+          : WHEEL_PINCH_EASE_GLIDE;
+        wheelPinchShown += diff * ease;
+        r.pinchZoom(wheelPinchShown);
+      } catch (__swallowErr) {
+        logSwallow(__swallowErr, "ReaderView.svelte · pinchZoom", "debug");
+        return;
+      }
+      wheelEaseRafId = requestAnimationFrame(step);
+    };
+    wheelEaseRafId = requestAnimationFrame(step);
+  }
 
   /**
    * 滚动模式：把本轮缩放预览提交为真实渲染 —— 每轮连续缩放只重绘【一次】。
    * 这是滚动模式流畅度的关键：连续缩放期间不改任何页面，停手才画。
    */
   function commitScrollWheelZoom() {
-    wheelCommitTimer = null;
     const r = view?.renderer as any;
-    if (!wheelPinchActive) return;
+    if (!wheelPinchActive) { wheelCommitTimer = null; return; }
+    // 2026-09-08 配套滑行缓动：预览尚未贴合目标时推迟提交（贴合后提交只剩
+    // canvas 清晰度切换、没有位移跳变）；限 8 次防呆，最迟约 +480ms 必提交。
+    if (Math.abs(wheelPinchShown - wheelPinchRatio) > 0.002 && wheelCommitDeferrals < 8) {
+      wheelCommitDeferrals++;
+      wheelCommitTimer = setTimeout(commitScrollWheelZoom, 60);
+      return;
+    }
+    wheelCommitDeferrals = 0;
+    wheelCommitTimer = null;
     wheelPinchActive = false;
+    // 2026-09-08 丝滑度修复：提交前先把预览贴合到目标倍数（仍纯 transform，零重绘），
+    // 保证 pinchEnd 快照的锚点矩形与即将提交的真实渲染（target 倍数）一致，
+    // 消除「平滑还没追完就提交」造成的最后一跳。
+    if (wheelEaseRafId != null) {
+      cancelAnimationFrame(wheelEaseRafId);
+      wheelEaseRafId = null;
+    }
+    if (r && typeof r.pinchZoom === "function" && wheelPinchShown !== wheelPinchRatio) {
+      wheelPinchShown = wheelPinchRatio;
+      try {
+        r.pinchZoom(wheelPinchShown);
+      } catch (__swallowErr) {
+        logSwallow(__swallowErr, "ReaderView.svelte · pinchZoom", "debug");
+      }
+    }
     const finalScale = clampPdfZoom(wheelPinchBase * wheelPinchRatio);
     wheelPinchRatio = 1;
+    wheelPinchShown = 1;
     if (r) {
       try {
         // pinchEnd 快照视口中心页的矩形存进 #pinchAnchor 并清掉 transform；
@@ -3114,19 +3557,20 @@ import { getLogger } from "../core/logger.ts";
         if (!wheelPinchActive) {
           wheelPinchBase = readCurrentPdfScale();
           wheelPinchRatio = 1;
+          wheelPinchShown = 1;
           wheelPinchActive = true;
         }
         const target = clampPdfZoom(
           wheelPinchBase * wheelPinchRatio * Math.exp(-dy * WHEEL_ZOOM_SENSITIVITY)
         );
         wheelPinchRatio = wheelPinchBase > 0 ? target / wheelPinchBase : 1;
+        lastWheelInputAt = performance.now();
         if (Math.abs(wheelPinchRatio - 1) < 0.0005) return;   // 已到边界
-        try {
-          r.pinchZoom(wheelPinchRatio);
-        } catch (__swallowErr) {
-          logSwallow(__swallowErr, "ReaderView.svelte · pinchZoom", "debug");
-        }
+        // 2026-09-08 丝滑度修复：不再直接把目标倍数砸到 transform 上（MMF 注入的
+        // delta 不均匀 → 逐帧锯齿），改走指数平滑缓动循环。
+        easeWheelPinchLoop();
         if (wheelCommitTimer) clearTimeout(wheelCommitTimer);
+        wheelCommitDeferrals = 0;
         wheelCommitTimer = setTimeout(commitScrollWheelZoom, SCROLL_ZOOM_COMMIT_DELAY);
         return;
       }
@@ -3263,7 +3707,12 @@ import { getLogger } from "../core/logger.ts";
       const cs = getComputedStyle(host);
       const pl = Math.round(parseFloat(cs.paddingLeft) || 0);
       const pr = Math.round(parseFloat(cs.paddingRight) || 0);
-      if (pl || pr) {
+      // 2026-09-08 冻结根治：值未变化时绝不能 update。此前无条件 update 会在
+      // 「订阅回调 → applyStyles → 本函数」间形成同步递归环（详见 applyStyles 守卫注释）。
+      if (
+        (pl || pr) &&
+        (pl !== settings.layout.marginLeftPx || pr !== settings.layout.marginRightPx)
+      ) {
         settings = settingsStore.update({
           layout: {
             ...settings.layout,
@@ -4486,19 +4935,28 @@ import { getLogger } from "../core/logger.ts";
         fr = frame.getBoundingClientRect();
         left += fr.left; top += fr.top; right += fr.left; bottom += fr.top;
       }
-      // 2026-09-04 P1：PDF 文本标注归一化矩形（相对当前页 iframe 框，0-1），供自建覆盖层重绘
+      // 2026-09-04 P1：PDF 文本标注归一化矩形（相对当前页 textLayer，0-1），供自建覆盖层重绘
+      // 2026-09-08 修复基准：此前用 frame（iframe 框）做基准，但选区 rect 与重绘端参照系
+      // 不一致导致高亮整体错位、滚动/缩放后"跑丢"。改为与重绘端（PdfTextHlLayer）统一
+      // 以 iframe 内 .textLayer 的 rect 为原点——两端参照同一元素，几何天然对齐。
       let pdfRects: PdfRect[] | null = null;
       if (isPdfBook() && frame && fr) {
-        const fw = fr.width || 1;
-        const fh = fr.height || 1;
+        let tl: DOMRect | null = null;
+        try { tl = (doc.querySelector(".textLayer") as HTMLElement | null)?.getBoundingClientRect() ?? null; } catch { tl = null; }
+        const bw = (tl && tl.width > 0 ? tl.width : fr.width) || 1;
+        const bh = (tl && tl.height > 0 ? tl.height : fr.height) || 1;
+        const ox = tl ? tl.left : 0;
+        const oy = tl ? tl.top : 0;
         const norm: PdfRect[] = [];
         for (const rc of rects) {
-          const x = rc.left / fw, y = rc.top / fh, w = rc.width / fw, h = rc.height / fh;
+          const x = (rc.left - ox) / bw, y = (rc.top - oy) / bh, w = rc.width / bw, h = rc.height / bh;
           if (Number.isFinite(x) && Number.isFinite(y) && Number.isFinite(w) && Number.isFinite(h) && w > 0 && h > 0) {
             norm.push({ x: Math.min(1, Math.max(0, x)), y: Math.min(1, Math.max(0, y)), w: Math.min(1, Math.max(0, w)), h: Math.min(1, Math.max(0, h)), page: (c.index ?? 0) + 1 });
           }
         }
-        pdfRects = norm.length ? norm : null;
+        // 2026-09-09 双绘根治②：getClientRects 实测会对同一行返回两套嵌套矩形
+        // （ parade 实录 34 矩形/13 行），保存前去嵌套，数据层不再存冗余矩形。
+        pdfRects = norm.length ? dedupeNestedRects(norm) : null;
       }
       let cfi: string | null = null;
       try {
@@ -4891,6 +5349,24 @@ import { getLogger } from "../core/logger.ts";
   }
 
   /**
+   * 2026-09-09：PDF 点击命中文本标注（PdfTextHlLayer 的 iframe click 命中回调）。
+   * EPUB 下等价路径是 foliate 原生 overlayer 派发 show-annotation → openHighlightEditToolbar；
+   * PDF 原生层已停画，由自建覆盖层补命中。rect 为视口坐标，直接供 toolbarPlacement 避让。
+   */
+  function onPdfAnnotClick(payload: { annId: string; x: number; y: number; rect: { left: number; top: number; right: number; bottom: number } }) {
+    if (!payload?.annId || !isPdfBook()) return;
+    if (!annStore) { try { annStore = getAnnotationStore(); } catch { annStore = null; } }
+    const stored = annStore?.get(payload.annId);
+    if (!stored || stored.deletedAt) return;
+    // 工具栏已在编辑同一条标注 → 不再重复定位（避免点击抖动）
+    if (selToolbar.visible && selToolbar.mode === "edit" && selToolbar.editingId === payload.annId) return;
+    openHighlightEditToolbar(
+      { id: stored.id, cfi: stored.cfi || "", color: stored.color || "" },
+      payload.rect
+    );
+  }
+
+  /**
    * 纯高亮（标注）样式面板：仅提供「样式切换 + 颜色切换 + 删除」，不含时间/笔记/复制/编辑，
    * 与批注查看卡 (mode:"view") 完全隔离。用于 onShowAnnotation 判定 isPureHighlight 时的入口。
    * 复用 positionPopupNear 定位；预估高度 120（两行 + 删除按钮，比 view 卡矮）。
@@ -4953,6 +5429,17 @@ import { getLogger } from "../core/logger.ts";
   /** C 跳转定位（由 ReaderTabController.focusAnnotation 调用）：等待 foliate view 就绪 → goTo 跳转 → 弹查看气泡 */
   export async function focusAnnotation(cfi: string) {
     if (!cfi) return;
+    // 2026-09-09 P1：矩形标注深链（cfi 字段携带 `pdf-rect:<标注id>` 标记）
+    // → 按页码跳页 → 矩形闪烁强调。不进 foliate goTo（矩形标注无 CFI）。
+    if (cfi.startsWith("pdf-rect:")) {
+      const annId = cfi.slice("pdf-rect:".length);
+      if (!annStore) { try { annStore = getAnnotationStore(); } catch { annStore = null; } }
+      const rec = (annStore?.getByBook?.(bookId) || []).find((a: any) => a.id === annId);
+      const pg = rec?.pdfRects?.[0]?.page || rec?.page;
+      if (pg) await goPdfPage(pg);
+      await pdfHlLayerComp?.flashRect(annId);
+      return;
+    }
     // 等待 foliate view 就绪（书籍异步加载，openBookTab 返回时未必已挂载完成）
     let tries = 0;
     while (tries < 25) {
@@ -5542,6 +6029,11 @@ import { getLogger } from "../core/logger.ts";
     dbgHud.addAnnotationTries++;
     if (!it.cfi || !it.color || !view) return;
     if (it.deletedAt) return; // 软删除项不重绘（最终一致保障：翻页后已删高亮彻底消失）
+    // 2026-09-09 双绘根治：PDF 文本标注视觉单一真源是自建覆盖层 PdfTextHlLayer。
+    // 此处是 foliate 原生管线的唯一入口，PDF 下必须拒绘——fixed-layout 每页也建
+    // overlayer 并派发 create-overlay，恢复/改色/撤销等路径会把标注喂进来，
+    // 原生 SVG 层与 PDF 文本层的缩放 transform 坐标系不匹配 → 叠一层漂移高亮。
+    if (isPdfBook()) return;
     const style = normalizeAnnotationStyle(it.style) as AnnotationStyle;
     try {
       const res: any = await view.addAnnotation({ value: it.cfi, color: it.color, style, note: it.note || "" });
@@ -5564,6 +6056,9 @@ import { getLogger } from "../core/logger.ts";
    */
   function redrawBookAnnotations() {
     if (!annStore || !bookId || !view) return;
+    // 2026-09-09 双绘根治：PDF 标注视觉单一真源是 PdfTextHlLayer，
+    // 页签可见性兜底 / relocate 兜底不得再把 PDF 标注喂进 foliate 原生管线。
+    if (isPdfBook()) return;
     const annots = annStore.getByBook(bookId);
     dbgHud.annotCountInStore = annots.length;
     for (const it of annots) {
@@ -5582,6 +6077,9 @@ import { getLogger } from "../core/logger.ts";
    */
   function onCreateOverlay(e?: any) {
     dbgHud.createOverlayCalls++;
+    // 2026-09-09 双绘根治：PDF 每页 frame 也会建 overlayer → 此事件每页触发，
+    // PDF 标注视觉全交 PdfTextHlLayer（annStore.subscribe 重绘），原生管线直接跳过。
+    if (isPdfBook()) return;
     if (!annStore || !bookId || !view) return;
     const idx = e?.detail?.index;
     dbgHud.ovr_evtIndex = (typeof idx === "number") ? idx : -1;
@@ -6780,22 +7278,37 @@ import { getLogger } from "../core/logger.ts";
 
   /**
    * 构造「回跳原书」深链（2026-08-29 新增，对齐 Obsidian weave 的双向溯源）。
-   * 形如 siyuan://plugins/siyuan-plugin-rewordreader?data={"bookId":"…","cfi":"…"}
+   * 形如 siyuan://plugins/siyuan-plugin-reword?data={"bookId":"…","cfi":"…"}（2026-09-09 改插件名）
    *  - 思源点击该链接 → 派发 open-siyuan-url-plugin 事件（见 index.ts onOpenBookUrl）
    *    → 打开 / 聚焦该书阅读 Tab → goTo 到 CFI，精确定位回原文。
    *  - 同时符合思源自定义协议约定（<插件名><Tab 类型>），即使思源内核先按内置逻辑
    *    开了一次 Tab，也能带上 bookId 命中同一本书，不会产生空白页签。
    * @returns Markdown 链接；cfi/bookId 缺失时返回空串（模板里自然留空，不留死链）
    */
-  function buildBookDeepLink(cfi: string): string {
+  /**
+   * 深链纯 URL（不含 markdown 包装）。buildBookDeepLink 与矩形标注链接共用。
+   * 2026-09-09 修复：矩形标注曾把 buildBookDeepLink 的 markdown 再包一层
+   * `[标题]([回原文](siyuan://…))`，思源解析 href 截断成非法 URL → 点击报 Invalid URL。
+   * 2026-09-09 修复（Tab 复用）：host 必须用**插件名**（siyuan-plugin-reword）。
+   * 此前用 Tab id（…-rewordreader）：思源 processSiYuanUri 找不到同名插件 →
+   * 落到 models 分支 openFile **直接开新 Tab**（绕过 openBookTab 去重，cfi 被忽略
+   * 不跳转）→ 表现为「不复用已有 Tab + 不定位」。改用插件名后思源只派发
+   * open-siyuan-url-plugin 事件，由 index.ts onOpenBookUrl 接手（去重 + 跳转）。
+   */
+  function buildBookDeepLinkUrl(cfi: string): string {
     if (!cfi || !bookId) return "";
     try {
       const data = encodeURIComponent(JSON.stringify({ bookId, cfi }));
-      return `[回原文](siyuan://plugins/siyuan-plugin-rewordreader?data=${data})`;
+      return `siyuan://plugins/siyuan-plugin-reword?data=${data}`;
     } catch (__swallowErr) {
-      logSwallow(__swallowErr, "ReaderView.svelte · buildBookDeepLink", "warn");
+      logSwallow(__swallowErr, "ReaderView.svelte · buildBookDeepLinkUrl", "warn");
       return "";
     }
+  }
+
+  function buildBookDeepLink(cfi: string): string {
+    const url = buildBookDeepLinkUrl(cfi);
+    return url ? `[回原文](${url})` : "";
   }
 
   /**
@@ -6868,7 +7381,7 @@ import { getLogger } from "../core/logger.ts";
         }
       } else if (onSendToNote) {
         // 降级：写入默认笔记本
-        const r = onSendToNote({ markdown: md, title: `${title || "阅读"}摘录 ${ts}` });
+        const r = onSendToNote({ markdown: md, title: `${title || "阅读"}摘录 ${ts}`, readerType: isPdfBook() ? "pdf" : "book" });
         if (r && typeof (r as Promise<string>).then === "function") {
           (r as Promise<string>).then(() => toast("已发送（未配置 currentDoc，降级到笔记本）")).catch(() => toast("发送失败"));
         } else {
@@ -7046,11 +7559,37 @@ import { getLogger } from "../core/logger.ts";
       }
     } catch (__swallowErr) { logSwallow(__swallowErr, "ReaderView.svelte · try { const contents = view?.renderer?.getContents?.() || []; f…", "debug"); }
     closeSelToolbar();
-    // 提供撤销：缓存刚删除的记录，3 秒后可恢复（P2 O4）；撤销即清 deletedAt
-    pendingDelete = removed;
+    armUndoFor(removed);
+  }
+
+  /**
+   * 2026-09-09 C：删除撤销统一窗口（矩形 / 文本标注 / 摘录共用）。
+   * 软删后的记录进 pendingDelete，3 秒内可撤销（Cmd/Ctrl+Z 或右键「撤销删除」）。
+   * 矩形快照图片延迟到窗口结束才真正清理——撤销成功则图片保留，
+   * 避免此前「撤销了但 assets 里的图已被删」的不可逆问题。
+   */
+  function armUndoFor(rec: any) {
+    // 无记录（数据层已缺失）时仍需给用户删除反馈，只是没有可撤销对象
+    if (!rec?.id) { toast("已删除"); return; }
+    pendingDelete = rec;
     if (undoTimer) clearTimeout(undoTimer);
-    undoTimer = setTimeout(() => { pendingDelete = null; }, 3000);
+    undoTimer = setTimeout(() => {
+      const p: any = pendingDelete;
+      pendingDelete = null;
+      if (p?.snapshotPath) {
+        try { void removeFile(`/data/${p.snapshotPath}`); }
+        catch (e) { console.warn("[REword] 清理矩形快照失败:", e); }
+      }
+    }, 3000);
     toastWithUndo("已删除");
+  }
+
+  /** 2026-09-09 C：覆盖层删除矩形后的回调（数据已软删，此处只登记撤销窗口） */
+  function onRectDeleted(annId: string) {
+    if (!annId) return;
+    if (!annStore) { try { annStore = getAnnotationStore(); } catch { annStore = null; } }
+    const rec = annStore?.get?.(annId) ? { ...annStore.get(annId) } : { id: annId };
+    armUndoFor(rec);
   }
 
   /** 撤销刚删除的标注（清掉软删除时间戳，数据重新生效并重建高亮） */
@@ -7308,7 +7847,17 @@ import { getLogger } from "../core/logger.ts";
           console.warn("[REword] 恢复译文归档配置失败:", __swallowErr);
         }
       })();
-      await openBook();
+      // 2026-09-08 启动卡死修复（启动闸门）：
+      // 思源布局恢复会直接重建阅读 Tab（早于 restoreSession 的空闲保护），
+      // onMount 自动开书必须自己等空闲窗口，否则 25MB 级大书会在启动最密集期
+      // （布局恢复 + 词典解析 + 文档 protyle 渲染并发）冻结主线程（2026-09-08 15:06 实录）。
+      // 上次启动卡死（launchCrashed）时禁止自动开书：断「恢复→卡死→再恢复」自锁。
+      if (launchCrashed) {
+        pausedByCrash = true;
+      } else {
+        await waitForLaunchIdle();
+        await openBook();
+      }
       // 2026-08-28：打开书后刷新翻译缓存统计 + 有缓存的书籍列表（默认查看本书）
       refreshCacheStats(bookId);
       refreshCacheBookList();
@@ -7387,7 +7936,9 @@ import { getLogger } from "../core/logger.ts";
     if (unsubInkStrokes) unsubInkStrokes();
     // R3：注销后取消挂起的视觉 reconcile（防抖窗口内的定时器不能再触发已销毁组件）
     if (annReconcileTimer != null) { clearTimeout(annReconcileTimer); annReconcileTimer = null; }
-    if (saveTimer) clearTimeout(saveTimer);
+    // 2026-09-09 修复：关闭时立即落盘挂起的进度（此前只 clearTimeout 直接丢弃，
+    // 连续快速翻页后立即关闭 → 最后位置从未写盘 → 恢复落后几页）
+    void flushProgressSave();
     if (selReadTimer) clearTimeout(selReadTimer);
     if (timeTimer) clearInterval(timeTimer);
     if (attachTimer1) clearTimeout(attachTimer1);
@@ -7515,6 +8066,15 @@ import { getLogger } from "../core/logger.ts";
         class:reader-btn-active={showMarks}
         on:click={() => toggleDrawer("marks")}
       >📝</button>
+      {#if readerMode === "pdf"}
+        <!-- 2026-09-09 P1：矩形框选（图表/排版块 → 跳转链接 + 图片快照） -->
+        <button
+          class="reader-btn"
+          title="矩形框选：框选图表区域，自动复制跳转链接 + 截图，粘贴到文档即可；右键点矩形可换色/删除；Esc 退出"
+          class:reader-btn-active={pdfRectMode}
+          on:click={togglePdfRectMode}
+        >⬚</button>
+      {/if}
     </div>
     <!-- 中：书名 + 章节（真正居中）。
          2026-08-30 改造：① 移除死按钮 .reader-back-inline（display:none 且无任何引用）
@@ -7689,12 +8249,14 @@ import { getLogger } from "../core/logger.ts";
         </div>
       </div>
 
-      <!-- 子区 2：摘录（含墨迹） -->
+      <!-- 子区 2：标注与摘录（含墨迹） -->
       <!-- 2026-09-04 P0-3：墨迹笔触与文本摘录合并展示，按 createdAt 倒序。
-           kind === "ink" 的项展示笔触色点 + 笔刷信息 + 跳页；其他走文本路径。 -->
+           kind === "ink" 的项展示笔触色点 + 笔刷信息 + 跳页；其他走文本路径。
+           2026-09-09 B：更名「标注与摘录」+ 每条加类型标识（高亮/直线/波浪/批注/矩形/墨迹），
+           此前一律只显示文字，高亮与批注分辨不出。 -->
       <div class="reader-marks-section">
         <div class="reader-popover-title">
-          本书摘录
+          标注与摘录
           {#if annotsList.length}
             <span class="reader-toc-count">{annotsList.length} 条</span>
             <button class="reader-mini-btn" title="导出文本摘录为 Markdown 到剪贴板（墨迹不导出）" on:click={exportAnnots}>导出</button>
@@ -7704,7 +8266,8 @@ import { getLogger } from "../core/logger.ts";
           {#each annotsList as it (it.id)}
             <div class="reader-annot-item" class:reader-annot-item-ink={it.kind === "ink"}>
               <span class="reader-annot-dot" style="background:{it.color || '#06b6d4'}"></span>
-              <button class="reader-annot-main" title={it.kind === "ink" ? "跳转到墨迹所在页" : "跳转到原文"} on:click={() => jumpAnnot(it)}>
+              <span class="reader-annot-kind" title={annotKindLabel(it)}>{annotGlyph(it)}</span>
+              <button class="reader-annot-main" title="跳转到{annotKindLabel(it)}所在位置" on:click={() => jumpAnnot(it)}>
                 <span class="reader-annot-text">
                   {#if it.kind === "ink"}
                     <span class="reader-annot-ink-tag">✎ {it.sentence}</span>
@@ -7724,7 +8287,7 @@ import { getLogger } from "../core/logger.ts";
               >✕</button>
             </div>
           {:else}
-            <div class="reader-toc-empty">本书还没有摘录，划选文本后点「标注」或「批注」</div>
+            <div class="reader-toc-empty">本书还没有标注，划选文本后点「标注」或「批注」</div>
           {/each}
         </div>
       </div>
@@ -8060,7 +8623,9 @@ import { getLogger } from "../core/logger.ts";
         />
       </details>
 
-      <!-- 3. 页面布局：4 边距 + 分栏间距 + 3 开关 + 进度样式 + 参考页数 + 时间 + 24h -->
+      <!-- 3. 页面布局：4 边距 + 分栏间距 + 3 开关 + 进度样式 + 参考页数 + 时间 + 24h
+           [REword 2026-09-09] 边距/分栏对 PDF 画布无效 → 归为图书专属，PDF 模式隐藏 -->
+      {#if readerMode !== "pdf"}
       <details class="reader-setting-section">
         <summary class="reader-setting-section-title">⬜ 页面布局</summary>
         <div class="reader-setting-row">
@@ -8167,11 +8732,8 @@ import { getLogger } from "../core/logger.ts";
           <span class="reader-setting-label">使用 24 小时制</span>
           <label class="reader-switch"><input type="checkbox" checked={settings.layout.use24Hour} on:change={setUse24Hour} /><span class="reader-switch-track"></span></label>
         </div>
-        <div class="reader-setting-row reader-setting-toggle-row">
-          <span class="reader-setting-label" title="思源不会自动恢复自定义阅读 Tab；开启后重启思源会自动重开上次打开的书">重启后恢复阅读 Tab</span>
-          <label class="reader-switch"><input type="checkbox" checked={settings.layout.restoreTabsOnLaunch !== false} on:change={setRestoreTabs} /><span class="reader-switch-track"></span></label>
-        </div>
       </details>
+      {/if}
 
       <!-- 笔记插入功能已移除（2026-08-25） -->
 
@@ -8179,6 +8741,12 @@ import { getLogger } from "../core/logger.ts";
            主面板（4 大分组）保持一屏可览，次要项折叠。 -->
       <details class="reader-setting-section">
         <summary class="reader-setting-section-title">⚙ 高级设置</summary>
+
+        <!-- 2026-09-09：自页面布局段挪入（该段 PDF 隐藏，但此开关是全局启动行为，需对 PDF 可达） -->
+        <div class="reader-setting-row reader-setting-toggle-row">
+          <span class="reader-setting-label" title="思源不会自动恢复自定义阅读 Tab；开启后重启思源会自动重开上次打开的书">重启后恢复阅读 Tab</span>
+          <label class="reader-switch"><input type="checkbox" checked={settings.layout.restoreTabsOnLaunch !== false} on:change={setRestoreTabs} /><span class="reader-switch-track"></span></label>
+        </div>
 
         <!-- 主题 -->
         <div class="reader-setting-row">
@@ -8638,7 +9206,32 @@ import { getLogger } from "../core/logger.ts";
     {#if readerMode === "pdf"}
       <PdfOverlay opened={opened} />
       <!-- 2026-09-04 P1：PDF 文本标注覆盖层（与 PdfOverlay 同处 PDF 分支） -->
-      <PdfTextHlLayer bookId={bookId} {view} {opened} {pdfCurrentPage} />
+      <PdfTextHlLayer
+        bookId={bookId}
+        {view}
+        {opened}
+        {pdfCurrentPage}
+        onRectCopyLink={copyRectLink}
+        onRectDeleted={onRectDeleted}
+        pendingUndo={!!pendingDelete}
+        onUndoDelete={undoDelete}
+        onAnnotClick={onPdfAnnotClick}
+        bind:this={pdfHlLayerComp}
+      />
+      {#if pdfRectMode}
+        <!-- 2026-09-09 P1：矩形框选捕获层（盖住 iframe 收事件）+ 拖拽预览矩形 -->
+        <div
+          class="pdf-rect-capture"
+          role="application"
+          aria-label="矩形框选模式"
+          on:mousedown={onRectCaptureMouseDownStart}
+        >
+          {#if pdfRectDrag}
+            <div class="pdf-rect-preview" style={pdfRectPreviewCss}></div>
+          {/if}
+          <span class="pdf-rect-hint">框选图表 / 排版区域，松手自动复制链接 + 截图（Esc 退出）</span>
+        </div>
+      {/if}
     {/if}
     {#if opened && !errorMsg}
       <div class="reader-side-tap" aria-hidden="false">
@@ -8760,7 +9353,13 @@ import { getLogger } from "../core/logger.ts";
   </div>
   {/if}
 
-  {#if errorMsg}
+  {#if pausedByCrash}
+    <!-- 2026-09-08 启动卡死修复：卡死后不自动开书，显示手动打开入口 -->
+    <div class="reader-error">
+      上次启动异常，已暂停自动打开本书
+      <button class="reader-btn" style="margin-left:8px;" on:click={manualReopen}>重新打开</button>
+    </div>
+  {:else if errorMsg}
     <div class="reader-error">打开失败：{errorMsg}</div>
   {/if}
 
@@ -10352,6 +10951,16 @@ import { getLogger } from "../core/logger.ts";
     margin-top: 10px;
     flex-shrink: 0;
   }
+  /* 2026-09-09 B：条目类型标识（▮ 高亮 / ━ 直线 / ﹏ 波浪 / 💬 批注 / ▭ 矩形 / ✎ 墨迹） */
+  .reader-annot-kind {
+    font-size: 11px;
+    line-height: 1;
+    margin-top: 8px;
+    opacity: 0.75;
+    flex-shrink: 0;
+    min-width: 12px;
+    text-align: center;
+  }
   .reader-annot-text {
     font-size: 13px;
     line-height: 1.5;
@@ -11676,4 +12285,36 @@ import { getLogger } from "../core/logger.ts";
     text-overflow: ellipsis;
   }
   .reader-debug-hud-row b { color: #66ccff; }
+
+  /* ========= 2026-09-09 P1：矩形框选捕获层 ========= */
+  .pdf-rect-capture {
+    position: absolute;
+    inset: 0;
+    z-index: 7;
+    cursor: crosshair;
+    background: transparent;
+    user-select: none;
+  }
+  .pdf-rect-preview {
+    position: absolute;
+    border: 1.5px dashed var(--b3-theme-primary, #3583e0);
+    background: rgba(53, 131, 224, 0.12);
+    border-radius: 2px;
+    box-sizing: border-box;
+    pointer-events: none;
+  }
+  .pdf-rect-hint {
+    position: absolute;
+    top: 10px;
+    left: 50%;
+    transform: translateX(-50%);
+    padding: 4px 12px;
+    border-radius: 12px;
+    font-size: 12px;
+    color: var(--b3-theme-on-surface, #555);
+    background: var(--b3-theme-surface, #fff);
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+    pointer-events: none;
+    white-space: nowrap;
+  }
 </style>

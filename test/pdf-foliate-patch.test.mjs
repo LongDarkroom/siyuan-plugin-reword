@@ -145,9 +145,10 @@ test("[回归] view-light.js 仍保留其他格式分支（EPUB/MOBI/FB2/CBZ）"
   assert.ok(/isCBZ\(file\)/.test(viewLightSrc), "CBZ 分支应保留");
 });
 
-test("[回归] view-light.js 仍为 REword 自实现的 lite 版（行数 ~705）", () => {
+test("[回归] view-light.js 仍为 REword 自实现的 lite 版（行数 ~727）", () => {
   // 防止被替换回完整版 view.js
   const lineCount = viewLightSrc.split("\n").length;
-  // view.js 是 704 行，view-light.js 应该是 705 左右（加了 isPDF 函数 + PDF 分支）
-  assert.ok(lineCount >= 700 && lineCount <= 720, `view-light.js 行数应在 700-720 之间，实际：${lineCount}`);
+  // 2026-09-09：addAnnotation 加了 PDF 双绘收口守卫（+12 行注释与守卫）→ ~727 行。
+  // 完整版 view.js 约 716 行且仍在同目录，行数只作粗筛（防整文件替换），窗口放宽。
+  assert.ok(lineCount >= 700 && lineCount <= 745, `view-light.js 行数应在 700-745 之间，实际：${lineCount}`);
 });

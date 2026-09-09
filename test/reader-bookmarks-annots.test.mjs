@@ -140,10 +140,17 @@ test("[A7] toggleBookmark 返回 { list, added } 且已存在则删除", () => {
 
 test("[B1] buildBookDeepLink 存在且产出思源自定义协议", () => {
   assert.match(viewSrc, /function buildBookDeepLink\(/, "应有 buildBookDeepLink");
-  const b = bodyOf(viewSrc, "function buildBookDeepLink");
+  // 2026-09-09 修复（Tab 复用）：host 必须用**插件名**（siyuan-plugin-reword）。
+  // 此前用 Tab id（…-rewordreader）→ 思源 processSiYuanUri 找不到同名插件 →
+  // 直接 openFile 开新 Tab（绕过去重、cfi 被忽略）→「不复用 Tab + 不跳转」。
+  assert.match(viewSrc, /function buildBookDeepLinkUrl\(/, "应有 buildBookDeepLinkUrl（纯 URL）");
+  const u = bodyOf(viewSrc, "function buildBookDeepLinkUrl");
+  assert.ok(u, "应取到 buildBookDeepLinkUrl 函数体");
+  assert.match(u, /siyuan:\/\/plugins\/siyuan-plugin-reword\?data=/, "host 应为插件名（非 Tab id），思源才派发事件给插件自身处理器");
+  assert.match(u, /encodeURIComponent\(JSON\.stringify\(/, "data 应 JSON + URL 编码（CFI 含特殊字符）");
+  const b = bodyOf(viewSrc, "function buildBookDeepLink(");
   assert.ok(b, "应取到函数体");
-  assert.match(b, /siyuan:\/\/plugins\/siyuan-plugin-rewordreader\?data=/, "应为 siyuan://plugins/<插件名><tab类型>?data=");
-  assert.match(b, /encodeURIComponent\(JSON\.stringify\(/, "data 应 JSON + URL 编码（CFI 含特殊字符）");
+  assert.match(b, /buildBookDeepLinkUrl\(/, "markdown 版应复用纯 URL 函数（防嵌套包装回归）");
   assert.match(b, /\[回原文\]/, "应渲染成可直接点 Markdown 链接");
 });
 

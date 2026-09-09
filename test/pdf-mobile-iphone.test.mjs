@@ -43,8 +43,9 @@ test("[核心] import 三个新 env 工具", () => {
 
 test("[核心] onMount 调 getDeviceClass + isSmallMobile", () => {
   // 找 onMount 块里的 deviceClass = getDeviceClass()
+  // onMount 块已随功能增长变长，设备分级代码在 +3772 字符处，窗口需 ≥6000
   const onMountIdx = src.indexOf("onMount(() => {");
-  const body = src.slice(onMountIdx, onMountIdx + 3000);
+  const body = src.slice(onMountIdx, onMountIdx + 6000);
   assert.ok(/deviceClass\s*=\s*getDeviceClass\(\)/.test(body), "onMount 应调 getDeviceClass");
   assert.ok(/isIphoneMode\s*=\s*isSmallMobile\(\)/.test(body), "onMount 应调 isSmallMobile");
 });
@@ -74,7 +75,7 @@ test("[核心] iPhone 模式强制 fit-width（小屏 custom 缩放过小）", (
 
 test("[注册] resize + orientationchange 监听 main window", () => {
   const onMountIdx = src.indexOf("onMount(() => {");
-  const body = src.slice(onMountIdx, onMountIdx + 3000);
+  const body = src.slice(onMountIdx, onMountIdx + 6000);
   assert.ok(
     /window\.addEventListener\(\s*['"]resize['"]\s*,\s*onDeviceClassResize\s*\)/.test(body),
     "应注册 resize 监听"
@@ -86,9 +87,10 @@ test("[注册] resize + orientationchange 监听 main window", () => {
 });
 
 test("[注销] onDestroy 注销 resize + orientationchange", () => {
-  // 找 onDestroy 块
-  const onDestroyIdx = src.indexOf("onDestroy(() => {");
-  const body = src.slice(onDestroyIdx, onDestroyIdx + 1500);
+  // ReaderView 有多个 onDestroy（line 662 早期清理 + 组件末尾那个），
+  // 设备分级监听的注销在【最后一个】onDestroy 里（removeEventListener 在 +1919 字符处）。
+  const onDestroyIdx = src.lastIndexOf("onDestroy(() => {");
+  const body = src.slice(onDestroyIdx, onDestroyIdx + 2500);
   assert.ok(
     /window\.removeEventListener\(\s*['"]resize['"]\s*,\s*onDeviceClassResize\s*\)/.test(body),
     "应注销 resize 监听"

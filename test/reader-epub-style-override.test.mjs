@@ -66,11 +66,11 @@ test("buildReaderStyles 输出含必含段：段距/字体/内联覆盖/标题/�
   // 内联覆盖
   assert.match(css, /p\s+span[^}]*font-size:\s*inherit\s*!important/);
   assert.match(css, /p\s+span[^}]*font-family:\s*inherit\s*!important/);
-  // 标题
-  assert.match(css, /h1\s*\{[^}]*font-size:\s*1\.6em\s*!important/);
-  assert.match(css, /h2\s*\{[^}]*font-size:\s*1\.4em\s*!important/);
-  // 引用
-  assert.match(css, /blockquote\s*\{[^}]*border-left:\s*3px solid currentColor\s*!important/);
+  // 标题（2026-08-30 排版精修后为 1.5em / 1.32em，旧断言的 1.6em / 1.4em 已过期）
+  assert.match(css, /h1\s*\{[^}]*font-size:\s*1\.5em\s*!important/);
+  assert.match(css, /h2\s*\{[^}]*font-size:\s*1\.32em\s*!important/);
+  // 引用（2026-08-30 思源化：左边线改为跟随思源 --b3-border-color，currentColor 降级为 fallback）
+  assert.match(css, /blockquote\s*\{[^}]*border-left:\s*3px solid var\(--b3-border-color,\s*currentColor\)\s*!important/);
   // 列表
   assert.match(css, /ul,\s*ol\s*\{[^}]*margin:\s*0\.6em\s*0/);
   assert.match(css, /li\s*\{[^}]*margin:\s*0\.3em\s*0/);
@@ -108,9 +108,19 @@ test("color-scheme 在亮主题时为 light", () => {
   assert.match(css, /color-scheme:\s*light/);
 });
 
-test("行宽 padding 注入（normal=2em 1.5em）", () => {
+// 2026-09 更新：旧断言 `body { padding: 2em 1.5em }`（来自 LINE_WIDTH_PRESETS）已过期。
+// 2026-08-29 起 body padding 改由「页面布局」4 个边距滑块驱动（reader-style.ts layoutMarginStyles），
+// lineWidth 预设的 padding 只经 deriveStyleOutput 透传、不再注入 CSS（见 reader-settings.ts:526 说明）。
+test("body 内边距由「页面布局」边距滑块驱动（缺省 16px 四边 + column-gap 16px）", () => {
   const css = build();
-  assert.match(css, /padding:\s*2em 1\.5em\s*!important/);
+  assert.match(css, /body\s*\{\s*padding:\s*16px 16px 16px 16px\s*!important;\s*column-gap:\s*16px;\s*\}/);
+});
+
+test("body 内边距随 settings.layout 四边与分栏间距变化", () => {
+  const css = build(mkSettings({
+    layout: { marginTopPx: 8, marginBottomPx: 12, marginLeftPx: 24, marginRightPx: 32, columnGapPx: 40 },
+  }));
+  assert.match(css, /body\s*\{\s*padding:\s*8px 32px 12px 24px\s*!important;\s*column-gap:\s*40px;\s*\}/);
 });
 
 test("行高 line-height 注入", () => {
@@ -174,7 +184,7 @@ test("所有子函数均被 buildReaderStyles 调用", () => {
   const css = build();
   assert.match(css, /p\s*\{[^}]*margin:\s*0\.6em\s*0/);                  // paragraphStyles
   assert.match(css, /p span[\s\S]*?font-size:\s*inherit/);                // inlineOverrideStyles
-  assert.match(css, /h1\s*\{[^}]*1\.6em/);                                // headingStyles
+  assert.match(css, /h1\s*\{[^}]*1\.5em/);                                // headingStyles
   assert.match(css, /blockquote\s*\{[^}]*border-left/);                    // quoteStyles
   assert.match(css, /ul,\s*ol\s*\{/);                                      // listStyles
   assert.match(css, /figure\s*\{[^}]*text-align:\s*center/);              // figureStyles

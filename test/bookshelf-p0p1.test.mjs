@@ -213,7 +213,8 @@ test("[UI] 排序下拉 + 升降序切换按钮存在", () => {
 test("[UI] 网格 / 列表双视图切换", () => {
   assert.ok(/setViewMode\("grid"\)/.test(viewSrc), "应能切到网格");
   assert.ok(/setViewMode\("list"\)/.test(viewSrc), "应能切到列表");
-  assert.ok(/\{#if viewMode === "grid"\}/.test(viewSrc), "模板应按 viewMode 分流");
+  // R3 重构：模板改为 {#if 空态}{:else if 无匹配}{:else if viewMode === "grid"}{:else 列表}
+  assert.ok(/\{:else if viewMode === "grid"\}/.test(viewSrc), "模板应按 viewMode 分流");
   assert.ok(/class="shelf-list"/.test(viewSrc), "应有列表视图容器");
 });
 

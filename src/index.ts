@@ -1202,6 +1202,14 @@ export default class RewordPlugin extends Plugin {
       getLogger().warn("[REword] 存量批注 IAL 清洗失败（不影响使用）:", { error: e });
     }
 
+    // ========== 2026-09-09：存量矩形标注补 kind:"rect"（旧数据 kind 未落库，右键菜单无法命中）==========
+    try {
+      const migrated = await this.annotationStore.migrateLegacyRectKind();
+      if (migrated > 0) getLogger().info(`[REword] 存量矩形标注 kind 迁移完成（${migrated} 条）`);
+    } catch (e) {
+      getLogger().warn("[REword] 存量矩形标注 kind 迁移失败（不影响使用）:", { error: e });
+    }
+
     // ========== 4.2.0 旧 category/tags → labels 一次性迁移（2026-08-15 新增）==========
     try {
       // category → 中文标签名映射
@@ -2119,13 +2127,16 @@ export default class RewordPlugin extends Plugin {
     this.speak(text);
   }
 
-  /** 阅读器划词发送：必须先在「阅读器设置 → 笔记导出绑定」中绑定阅读摘录目标文档 */
-  public async sendReaderSelection(opts: { markdown: string; title: string }): Promise<string> {
+  /** 阅读器划词发送：必须先在「阅读器设置 → 笔记导出绑定」中绑定阅读摘录目标文档。
+   *  2026-09-09 P0 设置双分家：readerType 指明来源阅读器（book/pdf），
+   *  读取对应分片的 excerptDocId——PDF Tab 的发送走 PDF 自己的绑定。 */
+  public async sendReaderSelection(opts: { markdown: string; title: string; readerType?: "book" | "pdf" }): Promise<string> {
     try {
-      const st = getGlobalSettingsStore()?.get?.();
+      const scope = opts.readerType === "pdf" ? "pdf" : "book";
+      const st = getGlobalSettingsStore()?.get?.(scope);
       const targetDocId = st?.excerptDocId?.trim();
       if (!targetDocId) {
-        getLogger().warn("[REword] 阅读摘录未绑定目标文档，跳过发送。请在阅读器设置中绑定。");
+        getLogger().warn(`[REword] 阅读摘录未绑定目标文档（scope=${scope}），跳过发送。请在阅读器设置中绑定。`);
         return "";
       }
       const { appendBlock } = await import("./siyuan/api.ts");
@@ -7919,10 +7930,11 @@ export default class RewordPlugin extends Plugin {
       host.innerHTML = '<p style="color:#888;padding:20px;text-align:center;">阅读器未就绪</p>';
       return;
     }
-    const st = this.readerDock.settingsStoreRef.get();
+    // 2026-09-09 P0 设置双分家：插件级统一设置面板面向图书主场景，显式路由 book 分片
+    const st = this.readerDock.settingsStoreRef.get("book");
     type RdPatch = Partial<import("./reader/reader-settings").ReaderSettings>;
     const apply = (patch: RdPatch) => {
-      try { this.readerDock!.settingsStoreRef.update(patch); } catch (__swallowErr) { logSwallow(__swallowErr, "index.ts · apply", "debug"); }
+      try { this.readerDock!.settingsStoreRef.update(patch, "book"); } catch (__swallowErr) { logSwallow(__swallowErr, "index.ts · apply", "debug"); }
     };
 
     const sel = (id: string, label: string, options: Array<[string, string]>, cur: string) => `

@@ -59,9 +59,8 @@ test("[核心] 用 setTimeout 延迟应用 zoom 避免被首次 render 覆盖", 
 });
 
 test("[核心] relocate 事件保存 zoom 到 progress", () => {
-  // 找 view.addEventListener("relocate", ...) 里的 scheduleProgressSave
-  // 检查 isPdfBook() 块
-  const re = /if\s*\(\s*isPdfBook\(\)\s*\)\s*savePayload\.zoom\s*=\s*currentZoom/;
+  // 2026-09-09 进度修复后 payload 构造改为块形式（zoom + page 一起写）
+  const re = /if\s*\(\s*isPdfBook\(\)\s*\)\s*\{\s*savePayload\.zoom\s*=\s*currentZoom/;
   assert.ok(
     re.test(src),
     "relocate 事件应把 currentZoom 写进 savePayload.zoom"

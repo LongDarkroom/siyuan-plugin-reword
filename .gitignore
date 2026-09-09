@@ -19,3 +19,9 @@ scripts/gen_assets.py
 /dict/
 # vite 构建临时文件
 vite.config.mts.timestamp-*.mjs
+# [2026-09-09] copy-dist.mjs 复制到插件根目录的运行时资源（pdf.js CMap / 标准字体）。
+# 它们是构建产物，不入库；发布包由 make_release.py 按白名单从本地磁盘取。
+cmaps/
+standard_fonts/
+# 本地方案/调研文档输出目录
+outputs/

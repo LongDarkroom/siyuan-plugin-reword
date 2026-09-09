@@ -54,22 +54,32 @@ function extractOnMountBody(src) {
   return null;
 }
 
-/** 抽 onDestroy 完整函数体 */
+/** 抽 onDestroy 完整函数体。
+ *  注意：ReaderView 里有多个 onDestroy（靠前的那个只清 hoverHideTimer），
+ *  真正解绑容器 mousedown 的是后面那个；取首个会断言打空。 */
 function extractOnDestroyBody(src) {
   const sig = "onDestroy(() => {";
-  const idx = src.indexOf(sig);
-  if (idx < 0) return null;
-  const start = src.indexOf("{", idx);
-  if (start < 0) return null;
-  let depth = 0;
-  for (let i = start; i < src.length; i++) {
-    if (src[i] === "{") depth++;
-    else if (src[i] === "}") {
-      depth--;
-      if (depth === 0) return src.substring(start, i + 1);
+  let from = 0;
+  for (;;) {
+    const idx = src.indexOf(sig, from);
+    if (idx < 0) return null;
+    const start = src.indexOf("{", idx);
+    if (start < 0) return null;
+    let depth = 0;
+    let body = null;
+    for (let i = start; i < src.length; i++) {
+      if (src[i] === "{") depth++;
+      else if (src[i] === "}") {
+        depth--;
+        if (depth === 0) {
+          body = src.substring(start, i + 1);
+          break;
+        }
+      }
     }
+    if (body && /removeEventListener/.test(body)) return body;
+    from = idx + sig.length;
   }
-  return null;
 }
 
 test("[关键修复] readerViewEl ref 存在", () => {

@@ -376,6 +376,13 @@ test("pretranslate：越界块只送译不注入（full 模式闸门生效）", 
     getContents: () => [doc],
     getSections: () => [{ index: 0, createDocument: () => doc }],
     getCurrentSection: () => 0,
+    // full 模式用 createDocument() 取段，节点未挂载（isConnected=false），
+    // 必须由调用方用 getLiveSegment 映射回当前视图的真实节点才能注入
+    // （见 pretranslate.ts:47-54）；不提供则该段只入缓存不注入。
+    getLiveSegment: (locatorKey, sectionIndex) => {
+      const s = segs.find((x) => x.locatorKey === locatorKey && x.sectionIndex === sectionIndex);
+      return s ? { ...s, node: mockEl(s.text, { isConnected: true }) } : undefined;
+    },
     translate: async (texts) => texts.map(() => "译"),
   });
   await q.start({ bookId: "b1", mode: "full", lanes: 1, blocksPerLane: 5, aheadSections: 2 });

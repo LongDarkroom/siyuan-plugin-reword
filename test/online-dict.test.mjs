@@ -82,7 +82,8 @@ test("renderOnlineDictCard: 含来源徽标 + 词头 + 音标 + 释义 + 收藏�
   assert.match(html, /🌐 在线词典（海词）/, "2026-09-07 切换后徽标改为「海词」");
   assert.match(html, /mastery/, "应显示词头");
   assert.match(html, /hiword-dict-phonetic/, "应显示音标");
-  assert.match(html, /hiword-online-meaning/, "应有释义行");
+  // 2026-09-07 全信息版改版：释义行由 hiword-online-meaning 改为复用离线 senses 结构
+  assert.match(html, /hiword-dict-sense-item/, "应有释义行");
   assert.match(html, /data-action="vocab-star"/, "应有收藏按钮（☆）");
   assert.match(html, /data-action="tts"/, "应有朗读按钮");
 });

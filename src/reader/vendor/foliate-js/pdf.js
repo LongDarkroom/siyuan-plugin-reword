@@ -10,7 +10,35 @@
 //   避免 iOS WKWebView 的 worker CORS 失败导致白屏。
 //
 // 性能：桌面恢复多线程 worker；移动端牺牲性能换可用性。
+// 2026-09-08 冻结诊断：boot 链路打点（同步落盘）——开书冻结时最后一条打点
+// 即精确卡死位置。诊断结束后可整体删除 [pdf-boot] 段。
+import { getLogger } from "../../../core/logger.ts"
+const pdfBootLog = msg => {
+    try {
+        getLogger().info(`[pdf-boot] ${msg}`)
+        getLogger().flushSync()
+    } catch { /* ignore */ }
+}
 const pdfjsPath = path => `./vendor/pdfjs/${path}`
+
+// [pdf-diag] 2026-09-08 文本层诊断（PDF 选中问题取证，选中修复后删除）：
+// 自动捕获会话内前 3 个文本密集页（span>40），dump item 粒度 + span 几何样本。
+// 目的：判定「无法选中/划选不准」根因是 item 合并过粗还是 span 几何错位。
+let pdfDiagRemaining = 3
+// 划选瞬间取证：mouseup 时抓「用户正在操作的那一页」的实时文本层状态（上限 3 次）。
+// 开书时静态取样无法解释「封面生效、正文全 0」，操作瞬间的现场才有决定性。
+let pdfDiagSelRemaining = 3
+// PAN/SELECT 分流取证：pointerdown 时记录 elementFromPoint 命中与分支走向（上限 5 次）。
+// 假设：若 span 永远命不中（如 pointer-events/层叠问题），每次拖动都会进 PAN 分支
+// → 表现为「完全拖不出选区」。
+let pdfDiagPdRemaining = 5
+const pdfDiagSelDocs = new WeakSet()
+const pdfDiagLog = msg => {
+    try {
+        getLogger().info(`[pdf-diag] ${msg}`)
+        getLogger().flushSync()
+    } catch { /* ignore */ }
+}
 
 import './vendor/pdfjs/pdf.mjs'
 const pdfjsLib = globalThis.pdfjsLib
@@ -64,13 +92,32 @@ const getFontScale = doc => {
     return fontScale > 0 ? fontScale : 1
 }
 
-let textLayerBuilderCSS = null
-let annotationLayerBuilderCSS = null
+// REword fix 2026-09-08（PDF 无法选中根因）：text/annotation layer 样式改为构建期内联。
+// 原实现运行时 fetch('./vendor/pdfjs/text_layer_builder.css')（相对插件根目录），
+// 但 copy-dist 产物里没有 vendor/pdfjs/ 目录 → fetch 404 → 404 错误页文本被原样
+// 注入 <style> → 所有规则无效 → .textLayer span 无 position:absolute（实测 computed
+// pos="static"）→ span 以普通流排在位图 canvas 下方 → 指针命中永远落在 canvas 上
+// → PDF 文本完全无法选中（[pdf-diag] target=CANVAS hit=CANVAS selLen=0 实证）。
+// ?raw 在构建时把 CSS 文本内联进 bundle，无运行时依赖、无发布白名单负担。
+import textLayerBuilderCSSRaw from './vendor/pdfjs/text_layer_builder.css?raw'
+import annotationLayerBuilderCSSRaw from './vendor/pdfjs/annotation_layer_builder.css?raw'
+let textLayerBuilderCSS = textLayerBuilderCSSRaw
+let annotationLayerBuilderCSS = annotationLayerBuilderCSSRaw
 
 // Track active render tasks per iframe document to cancel superseded renders
 const activeRenderTasks = new WeakMap()
 // Generation counter per document to detect stale renders after async gaps
 const renderGenerations = new WeakMap()
+// REword fix 2026-09-08 (startup freeze): per-doc zoom of the last completed
+// render start. onZoom is invoked on EVERY fixed-layout #render (zoom change,
+// relayout, ResizeObserver re-fire). A finished render can itself nudge the
+// host size (scrollbar churn / sub-pixel rounding), which re-fires the
+// observer, re-runs #render and re-enters onZoom — re-rasterising the SAME
+// page at the SAME zoom forever and freezing the whole renderer thread
+// (observed 2026-09-08: view.init watchdog stops at ~900ms, zero logs after).
+// Skipping same-zoom re-renders removes the fuel of that loop at zero visual
+// cost: same page + same zoom renders an identical bitmap.
+const lastRenderZoomByDoc = new WeakMap()
 
 // Set up panning and selection event handlers once per iframe document
 const setupPanningEvents = (doc) => {
@@ -119,6 +166,16 @@ const setupPanningEvents = (doc) => {
         const hasTextUnderneath = elementUnderCursor &&
                              (elementUnderCursor.tagName === 'SPAN' || elementUnderCursor.tagName === 'P') &&
                              elementUnderCursor.textContent.trim().length > 0
+
+        // [pdf-diag] 分流取证（选中问题诊断，修复后删除）
+        if (pdfDiagPdRemaining > 0) {
+            pdfDiagPdRemaining--
+            pdfDiagLog(`pd hit=${elementUnderCursor?.tagName}.${
+                String(elementUnderCursor?.className ?? '').slice(0, 24)
+            } underText=${hasTextUnderneath} hasSel=${hasTextSelection} branch=${
+                (!hasTextUnderneath && !hasTextSelection) ? 'PAN' : 'SELECT'
+            }`)
+        }
 
         if (!hasTextUnderneath && !hasTextSelection) {
             isPanning = true
@@ -200,6 +257,12 @@ const MAX_RENDER_DPR = 2
 // Hard ceiling on a single page's bitmap area (~3.1 Mpx ≈ 12.6 MB) so a large
 // tablet page can't blow the budget even after the dpr clamp.
 const MAX_CANVAS_PIXELS = 2048 * 1536
+// [REword 2026-09-09] 桌面端像素预算（发热治理）：此前桌面无任何面积钳制，
+// Retina(dpr2) 下 fit-width 杂志页约 4.3 Mpx/页，放大 200% 时 17+ Mpx（≈70MB
+// 位图 + 同量级 GPU 合成层），scrolled 模式同时挂 12 页 → 持续高 CPU/GPU 发热。
+// 预算取移动端 4 倍（≈12.6 Mpx）：正常阅读（fit-width、≤150%）不会触顶、
+// 清晰度零损失；仅深缩放时栅格变柔（文字清晰度由 DOM 文本层保证，不受影响）。
+const MAX_CANVAS_PIXELS_DESKTOP = 4096 * 3072
 
 // Only mobile WebViews get that budget. Desktop browsers have no per-process
 // memory ceiling, and a page fitted to a desktop window is several times the
@@ -223,12 +286,27 @@ const getRenderDpr = (page, zoom) => {
         const { width, height } = page.getViewport({ scale: zoom || 1 })
         const area = width * height * dpr * dpr
         if (area > MAX_CANVAS_PIXELS) dpr *= Math.sqrt(MAX_CANVAS_PIXELS / area)
+    } else {
+        // [REword 2026-09-09] 桌面端同样做面积钳制（预算更宽松），防深缩放位图爆炸
+        const { width, height } = page.getViewport({ scale: zoom || 1 })
+        const area = width * height * dpr * dpr
+        if (area > MAX_CANVAS_PIXELS_DESKTOP) dpr *= Math.sqrt(MAX_CANVAS_PIXELS_DESKTOP / area)
     }
     return Math.max(1, dpr)
 }
 
 const render = async (page, doc, zoom, pageColors) => {
     if (!doc) return
+
+    // REword fix 2026-09-08: same-doc same-zoom re-render is a no-op — skip
+    // before any allocation. This breaks the ResizeObserver -> #render ->
+    // onZoom loop described at lastRenderZoomByDoc (see also the circuit
+    // breaker on fixed-layout's ResizeObserver). pageColors participates in
+    // the key so theme switches still re-render.
+    const lastKey = lastRenderZoomByDoc.get(doc)
+    const renderKey = `${zoom}|${pageColors ? (Array.isArray(pageColors) ? pageColors.join(',') : JSON.stringify(pageColors)) : ''}`
+    if (lastKey !== undefined && lastKey === renderKey) return
+    lastRenderZoomByDoc.set(doc, renderKey)
 
     // Increment generation to invalidate any in-progress render for this doc
     const generation = (renderGenerations.get(doc) || 0) + 1
@@ -253,6 +331,12 @@ const render = async (page, doc, zoom, pageColors) => {
     const renderDpr = getRenderDpr(page, zoom)
     const renderScale = zoom * renderDpr
     doc.documentElement.style.setProperty('--total-scale-factor', zoom)
+    // 2026-09-08 修复 PDF 无法选中：markedContent 内的 span 定位/字号用
+    // calc(var(--scale-factor)*Xpx)（pdf.mjs TextLayer #appendText），root 级
+    // span 才用百分比。该变量此前从未被设置 → 带 markedContent 的正文页所有
+    // span 堆在 (0,0)、几何全 0，selection 命中不到字形（[pdf-diag] page=3
+    // w/h 全 0 实证）。官方 viewer 本就要求此变量（无单位数字，同 zoom）。
+    doc.documentElement.style.setProperty('--scale-factor', zoom)
     doc.documentElement.style.setProperty('--user-unit', '1')
     doc.documentElement.style.setProperty('--scale-round-x', '1px')
     doc.documentElement.style.setProperty('--scale-round-y', '1px')
@@ -283,6 +367,8 @@ const render = async (page, doc, zoom, pageColors) => {
         // Render was cancelled or failed — release canvas bitmap memory
         canvas.width = 0
         canvas.height = 0
+        // Allow a retry at the same zoom (the failed render never painted)
+        lastRenderZoomByDoc.delete(doc)
         return
     } finally {
         if (activeRenderTasks.get(doc) === renderTask) {
@@ -320,6 +406,81 @@ const render = async (page, doc, zoom, pageColors) => {
         container, viewport: displayViewport,
     })
     await textLayer.render()
+
+    // [pdf-diag] 文本层取证（选中问题诊断，修复后删除）：item 粒度 + span 几何样本
+    if (pdfDiagRemaining > 0) {
+        try {
+            const spanEls = container.querySelectorAll('span')
+            if (spanEls.length > 40) {
+                pdfDiagRemaining--
+                const tc = await page.getTextContent()
+                const items = (tc?.items || []).filter(it => it.str && it.str.length)
+                const lens = items.map(it => it.str.length)
+                const avgLen = lens.length ? (lens.reduce((a, b) => a + b, 0) / lens.length) : 0
+                const shortItems = lens.filter(l => l <= 2).length
+                const longItems = lens.filter(l => l > 20).length
+                const cr = container.getBoundingClientRect()
+                // 2026-09-08 增强取证：page3（markedContent）修复后仍全 0，需分辨
+                // 「inline 没写 / 变量没继承 / CSS 没应用 / iframe 未挂载无渲染树」
+                const docEl = doc.documentElement
+                const env = {
+                    connected: container.isConnected,
+                    inFrame: !!(doc.defaultView && doc.defaultView.frameElement && doc.defaultView.frameElement.isConnected),
+                    mainDoc: doc === document,
+                    mc: container.querySelectorAll('.markedContent').length,
+                    sf: docEl.style.getPropertyValue('--scale-factor') || '(unset)',
+                    tsf: docEl.style.getPropertyValue('--total-scale-factor') || '(unset)',
+                }
+                const sample = [...spanEls].slice(0, 4).map(s => {
+                    const r = s.getBoundingClientRect()
+                    const cs = doc.defaultView?.getComputedStyle(s)
+                    return {
+                        t: (s.textContent || '').slice(0, 12),
+                        x: +(r.left - cr.left).toFixed(1), y: +(r.top - cr.top).toFixed(1),
+                        w: +r.width.toFixed(1), h: +r.height.toFixed(1),
+                        tf: s.style.transform || '',
+                        inl: (s.getAttribute('style') || '').slice(0, 130),
+                        fs: cs?.fontSize || '?', pos: cs?.position || '?',
+                    }
+                })
+                pdfDiagLog(`page=${page.pageNumber} scale=${displayViewport.scale.toFixed(2)} items=${items.length} spans=${spanEls.length} avgLen=${avgLen.toFixed(1)} short<=2=${shortItems} long>20=${longItems} env=${JSON.stringify(env)} sample=${JSON.stringify(sample)}`)
+            }
+        } catch (e) {
+            pdfDiagLog(`failed: ${e?.message || e}`)
+        }
+    }
+
+    // [pdf-diag] 划选瞬间取证：mouseup（capture）时抓本页实时状态——选区长度、
+    // span 几何、inline style 原文、--scale-factor 值。每个 iframe 文档只挂一次。
+    if (doc && !pdfDiagSelDocs.has(doc)) {
+        pdfDiagSelDocs.add(doc)
+        doc.addEventListener('mouseup', (ev) => {
+            if (pdfDiagSelRemaining <= 0) return
+            pdfDiagSelRemaining--
+            try {
+                const sel = doc.getSelection()
+                const cr2 = container.getBoundingClientRect()
+                const spans2 = container.querySelectorAll('span')
+                // 命中与 pan 状态：区分「事件根本没打到文本层」与「选区被清除」
+                const hitEl = doc.elementFromPoint(ev.clientX, ev.clientY)
+                const tgtCls = String(ev.target?.className ?? '').slice(0, 24)
+                const sample2 = [...spans2].slice(0, 4).map(s => {
+                    const r2 = s.getBoundingClientRect()
+                    return {
+                        t: (s.textContent || '').slice(0, 12),
+                        x: +(r2.left - cr2.left).toFixed(1), y: +(r2.top - cr2.top).toFixed(1),
+                        w: +r2.width.toFixed(1), h: +r2.height.toFixed(1),
+                        inl: (s.getAttribute('style') || '').slice(0, 110),
+                    }
+                })
+                const mc2 = container.querySelectorAll('.markedContent').length
+                const sf2 = doc.documentElement.style.getPropertyValue('--scale-factor') || '(unset)'
+                pdfDiagLog(`sel page=${page.pageNumber} target=${ev.target?.tagName}.${tgtCls} hit=${hitEl?.tagName} cursor=${container.style.cursor} selType=${sel?.type} selLen=${sel ? sel.toString().length : -1} spans=${spans2.length} mc=${mc2} sf=${sf2} sample=${JSON.stringify(sample2)}`)
+            } catch (e) {
+                pdfDiagLog(`sel failed: ${e?.message || e}`)
+            }
+        }, { capture: true })
+    }
 
     // Bail out if superseded after async text layer render
     if (renderGenerations.get(doc) !== generation) return
@@ -386,13 +547,10 @@ const renderPage = async (page, getImageBlob) => {
         }))
     }
     // https://github.com/mozilla/pdf.js/blob/642b9a5ae67ef642b9a8808fd9efd447e8c350e2/web/text_layer_builder.css
-    if (textLayerBuilderCSS == null) {
-        textLayerBuilderCSS = await fetchText(pdfjsPath('text_layer_builder.css'))
-    }
+    // 2026-09-08 改构建期内联（?raw import，见文件顶部说明），不再运行时 fetch
+    textLayerBuilderCSS = textLayerBuilderCSS || textLayerBuilderCSSRaw
     // https://github.com/mozilla/pdf.js/blob/642b9a5ae67ef642b9a8808fd9efd447e8c350e2/web/annotation_layer_builder.css
-    if (annotationLayerBuilderCSS == null) {
-        annotationLayerBuilderCSS = await fetchText(pdfjsPath('annotation_layer_builder.css'))
-    }
+    annotationLayerBuilderCSS = annotationLayerBuilderCSS || annotationLayerBuilderCSSRaw
     const data = `
         <!DOCTYPE html>
         <html lang="en">
@@ -415,7 +573,14 @@ const renderPage = async (page, getImageBlob) => {
     return { src, data, onZoom }
 }
 
-const makeTOCItem = async (item, pdf) => {
+const makeTOCItem = async (item, pdf, depth = 0, seen = new WeakSet()) => {
+    // REword fix 2026-09-08: guard against malformed outline trees (cyclic
+    // references / absurd depth) — a broken outline used to hang openBook's
+    // TOC build forever. Depth cap + per-branch cycle detection, no behaviour
+    // change for well-formed PDFs.
+    const MAX_TOC_DEPTH = 32
+    if (!item || depth > MAX_TOC_DEPTH || seen.has(item)) return null
+    seen.add(item)
     let pageIndex = undefined
 
     if (item.dest) {
@@ -436,7 +601,7 @@ const makeTOCItem = async (item, pdf) => {
         href: item.dest ? JSON.stringify(item.dest) : '',
         index: pageIndex,
         subitems: item.items?.length
-            ? await Promise.all(item.items.map(i => makeTOCItem(i, pdf)))
+            ? (await Promise.all(item.items.map(i => makeTOCItem(i, pdf, depth + 1, seen)))).filter(Boolean)
             : null,
     }
 }
@@ -488,6 +653,7 @@ const parseCalibreSeriesFromXMP = raw => {
 const MAX_CONCURRENT_RANGES = 6
 
 export const makePDF = async file => {
+    pdfBootLog(`makePDF start, size=${file.size}, weakDevice=${_rewordIsWeakDevice}, workerSrc=${pdfjsLib.GlobalWorkerOptions.workerSrc || '(empty/fake)'}`)
     const transport = new pdfjsLib.PDFDataRangeTransport(file.size, [])
     // Bound the concurrent range reads instead of dispatching them all at once.
     let active = 0
@@ -522,28 +688,40 @@ export const makePDF = async file => {
             : './standard_fonts/',
         // 2026-09-04 P1 修复：每个文本片段独立成 span，大幅提升文本选中体验
         // （PDF.js 默认会合并多个片段到同一 span，跨片段选区经常"选不上"或"选到一半断"）
-        // 2026-09-08 重新开启 + 翻页虚拟化兜底：
-        //  - 文本层每页 200-500 spans 相比合并模式 30-80 spans 增 5-10x
-        //  - 但配合 .scroll-page { content-visibility: auto }（见 index.less），
-        //    浏览器对 off-screen 页的 iframe 不做 layout/paint/合成，
-        //    大 PDF（300+ 页）翻页成本可降至原先水平
-        //  - contain-intrinsic-size 给定典型页大小（800×1100），保留占位避免抖动
-        disableCombineTextItems: true,
+        // 2026-09-08 回滚为 false（性能铁律）：
+        //  - 开启后文本层 span 数增 5-10x，对文字密集杂志 PDF（如 The Week Junior 25MB）
+        //    view.init 首次渲染即把主线程彻底冻结（15:46 实测，看门狗 902ms 后零日志）；
+        //  - 配套「翻页虚拟化」CSS（fixed-layout.js）当日在工作区的实现插入位置错误
+        //    （嵌套进未闭合规则，:host 嵌套选择器无效），content-visibility 从未生效，
+        //    v1.7.0 发布包亦无任何兜底（查实 package.zip 无 content-visibility）；
+        //  - 待「分页惰性文本层 + 真正落地的虚拟化」方案就绪并经大书实测后再开启。
+        disableCombineTextItems: false,
         isEvalSupported: false,
         // 静音 PDF.js 内部 warn（cMap 错误已通过上方配置修复，无须在控制台噪音刷屏）
         verbosity: 0,
     })
     const pdf = await loadingTask.promise
+    // 2026-09-08 修正 workerMode 误报：pdf.js v4.7.76 挂在 task._worker（旧版才是
+    // task.worker）；且 fake 路径同样会赋 _worker，真 Worker 的标志是 _webWorker
+    // （PDFWorker._initialize 握手成功才赋值）。此前恒显示 fake-worker(main-thread!)。
+    const wk = loadingTask._worker
+    const workerReal = !!(wk && wk._webWorker && !wk.destroyed)
+    pdfBootLog(`document parsed, numPages=${pdf.numPages}, workerMode=${workerReal ? 'real-worker' : 'fake-worker(main-thread!)'}, workerFail=${globalThis.__rewordWorkerFail ?? '-'}`)
 
     // Get viewport dimensions from first page for fixed-layout rendering
     const firstPage = await pdf.getPage(1)
+    pdfBootLog('page1 ready')
     const firstViewport = firstPage.getViewport({ scale: 1 })
     const book = { rendition: {
         layout: 'pre-paginated',
         viewport: { width: firstViewport.width, height: firstViewport.height },
     } }
+    // [REword patch 2026-09-09 P1.3] 暴露 pdf 文档代理：矩形标注高清快照（ReaderView
+    // finishPdfRect 重渲裁剪用）。只挂引用，不改任何渲染行为；旧调用方不受影响。
+    book.rewordPdf = pdf
 
     const { metadata, info } = await pdf.getMetadata() ?? {}
+    pdfBootLog('metadata done')
     // TODO: for better results, parse `metadata.getRaw()`
     book.metadata = {
         title: metadata?.get('dc:title') ?? info?.Title,
@@ -570,7 +748,9 @@ export const makePDF = async file => {
     if (direction === 'R2L') book.dir = 'rtl'
 
     const outline = await pdf.getOutline()
+    pdfBootLog(`outline done, items=${outline?.length ?? 0}`)
     book.toc = outline ? await Promise.all(outline.map(item => makeTOCItem(item, pdf))) : null
+    pdfBootLog('toc done')
 
     // Page labels (PDF 32000-1 §12.4.2) are the numbers printed on the pages
     // -- roman-numeral front matter, a body that restarts at 1 -- and are what
@@ -707,5 +887,6 @@ export const makePDF = async file => {
         pageCache.clear()
         loadingTask.destroy()
     }
+    pdfBootLog('book built (sections+rendition ready)')
     return book
 }

@@ -388,6 +388,13 @@ export class View extends HTMLElement {
     }
     async addAnnotation(annotation, remove) {
         const { value } = annotation
+        // [REword patch 2026-09-09] PDF 双绘最终收口：PDF 文本标注的视觉单一真源是
+        // 自建覆盖层 PdfTextHlLayer（annStore.subscribe 驱动重绘）。原生 Overlayer 的
+        // 坐标系与 PDF 文本层（缩放 transform、碎片化 span）不匹配，画出来必然漂移。
+        // 此前只在 ReaderView 的三个入口加守卫，仍可能有未知旁路（补绘、撤销、
+        // 改色改样式的隐藏调用链）漏进来；这里在管线最深处兜底——凡 PDF 书，
+        // 非搜索、非删除语义的标注一律不画。搜索高亮与删除放行。
+        if (this.book?.rewordPdf && !remove && !value.startsWith(SEARCH_PREFIX)) return
         if (value.startsWith(SEARCH_PREFIX)) {
             const cfi = value.replace(SEARCH_PREFIX, '')
             const { index, anchor } = await this.resolveNavigation(cfi)

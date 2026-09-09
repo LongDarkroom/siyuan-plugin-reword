@@ -12086,7 +12086,12 @@ class PDFWorker {
         }
       };
       const ac = new AbortController();
-      worker.addEventListener("error", () => {
+      worker.addEventListener("error", (e) => {
+        // [REword diag] 记录真 Worker 失败原因（脚本加载失败/证书/解析错误），主线程可读取
+        try {
+          globalThis.__rewordWorkerFail = "error-event: " + (e?.message || e?.filename || "unknown");
+          console.warn("[pdf-worker] real worker error event:", e?.message, e?.filename);
+        } catch {}
         if (!this._webWorker) {
           terminateEarly();
         }
@@ -12122,7 +12127,12 @@ class PDFWorker {
       };
       sendTest();
       return;
-    } catch {
+    } catch (e) {
+      // [REword diag] Worker 构造失败（CSP SecurityError 等）——记录真实原因
+      try {
+        globalThis.__rewordWorkerFail = "construct: " + (e?.message || e?.name || e);
+        console.warn("[pdf-worker] real worker construct failed:", e?.message || e);
+      } catch {}
       info("The worker has been disabled.");
     }
     this._setupFakeWorker();

@@ -403,6 +403,13 @@ export class View extends HTMLElement {
     }
     async addAnnotation(annotation, remove) {
         const { value } = annotation
+        // [REword patch 2026-09-09] PDF 双绘最终收口：阅读器实际加载的是本文件
+        // （ReaderView import view-light.js，view.js 不在运行路径）。PDF 文本标注的
+        // 视觉单一真源是自建覆盖层 PdfTextHlLayer；原生 Overlayer 坐标系与 PDF
+        // 文本层（缩放 transform、碎片化 span）不匹配，画出来必然漂移。凡 PDF 书，
+        // 非搜索、非删除语义的标注在此一律不画——ReaderView 三个入口守卫之外的
+        // 任何未知旁路（补绘、撤销、改色改样式的隐藏调用链）也被兜住。
+        if (this.book?.rewordPdf && !remove && !value.startsWith(SEARCH_PREFIX)) return
         if (value.startsWith(SEARCH_PREFIX)) {
             const cfi = value.replace(SEARCH_PREFIX, '')
             const { index, anchor } = await this.resolveNavigation(cfi)

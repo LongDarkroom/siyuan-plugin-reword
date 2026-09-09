@@ -17,6 +17,10 @@ export interface ReadingProgress {
   index?: number;
   // [REword patch 2026-08-29] PDF 缩放状态（仅 PDF 用，optional 字段，老数据兼容）
   zoom?: ZoomState;
+  // 2026-09-09 PDF 阅读进度修复：显式页码（1-based）。
+  // foliate fixed-layout 上报 size:1 → 保存的 fraction 是「页尾边界」，getSection
+  // 反解会落到下一页（每次会话 +1 页累积漂移）；PDF 恢复改用页码精确换算。
+  page?: number;
 }
 
 /** PDF 缩放状态（per-file 持久化） */

@@ -7,6 +7,10 @@
 //
 // 修复：把 placeholder 里的 {{xxx}} 用 HTML 实体 &#123;&#123; 编码，避免
 // 被 Svelte 误识别为 mustache 表达式。
+//
+// 2026-09 清理：原用例「linkFormat textarea 的 placeholder 已用 HTML 实体编码变量」已删除 ——
+// 笔记插入分组（含 linkFormat textarea）于 2026-08-25 整体移除，ReaderView 中已无
+// `value={settings.note.linkFormat}`，该断言失去目标。placeholder 编码回归保留在用例 1。
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -32,13 +36,4 @@ test("placeholder 字符串不含未编码的 {{xxx}}（避免 Svelte mustache �
       `placeholder 含未编码的 mustache 表达式：${p}（用 &#123;&#123; 编码）`
     );
   }
-});
-
-test("linkFormat textarea 的 placeholder 已用 HTML 实体编码变量", () => {
-  // 提取 linkFormat 周围的 placeholder
-  const m = viewSrc.match(/value=\{settings\.note\.linkFormat\}[\s\S]*?placeholder="([^"]+)"/);
-  assert.ok(m, "应找到 linkFormat textarea 及其 placeholder");
-  // placeholder 文本应含 &#123;&#123; 编码的变量（不依赖运行时解码）
-  assert.match(m[1], /&#123;&#123;bookTitle&#125;&#125;/, "placeholder 应含编码的 bookTitle 变量");
-  assert.match(m[1], /&#123;&#123;date&#125;&#125;/, "placeholder 应含编码的 date 变量");
 });

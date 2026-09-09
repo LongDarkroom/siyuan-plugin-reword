@@ -23,6 +23,37 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const viewPath = join(__dirname, "..", "src", "reader", "ReaderView.svelte");
 const src = readFileSync(viewPath, "utf-8");
+// 2026-09-02 重构：「格式 → PDF 界面」的判定收敛到 reader-mode.ts，
+// ReaderView.isPdfBook() 只是转发给 isPdfFormat()。
+const modePath = join(__dirname, "..", "src", "reader", "reader-mode.ts");
+const modeSrc = readFileSync(modePath, "utf-8");
+
+/** 逐个取 onDestroy(() => {...}) 块，返回第一个命中 predicate 的函数体。
+ *  ReaderView 内有多个 onDestroy（首个只清 hoverHideTimer），
+ *  用「首个 + 定长窗口」切片会打到无关的块上。 */
+function findOnDestroyBody(src, predicate) {
+  const sig = "onDestroy(() => {";
+  let from = 0;
+  for (;;) {
+    const idx = src.indexOf(sig, from);
+    if (idx < 0) return null;
+    const start = src.indexOf("{", idx);
+    let depth = 0;
+    let body = null;
+    for (let i = start; i < src.length; i++) {
+      if (src[i] === "{") depth++;
+      else if (src[i] === "}") {
+        depth--;
+        if (depth === 0) {
+          body = src.substring(start, i + 1);
+          break;
+        }
+      }
+    }
+    if (body && predicate.test(body)) return body;
+    from = idx + sig.length;
+  }
+}
 
 test("[核心] applyZoom 函数存在并处理三种 ZoomState", () => {
   assert.ok(/function applyZoom\(/.test(src), "applyZoom 函数应存在");
@@ -164,7 +195,17 @@ test("[核心] zoomPercentLabel 返回 3 种格式", () => {
 });
 
 test("[核心] isPdfBook() 判断当前书格式", () => {
-  assert.ok(/function isPdfBook\(\)[\s\S]*?meta\?\.format\s*===\s*["']pdf["']/.test(src), "isPdfBook 应判断 meta.format === 'pdf'");
+  // ReaderView 侧：把当前书的 meta.format 交给 reader-mode 的 isPdfFormat 判定
+  const fnIdx = src.indexOf("function isPdfBook(");
+  assert.ok(fnIdx > -1, "isPdfBook 应存在");
+  const body = src.slice(fnIdx, src.indexOf("\n  }", fnIdx));
+  assert.ok(/isPdfFormat\(meta\?\.format\)/.test(body), "isPdfBook 应把 meta.format 交给 isPdfFormat 判定");
+  // reader-mode.ts 侧：唯一真源，pdf 格式走 PDF 界面
+  assert.ok(/PDF_FORMATS\s*=\s*new Set\(\s*\[\s*["']pdf["']\s*\]/.test(modeSrc), "reader-mode 应把 pdf 列为 PDF 格式");
+  assert.ok(
+    /export function isPdfFormat\([\s\S]*?resolveReaderMode\(format\)\s*===\s*["']pdf["']/.test(modeSrc),
+    "isPdfFormat 应由 resolveReaderMode 判定为 pdf"
+  );
 });
 
 test("[核心] onGlobalKey 加 Cmd+= / Cmd+- / Cmd+0 / Cmd+1 / Cmd+2 / Cmd+3 分支", () => {
@@ -232,9 +273,20 @@ test("[性能 2026-08-29] 滚动模式走 foliate pinch 预览，连续缩放期
   const body = src.slice(flushIdx, nextFn > -1 ? nextFn : flushIdx + 3000);
 
   assert.ok(/isScrollFlow\(\)/.test(body), "flushWheelZoom 应区分滚动模式");
+  // 2026-09-08 丝滑度改造：预览不再直接把目标倍数砸到 transform 上（Mac Mouse Fix 等工具
+  // 注入的 delta 高频且不均匀 → 逐帧锯齿抖动），改为启动 easeWheelPinchLoop 做指数平滑，
+  // 由该循环逐帧调 renderer.pinchZoom()。仍是纯 CSS transform，零重绘。
   assert.ok(
-    /r\.pinchZoom\(wheelPinchRatio\)/.test(body),
-    "滚动模式应调 renderer.pinchZoom() 做 CSS transform 预览（不重绘 canvas）"
+    /easeWheelPinchLoop\(\)/.test(body),
+    "滚动模式应启动 easeWheelPinchLoop() 做 CSS transform 预览（不重绘 canvas）"
+  );
+  const easeIdx = src.indexOf("function easeWheelPinchLoop(");
+  assert.ok(easeIdx > -1, "easeWheelPinchLoop 应存在");
+  const easeNext = src.indexOf("\n  function ", easeIdx + 10);
+  const easeBody = src.slice(easeIdx, easeNext > -1 ? easeNext : easeIdx + 2000);
+  assert.ok(
+    /r\.pinchZoom\(wheelPinchShown\)/.test(easeBody),
+    "预览循环应逐帧调 renderer.pinchZoom()（纯 transform，不重绘 canvas）"
   );
   // 预览期间绝不能调 applyZoom，否则又变回逐帧重绘 12 页
   assert.ok(
@@ -263,9 +315,8 @@ test("[性能 2026-08-29] 滚动模式走 foliate pinch 预览，连续缩放期
 test("[清理 2026-08-29] 预览态必须在 onDestroy 复位 #pinching", () => {
   // foliate 的 #pinching 只有 pinchEnd 会复位；若组件销毁时停在预览态，
   // #scheduleScrollPages 会永久 return，页面加载/回收全部停摆。
-  const destroyIdx = src.indexOf("onDestroy(");
-  assert.ok(destroyIdx > -1, "onDestroy 应存在");
-  const body = src.slice(destroyIdx, destroyIdx + 6000);
+  const body = findOnDestroyBody(src, /wheelPinchActive/);
+  assert.ok(body, "应存在复位滚轮预览态的 onDestroy 块");
   assert.ok(/wheelPinchActive\)\s*\{/.test(body), "onDestroy 应检查 wheelPinchActive");
   assert.ok(
     /pinchEnd\?\.\(\)/.test(body),

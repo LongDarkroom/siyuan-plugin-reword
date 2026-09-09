@@ -69,8 +69,10 @@ test("[注册] onMount 注册 resize + orientationchange 监听", () => {
 });
 
 test("[注销] onDestroy 注销 resize + orientationchange", () => {
-  const onDestroyIdx = src.indexOf("onDestroy(() => {");
-  const body = src.slice(onDestroyIdx, onDestroyIdx + 2000);
+  // ReaderView 有多个 onDestroy（line 662 早期清理 + 组件末尾那个），
+  // 设备分级监听的注销在【最后一个】onDestroy 里（removeEventListener 在 +1919 字符处）。
+  const onDestroyIdx = src.lastIndexOf("onDestroy(() => {");
+  const body = src.slice(onDestroyIdx, onDestroyIdx + 2500);
   assert.ok(
     /window\.removeEventListener\(\s*['"]resize['"]\s*,\s*onDeviceClassResize\s*\)/.test(body),
     "onDestroy 应注销 resize 监听"

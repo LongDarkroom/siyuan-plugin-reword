@@ -134,10 +134,19 @@ test("C4: 第 3 分组为朗读设置（语音引擎 + 讯飞配置 + 中文发�
   }
 });
 
-test("C5: 设置弹窗收敛为 3 大分组（笔记插入组已移除）", () => {
-  // 2026-09-04 对齐：笔记插入 UI 已从阅读设置移除（insertPosition/linkFormat 逻辑保留在 onSelSend 数据层）
+// 2026-09 更新：分组数 3 → 6（陆续并入 笔记导出绑定 / 页面布局 / 高级设置），
+// 「笔记插入」分组自 2026-08-25 移除后未回归（insertPosition/linkFormat 仅保留在 onSelSend 数据层）。
+test("C5: 设置弹窗为 6 大分组（笔记插入组已移除）", () => {
   const blocks = viewSrc.match(/<details\s+class="reader-setting-section"[^>]*>[\s\S]*?<\/details>/g) ?? [];
-  assert.equal(blocks.length, 3, `应恰好 3 个 details 分组，实际 ${blocks.length}`);
+  assert.equal(blocks.length, 6, `应恰好 6 个 details 分组，实际 ${blocks.length}`);
+  const titles = [...viewSrc.matchAll(/<summary class="reader-setting-section-title">([^<]+)<\/summary>/g)].map(
+    (m) => m[1]
+  );
+  assert.deepEqual(
+    titles,
+    ["📖 文本设置", "📐 段落设置", "🔊 朗读设置", "📤 笔记导出绑定", "⬜ 页面布局", "⚙ 高级设置"],
+    `分组标题与顺序不符，实际 ${JSON.stringify(titles)}`
+  );
   assert.doesNotMatch(blocks.join("\n"), /笔记插入/, "设置弹窗分组内不应再有「笔记插入」标题");
 });
 

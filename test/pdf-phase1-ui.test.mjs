@@ -24,6 +24,10 @@ const viewSrc = readFileSync(join(__dirname, "..", "src", "reader", "ReaderView.
 // 2026-09-02 拆分：PDF 缩放 + 页码控件迁入 PdfToolbar.svelte，样式在 reader-controls.less
 const toolbarSrc = readFileSync(join(__dirname, "..", "src", "reader", "PdfToolbar.svelte"), "utf-8");
 const controlsSrc = readFileSync(join(__dirname, "..", "src", "reader", "reader-controls.less"), "utf-8");
+// R1 收敛：PDF 大纲抽取已从 ReaderView 迁入适配器层
+//   DocumentLoader.buildBookDoc → adapters/pdf-adapter.ts → loadPdfOutline
+const pdfAdapterSrc = readFileSync(join(__dirname, "..", "src", "reader", "adapters", "pdf-adapter.ts"), "utf-8");
+const epubAdapterSrc = readFileSync(join(__dirname, "..", "src", "reader", "adapters", "epub-adapter.ts"), "utf-8");
 
 /** 取源码中 `name` 函数的花括号配对函数体（纯切片，无 jsdom） */
 function bodyOf2(src, name) {
@@ -50,10 +54,12 @@ function bodyOf2(src, name) {
 
 /* ================= 导入契约 ================= */
 
-test("[导入] ReaderView 引入 loadPdfOutline + extractPdfCurrentPage", () => {
+test("[导入] extractPdfCurrentPage 在 ReaderView / loadPdfOutline 在 pdf-adapter", () => {
+  // R1 收敛：loadPdfOutline 是「打开 PDF 抽取大纲」，已随适配器拆到 pdf-adapter.ts；
+  // ReaderView 只保留「阅读中反推当前页」的 extractPdfCurrentPage。
   assert.ok(
-    /import\s*\{[^}]*loadPdfOutline[^}]*\}\s*from\s*"\.\.\/reader\/pdf-outline"/.test(viewSrc),
-    "应从 pdf-outline 导入 loadPdfOutline"
+    /import\s*\{[^}]*loadPdfOutline[^}]*\}\s*from\s*"\.\.\/pdf-outline\.ts"/.test(pdfAdapterSrc),
+    "pdf-adapter 应从 pdf-outline 导入 loadPdfOutline"
   );
   assert.ok(
     /import\s*\{[^}]*extractPdfCurrentPage[^}]*\}\s*from\s*"\.\.\/reader\/pdf-outline"/.test(viewSrc),
@@ -70,17 +76,23 @@ test("[状态] 新增 pdfTotalPages + pdfCurrentPage", () => {
 
 /* ================= openBook 接入 PDF outline ================= */
 
-test("[openBook] PDF 分支走 loadPdfOutline 拿 tocItems", () => {
-  // 找 Phase 1 PDF 注释作为锚点(更精确)
+test("[openBook] PDF 大纲经适配器走 loadPdfOutline 拿 tocItems", () => {
+  // R1 收敛：ReaderView 不再 if (isPdfBook()) 内联解析大纲，
+  // 改为统一委托 DocumentLoader.buildBookDoc，由格式适配器分派。
   const idx = viewSrc.indexOf("Phase 1:PDF 与 EPUB 走不同数据源");
   assert.ok(idx > 0, "应能找到 Phase 1 锚点注释");
   const region = viewSrc.slice(idx, idx + 1500);
-  assert.ok(/if\s*\(isPdfBook\(\)\)/.test(region), "应按 isPdfBook 分支");
-  assert.ok(/loadPdfOutline\(/.test(region), "PDF 分支应调 loadPdfOutline");
-  assert.ok(/pdfResult\.nodes/.test(region), "PDF 分支应取 nodes 赋给 tocItems");
-  assert.ok(/pdfResult\.totalPages/.test(region), "PDF 分支应取 totalPages 赋给 pdfTotalPages");
-  // EPUB 仍走 flattenToc(在 else 分支)
-  assert.ok(/flattenToc\(/.test(region), "EPUB 分支应继续用 flattenToc");
+  assert.ok(/DocumentLoader\.buildBookDoc\(/.test(region), "应委托 DocumentLoader 抽取目录");
+  assert.ok(/loadedModel\.book\.toc/.test(region), "应取统一 BookDoc.toc 赋给 tocItems");
+  assert.ok(/loadedModel\.book\.pdfTotalPages/.test(region), "应取 pdfTotalPages");
+
+  // PDF：pdf-adapter 调 loadPdfOutline → nodes 当 toc、totalPages 当总页数
+  const pdfBody = pdfAdapterSrc.slice(pdfAdapterSrc.indexOf("async buildBookDoc"));
+  assert.ok(/loadPdfOutline\(/.test(pdfBody), "PDF 适配器应调 loadPdfOutline");
+  assert.ok(/pdf\.nodes/.test(pdfBody), "PDF 分支应取 nodes 作为 toc");
+  assert.ok(/pdf\.totalPages/.test(pdfBody), "PDF 分支应取 totalPages 作为 pdfTotalPages");
+  // EPUB 仍走 foliate toc 展平（旧 flattenToc 已更名 flattenFoliateToc）
+  assert.ok(/flattenFoliateToc\(/.test(epubAdapterSrc), "EPUB 分支应继续展平 foliate toc");
 });
 
 /* ================= goToc 兼容 PDF href ================= */

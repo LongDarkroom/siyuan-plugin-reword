@@ -24,10 +24,43 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const viewPath = join(__dirname, "..", "src", "reader", "ReaderView.svelte");
 const src = readFileSync(viewPath, "utf-8");
+// 2026-09-02 重构：InkLayer / InkToolbar 的导入与挂载从 ReaderView 拆到了 PdfOverlay.svelte，
+// ReaderView 只保留 pointer 事件处理（onInkPointerXxx）与 inkState 导入。
+const overlayPath = join(__dirname, "..", "src", "reader", "PdfOverlay.svelte");
+const overlaySrc = readFileSync(overlayPath, "utf-8");
+
+/** 逐个取 onDestroy(() => {...}) 块，返回第一个命中 predicate 的函数体。
+ *  ReaderView 内有多个 onDestroy（靠前的那个只清 hoverHideTimer），
+ *  按「首个 + 定长窗口」切片会打到无关的块上。 */
+function findOnDestroyBody(src, predicate) {
+  const sig = "onDestroy(() => {";
+  let from = 0;
+  for (;;) {
+    const idx = src.indexOf(sig, from);
+    if (idx < 0) return null;
+    const start = src.indexOf("{", idx);
+    let depth = 0;
+    let body = null;
+    for (let i = start; i < src.length; i++) {
+      if (src[i] === "{") depth++;
+      else if (src[i] === "}") {
+        depth--;
+        if (depth === 0) {
+          body = src.substring(start, i + 1);
+          break;
+        }
+      }
+    }
+    if (body && predicate.test(body)) return body;
+    from = idx + sig.length;
+  }
+}
 
 test("[核心] ReaderView 导入 ink 模块", () => {
-  assert.ok(/import\s+InkLayer\s+from\s+["']\.\/ink\/InkLayer\.svelte["']/.test(src), "应 import InkLayer");
-  assert.ok(/import\s+InkToolbar\s+from\s+["']\.\/ink\/InkToolbar\.svelte["']/.test(src), "应 import InkToolbar");
+  // InkLayer / InkToolbar 已搬到 PdfOverlay.svelte（ReaderView 改为 import PdfOverlay）
+  assert.ok(/import\s+InkLayer\s+from\s+["']\.\/ink\/InkLayer\.svelte["']/.test(overlaySrc), "PdfOverlay 应 import InkLayer");
+  assert.ok(/import\s+InkToolbar\s+from\s+["']\.\/ink\/InkToolbar\.svelte["']/.test(overlaySrc), "PdfOverlay 应 import InkToolbar");
+  assert.ok(/import\s+PdfOverlay\s+from\s+["']\.\/PdfOverlay\.svelte["']/.test(src), "ReaderView 应 import PdfOverlay");
   assert.ok(/import\s*\{[\s\S]*?inkState[\s\S]*?\}\s*from\s+["']\.\/ink\/store["']/.test(src), "应 import inkState + activeStroke");
 });
 
@@ -47,9 +80,8 @@ test("[核心] readerViewEl 注册 4 个 pointer 监听（down/move/up/cancel）
 });
 
 test("[核心] onDestroy 注销 4 个 pointer 监听", () => {
-  const onDestroyIdx = src.indexOf("onDestroy(() => {");
-  assert.ok(onDestroyIdx > 0, "onDestroy 应存在");
-  const body = src.slice(onDestroyIdx, onDestroyIdx + 5000);
+  const body = findOnDestroyBody(src, /removeEventListener\(\s*["']pointerdown["']/);
+  assert.ok(body, "应存在解绑 pointerdown 的 onDestroy 块");
   for (const evt of ["pointerdown", "pointermove", "pointerup", "pointercancel"]) {
     assert.ok(
       new RegExp(`removeEventListener\\(\\s*["']${evt}["']\\s*,\\s*onInkPointer`).test(body),
@@ -96,7 +128,8 @@ test("[关键] 压力 0/0.5/1 映射到粗细系数", () => {
   // 1. 找 getInkPointerContext 读取 e.pressure
   const ctxFn = src.indexOf("function getInkPointerContext(");
   assert.ok(ctxFn > 0, "getInkPointerContext 函数应存在");
-  const ctxBody = src.slice(ctxFn, ctxFn + 500);
+  // 定长窗口要盖住 return {...} 里的 pressure 字段（函数签名 + 坐标计算约 550 字符）
+  const ctxBody = src.slice(ctxFn, ctxFn + 900);
   assert.ok(
     /e\.pressure/.test(ctxBody) || /pressure:\s*e\.pressure/.test(ctxBody),
     "getInkPointerContext 应读 e.pressure"
@@ -147,12 +180,13 @@ test("[关键] getCoalescedPoints 拿原始点", () => {
 });
 
 test("[UI] InkLayer + InkToolbar 在 PDF 模式下挂载", () => {
-  // 找 <InkLayer 模板位置（pageWidth={800} 形式）
-  assert.ok(/<InkLayer[\s\S]*?pageWidth/.test(src), "应有 <InkLayer pageWidth=...>");
-  assert.ok(/<InkLayer[\s\S]*?pageHeight/.test(src), "应有 <InkLayer pageHeight=...>");
-  assert.ok(/<InkToolbar\s*\/>/.test(src), "应有 <InkToolbar />");
-  // 仅 PDF 模式
-  assert.ok(/isPdfBook\(\)/.test(src), "InkLayer/InkToolbar 应仅在 isPdfBook 块");
+  // 挂载点已搬到 PdfOverlay.svelte
+  assert.ok(/<InkLayer[\s\S]*?pageWidth/.test(overlaySrc), "应有 <InkLayer pageWidth=...>");
+  assert.ok(/<InkLayer[\s\S]*?pageHeight/.test(overlaySrc), "应有 <InkLayer pageHeight=...>");
+  assert.ok(/<InkToolbar\s*\/>/.test(overlaySrc), "应有 <InkToolbar />");
+  // 仅 PDF 模式：PdfOverlay 由 ReaderView 的 PDF 分支挂载，本组件内用 opened 门控
+  assert.ok(/\{#if\s+opened\}/.test(overlaySrc), "PdfOverlay 应在 opened 时才渲染 Ink 层");
+  assert.ok(/<PdfOverlay\s+opened=\{opened\}\s*\/>/.test(src), "ReaderView 应挂载 <PdfOverlay />");
 });
 
 test("[关键] pointerdown preventDefault + stopPropagation（不让 foliate 收到）", () => {

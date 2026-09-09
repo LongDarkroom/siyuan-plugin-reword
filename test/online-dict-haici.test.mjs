@@ -105,11 +105,12 @@ test("parseHaiciLiteHtml: borrow 4 字段全解析", () => {
   assert.equal(r.inflections[1].form, "borrowed");
   assert.equal(r.inflections[3].form, "borrowing");
 
-  // 4) 近反义词
+  // 4) 近反义词（2026-09-07 全信息版：由纯字符串改为 {w, zh} 对象，zh 供 chip title 悬浮释义）
   assert.equal(r.synonyms.length, 3);
-  assert.deepEqual(r.synonyms, ["take", "use", "lend"]);
+  assert.deepEqual(r.synonyms.map((s) => s.w), ["take", "use", "lend"]);
+  assert.equal(r.synonyms[0].zh, "拿", "近义词应带中文注释");
   assert.equal(r.antonyms.length, 2);
-  assert.deepEqual(r.antonyms, ["give", "return"]);
+  assert.deepEqual(r.antonyms.map((a) => a.w), ["give", "return"]);
 });
 
 test("parseHaiciLiteHtml: 最小样本（仅音标 + 简释）", () => {
@@ -159,9 +160,11 @@ test("renderOnlineDictCard: 含 4 字段 + 徽标 + 词形 + 近反义 chips", (
   assert.match(html, /在线词典（海词）/);
   // 简释
   assert.match(html, /借；借鉴；抄袭/);
-  // 词形 section（<dl> + dt + dd）
-  assert.match(html, /class="hiword-dict-section"/);
-  assert.match(html, /<dt>过去式<\/dt><dd>borrowed<\/dd>/);
+  // 词形行（2026-09-07 全信息版：不再用 <dl>/<dt>/<dd> section，
+  // 改为并入简释义组的 hiword-dict-shapes，每项为可点击 chip）
+  assert.match(html, /class="hiword-dict-shapes"/);
+  assert.match(html, /hiword-dict-shape-k">过去式:<\/span>/);
+  assert.match(html, /data-action="lookup-word" data-word="borrowed">borrowed<\/a>/);
   // 近反义词 chips（含 data-action="lookup-word" 用于递归查词）
   assert.match(html, /data-action="lookup-word"/);
   assert.match(html, /data-word="take"/);
@@ -173,6 +176,7 @@ test("renderOnlineDictCard: 空 inflections/synonyms 不渲染空 section", () =
   const r = parseHaiciLiteHtml(MINIMAL_HTML, "cat");
   assert.ok(r);
   const html = renderOnlineDictCard(r, false);
-  // 不应出现 section 标题
-  assert.doesNotMatch(html, /hiword-dict-section-title/);
+  // 不应出现词形行 / 近反义 chips（原 hiword-dict-section-title 已随改版移除，改断言实际产物）
+  assert.doesNotMatch(html, /hiword-dict-shapes/);
+  assert.doesNotMatch(html, /hiword-dict-syn-row/);
 });

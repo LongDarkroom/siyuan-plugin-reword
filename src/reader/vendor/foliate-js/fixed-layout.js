@@ -1,4 +1,12 @@
 import 'construct-style-sheets-polyfill'
+// 2026-09-08 冻结诊断：渲染链路打点（同步落盘），诊断结束后可删除 [pdf-boot] 段
+import { getLogger } from "../../../core/logger.ts"
+const fxLog = msg => {
+    try {
+        getLogger().info(`[pdf-boot] ${msg}`)
+        getLogger().flushSync()
+    } catch { /* ignore */ }
+}
 
 const parseViewport = str => str
     ?.split(/[,;\s]/) // NOTE: technically, only the comma is valid
@@ -203,7 +211,28 @@ export const applyOverlayerViewBox = (frame, overlayer) => {
 export class FixedLayout extends HTMLElement {
     static observedAttributes = ['zoom', 'scale-factor', 'spread', 'flow', 'scroll-gap', 'scroll-direction']
     #root = this.attachShadow({ mode: 'open' })
-    #observer = new ResizeObserver(() => this.#render())
+    // REword fix 2026-09-08 (startup freeze): circuit breaker. A completed
+    // #render can itself resize the host (scrollbar churn, sub-pixel
+    // rounding), re-firing this observer and re-running #render -> onZoom
+    // (a full page rasterisation) in a tight loop that freezes the renderer
+    // thread. If the observer fires more than 12 times within any 1s window,
+    // drop further triggers for a cooldown and log once so the storm is
+    // visible in the plugin logs.
+    #resizeTimes = []
+    #resizeStormCooldownUntil = 0
+    #observer = new ResizeObserver(() => {
+        const now = performance.now()
+        if (now < this.#resizeStormCooldownUntil) return
+        this.#resizeTimes = this.#resizeTimes.filter(t => now - t < 1000)
+        this.#resizeTimes.push(now)
+        if (this.#resizeTimes.length > 12) {
+            this.#resizeTimes.length = 0
+            this.#resizeStormCooldownUntil = now + 2000
+            console.warn('[REword][fixed-layout] ResizeObserver storm: #render re-fired 12+ times in 1s - cooling down 2s (render loop guard)')
+            return
+        }
+        this.#render()
+    })
     #spreads
     #index = -1
     defaultViewport
@@ -261,6 +290,12 @@ export class FixedLayout extends HTMLElement {
     // lands where the preview showed it. Using the real getBoundingClientRect
     // (not fraction maths) sidesteps gap/page-boundary and header-offset errors.
     #pinchAnchor = null
+    // 2026-09-08 缩放提交卡顿修复：提交缩放时只重绘视口附近页，远处 loaded 页
+    // 用 CSS transform 拉伸旧 canvas（模糊但位置正确、零重绘），随后错峰逐页重绘。
+    // 此前 #renderScrollMode 对全部 12 个 loaded 页同时 onZoom → 12 个 pdf.js 渲染
+    // 任务排队、页与页陆续替换 canvas → 提交后数秒内持续卡顿 + 反复闪抖。
+    #stalePages = new Set()
+    #staleRerenderTimer = null
     #captureCenterPageRect() {
         const hostRect = this.getBoundingClientRect()
         const c = this.#scrollHorizontal
@@ -280,11 +315,25 @@ export class FixedLayout extends HTMLElement {
     #restorePinchAnchor(anchor) {
         const page = this.#scrollPages.find(p => p.index === anchor.index)
         if (!page) return
-        const rect = page.el.getBoundingClientRect()
-        const maxTop = Math.max(0, this.scrollHeight - this.clientHeight)
-        const maxLeft = Math.max(0, this.scrollWidth - this.clientWidth)
-        this.scrollTop = clamp(this.scrollTop + (rect.top - anchor.top), 0, maxTop)
-        this.scrollLeft = clamp(this.scrollLeft + (rect.left - anchor.left), 0, maxLeft)
+        const apply = () => {
+            const rect = page.el.getBoundingClientRect()
+            const maxTop = Math.max(0, this.scrollHeight - this.clientHeight)
+            const maxLeft = Math.max(0, this.scrollWidth - this.clientWidth)
+            this.scrollTop = clamp(this.scrollTop + (rect.top - anchor.top), 0, maxTop)
+            this.scrollLeft = clamp(this.scrollLeft + (rect.left - anchor.left), 0, maxLeft)
+        }
+        apply()
+        // 2026-09-08 缩放抖动修复：提交重绘后布局可能在一帧内继续 settle
+        // （canvas 重绘尺寸舍入、gap 随 --scroll-zoom 缩放等），导致锚点残余偏差。
+        // 下一帧复测一次，偏差 > 0.5px 就再校正一次。只做一次、只动滚动位置，
+        // 零重绘开销；新一轮 pinch 已开始时（#pinchAnchor 非空）主动让位。
+        requestAnimationFrame(() => {
+            if (this.#pinchAnchor) return
+            const rect = page.el.getBoundingClientRect()
+            if (Math.abs(rect.top - anchor.top) > 0.5 || Math.abs(rect.left - anchor.left) > 0.5) {
+                apply()
+            }
+        })
     }
     #getScrollModePageMetrics() {
         return this.#scrollPages.map(page => ({
@@ -707,6 +756,7 @@ export class FixedLayout extends HTMLElement {
         return renderPromises
     }
     async #showSpread({ left, right, center, side, spreadIndex }) {
+        fxLog(`showSpread begin spread=${spreadIndex ?? '?'} center=${!!center}`)
         this.#left = null
         this.#right = null
         this.#center = null
@@ -784,6 +834,7 @@ export class FixedLayout extends HTMLElement {
                 }
             }
         }
+        fxLog(`showSpread done spread=${spreadIndex ?? '?'} (render+overlayer complete)`)
     }
     #initScrollMode(targetIndex = 0) {
         const currentIndex = targetIndex
@@ -1171,16 +1222,42 @@ export class FixedLayout extends HTMLElement {
         // re-render keeps the reader's vertical position via the top anchor.
         const pinchAnchor = this.#pinchAnchor
         const scrollAnchor = pinchAnchor ? null : this.#captureScrollModeAnchor()
+        // 2026-09-08 十一轮微卡顿优化：提交瞬间只真实重绘距视口最近的一页；
+        // 其余近页（±1 屏内、之前已真实渲染过的）也先拉伸占位进错峰队列——
+        // 多页同帧排队 canvas 重绘（每页 ~100-300ms 主线程）是「微微卡顿」残余来源。
+        // 首次渲染（contentScale==null）的页必须立即真实渲染（没有旧内容可拉伸）。
+        let nearest = null
         for (const page of this.#scrollPages) {
             const scale = this.#scrollHorizontal
                 ? (hostHeight / page.vpHeight) * this.#scaleFactor
                 : (hostWidth / page.vpWidth) * this.#scaleFactor
             page.el.style.width = `${page.vpWidth * scale}px`
             page.el.style.height = `${page.vpHeight * scale}px`
-            if (page.state === 'loaded' && page.frame) {
-                this.#renderScrollPage(page)
+            if (page.state !== 'loaded' || !page.frame) continue
+            if (page.frame.contentScale == null) {
+                this.#renderScrollPage(page, scale)
+                continue
+            }
+            if (!this.#pageNearViewport(page)) {
+                this.#stretchPage(page, scale)
+                this.#stalePages.add(page)
+                continue
+            }
+            if (!nearest) {
+                nearest = { page, scale }
+                continue
+            }
+            if (this.#pageViewportDistance(page) < this.#pageViewportDistance(nearest.page)) {
+                this.#stretchPage(nearest.page, nearest.scale)
+                this.#stalePages.add(nearest.page)
+                nearest = { page, scale }
+            } else {
+                this.#stretchPage(page, scale)
+                this.#stalePages.add(page)
             }
         }
+        if (nearest) this.#renderScrollPage(nearest.page, nearest.scale)
+        this.#scheduleStaleRerender()
         if (pinchAnchor) {
             this.#restorePinchAnchor(pinchAnchor)
             this.#pinchAnchor = null
@@ -1188,13 +1265,13 @@ export class FixedLayout extends HTMLElement {
             this.#restoreScrollModeAnchor(scrollAnchor)
         }
     }
-    #renderScrollPage(pageData) {
+    #renderScrollPage(pageData, scaleOverride) {
         const { width: hostWidth, height: hostHeight } = this.getBoundingClientRect()
         if (!(this.#scrollHorizontal ? hostHeight : hostWidth) || !pageData.frame) return
         const { vpWidth: vw, vpHeight: vh, frame } = pageData
-        const scale = this.#scrollHorizontal
+        const scale = scaleOverride ?? (this.#scrollHorizontal
             ? (hostHeight / vh) * this.#scaleFactor
-            : (hostWidth / vw) * this.#scaleFactor
+            : (hostWidth / vw) * this.#scaleFactor)
 
         if (frame.onZoom) {
             const p = frame.onZoom({
@@ -1202,7 +1279,11 @@ export class FixedLayout extends HTMLElement {
                 scale,
                 pageColors: this.#pageColors,
             })
-            if (p?.then) p.then(() => this.#refreshOverlayerForFrame(frame))
+            if (p?.then) p.then(() => {
+                // 记录 iframe 内容当前的真实渲染 scale（stale 拉伸的换算依据）
+                frame.contentScale = scale
+                this.#refreshOverlayerForFrame(frame)
+            })
             Object.assign(frame.iframe.style, {
                 width: `${vw * scale}px`,
                 height: `${vh * scale}px`,
@@ -1238,6 +1319,68 @@ export class FixedLayout extends HTMLElement {
             applyOverlayerViewBox(frame, overlayer)
             overlayer.redraw()
         }
+    }
+    // 2026-09-08 缩放提交卡顿修复三件套：视口判断 / stale 拉伸 / 错峰重绘
+    #pageNearViewport(page) {
+        const pos = this.#scrollHorizontal ? page.el.offsetLeft : page.el.offsetTop
+        const size = this.#scrollHorizontal ? page.el.offsetWidth : page.el.offsetHeight
+        const viewStart = this.#scrollHorizontal ? this.scrollLeft : this.scrollTop
+        const viewSize = this.#scrollHorizontal ? this.clientWidth : this.clientHeight
+        // 视口前 1 屏到后 2 屏之间视为「近」，直接真实重绘
+        return pos + size > viewStart - viewSize && pos < viewStart + viewSize * 2
+    }
+    // 页中心到视口中心的距离（沿滚动轴），用于挑选提交时唯一立即重绘的最近页
+    #pageViewportDistance(page) {
+        const pos = this.#scrollHorizontal ? page.el.offsetLeft : page.el.offsetTop
+        const size = this.#scrollHorizontal ? page.el.offsetWidth : page.el.offsetHeight
+        const viewStart = this.#scrollHorizontal ? this.scrollLeft : this.scrollTop
+        const viewSize = this.#scrollHorizontal ? this.clientWidth : this.clientHeight
+        return Math.abs((pos + size / 2) - (viewStart + viewSize / 2))
+    }
+    // 远处 loaded 页：iframe 内容仍是旧 scale 渲染的位图，保持其原尺寸并用
+    // transform 拉伸到新尺寸（GPU 合成、零重绘）；外层元素尺寸更新为新值，
+    // 布局与锚点恢复不受影响。内容略糊，等错峰重绘后变清晰。
+    #stretchPage(page, newScale) {
+        const { vpWidth: vw, vpHeight: vh, frame } = page
+        if (!frame?.iframe || frame.contentScale == null) return
+        const oldScale = frame.contentScale
+        if (Math.abs(oldScale - newScale) < 0.0005) return
+        frame.element.style.position = 'relative'
+        Object.assign(frame.iframe.style, {
+            width: `${vw * oldScale}px`,
+            height: `${vh * oldScale}px`,
+            transform: `scale(${newScale / oldScale})`,
+            transformOrigin: 'top left',
+            position: 'absolute',
+            top: '0',
+            left: '0',
+            display: 'block',
+        })
+        Object.assign(frame.element.style, {
+            width: `${vw * newScale}px`,
+            height: `${vh * newScale}px`,
+        })
+    }
+    // 错峰重绘 stale 页：一次一页，等用户停手（滚动位置稳定）再逐页消化，
+    // 避免提交后数秒内连续重绘占满主线程。
+    #scheduleStaleRerender() {
+        if (this.#staleRerenderTimer != null || !this.#stalePages.size) return
+        const scrollKey = `${this.scrollLeft},${this.scrollTop}`
+        this.#staleRerenderTimer = setTimeout(() => {
+            this.#staleRerenderTimer = null
+            // 还在滚动：换个位置重新排队，不打断滚动手感
+            if (`${this.scrollLeft},${this.scrollTop}` !== scrollKey) {
+                this.#scheduleStaleRerender()
+                return
+            }
+            const page = this.#stalePages.values().next().value
+            if (!page) return
+            this.#stalePages.delete(page)
+            if (page.state === 'loaded' && page.frame) {
+                this.#renderScrollPage(page)
+            }
+            if (this.#stalePages.size) this.#scheduleStaleRerender()
+        }, 350)
     }
     #getScrollIndex() {
         if (!this.#scrollPages.length) return -1
@@ -1414,6 +1557,7 @@ export class FixedLayout extends HTMLElement {
     }
     async goToSpread(index, side, reason) {
         if (index < 0 || index > this.#spreads.length - 1) return
+        fxLog(`goToSpread index=${index} side=${side} reason=${reason ?? ''}`)
         if (index === this.#index) {
             this.#render(side)
             return
@@ -1836,6 +1980,11 @@ export class FixedLayout extends HTMLElement {
                 clearTimeout(this.#scrollIdleTimer)
                 this.#scrollIdleTimer = null
             }
+            if (this.#staleRerenderTimer != null) {
+                clearTimeout(this.#staleRerenderTimer)
+                this.#staleRerenderTimer = null
+            }
+            this.#stalePages.clear()
             for (const page of this.#scrollPages) {
                 this.#teardownScrollPage(page)
             }

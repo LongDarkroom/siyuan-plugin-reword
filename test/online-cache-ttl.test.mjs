@@ -39,8 +39,11 @@ function failTransport() {
   };
 }
 
-const DICT_HTML = '<span class="phontype">英</span><span class="Phonitic">/test/</span>' +
-                   '<div class="exp">n. 测试</div>';
+// 2026-09-07 数据源切至海词后，解析器（parseHaiciLiteHtml）只认海词结构：
+// 音标 <span>英 <bdo lang="EN-US">['test]</bdo></span> + 简释 <ul class="dict-basic-ul">。
+// 旧的欧路样本（phontype / Phonitic / div.exp）已无法解析，会让缓存用例恒为负缓存。
+const DICT_HTML = '<div class="phonetic"><span>英 <bdo lang="EN-US">[\'test]</bdo></span></div>' +
+                  '<ul class="dict-basic-ul"><li><span>n.</span><strong>测试</strong></li></ul>';
 
 test("2.4 online-dict:正缓存命中,过期前不重发", async () => {
   resetOnlineDictCache();
@@ -114,7 +117,8 @@ test("2.4 online-dict:setOnlineDictTtl 调整生效", async () => {
 test("2.4 online-phonetic:正缓存命中", async () => {
   resetOnlinePhoneticCache();
   setOnlinePhoneticTtl({ positiveMs: 60_000, negativeMs: 30_000 });
-  const PHON_HTML = '<span class="phontype">英</span><span class="Phonitic">/kət/</span>';
+  // 同 DICT_HTML：海词音标结构
+  const PHON_HTML = '<span>英 <bdo lang="EN-US">[\'kət]</bdo></span>';
   const t = counterTransport(PHON_HTML);
   const r1 = await fetchOnlinePhonetic("cat", t.transport);
   const r2 = await fetchOnlinePhonetic("cat", t.transport);

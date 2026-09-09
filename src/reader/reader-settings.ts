@@ -10,13 +10,15 @@ export function getGlobalSettingsStore(): ReaderSettingsStore | null {
  * ---------------------------------------------------------------
  * 字号 / 行距 / 主题（8 预设 + 自定义色）/ 行宽 / 阅读模式 / 翻页动画，
  * 文本设置（字重/字距）/ 段落设置（段距/首行缩进）/ 页面布局（4 边距/页眉/页脚/进度等）/
- * 笔记插入（发送模板/插入位置/同步开关），全局一套设置，存 hiword-reader-settings.json，变更防抖保存。
+ * 笔记插入（发送模板/插入位置/同步开关），存 hiword-reader-settings.json，变更防抖保存。
  *
  * 2026-08-24 扩展：4 大分类（文本/段落/页面布局/笔记插入）—— 适配自思阅 SiReader。
  * 向后兼容：旧版本 settings（无 text/paragraph/layout/note 字段）加载时用 DEFAULTS 合并。
+ * 2026-09-09 P0 设置双分家：book / pdf 两个独立分片（{version:2, book, pdf}），
+ * ReaderTab 按书类型取 scopeView 路由读写；未指定 scope 的全局调用默认 book。
  */
 
-import { writable } from "svelte/store";
+import { writable, type Writable } from "svelte/store";
 
 export type ReaderTheme =
   | "auto"    // 跟随思源主题（2026-08-25 新增）
@@ -570,10 +572,34 @@ export const TURN_STYLE_PRESETS: Record<ReaderTurnStyle, { label: string }> = {
 
 const STORAGE_KEY = "hiword-reader-settings.json";
 
+/**
+ * 设置作用域（2026-09-09 P0 设置双分家）：图书阅读器 / PDF 阅读器各一份独立设置。
+ * 存储格式 `{ version: 2, book, pdf }`；旧版扁平数据加载时整体归入 book 分片，
+ * pdf 分片从默认值起步（pdf 专属字段 pdfViewMode/pdfInvert 等从旧数据继承，不丢偏好）。
+ * 未显式指定作用域的调用（插件级全局面板）一律路由到 book（历史主场景）。
+ */
+export type ReaderSettingsScope = "book" | "pdf";
+
+/** 设置存储鸭子类型（2026-09-09 双分家）：ReaderSettingsStore 本体与 scopeView 返回的
+ *  作用域视图共同满足——ReaderView 及子组件以此声明 prop，即插即用两种形态。 */
+export interface ReaderSettingsLike {
+  get(): ReaderSettings;
+  update(patch: Partial<ReaderSettings>): ReaderSettings;
+  subscribe(run: (value: ReaderSettings) => void, invalidate?: (value?: ReaderSettings) => void): () => void;
+  load(): Promise<void>;
+}
+
 export class ReaderSettingsStore {
-  private settings: ReaderSettings = { ...READER_DEFAULT_SETTINGS };
-  /** 内部 Svelte store：让 ReaderView 可订阅，跨 Tab 同实例自动同步 */
-  private _store = writable<ReaderSettings>({ ...READER_DEFAULT_SETTINGS });
+  /** 双分片：book / pdf 各一份完整设置 */
+  private slices: Record<ReaderSettingsScope, ReaderSettings> = {
+    book: { ...READER_DEFAULT_SETTINGS },
+    pdf: { ...READER_DEFAULT_SETTINGS },
+  };
+  /** 每个 scope 一个 Svelte store：订阅按 scope 隔离，跨 Tab 同步互不串扰 */
+  private _stores: Record<ReaderSettingsScope, Writable<ReaderSettings>> = {
+    book: writable<ReaderSettings>({ ...READER_DEFAULT_SETTINGS }),
+    pdf: writable<ReaderSettings>({ ...READER_DEFAULT_SETTINGS }),
+  };
   private loaded = false;
   private saveTimer: any = null;
   /** 思源插件实例（loadData / saveData）。
@@ -589,49 +615,103 @@ export class ReaderSettingsStore {
     _globalSettingsStore = this;
   }
 
-  /** 实现 Svelte store 契约：返回退订函数（支持 `$settingsStore` 自动订阅） */
-  subscribe(run: (value: ReaderSettings) => void, invalidate?: (value?: ReaderSettings) => void): () => void {
-    return this._store.subscribe(run, invalidate as any);
+  /** 实现 Svelte store 契约：返回退订函数（支持 `$settingsStore` 自动订阅）。
+   *  2026-09-09 双分家：不传 scope 时订阅 book 分片（历史主场景语义）。 */
+  subscribe(run: (value: ReaderSettings) => void, invalidate?: (value?: ReaderSettings) => void, scope?: ReaderSettingsScope): () => void {
+    return this._stores[scope ?? "book"].subscribe(run, invalidate as any);
   }
 
   async load(): Promise<void> {
     if (this.loaded) {
       // 已加载：重新推送当前值，唤醒（可能晚于 onMount 才订阅的）组件
-      this._store.set({ ...this.settings });
+      this._push();
       return;
     }
     try {
       const data = await this.plugin.loadData(STORAGE_KEY);
       if (data && typeof data === "object") {
-        // 浅合并 + 各子对象（text/paragraph/layout/note）逐层合并，
-        // 保证旧版已保存的配置也能补齐新增字段（如 bottomBarMode），不会因整体覆盖而丢失默认。
-        this.settings = {
-          ...READER_DEFAULT_SETTINGS,
-          ...data,
-          text: { ...READER_DEFAULT_SETTINGS.text, ...(data.text ?? {}) },
-          paragraph: { ...READER_DEFAULT_SETTINGS.paragraph, ...(data.paragraph ?? {}) },
-          layout: { ...READER_DEFAULT_SETTINGS.layout, ...(data.layout ?? {}) },
-          note: { ...READER_DEFAULT_SETTINGS.note, ...(data.note ?? {}) },
-        };
+        if ((data as any).book || (data as any).pdf) {
+          // 新格式 { version:2, book, pdf }：两个分片各自浅合并 + 子对象逐层合并
+          for (const s of ["book", "pdf"] as ReaderSettingsScope[]) {
+            const d = (data as any)[s];
+            if (d && typeof d === "object") this.slices[s] = this._mergeDefaults(d);
+          }
+        } else {
+          // 旧版扁平格式：整体归入 book 分片；pdf 分片继承 pdf 专属偏好后用默认值
+          this.slices.book = this._mergeDefaults(data);
+          const d = data as any;
+          this.slices.pdf = this._mergeDefaults({
+            pdfViewMode: d.pdfViewMode,
+            pdfScrollDir: d.pdfScrollDir,
+            pdfInvert: d.pdfInvert,
+            pdfAnnotHighlight: d.pdfAnnotHighlight,
+            pdfAnnotUnderline: d.pdfAnnotUnderline,
+            pdfAnnotAnnotate: d.pdfAnnotAnnotate,
+          });
+        }
       }
     } catch (__swallowErr) { logSwallow(__swallowErr, "reader-settings.ts · load", "debug"); }
     this.loaded = true;
     // 加载完成后推送最新值 → 订阅者（含其它已开 Tab）立即生效
-    this._store.set({ ...this.settings });
+    this._push();
   }
 
-  get(): ReaderSettings {
-    return { ...this.settings };
+  /** 旧数据 → 补齐默认值（顶层 + text/paragraph/layout/note 子对象逐层合并） */
+  private _mergeDefaults(data: any): ReaderSettings {
+    return {
+      ...READER_DEFAULT_SETTINGS,
+      ...data,
+      text: { ...READER_DEFAULT_SETTINGS.text, ...(data.text ?? {}) },
+      paragraph: { ...READER_DEFAULT_SETTINGS.paragraph, ...(data.paragraph ?? {}) },
+      layout: { ...READER_DEFAULT_SETTINGS.layout, ...(data.layout ?? {}) },
+      note: { ...READER_DEFAULT_SETTINGS.note, ...(data.note ?? {}) },
+    };
   }
 
-  /** 更新并立即返回新设置；保存防抖 300ms；推送新值通知所有订阅者（跨 Tab 同步） */
-  update(patch: Partial<ReaderSettings>): ReaderSettings {
-    this.settings = { ...this.settings, ...patch };
-    this._store.set({ ...this.settings });
+  /** 把两个分片的当前值推给各自的订阅者 */
+  private _push(): void {
+    for (const s of ["book", "pdf"] as ReaderSettingsScope[]) {
+      this._stores[s].set({ ...this.slices[s] });
+    }
+  }
+
+  get(scope?: ReaderSettingsScope): ReaderSettings {
+    return { ...this.slices[scope ?? "book"] };
+  }
+
+  /** 更新指定（或默认 book）分片并立即返回新设置；保存防抖 300ms；推送该分片通知订阅者（跨 Tab 同步） */
+  update(patch: Partial<ReaderSettings>, scope?: ReaderSettingsScope): ReaderSettings {
+    const s = scope ?? "book";
+    this.slices[s] = { ...this.slices[s], ...patch };
+    this._stores[s].set({ ...this.slices[s] });
     if (this.saveTimer) clearTimeout(this.saveTimer);
     this.saveTimer = setTimeout(() => {
-      this.plugin.saveData(STORAGE_KEY, this.settings).catch(() => {});
+      this.plugin
+        .saveData(STORAGE_KEY, { version: 2, book: this.slices.book, pdf: this.slices.pdf })
+        .catch(() => {});
     }, 300);
-    return this.get();
+    return this.get(s);
+  }
+
+  /** 双分片作用域视图：duck-typed 与 ReaderSettingsStore 同签名（get/update/subscribe/load），
+   *  但读写固定路由到指定 scope——ReaderView 及其子组件零改动即可按 Tab 类型隔离。 */
+  scopeView(scope: ReaderSettingsScope): {
+    get(): ReaderSettings;
+    update(patch: Partial<ReaderSettings>): ReaderSettings;
+    subscribe(run: (value: ReaderSettings) => void, invalidate?: (value?: ReaderSettings) => void): () => void;
+    load(): Promise<void>;
+  } {
+    return {
+      get: () => this.get(scope),
+      update: (patch) => this.update(patch, scope),
+      subscribe: (run, invalidate) => this.subscribe(run, invalidate, scope),
+      load: () => this.load(),
+    };
+  }
+
+  /** 数据面板「重置阅读设置」：两个分片一起恢复出厂 */
+  resetAll(): void {
+    this.update({ ...READER_DEFAULT_SETTINGS }, "book");
+    this.update({ ...READER_DEFAULT_SETTINGS }, "pdf");
   }
 }

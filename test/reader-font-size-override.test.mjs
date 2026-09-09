@@ -71,7 +71,8 @@ test("压平不误伤：标题 h1-h6 保持 em 相对值（随 body 等比缩放
     "",
     "sans-serif"
   );
-  assert.match(css, /h1\s*\{[^}]*font-size:\s*1\.6em\s*!important/);
+  // 2026-09 更新：headingStyles 的 h1 于 2026-08-30 排版精修后为 1.5em（旧断言 1.6em 已过期）
+  assert.match(css, /h1\s*\{[^}]*font-size:\s*1\.5em\s*!important/);
   // fontSizeOverrideStyles 的容器列表不应包含 h1/figcaption
   const seg = fontSizeOverrideStyles(17, true);
   assert.doesNotMatch(seg, /h1|h2|h3|figcaption/);

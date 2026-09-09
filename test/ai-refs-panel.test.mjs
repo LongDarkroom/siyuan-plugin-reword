@@ -25,17 +25,23 @@ const DOC_ID_2 = "20260813120000-bbbbbb";
  * 槽位守卫：块/文档两组 fixture 严格分开。若某个 id 被用「另一边」的 fetcher 取，
  * 直接抛错而不是静默返回 null —— 否则写测试时把文档正文误传进 block 槽位，
  * 只会看到「body undefined」这种看不出根因的失败。
+ *
+ * 2026-09-08：块正文入口已由 fetchBlockText 换成 fetchBlockRangeText
+ * （标题块自动收集整个小节，普通块退化为单块自身）。两个入口都接到同一个块槽位，
+ * 断言只看 calls.block 总数 —— 以后实现再换入口，测试不会整片假失败。
  */
 function makeHost(blockBodies = {}, docBodies = {}) {
   const calls = { block: [], doc: [] };
+  const fetchBlock = async (id) => {
+    if (id in docBodies) {
+      throw new Error(`槽位错位：id=${id} 属于 docBodies，却走块正文 fetcher`);
+    }
+    calls.block.push(id);
+    return blockBodies[id] ?? null;
+  };
   const base = {
-    fetchBlockText: async (id) => {
-      if (id in docBodies) {
-        throw new Error(`槽位错位：id=${id} 属于 docBodies，却走 fetchBlockText`);
-      }
-      calls.block.push(id);
-      return blockBodies[id] ?? null;
-    },
+    fetchBlockText: fetchBlock,
+    fetchBlockRangeText: fetchBlock,
     fetchDocText: async (id) => {
       if (id in blockBodies) {
         throw new Error(`槽位错位：id=${id} 属于 blockBodies，却走 fetchDocText`);

@@ -1,5 +1,7 @@
 import { logSwallow } from "../core/safe.ts";
 import { getLogger } from "../core/logger.ts";
+// 2026-09-08 启动卡死修复：空闲等待抽到 reader-launch.ts（ReaderView 也用，避免循环依赖）
+import { waitForLaunchIdle } from "./reader-launch.ts";
 /**
  * 阅读器 - 独立 Tab 控制器
  * ---------------------------------------------------------------
@@ -16,6 +18,7 @@ import { openTab, showMessage } from "siyuan";
 import type { BookshelfStore } from "./bookshelf-store";
 import type { ReaderSettingsStore } from "./reader-settings";
 import type { FontStore } from "./reader-fonts";
+import { resolveReaderMode } from "./reader-mode.ts";
 
 export const READER_TAB_TYPE = "reader";
 
@@ -29,9 +32,6 @@ export const READER_SESSION_KEY = "hiword-reader-session.json";
  * 杜绝「自动恢复 → 卡死 → 又恢复同一本 → 又卡死」的自锁死循环。
  */
 const LAUNCH_MARKER_KEY = "reword:launch-pending";
-
-/** 空闲窗口兜底：不支持 requestIdleCallback 或长时间无空闲时，最多等这么久就恢复 */
-const LAUNCH_IDLE_FALLBACK_MS = 3000;
 
 /** 读取「上次启动卡死」标记（读到即消费，避免永久生效） */
 export function consumeLaunchCrash(): boolean {
@@ -53,21 +53,8 @@ export function clearLaunchMarker(): void {
 }
 
 /**
- * 会话恢复前等一个安全窗口：
- * 1) 思源刚启动时布局/渲染密集，此时同步开大书极易把主线程吃满；
- * 2) 后台窗口（不可见）不恢复 —— 等用户切到前台也拿不到渲染收益，白白冒险。
+ * 会话恢复前等一个安全窗口（实现移至 reader-launch.ts，与 ReaderView 开书闸门共用）。
  */
-function waitForLaunchIdle(): Promise<void> {
-  return new Promise((resolve) => {
-    const ric = (globalThis as any).requestIdleCallback;
-    if (typeof ric === "function") {
-      try { ric(() => resolve(), { timeout: LAUNCH_IDLE_FALLBACK_MS }); return; }
-      catch (__e) { logSwallow(__e, "reader-tab.ts · requestIdleCallback", "debug"); }
-    }
-    // 兜底：Electron 旧版 Chromium 可能没有 requestIdleCallback
-    setTimeout(resolve, LAUNCH_IDLE_FALLBACK_MS);
-  });
-}
 
 interface TabRecord {
   tab: any; // Tab
@@ -125,13 +112,21 @@ export class ReaderTabController {
         custom.element.append(holder);
         let comp: any = null;
         try {
+          // 2026-09-09 P0 设置双分家：按书类型路由设置分片（book/pdf），
+          // ReaderView 及其子组件零改动（scopeView 与 store 同签名）。
+          // 此处 store 已在 dock init 时加载完毕（onload 先于任何 Tab 打开）。
+          const settingsForTab = self.stores.settingsStore.scopeView(
+            resolveReaderMode(self.stores.store.get(bookId)?.format)
+          );
           comp = new ReaderView({
             target: holder,
             props: {
               bookId,
               store: self.stores.store,
-              settingsStore: self.stores.settingsStore,
+              settingsStore: settingsForTab,
               fontStore: self.stores.fontStore,
+              // 2026-09-08 启动卡死修复：上次启动未完成初始化 → 组件内禁止自动开书（断自锁）
+              launchCrashed: !!self.plugin?.lastLaunchCrashed,
               onCloseTab: () => {
                 try {
                   custom.tab?.close?.();
@@ -147,7 +142,7 @@ export class ReaderTabController {
               // 2026-08-28：连续朗读控制器设置透传（get 读 / save 写，结构 = reader-tts 的 RewordTtsSettings）
               getTtsSettings: () => (self.plugin as any)?.getTtsSettings?.() ?? null,
               saveTtsSettings: (s: any) => (self.plugin as any)?.saveTtsSettings?.(s) ?? Promise.resolve(),
-              onSendToNote: (opts: { markdown: string; title: string }) =>
+              onSendToNote: (opts: { markdown: string; title: string; readerType?: "book" | "pdf" }) =>
                 self.plugin?.sendReaderSelection?.(opts) ?? undefined,
               onInsertToCurrentDoc: (markdown: string) =>
                 self.plugin?.insertReaderSelectionToCurrentDoc?.({ markdown }) ?? undefined,
@@ -423,10 +418,18 @@ export class ReaderTabController {
       for (const item of open) {
         if (!item?.bookId) continue;
         // 书已被删除则跳过
+        let meta: any = null;
         try {
-          const meta = this.stores.store.get?.(item.bookId);
+          meta = this.stores.store.get?.(item.bookId);
           if (!meta) continue;
         } catch (__e) { logSwallow(__e, "reader-tab.ts · checkBook", "debug"); }
+        // 2026-09-08 启动冻结隔离：冻结 100% 复现于「启动自动恢复 PDF」，
+        // 同书手动打开（思源完全启动后）曾正常。先禁 PDF 自动恢复解锁用户，
+        // 待渲染侧根因（打点定位中）修复后再放开。
+        if (meta?.format === "pdf") {
+          getLogger().info(`[REword] 启动冻结隔离：跳过 PDF 自动恢复（${item.bookId}），请从书架手动打开`);
+          continue;
+        }
         try {
           await this.openBookTab(item.bookId, item.title || undefined);
         } catch (e) {

@@ -419,8 +419,11 @@ export function onLayoutReady(p: RewordPlugin) {
         fixStandaloneDockIcons(p);
         restoreDockOrderFromCache(p);
       });
-      // 重启思源后自动恢复上次打开的阅读 Tab（思源不会自动恢复自定义插件 Tab）
-      // 由 restoreSession 内部等空闲窗口后再恢复；上次启动卡死时直接跳过（自愈）
+      // 重启思源后恢复上次打开的阅读 Tab（书架会话兜底）。
+      // 2026-09-08 修正注释：实测思源**会**在布局恢复中直接重建自定义插件 Tab
+      // （早于本调用，走 addTab.init → ReaderView onMount 自动开书），
+      // 该路径的空闲窗口保护与卡死自锁断路在 ReaderView 内部（launchCrashed + waitForLaunchIdle）；
+      // 这里的 restoreSession 只负责书架会话兜底（同样等空闲窗口、上次卡死时跳过并清会话）。
       try {
         void p.readerDock?.tabController?.restoreSession?.({ crashed: p.lastLaunchCrashed });
       } catch (__e) { logSwallow(__e, "index.ts · restoreReaderTabs", "debug"); }

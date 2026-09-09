@@ -261,6 +261,12 @@ export interface AnnotationItem {
   page?: number;
   /** 2026-09-04 P1：PDF 自建覆盖层用的归一化矩形（按页存储，翻页/缩放重映射） */
   pdfRects?: PdfRect[];
+  /** 2026-09-09 P1 矩形标注：kind="rect" 表示框选矩形（非文本划选）；
+   *  文本标注不填。矩形标注 sentence/selectedText 为合成文案「矩形 P{page}」。 */
+  kind?: "rect";
+  /** 2026-09-09 P1.3：矩形标注的 assets 快照相对路径（"assets/reword-rect-*.png"），
+   *  仅 kind="rect" 且截图成功时存在。删除标注时用于连带清理 assets 文件。 */
+  snapshotPath?: string;
 }
 
 /** 持久化结构 */
@@ -298,6 +304,10 @@ export interface AnnotationInput {
   page?: number;
   /** 2026-09-04 P1：PDF 自建覆盖层归一化矩形，落库到 AnnotationItem.pdfRects */
   pdfRects?: PdfRect[];
+  /** 2026-09-09 P1：矩形框选标注（见 AnnotationItem.kind） */
+  kind?: "rect";
+  /** 2026-09-09 P1.3：矩形标注 assets 快照相对路径（见 AnnotationItem.snapshotPath） */
+  snapshotPath?: string;
   id?: string;           // 更新已有批注时传入
   noteFormat?: "html" | "kramdown"; // 预留（写入时由 store 强制置 kramdown）
   version?: number;      // 预留（写入时由 store 递增）
@@ -506,6 +516,27 @@ export class AnnotationStore {
     return cleaned;
   }
 
+  /**
+   * 2026-09-09 一次性迁移：矩形框选标注补 kind:"rect"。
+   * kind 字段曾长期"接口有、upsert 未落库"（2026-09-09 修复），此前创建的矩形标注
+   * 重载后 kind 丢失 → 绘制层画成无边框浅蓝底、右键菜单命中过滤（要求 kind==="rect"）
+   * 永不命中 → 菜单弹不出来。矩形标注的合成 sentence 以「矩形框选」开头，
+   * 以此为判据补 kind（文本划选标注也带 pdfRects，不能只按 pdfRects 判断）。
+   */
+  async migrateLegacyRectKind(): Promise<number> {
+    let migrated = 0;
+    for (const it of this.items.values()) {
+      if (!isActive(it) || it.kind) continue;
+      if (it.pdfRects && it.pdfRects.length && String(it.sentence || "").startsWith("矩形框选")) {
+        it.kind = "rect";
+        it.version = (it.version ?? 0) + 1;
+        migrated++;
+      }
+    }
+    if (migrated > 0) await this.emit();
+    return migrated;
+  }
+
   /** 导出为可持久化结构 */
   toJSON(): AnnotationStoreData {
     return { annotations: [...this.items.values()] };
@@ -604,6 +635,8 @@ export class AnnotationStore {
         category: input.category ?? prev.category,
         ai: input.ai ? { ...prev.ai, ...input.ai } : prev.ai,
         pdfRects: sanitizePdfRects(input.pdfRects) ?? prev.pdfRects,
+        kind: input.kind ?? prev.kind,
+        snapshotPath: input.snapshotPath ?? prev.snapshotPath,
         updatedAt: ts,
       };
       // 2026-08-24 修复：更新 = 重新激活。此前 ...prev 展开会保留 deletedAt，
@@ -645,6 +678,8 @@ export class AnnotationStore {
         category: input.category ?? prev.category,
         ai: input.ai ? { ...prev.ai, ...input.ai } : prev.ai,
         pdfRects: sanitizePdfRects(input.pdfRects) ?? prev.pdfRects,
+        kind: input.kind ?? prev.kind,
+        snapshotPath: input.snapshotPath ?? prev.snapshotPath,
         updatedAt: ts,
       };
       // 2026-08-24 修复：更新 = 重新激活（清除软删标记），同上。
@@ -686,6 +721,10 @@ export class AnnotationStore {
       bookType: input.bookType,
       page: input.page,
       pdfRects: sanitizePdfRects(input.pdfRects),
+      // 2026-09-09 P1.3 修复：kind 此前声明了但从未落库——矩形标注重载后 kind 丢失，
+      // 退化为无边框高亮且点击菜单永远无法触发。
+      kind: input.kind,
+      snapshotPath: input.snapshotPath,
     };
     this.items.set(created.id, created);
     this.byKey.set(key, created.id);

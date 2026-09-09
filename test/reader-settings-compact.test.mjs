@@ -4,7 +4,10 @@
 // 修复：
 //   1) 紧凑化 CSS（max-height 70%→80vh、width 260px→300px、padding/gap 减小约 40%）
 //   2) 4 边距（上/下/左/右）2x2 网格（reader-setting-grid-2col）
-//   3) 「高级设置」二级折叠（主题/字体/行宽/模式/动画/点击翻页）
+//   3) 「高级设置」二级折叠（主题/字体/页面边距/模式/动画/点击翻页）
+//
+// 2026-09 清理：「笔记插入」分组（链接格式 textarea）已于 2026-08-25 整体移除，
+// 原 D6 用例随之删除；D1/D2/C2 已对齐当前实现（分组 6 个、全部默认折叠、行宽→页面边距）。
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -69,7 +72,9 @@ test("C1: 「高级设置」二级折叠组存在", () => {
   assert.match(viewSrc, /⚙ 高级设置/, "应有 ⚙ 高级设置 summary 标题");
 });
 
-test("C2: 高级设置内包含 主题 / 字体 / 行宽 / 模式 / 动画 / 点击翻页", () => {
+// 2026-09 更新：「行宽」三档预设于 2026-08-29 被「页面边距」取代（原 lineWidth padding 对
+// foliate 不生效，改由 4 边距滑块 + 三档预设驱动 body padding），见 reader-settings.ts:520。
+test("C2: 高级设置内包含 主题 / 字体 / 页面边距 / 模式 / 动画 / 点击翻页", () => {
   // 找「高级设置」summary 位置
   const idx = viewSrc.indexOf("⚙ 高级设置");
   assert.ok(idx > 0, "应找到 ⚙ 高级设置 summary");
@@ -78,7 +83,7 @@ test("C2: 高级设置内包含 主题 / 字体 / 行宽 / 模式 / 动画 / 点
   // 取到对应的 </details> 结束位置
   const endIdx = after.indexOf("</details>");
   const block = after.slice(0, endIdx);
-  for (const label of ["主题", "字体", "行宽", "模式", "动画", "点击翻页"]) {
+  for (const label of ["主题", "字体", "页面边距", "模式", "动画", "点击翻页"]) {
     assert.match(block, new RegExp(`>${label}<`), `高级设置内应含 ${label}`);
   }
 });
@@ -96,16 +101,23 @@ test("C3: 高级设置内不再包含 4 大分组的标签（不重复）", () =
 
 // ============ D. 4 大分组 + 现有功能不破坏 ============
 
-test("D1: 4 大分组（文本/段落/页面布局/笔记插入）仍在弹窗内", () => {
-  for (const title of ["📖 文本设置", "📐 段落设置", "⬜ 页面布局", "📝 笔记插入"]) {
-    assert.match(viewSrc, new RegExp(`>\\s*${title.replace(/[.*+?^${}()|[\\]\\\\]/g, "\\\\$&")}\\s*<`), `4 大分组 ${title} 应仍在弹窗内`);
+// 2026-09 更新：4 大分组中的「📝 笔记插入」已于 2026-08-25 整体移除
+// （setNoteLinkFormat / linkFormat textarea 均不在 ReaderView 中，仅数据层 note.linkFormat 保留），
+// 故本用例只回归仍存在的 3 个分组。
+test("D1: 4 大分组中的 文本/段落/页面布局 仍在弹窗内（笔记插入已移除）", () => {
+  for (const title of ["📖 文本设置", "📐 段落设置", "⬜ 页面布局"]) {
+    assert.match(viewSrc, new RegExp(`>\\s*${title.replace(/[.*+?^${}()|[\\]\\\\]/g, "\\\\$&")}\\s*<`), `分组 ${title} 应仍在弹窗内`);
   }
 });
 
-test("D2: 4 大分组默认展开（open 属性）", () => {
-  // 文本 + 段落 默认 open
-  const matches = viewSrc.match(/<details class="reader-setting-section" open>/g);
-  assert.ok(matches && matches.length >= 2, `默认展开的 details 应至少 2 个（文本 + 段落），实际 ${matches?.length}`);
+// 2026-09 更新：分组从 4 个扩到 6 个（朗读 / 笔记导出绑定 / 高级设置陆续并入），
+// 弹窗 max-height 仅 80vh，全部展开必然溢出 → 现改为**全部默认折叠**（6 个 details 均无 open 属性）。
+// 旧断言「文本 + 段落 默认 open」已过期。
+test("D2: 分组默认折叠（6 个 details 均无 open 属性）", () => {
+  const all = viewSrc.match(/<details class="reader-setting-section"[^>]*>/g) ?? [];
+  assert.equal(all.length, 6, `应有 6 个 details 分组，实际 ${all.length}`);
+  const opened = viewSrc.match(/<details class="reader-setting-section"[^>]*\sopen[^>]*>/g) ?? [];
+  assert.equal(opened.length, 0, `不应有默认展开的分组，实际 ${opened.length} 个：${opened.join(", ")}`);
 });
 
 test("D3: 页面布局 / 笔记插入 / 高级设置 默认折叠（无 open）", () => {
@@ -134,8 +146,7 @@ test("D5: 段落设置（行距/段距/首行缩进）仍在弹窗内", () => {
   }
 });
 
-test("D6: 笔记插入（链接格式 textarea）仍存在", () => {
-  // 链接格式 textarea 应存在
-  assert.match(viewSrc, /setNoteLinkFormat/, "setNoteLinkFormat handler 应仍存在");
-  assert.match(viewSrc, /linkFormat/, "linkFormat 设置项应仍存在");
-});
+// 用例「D6: 笔记插入（链接格式 textarea）仍存在」已删除（2026-09 清理）：
+// 笔记插入分组于 2026-08-25 整体移除，ReaderView 中已无 setNoteLinkFormat handler 与
+// linkFormat textarea（全仓仅剩数据层 note.linkFormat 与 onSelSend 的模板渲染）。
+// 相关回归见 reader-settings-4-sections.test.mjs 的 C5 / C7。
