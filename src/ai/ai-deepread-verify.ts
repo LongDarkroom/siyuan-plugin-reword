@@ -15,6 +15,7 @@
  * 这层是 copilot 完全没有的——精读的正确性可机械验证（原文就在手边）。
  */
 import type { DeepReadIssue, DeepReadResult } from "./ai-orchestrator.ts";
+import { t as T } from "../i18n/index.ts";
 
 /** 归一化：折叠所有空白为单空格、去首尾（「逐字比对」的统一口径） */
 export function normText(s: string): string {
@@ -55,7 +56,7 @@ export function verifyDeepReadResult(
     const t = normText(s.sentence);
     if (!t) continue;
     if (!haystack.includes(t) && !haystackLoose.includes(t.toLowerCase())) {
-      outcome.issues.push({ kind: "sentence", target: t.slice(0, 60), reason: "与原文不符（未逐字出现）" });
+      outcome.issues.push({ kind: "sentence", target: t.slice(0, 60), reason: T("与原文不符（未逐字出现）") });
     }
     // ordinal：AI 未给时，按预处理分句定位（回链定位用，1-based）
     if (s.ordinal == null && refSentences.length) {
@@ -65,9 +66,9 @@ export function verifyDeepReadResult(
     // 翻译直通作弊：为空或与原句完全相同
     const tr = normText(s.translation || "");
     if (!tr) {
-      outcome.issues.push({ kind: "translation", target: t.slice(0, 40), reason: "翻译为空" });
+      outcome.issues.push({ kind: "translation", target: t.slice(0, 40), reason: T("翻译为空") });
     } else if (tr === t || tr.toLowerCase() === t.toLowerCase()) {
-      outcome.issues.push({ kind: "translation", target: t.slice(0, 40), reason: "翻译与原句相同（未翻译）" });
+      outcome.issues.push({ kind: "translation", target: t.slice(0, 40), reason: T("翻译与原句相同（未翻译）") });
     }
   }
 
@@ -77,14 +78,14 @@ export function verifyDeepReadResult(
     if (!word) continue;
     if (!haystackLoose.includes(word.toLowerCase())) {
       outcome.flaggedWords.add(word);
-      outcome.issues.push({ kind: "word", target: word, reason: "未见于原文" });
+      outcome.issues.push({ kind: "word", target: word, reason: T("未见于原文") });
     }
     // 引文（quote / context，normalize 已合并到 context）：不符 → 清空不渲染
     const q = normText(w.context || "");
     if (q && !haystack.includes(q) && !haystackLoose.includes(q.toLowerCase())) {
       w.context = undefined;
       outcome.mutated = true;
-      outcome.issues.push({ kind: "quote", target: q.slice(0, 60), reason: "引文与原文不符，已隐去" });
+      outcome.issues.push({ kind: "quote", target: q.slice(0, 60), reason: T("引文与原文不符，已隐去") });
     }
   }
 

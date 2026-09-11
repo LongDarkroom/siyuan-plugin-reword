@@ -117,12 +117,13 @@ test("Normalize:删字段(chatApi/topP/freqPenalty/presencePenalty/autoContinue/
 test("Normalize:sendShortcut 已于 2026-09-06 复活(枚举收窄,非忽略)", () => {
   // 该字段 2026-08-21 曾被精简删除,老断言要求 normalize 忽略它;
   // 2026-09-06 第 1 批把它提升为「发送快捷键」设置项(🟡 待接线),故行为改为枚举收窄。
+  // 2026-09-10 P3:默认值由 "mod+enter" 改为 "enter",故三处回退断言随之更新。
   assert.equal(normalizeAiSettings({ sendShortcut: "enter" }).sendShortcut, "enter");
   assert.equal(normalizeAiSettings({ sendShortcut: "mod+enter" }).sendShortcut, "mod+enter");
   // 非法值(含 2026-08-21 之前的旧格式 "ctrl+enter")静默回退默认,不抛错
-  assert.equal(normalizeAiSettings({ sendShortcut: "ctrl+enter" }).sendShortcut, "mod+enter");
-  assert.equal(normalizeAiSettings({ sendShortcut: 123 }).sendShortcut, "mod+enter");
-  assert.equal(normalizeAiSettings({}).sendShortcut, "mod+enter");
+  assert.equal(normalizeAiSettings({ sendShortcut: "ctrl+enter" }).sendShortcut, "enter");
+  assert.equal(normalizeAiSettings({ sendShortcut: 123 }).sendShortcut, "enter");
+  assert.equal(normalizeAiSettings({}).sendShortcut, "enter");
 });
 
 test("Normalize:第 1 批功能蓝图字段枚举收窄(progressMode/deepReadVerify/unknownHandling)", () => {

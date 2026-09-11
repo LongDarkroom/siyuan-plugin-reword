@@ -41,7 +41,12 @@ export interface DockLayoutConfig {
 }
 
 const STORAGE_KEY = "hiword-dock-layout.json";
+/** lastSide 记忆的存储键（featureId -> 上次停靠的侧栏槽位，⇄ 一键切换用） */
+const LASTSIDE_KEY = "hiword-dock-lastside.json";
 
+// 2026-09-11 P3-2：label 是**显示名即 i18n key**（中文原文），渲染点再包 t()。
+// 不能在这里直接调用 t() —— 模块顶层求值早于 onload 的 initI18n()，会把中文固化。
+// value 是存储标识，绝不翻译（写进 hiword-dock-layout.json 与宿主缓存）。
 export const SLOT_LABELS: { value: DockSlot; label: string }[] = [
   { value: "combined", label: "组合栏（默认）" },
   { value: "LeftTop", label: "左侧 · 上" },
@@ -55,6 +60,8 @@ export const SLOT_LABELS: { value: DockSlot; label: string }[] = [
 export class DockManager {
   private features: DockableFeature[] = [];
   private config: DockLayoutConfig = {};
+  /** featureId -> 上次停靠的侧栏槽位（⇄ 回侧栏时恢复到用户用过的角落） */
+  private lastSide: Record<string, DockSlot> = {};
 
   constructor(private plugin: any) {}
 
@@ -79,6 +86,13 @@ export class DockManager {
     // 未显式配置的功能回退到 defaultSlot
     for (const f of this.features) {
       if (!(f.id in this.config)) this.config[f.id] = f.defaultSlot;
+    }
+    // lastSide 记忆（可选数据，损坏即弃用）
+    try {
+      const ls = (await this.plugin.loadData(LASTSIDE_KEY)) as Record<string, DockSlot> | null;
+      this.lastSide = ls && typeof ls === "object" ? ls : {};
+    } catch {
+      this.lastSide = {};
     }
   }
 
@@ -112,11 +126,16 @@ export class DockManager {
       .map((f) => ({ feature: f, slot: this.config[f.id] }));
   }
 
-  /** 留在组合 Dock 的功能 id 列表 */
-  getCombinedFeatureIds(): string[] {
-    return this.features
-      .filter((f) => this.config[f.id] === "combined" || this.config[f.id] === undefined)
-      .map((f) => f.id);
+  /** 记忆某功能的侧栏槽位并持久化（失败不阻断 UI；当前仅布局管理下拉框写入） */
+  async setLastSide(id: string, slot: DockSlot): Promise<void> {
+    if (slot === "combined" || slot === "hidden") return;
+    this.lastSide[id] = slot;
+    try {
+      await this.plugin.saveData(LASTSIDE_KEY, this.lastSide);
+    } catch (e) {
+      // eslint-disable-next-line no-console
+      console.warn("[REword] lastSide 持久化失败:", e);
+    }
   }
 
   /** 是否至少有一个功能被隐藏（用于 UI 提示） */

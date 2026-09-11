@@ -172,9 +172,13 @@ test("index.ts:click .hiword-vocab-mark 跳转词库面板(disable Alt+hover)", 
     /closest\("\.hiword-vocab-mark"\)/,
     "应通过 closest('.hiword-vocab-mark') 找到高亮 span"
   );
+  // 2026-09-11：组合栏退役，词库升级为主区页签（openTab 异步）。
+  // 源码形态由 focusFeatureDock("vocab")（同步聚焦）改为
+  // withFeatureTab(this, "vocab", (el) => this.scrollVocabPanelToWord(word))
+  // （打开/聚焦页签并等承载元素就绪后再滚动定位）。
   assert.match(
     src,
-    /focusFeatureDock\("vocab"\)/,
+    /withFeatureTab\(this, "vocab", \(el\) => this\.scrollVocabPanelToWord\(word\)\)/,
     "应跳转到 vocab 面板"
   );
   assert.match(src, /scrollVocabPanelToWord/);
@@ -184,7 +188,12 @@ test("index.ts:scrollVocabPanelToWord:找不到目标时 showMessage 提示", as
   const src = await readFile("src/index.ts", "utf8");
   const fnMatch = src.match(/private scrollVocabPanelToWord\(word: string\): void \{[\s\S]*?\n  \}/);
   assert.ok(fnMatch, "应能找到 scrollVocabPanelToWord");
-  assert.match(fnMatch[0], /showMessage\(`「\$\{word\}」不在当前词本/);
+  // 2026-09-11：该提示已接入 i18n，源码形态由模板串 `` `「${word}」不在当前词本…` ``
+  // 改为 t("「{w}」不在当前词本/主题中", { w: word })。两种形态都接受，
+  // 重点校验「找不到目标时有 showMessage 提示」这一事实。
+  const hasRaw = /showMessage\(`「\$\{word\}」不在当前词本/.test(fnMatch[0]);
+  const hasI18n = /showMessage\(t\("「\{w\}」不在当前词本/.test(fnMatch[0]);
+  assert.ok(hasRaw || hasI18n, "找不到目标时应 showMessage 提示「…」不在当前词本/主题中");
   assert.match(fnMatch[0], /scrollIntoView/);
   assert.match(fnMatch[0], /whale-card--flash/);
 });

@@ -9,7 +9,6 @@ import { DockManager, type DockableFeature, type DockSlot } from "./dock/dock-ma
 import {
   initDockPanels,
   registerStandaloneDock,
-  renderCombinedDockShell,
   refreshCombinedDock,
   exposeDockContentDelegation,
   featureTitle,
@@ -32,6 +31,14 @@ import {
   hideDockDropZones,
   slotLabel,
 } from "./dock/dock-layout.ts";
+// 2026-09-11 组合栏退役：全部功能升级为思源主区自定义页签（addTab/openTab）
+import {
+  registerFeatureTabs,
+  withFeatureTab,
+  refreshFeatureTabs,
+} from "./dock/feature-tab.ts";
+import { renderDashboardPanel, DASHBOARD_ICON, DASHBOARD_FEATURE_ID, type DashboardSnapshot } from "./dashboard/dashboard-panel.ts";
+import type { BookMeta } from "./reader/bookshelf-store.ts";
 import * as path from "path";
 import * as fs from "node:fs";
 import { isPluginRootWithFs, isAsarPath, resolvePluginPathWithFs } from "./core/plugin-path.ts";
@@ -40,6 +47,9 @@ import { LearningStatus, type LearningStatus as LearningStatusT } from "./types.
 import { getVocabHighlighter, configureVocabHighlightDeps } from "./vocab/vocab-highlight.ts";
 import { MASTERY_MAX } from "./types.ts";
 import { getDueQueue, nextReviewState, isDue } from "./review/scheduler.ts";
+// 2026-09-11 复习面板重构：星级筛选（mastery 档位）+ 书源绑定（添加单词书）
+import { countByMastery } from "./review/star-filter.ts";
+import { ReviewSourceStore, computeRelease, resolveSourceWords, summarizeSource, localDateKey, type ReviewSource } from "./review/review-source.ts";
 import { calibrateFromHistory, applyCalibration } from "./review/calibrate.ts";
 import { initReviewData } from "./review/review-data.ts";
 import { getReviewConfig, setReviewConfig, resetReviewConfig } from "./review/config.ts";
@@ -109,6 +119,7 @@ import type { DeepReadWord, DeepReadSentence } from "./ai/ai-orchestrator.ts";
 import { AiPresetStore, type AiPreset } from "./ai/ai-preset.ts";
 import { PromptTemplateStore, type AiPromptTemplate } from "./ai/ai-prompt-templates.ts";
 import { searchDocs as searchAiDocs, getDocText as getAiDocText, type AiDocSearchResult } from "./ai/ai-doc-search.ts";
+import { SKELETON_ONLY } from "./ai/ai-skeleton.ts";
 import {
   extractDocIdFromDrag,
   resolveDocIdFromDragSource,
@@ -141,6 +152,12 @@ import { InkSaver, INK_STORAGE_KEY } from "./reader/ink/persistence.ts";
 import { inkStrokes as inkStrokesStore } from "./reader/ink/store.ts";
 // 2026-08-24：dock 批注面板删除后广播 → 各 ReaderView 全量 reconcile 清除当前页残留高亮
 import { notifyAnnotationsChanged } from "./reader/annotation-visual.ts";
+
+// 2026-09-10：界面多语言（中文为源语言，英语第一优先适配；中文原文即 key）
+// T = t 的别名。本文件有 23 处局部变量 / 回调参数命名为 `t`（会遮蔽 i18n 的 t），
+// 在这些作用域内需要翻译时一律写 T("...")，否则会拿到 DOM 元素并报「不可调用」。
+import { initI18n, saveLang, getLang, t, t as T, type I18nIO } from "./i18n/index.ts";
+import { pickInitialLang, openLangSwitcher } from "./i18n/lang-picker.ts";
 
 // 共享基建（生命周期 / 持久化 / 安全渲染）
 import { Disposables } from "./core/disposable.ts";
@@ -311,8 +328,16 @@ export default class RewordPlugin extends Plugin {
    */
   /** @internal dock/dock-layout.ts 委托访问（P1-5 拆分） */
   lastLaunchCrashed = false;
-  /** 复习面板当前状态筛选：all/active/archived/ignored */
-  private reviewStatusFilter: "all" | "active" | "archived" | "ignored" = "active";
+  /** 2026-09-11 v4：复习列表状态筛选（四状态：全部/待学习/已学习/标熟词） */
+  private reviewListFilter: "all" | "todo" | "done" | "ripe" = "all";
+  /** 2026-09-11 复习面板重构：面板内小 Tab（学习记忆 / 数据统计） */
+  private reviewPane: "learn" | "stats" = "learn";
+  /**
+   * 2026-09-11 复习面板重构：复习书源（「添加单词书」）存储。
+   * 回调惰性执行（persist 时 onload 必已完成），persistReviewSources 用可选链兜底。
+   */
+  private reviewSourceStore: ReviewSourceStore = new ReviewSourceStore(() => this.persistReviewSources?.update(this.reviewSourceStore.toJSON()));
+  private persistReviewSources?: { update(d: unknown): void };
   private dictReady!: boolean;
   private dictManifest!: DictManifest;
   /** 词典切换串行锁：避免快速连点导致多个 loadDictFile 交错、MDX 重复解析与状态残留 */
@@ -550,6 +575,21 @@ export default class RewordPlugin extends Plugin {
     // 异常,让真实错误可见)。在 logger 初始化后立即调用,幂等。
     try { installConsoleFilter(); } catch (__swallowErr) { logSwallow(__swallowErr, "index.ts · onload", "debug"); }
 
+    // ========== -1. 界面语言（必须在任何 UI 渲染之前）==========
+    // 2026-09-10：插件内独立切换，不跟随思源界面语言。
+    // 首次启动（无记录）弹窗让用户选中文 / English；选完即生效，后续 UI 都按该语言渲染。
+    // ⚠️ 任何异常都必须兜住（含 20s 超时），绝不能把 onload 挂住导致插件起不来。
+    try {
+      const i18nIO = this.i18nIO();
+      const savedLang = await initI18n(i18nIO);
+      if (!savedLang) {
+        const picked = await pickInitialLang();
+        await saveLang(i18nIO, picked);
+      }
+    } catch (e) {
+      logSwallow(e, "index.ts · i18n 初始化（回落中文）", "warn");
+    }
+
     // ========== 0. 注册自定义图标（必须在 addTopBar/addDock 之前）==========
     // 关键修复（2026-08-17）：原先把 5 个 <symbol> 拼成一条字符串传给 addIcons，
     // 其中 copilotIcon 带 xmlns="http://www.w3.org/2000/svg" 导致整串解析失败、
@@ -574,6 +614,10 @@ export default class RewordPlugin extends Plugin {
       `<symbol id="iconREwordReview" viewBox="0 0 1024 1024"><g fill="none" stroke="currentColor" stroke-width="64" stroke-linecap="round" stroke-linejoin="round"><path d="M320 320a256 256 0 01562 56"/><path d="M882 376v-96h-96"/><path d="M704 704a256 256 0 01-562-56"/><path d="M142 648v96h96"/></g></symbol>`,
       // 阅读器：展开的书页 + 书签尾（区别于主图标「合拢的书」）
       `<symbol id="iconREwordReader" viewBox="0 0 1024 1024"><g fill="none" stroke="currentColor" stroke-width="56" stroke-linecap="round" stroke-linejoin="round"><path d="M192 256c128-64 256-80 384-48v560c-128-32-256-16-384 48z"/><path d="M832 256c-128-64-256-80-384-48v560c128-32 256-16 384 48z"/><path d="M512 208v560"/></g></symbol>`,
+      // 工作台（聚合仪表盘）：2×2 四格 —— 必须走 sprite symbol id：
+      // 布局管理器 / fixStandaloneDockIcons 均按 <use xlink:href="#id"> 引用图标，
+      // 内联 svg 字符串会让 href 变成 "#<svg..." 而渲染成乱码（2026-09-11 修复）。
+      `<symbol id="iconREwordDashboard" viewBox="0 0 1024 1024"><g fill="none" stroke="currentColor" stroke-width="64" stroke-linecap="round" stroke-linejoin="round"><rect x="224" y="224" width="240" height="240" rx="48"/><rect x="560" y="224" width="240" height="240" rx="48"/><rect x="224" y="560" width="240" height="240" rx="48"/><rect x="560" y="560" width="240" height="240" rx="48"/></g></symbol>`,
       `<symbol id="copilotIcon" viewBox="0 0 24 24" fill="none"><path d="M12 3a7 7 0 00-4 12.7V18a1 1 0 001 1h6a1 1 0 001-1v-2.3A7 7 0 0012 3z" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/><path d="M9 21h6M10 18v3M14 18v3" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></symbol>`,
     ];
     let iconsOk = 0;
@@ -629,31 +673,36 @@ export default class RewordPlugin extends Plugin {
       // 防抖持久化层（P1 #7/#8）：高频变更合并为一次落盘，失败指数退避重试并上报
       this.persistVocab = new PersistentStore(
         (d) => this.saveData("hiword-vocab.json", d),
-        { onError: () => showMessage("词库保存失败，请检查存储空间", 3000, "error") }
+        { onError: () => showMessage(t("词库保存失败，请检查存储空间"), 3000, "error") }
       );
       this.persistAnnotations = new PersistentStore(
         (d) => this.saveData("hiword-annotations.json", d),
-        { onError: () => showMessage("批注保存失败，请检查存储空间", 3000, "error") }
+        { onError: () => showMessage(T("批注保存失败，请检查存储空间"), 3000, "error") }
       );
       this.persistVocabLabels = new PersistentStore(
         (d) => this.saveData("hiword-vocab-labels.json", d),
-        { onError: () => showMessage("词库标签保存失败，请检查存储空间", 3000, "error") }
+        { onError: () => showMessage(t("词库标签保存失败，请检查存储空间"), 3000, "error") }
       );
       this.persistAnnotationLabels = new PersistentStore(
         (d) => this.saveData("hiword-annotation-labels.json", d),
-        { onError: () => showMessage("批注标签保存失败，请检查存储空间", 3000, "error") }
+        { onError: () => showMessage(T("批注标签保存失败，请检查存储空间"), 3000, "error") }
+      );
+      // 2026-09-11 复习面板重构：复习书源（「添加单词书」）持久化
+      this.persistReviewSources = new PersistentStore(
+        (d) => this.saveData("hiword-review-sources.json", d),
+        { onError: () => showMessage(t("复习书源保存失败，请检查存储空间"), 3000, "error") }
       );
       this.persistAiPresets = new PersistentStore(
         (d) => this.saveData("hiword-ai-presets.json", d),
-        { onError: () => showMessage("AI 角色保存失败，请检查存储空间", 3000, "error") }
+        { onError: () => showMessage(T("AI 角色保存失败，请检查存储空间"), 3000, "error") }
       );
       this.persistAiPrompts = new PersistentStore(
         (d) => this.saveData("hiword-ai-prompts.json", d),
-        { onError: () => showMessage("快捷指令保存失败，请检查存储空间", 3000, "error") }
+        { onError: () => showMessage(T("快捷指令保存失败，请检查存储空间"), 3000, "error") }
       );
       this.persistAiSessions = new PersistentStore(
         (d) => this.saveData("hiword-ai-sessions.json", d),
-        { onError: () => showMessage("AI 会话保存失败，请检查存储空间", 3000, "error") }
+        { onError: () => showMessage(T("AI 会话保存失败，请检查存储空间"), 3000, "error") }
       );
       // 2026-09-04 P0-3：Apple Pencil 墨迹持久化器
       // 内部用 PersistentStore 400ms 防抖 + 3 次退避重试，构造时机必须早于 initAnnotationStore
@@ -813,12 +862,13 @@ export default class RewordPlugin extends Plugin {
     try {
       this.dockManager = new DockManager(this);
       const dockFeatures: DockableFeature[] = [
-        { id: "vocab", title: "词库", icon: ICON_VOCAB, defaultSlot: "combined" },
-        { id: "dict", title: "查词典", icon: ICON_DICT, defaultSlot: "combined" },
-        { id: "annotations", title: "微阅批注", icon: ICON_ANN, defaultSlot: "combined" },
-        { id: "ai", title: "AI 精读", icon: ICON_AI, defaultSlot: "combined" },
-        { id: "review", title: "复习", icon: ICON_REVIEW, defaultSlot: "combined" },
-        { id: READER_FEATURE_ID, title: "阅读器", icon: ICON_READER, defaultSlot: "combined" },
+        { id: DASHBOARD_FEATURE_ID, title: t("工作台"), icon: DASHBOARD_ICON, defaultSlot: "combined" },
+        { id: "vocab", title: t("词库"), icon: ICON_VOCAB, defaultSlot: "combined" },
+        { id: "dict", title: t("查词典"), icon: ICON_DICT, defaultSlot: "combined" },
+        { id: "annotations", title: t("微阅批注"), icon: ICON_ANN, defaultSlot: "combined" },
+        { id: "ai", title: t("AI 精读"), icon: ICON_AI, defaultSlot: "combined" },
+        { id: "review", title: t("复习"), icon: ICON_REVIEW, defaultSlot: "combined" },
+        { id: READER_FEATURE_ID, title: t("阅读器"), icon: ICON_READER, defaultSlot: "combined" },
       ];
       for (const f of dockFeatures) this.dockManager.registerFeature(f);
       // 一次性迁移：将面板布局重置为「全部收入组合栏」的干净状态（消除旧布局残留的独立 Dock 杂乱）
@@ -828,6 +878,8 @@ export default class RewordPlugin extends Plugin {
       getLogger().error("[REword] Dock 管理器初始化失败（回退单 Dock）", { operation: "初始化-Dock管理器", error: e });
       this.dockManager = new DockManager(this);
     }
+    // 2026-09-11 v2：为全部功能注册思源主区自定义页签（组合栏 Tab 悬停 ⧉ 弹出 / 右键兜底；页签 ⇄ 收回组合栏）
+    try { registerFeatureTabs(this); } catch (e) { getLogger().error("主区功能页签注册失败", { operation: "初始化-主区页签", error: e }); }
     // 2026-08-22：一次性清理旧 Dock 缓存（修复旧图标/位置被 localStorage「local-plugin-docks」覆盖导致不生效）
     try { await this.clearStaleDockCache(); } catch (e) { getLogger().warn("[REword] 清理 Dock 缓存失败", { error: e }); }
     try { this.initDockPanels(); } catch (e) { getLogger().error("侧边栏注册失败", { operation: "初始化-侧边栏", error: e }); }
@@ -856,21 +908,21 @@ export default class RewordPlugin extends Plugin {
 
     // ========== 3. 注册命令（容错）==========
     const commands = [
-      { langKey: "addWord", langText: "RE word: 添加选中单词到词库", cb: () => this.addSelectedWord() },
-      { langKey: "showVocab", langText: "RE word: 显示词库列表", cb: () => this.showVocabDialog() },
-      { langKey: "lookupDict", langText: "RE word: 查词典（选中单词）", cb: () => this.lookupSelectedWord() },
-      { langKey: "quickLookup", langText: "RE word: 选中文本一键填入侧边栏查词", hotkey: "⌥⌘L", cb: () => this.fillSelectionToSidebar() },
-      { langKey: "extractWords", langText: "RE word: 框选提取单词到词库", hotkey: "⌥⌘E", cb: () => this.extractWordsFromSelection() },
-      { langKey: "aiDeepRead", langText: "RE word: AI 精读（当前块/选区）", hotkey: "⌥⌘A", cb: () => this.showAiPanel() },
-      { langKey: "aiSettings", langText: "RE word: AI 设置", cb: () => this.openAiSettings() },
-      { langKey: "bilingualSettings", langText: "RE word: 双语翻译设置", cb: () => this.openBilingualSettingsTab() },
-      { langKey: "openDictManager", langText: "RE word: 词典管理（添加离线词典）", cb: () => this.openDictManager() },
-      { langKey: "exportVocab", langText: "RE word: 导出词库为 CSV", cb: () => this.exportVocabCSV() },
-      { langKey: "pruneOrphanAnn", langText: "RE word: 清理失效批注（来源块已删除）", cb: () => this.pruneOrphanAnnotations() },
-      { langKey: "startReview", langText: "RE word: 开始复习（自研 SRS）", cb: () => this.startReviewSession() },
-      { langKey: "calibrateReview", langText: "RE word: 校准复习算法（基于历史）", cb: () => this.calibrateReview() },
-      { langKey: "restoreReviewWords", langText: "RE word: 恢复被忽略/归档的单词", cb: () => this.restoreReviewWords() },
-      { langKey: "resetReviewConfig", langText: "RE word: 重置复习算法配置（恢复默认）", cb: () => this.resetReviewConfigCmd() },
+      { langKey: "addWord", langText: t("RE word: 添加选中单词到词库"), cb: () => this.addSelectedWord() },
+      { langKey: "showVocab", langText: t("RE word: 显示词库列表"), cb: () => this.showVocabDialog() },
+      { langKey: "lookupDict", langText: t("RE word: 查词典（选中单词）"), cb: () => this.lookupSelectedWord() },
+      { langKey: "quickLookup", langText: t("RE word: 选中文本一键填入侧边栏查词"), hotkey: "⌥⌘L", cb: () => this.fillSelectionToSidebar() },
+      { langKey: "extractWords", langText: t("RE word: 框选提取单词到词库"), hotkey: "⌥⌘E", cb: () => this.extractWordsFromSelection() },
+      { langKey: "aiDeepRead", langText: t("RE word: AI 精读（当前块/选区）"), hotkey: "⌥⌘A", cb: () => this.showAiPanel() },
+      { langKey: "aiSettings", langText: t("RE word: AI 设置"), cb: () => this.openAiSettings() },
+      { langKey: "bilingualSettings", langText: t("RE word: 双语翻译设置"), cb: () => this.openBilingualSettingsTab() },
+      { langKey: "openDictManager", langText: t("RE word: 词典管理（添加离线词典）"), cb: () => this.openDictManager() },
+      { langKey: "exportVocab", langText: t("RE word: 导出词库为 CSV"), cb: () => this.exportVocabCSV() },
+      { langKey: "pruneOrphanAnn", langText: t("RE word: 清理失效批注（来源块已删除）"), cb: () => this.pruneOrphanAnnotations() },
+      { langKey: "startReview", langText: t("RE word: 开始复习（自研 SRS）"), cb: () => this.startReviewSession() },
+      { langKey: "calibrateReview", langText: t("RE word: 校准复习算法（基于历史）"), cb: () => this.calibrateReview() },
+      { langKey: "restoreReviewWords", langText: t("RE word: 恢复被忽略/归档的单词"), cb: () => this.restoreReviewWords() },
+      { langKey: "resetReviewConfig", langText: t("RE word: 重置复习算法配置（恢复默认）"), cb: () => this.resetReviewConfigCmd() },
     ];
     for (const c of commands) {
       try {
@@ -892,18 +944,40 @@ export default class RewordPlugin extends Plugin {
     try {
       this.addCommand({
         langKey: "viewLogs",
-        langText: "RE word: 查看运行日志",
+        langText: t("RE word: 查看运行日志"),
         hotkey: "",
         callback: () => openLogViewer(),
       });
       this.addCommand({
         langKey: "exportLogs",
-        langText: "RE word: 导出运行日志（文件+剪贴板）",
+        langText: t("RE word: 导出运行日志（文件+剪贴板）"),
         hotkey: "",
         callback: () => { void exportLogsCommand(); },
       });
     } catch (e) {
       getLogger().error("日志命令注册失败", { operation: "初始化-命令", error: e });
+    }
+
+    // ========== 3.2 界面语言切换（2026-09-10：插件内独立，不跟随思源界面语言）==========
+    // 命令名中英并列写死：命令列表在语言切换前后都要能看懂，且它本身不该被切换影响。
+    try {
+      this.addCommand({
+        langKey: "switchLang",
+        langText: t("RE word: 界面语言 / Interface Language"),
+        hotkey: "",
+        callback: async () => {
+          const before = getLang();
+          const picked = await openLangSwitcher(before);
+          if (!picked || picked === before) return;
+          await saveLang(
+            { load: (f: string) => this.loadData(f), save: (f: string, d: unknown) => this.saveData(f, d) },
+            picked,
+          );
+          showMessage(t("界面语言已切换，重载插件后生效。"), 4000, "info");
+        },
+      });
+    } catch (e) {
+      getLogger().error("界面语言命令注册失败", { operation: "初始化-命令", error: e });
     }
 
     // ========== 4. 容错初始化词库（失败不影响 UI）==========
@@ -1033,7 +1107,7 @@ export default class RewordPlugin extends Plugin {
   private resetReviewConfigCmd(): void {
     resetReviewConfig();
     void this.saveReviewConfig();
-    showMessage("复习算法配置已恢复默认", 2200, "success" as any);
+    showMessage(t("复习算法配置已恢复默认"), 2200, "success" as any);
   }
 
   /**
@@ -1041,26 +1115,26 @@ export default class RewordPlugin extends Plugin {
    * 历史不足时提示先积累；否则应用校准结果并落盘 hiword-review-config.json。
    */
   private calibrateReview(): void {
-    if (!this.vocabStore) { showMessage("词库尚未就绪", 2000, "info"); return; }
+    if (!this.vocabStore) { showMessage(t("词库尚未就绪"), 2000, "info"); return; }
     const events = this.vocabStore.getReviewEvents();
     if (events.length < 9) {
-      showMessage(`复习历史不足（${events.length} 条，需 ≥9 才能校准）；先多用一阵复习功能再回来校准`, 2800, "info");
+      showMessage(t("复习历史不足（{n} 条，需 ≥9 才能校准）；先多用一阵复习功能再回来校准", { n: events.length }), 2800, "info");
       return;
     }
     const res = calibrateFromHistory(events, { targetRetention: 0.9 });
     applyCalibration(res);
     void this.saveReviewConfig();
     const summary = [
-      `样本量：${res.eventsUsed} 条`,
-      `目标留存：${(res.targetRetention * 100).toFixed(0)}%`,
+      `${T("样本量：{n} 条", { n: res.eventsUsed })}`,
+      `${T("目标留存：{n}%", { n: (res.targetRetention * 100).toFixed(0) })}`,
       ...res.notes,
     ].join("\n");
     new Dialog({
-      title: "复习算法校准结果",
+      title: t("复习算法校准结果"),
       width: responsiveDialogSize(440, "width"),
       content: `<div class="hiword-review-cfg">
         <pre class="hiword-review-cfg__pre">${this.escapeHtml(summary)}</pre>
-        <div class="hiword-review-cfg__hint">已写入 hiword-review-config.json 并立即生效。重置入口：RE word: 重置复习算法配置</div>
+        <div class="hiword-review-cfg__hint">${t("已写入 hiword-review-config.json 并立即生效。重置入口：RE word: 重置复习算法配置")}</div>
       </div>`,
     });
   }
@@ -1069,30 +1143,30 @@ export default class RewordPlugin extends Plugin {
    * 命令：恢复被忽略/归档的单词。列出 archived + ignored 单词，可逐个或全部恢复为 active。
    */
   private restoreReviewWords(): void {
-    if (!this.vocabStore) { showMessage("词库尚未就绪", 2000, "info"); return; }
+    if (!this.vocabStore) { showMessage(t("词库尚未就绪"), 2000, "info"); return; }
     const list = [
       ...this.vocabStore.getWordsByStatus(WordStatus.Archived),
       ...this.vocabStore.getWordsByStatus(WordStatus.Ignored),
     ];
-    if (list.length === 0) { showMessage("没有需要恢复的单词（忽略/归档列表为空）", 2200, "info"); return; }
+    if (list.length === 0) { showMessage(t("没有需要恢复的单词（忽略/归档列表为空）"), 2200, "info"); return; }
 
     const rows = list
       .map(
         (r) => `<div class="hiword-restore-row" data-word="${this.escapeHtml(r.word)}">
           <span class="hiword-restore-word">${this.escapeHtml(r.word)}</span>
-          <span class="hiword-restore-tag">${r.status === "archived" ? "已归档" : "已忽略"}</span>
-          <button class="b3-button b3-button--small" data-action="restore-one">恢复</button>
+          <span class="hiword-restore-tag">${r.status === "archived" ? t("已归档") : t("已忽略")}</span>
+          <button class="b3-button b3-button--small" data-action="restore-one">${t("恢复")}</button>
         </div>`
       )
       .join("");
 
     const dialog = new Dialog({
-      title: `恢复单词（${list.length} 个）`,
+      title: t("恢复单词（{n} 个）", { n: list.length }),
       width: responsiveDialogSize(420, "width"),
       height: "440px",
       content: `<div class="hiword-restore" id="hiword-restore">
         <div class="hiword-restore-list">${rows}</div>
-        <div class="hiword-restore-foot"><button class="b3-button" data-action="restore-all">全部恢复</button></div>
+        <div class="hiword-restore-foot"><button class="b3-button" data-action="restore-all">${t("全部恢复")}</button></div>
       </div>`,
     });
     const root = dialog.element.querySelector("#hiword-restore") as HTMLElement | null;
@@ -1106,7 +1180,7 @@ export default class RewordPlugin extends Plugin {
       const remaining = root.querySelector(".hiword-restore-row");
       if (!remaining) {
         const listEl = root.querySelector(".hiword-restore-list") as HTMLElement | null;
-        if (listEl) listEl.innerHTML = `<div class="hiword-review__done">已全部恢复</div>`;
+        if (listEl) listEl.innerHTML = `<div class="hiword-review__done">${t("已全部恢复")}</div>`;
       }
     };
 
@@ -1133,8 +1207,17 @@ export default class RewordPlugin extends Plugin {
     } catch {
       this.vocabStore.load(null);
     }
+    // 2026-09-11 复习面板重构：加载复习书源（「添加单词书」）
+    try {
+      this.reviewSourceStore.load(await this.loadData("hiword-review-sources.json"));
+    } catch {
+      this.reviewSourceStore.load(null);
+    }
     this.isReady = true;
     getLogger().info("[REword] 词库加载完成");
+
+    // 2026-09-11 书源每日释放钩子：按 dailyNewLimit 分批把新词放入复习队列（一天一批）
+    void this.releaseDueSources();
 
     // 回填历史单词的固有难度（旧词库无 difficulty 字段；新收词已在收词时计算）
     try {
@@ -1329,18 +1412,14 @@ export default class RewordPlugin extends Plugin {
     this.aiPanel.render(dockElement);
   }
 
-  /** 聚焦 dock 的「AI 精读」Tab（供命令 / 快捷入口） */
+  /** 聚焦「AI 精读」（供命令 / 快捷入口；页签化后 openTab 异步，元素经 withFeatureTab 等就绪） */
   private showAiPanel() {
-    this.focusFeatureDock("ai");
-    const el = this.getFeatureElement("ai");
-    if (!el) {
-      showMessage("请先打开 RE word 侧边栏", 2000, "info");
-      return;
-    }
-    this.renderFeatureInto("ai", el);
-    // 2026-08-26：仅在显式打开（⌥⌘A / 右键「发送到 AI」）时预填当前选区文本；
-    // 切回 AI 精读 Tab 等被动渲染不再自动灌入「先前选中文本」，避免覆盖已输入内容。
-    this.aiPanel?.prefillSelection();
+    void withFeatureTab(this, "ai", (el) => {
+      this.renderFeatureInto("ai", el);
+      // 2026-08-26：仅在显式打开（⌥⌘A / 右键「发送到 AI」）时预填当前选区文本；
+      // 切回 AI 精读 Tab 等被动渲染不再自动灌入「先前选中文本」，避免覆盖已输入内容。
+      this.aiPanel?.prefillSelection();
+    }, { onMissing: () => showMessage(T("请先打开 RE word 侧边栏"), 2000, "info") });
   }
 
   // ===================== AI 精读会话持久化（原 Copilot 插件会话层，现仅服务 AI 精读）=====================
@@ -1406,22 +1485,22 @@ export default class RewordPlugin extends Plugin {
     const tLock = s.tencentCharsLock ?? 0;
     if (tLock > 0 && s.tencentCharsUsed) {
       const r = s.tencentCharsUsed / tLock;
-      if (r >= ratio) warn("tencent", `腾讯云翻译额度已用至 ${Math.round(r * 100)}%，接近上限将自动停止。`);
+      if (r >= ratio) warn("tencent", `${T("腾讯云翻译额度已用至 {n}%，接近上限将自动停止。", { n: Math.round(r * 100) })}`);
     }
     const bLock = s.baiduCharsLock ?? 0;
     if (bLock > 0 && s.baiduCharsUsed) {
       const r = s.baiduCharsUsed / bLock;
-      if (r >= ratio) warn("baidu", `百度翻译额度已用至 ${Math.round(r * 100)}%，接近上限将自动停止。`);
+      if (r >= ratio) warn("baidu", `${T("百度翻译额度已用至 {n}%，接近上限将自动停止。", { n: Math.round(r * 100) })}`);
     }
     const yLock = s.youdaoCharsLock ?? 0;
     if (yLock > 0 && s.youdaoCharsUsed) {
       const r = s.youdaoCharsUsed / yLock;
-      if (r >= ratio) warn("youdao", `有道智云额度已用至 ${Math.round(r * 100)}%，接近上限将自动停止。`);
+      if (r >= ratio) warn("youdao", `${T("有道智云额度已用至 {n}%，接近上限将自动停止。", { n: Math.round(r * 100) })}`);
     }
     const aLimit = s.aiTokenLimit ?? 0;
     if (aLimit > 0 && s.aiTokenUsed) {
       const r = s.aiTokenUsed / aLimit;
-      if (r >= ratio) warn("ai", `AI 翻译 Token 已用至 ${Math.round(r * 100)}%，接近上限将自动停止。`);
+      if (r >= ratio) warn("ai", `${T("AI 翻译 Token 已用至 {n}%，接近上限将自动停止。", { n: Math.round(r * 100) })}`);
     }
   }
 
@@ -1429,7 +1508,7 @@ export default class RewordPlugin extends Plugin {
   private notifyTranslationQuotaExhausted(): void {
     if (this.quotaExhaustedNotified) return;
     this.quotaExhaustedNotified = true;
-    showMessage("翻译额度已耗尽，已停止翻译。请到「双语翻译设置 → 监督中心」重置用量或提高上限。", 5000, "error" as any);
+    showMessage(T("翻译额度已耗尽，已停止翻译。请到「双语翻译设置 → 监督中心」重置用量或提高上限。"), 5000, "error" as any);
   }
 
   /** 累计腾讯翻译用量并持久化 */
@@ -2079,7 +2158,7 @@ export default class RewordPlugin extends Plugin {
   public translateToAi(text: string): void {
     if (!text?.trim()) return;
     if (!this.aiSettings?.enabled || !this.aiSettings?.apiKey) {
-      showMessage("翻译未配置：请先在 AI 设置中开启并填写 API", 2600, "info" as any);
+      showMessage(T("翻译未配置：请先在 AI 设置中开启并填写 API"), 2600, "info" as any);
       return;
     }
     const prompt = (this.aiSettings.translatePrompt || DEFAULT_AI_SETTINGS.translatePrompt).trim();
@@ -2104,7 +2183,7 @@ export default class RewordPlugin extends Plugin {
   public async sendDocToAi(docId: string): Promise<void> {
     if (!docId) return;
     if (!this.aiSettings?.enabled || !this.aiSettings?.apiKey) {
-      showMessage("AI 未配置：请先在 AI 设置中开启并填写 API", 2600, "info" as any);
+      showMessage(T("AI 未配置：请先在 AI 设置中开启并填写 API"), 2600, "info" as any);
       return;
     }
     this.showAiPanel();
@@ -2113,7 +2192,7 @@ export default class RewordPlugin extends Plugin {
     try {
       const text = await this.getDocText(docId);
       if (!text.trim()) {
-        showMessage("无法读取该文档正文，可能为空文档或无读取权限", 2400, "info" as any);
+        showMessage(T("无法读取该文档正文，可能为空文档或无读取权限"), 2400, "info" as any);
         return;
       }
       this.aiPanel?.sendText(text);
@@ -2821,7 +2900,7 @@ export default class RewordPlugin extends Plugin {
           });
         }).catch((err) => {
           getLogger().error("[REword-AnnoAI] 动态 import anno-ai-dialog 失败:", err);
-          showMessage("打开 AI 助手失败：模块加载错误", 3000, "error" as any);
+          showMessage(T("打开 AI 助手失败：模块加载错误"), 3000, "error" as any);
         });
       },
     };
@@ -2839,7 +2918,7 @@ export default class RewordPlugin extends Plugin {
     const bid = blockId || this.lastDeepReadBlockId;
     const docId = this.lastDeepReadDocId || this.getSelectionDocId(bid) || "";
     if (!bid) {
-      showMessage("无法定位来源块，句子批注失败", 2500, "error" as any);
+      showMessage(T("无法定位来源块，句子批注失败"), 2500, "error" as any);
       return;
     }
     await this.annotationStore.upsert({
@@ -2854,7 +2933,7 @@ export default class RewordPlugin extends Plugin {
       tags: tags || [],
     });
     this.applyAnnotationBlockMarks();
-    showMessage("已添加句子批注", 2000, "success" as any);
+    showMessage(T("已添加句子批注"), 2000, "success" as any);
     // 2026-08-27 修复（Tab 覆盖）：按 Tab 刷新，不再覆盖非批注 Tab 的当前内容
     this.renderDockIfTab("annotations");
   }
@@ -2874,9 +2953,9 @@ export default class RewordPlugin extends Plugin {
     if (count > 0) {
       this.applyAnnotationBlockMarks();
       this.renderDockIfTab("annotations");
-      showMessage(`已清理 ${count} 条失效批注（来源块已删除）`, 2500, "info" as any);
+      showMessage(T("已清理 {count} 条失效批注（来源块已删除）", { count }), 2500, "info" as any);
     } else {
-      showMessage("没有需要清理的失效批注", 2000, "info" as any);
+      showMessage(T("没有需要清理的失效批注"), 2000, "info" as any);
     }
     return count;
   }
@@ -2892,7 +2971,7 @@ export default class RewordPlugin extends Plugin {
     // 兜底：优先用本次来源块，其次用最近精读块；仍为空则提示先定位块
     const blockId = opts.blockId || this.lastDeepReadBlockId || "";
     if (!blockId) {
-      showMessage("未定位到来源块：请先在文档中点击该文段，再插入批注", 3000, "info" as any);
+      showMessage(T("未定位到来源块：请先在文档中点击该文段，再插入批注"), 3000, "info" as any);
       return;
     }
 
@@ -2923,9 +3002,9 @@ export default class RewordPlugin extends Plugin {
         document.execCommand("copy");
         document.body.removeChild(ta);
       }
-      showMessage("已复制", 1500, "info" as any);
+      showMessage(T("已复制"), 1500, "info" as any);
     } catch {
-      showMessage("复制失败", 1500, "error" as any);
+      showMessage(T("复制失败"), 1500, "error" as any);
     }
   }
 
@@ -2942,7 +3021,7 @@ export default class RewordPlugin extends Plugin {
     if (!markdown.trim()) throw new Error("内容为空");
 
     const now = new Date();
-    const defaultTitle = `AI 对话 ${now.getMonth() + 1}月${now.getDate()}日 ${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
+    const defaultTitle = `${T("AI 对话 {m}月{n}日 {h}:{mm}", { m: now.getMonth() + 1, n: now.getDate(), h: String(now.getHours()).padStart(2, "0"), mm: String(now.getMinutes()).padStart(2, "0") })}`;
     const docTitle = title.trim() || defaultTitle;
     const docPath = path.trim() ? `${path.replace(/\/$/, "")}/${docTitle}` : `/${docTitle}`;
 
@@ -2999,7 +3078,7 @@ export default class RewordPlugin extends Plugin {
           <div class="whale-dlg-head">
             <span class="whale-dlg-title">${this.escapeHtml(message)}</span>
             <div class="whale-dlg-head-right">
-              <button class="whale-dlg-close" id="cp-pd-cancel" title="取消">✕</button>
+              <button class="whale-dlg-close" id="cp-pd-cancel" title="${T("取消")}">✕</button>
             </div>
           </div>
           <div class="whale-confirm-body">
@@ -3007,8 +3086,8 @@ export default class RewordPlugin extends Plugin {
           </div>
           <div class="whale-dlg-foot">
             <span class="whale-dlg-spacer"></span>
-            <button class="whale-dlg-btn" id="cp-pd-cancel2">取消</button>
-            <button class="whale-dlg-btn whale-dlg-btn--primary" id="cp-pd-ok">确定</button>
+            <button class="whale-dlg-btn" id="cp-pd-cancel2">${T("取消")}</button>
+            <button class="whale-dlg-btn whale-dlg-btn--primary" id="cp-pd-ok">${T("确定")}</button>
           </div>
         </div>
       `;
@@ -3045,9 +3124,9 @@ export default class RewordPlugin extends Plugin {
       ov.className = "whale-dlg-overlay hiword-theme-menu-overlay";
       ov.innerHTML = `
         <div class="hiword-theme-menu" role="menu">
-          <button class="hiword-theme-menu-item" data-act="rename">✎ 重命名</button>
+          <button class="hiword-theme-menu-item" data-act="rename">${T("✎ 重命名")}</button>
           <button class="hiword-theme-menu-item hiword-theme-menu-item--danger" data-act="delete">🗑 删除（${(theme as any).words.length} 词）</button>
-          <button class="hiword-theme-menu-item" data-act="cancel">取消</button>
+          <button class="hiword-theme-menu-item" data-act="cancel">${T("取消")}</button>
         </div>
       `;
       document.body.appendChild(ov);
@@ -3253,7 +3332,7 @@ export default class RewordPlugin extends Plugin {
   ): Promise<number> {
     const bid = blockId || this.lastDeepReadBlockId || "";
     if (!bid) {
-      showMessage("无法定位来源块，请先在文档中定位再批量批注", 3000, "error" as any);
+      showMessage(T("无法定位来源块，请先在文档中定位再批量批注"), 3000, "error" as any);
       return 0;
     }
     const docId = this.lastDeepReadDocId || this.getSelectionDocId(bid) || "";
@@ -3270,8 +3349,8 @@ export default class RewordPlugin extends Plugin {
     let ok = 0;
     for (const s of sents) {
       if (!s.sentence) continue;
-      const structure = s.structure ? `结构：${s.structure}` : "";
-      const translation = s.translation ? `译文：${s.translation}` : "";
+      const structure = s.structure ? `${T("结构：")}${s.structure}` : "";
+      const translation = s.translation ? `${T("译文：")}${s.translation}` : "";
       const note = fillNote ? [structure, translation].filter(Boolean).join("；") : "";
       await this.annotationStore.upsert({
         blockId: bid,
@@ -3289,7 +3368,7 @@ export default class RewordPlugin extends Plugin {
       ok++;
     }
     this.applyAnnotationBlockMarks();
-    showMessage(`已批量添加 ${ok} 条 AI 批注`, 2000, "success" as any);
+    showMessage(T("已批量添加 {ok} 条 AI 批注", { ok }), 2000, "success" as any);
     // 2026-08-27 修复（Tab 覆盖）：按 Tab 刷新，不覆盖非批注 Tab 的当前内容
     this.renderDockIfTab("annotations");
     return ok;
@@ -3312,12 +3391,7 @@ export default class RewordPlugin extends Plugin {
     registerStandaloneDock(this, f, slot, dockWidth);
   }
 
-  /** 渲染组合栏外壳（Tab 栏 + 内容区 + 头部按钮） */
-  private renderCombinedDockShell(dockElement: HTMLElement, combinedIds: string[]) {
-    renderCombinedDockShell(this, dockElement, combinedIds);
-  }
-
-  /** 重新渲染组合栏 Tab（功能在组合栏 / 独立栏之间移动后调用） */
+  /** 重绘组合栏外壳（工作台常驻面板） */
   private refreshCombinedDock(): void {
     refreshCombinedDock(this);
   }
@@ -3430,7 +3504,8 @@ export default class RewordPlugin extends Plugin {
       dockElement.innerHTML = `<div class="hiword-dock-panel"><div class="hiword-dock-content" id="hiword-dock-content"></div></div>`;
       contentEl = dockElement.querySelector("#hiword-dock-content");
     }
-    if (id === "vocab") this.renderVocabPanel(dockElement);
+    if (id === DASHBOARD_FEATURE_ID) this.renderDashboardPanel(dockElement);
+    else if (id === "vocab") this.renderVocabPanel(dockElement);
     else if (id === "dict") this.renderDictPanel(dockElement);
     else if (id === "annotations") this.renderAnnotationsPanel(dockElement);
     else if (id === "ai") this.renderAiPanel(dockElement);
@@ -3445,15 +3520,31 @@ export default class RewordPlugin extends Plugin {
   }
 
 
+  /** 工作台面板（聚合仪表盘，委托 dashboard-panel 模块渲染） */
+  private renderDashboardPanel(dockElement: HTMLElement) {
+    renderDashboardPanel(this, dockElement);
+  }
+
+  /** 工作台数据快照（dashboard-panel 唯一数据入口；未就绪返回 null） */
+  /** @internal dashboard/dashboard-panel.ts 访问（public 仅为此目的） */
+  public getDashboardSnapshot(): DashboardSnapshot | null {
+    if (!this.isReady || !this.vocabStore) return null;
+    return {
+      metrics: this.computeReviewMetrics(),
+      words: this.vocabStore.getAllWords(),
+      candidates: this.vocabStore.getReviewCandidates(),
+      books: this.readerDock?.storeRef?.list ?? [],
+    };
+  }
+
   /**
    * 刷新词库面板（词典就绪后调用，确保简洁模式能显示实时释义）
    * 注意：此方法仅用于明确需要刷新词库的场景（如单词入库后）。
    * 词典切换后的通用刷新请使用 refreshActivePanel()，避免覆盖非词库 Tab 的内容。
    */
   private refreshVocabPanel() {
-    if (this.dockElement) {
-      this.renderVocabPanel(this.dockElement);
-    }
+    // 2026-09-11 组合栏退役：词库可能承载在主区页签 / 独立 Dock，经 refreshFeature 路由
+    this.refreshFeature("vocab");
   }
 
   /**
@@ -3462,33 +3553,19 @@ export default class RewordPlugin extends Plugin {
    */
   /** @internal dock/dock-layout.ts 委托访问（P1-5 拆分） */
   refreshActivePanel() {
-    // 组合栏：刷新当前激活 Tab
+    // 组合栏：刷新当前激活 Tab（组合栏是家）
     if (this.dockElement) {
       destroyAllPreviews();   // 各 Tab 共用 #hiword-dock-content，刷新前先销毁只读预览防 detached 崩溃
       const activeTab = this.dockElement.querySelector(".hiword-dock-tab.active") as HTMLElement | null;
       const tab = activeTab?.dataset.tab;
-      if (tab === "vocab") {
-        this.renderVocabPanel(this.dockElement);
-      } else if (tab === "dict") {
-        this.renderDictPanel(this.dockElement);
-      } else if (tab === "annotations") {
-        this.renderAnnotationsPanel(this.dockElement);
-      } else if (tab === "ai") {
-        this.renderAiPanel(this.dockElement);
-      } else if (tab === "review") {
-        this.renderReviewPanel(this.dockElement);
-      } else if (tab === READER_FEATURE_ID) {
-        try {
-          this.readerDock?.render(this.dockElement);
-        } catch (e) {
-          getLogger().warn("[REword] 刷新阅读器面板失败", { error: e });
-        }
-      }
+      if (tab) this.renderFeatureInto(tab, this.dockElement);
     }
     // 独立 Dock（2026-08-22）：逐个重绘
     for (const [id, el] of this.standaloneElements) {
       this.renderFeatureInto(id, el);
     }
+    // 已弹出的主区功能页签：逐个重绘
+    refreshFeatureTabs(this);
   }
 
   /**
@@ -3501,7 +3578,7 @@ export default class RewordPlugin extends Plugin {
     if (!contentEl) return;
 
     if (!this.isReady) {
-      contentEl.innerHTML = `<div class="hiword-empty">插件尚未就绪</div>`;
+      contentEl.innerHTML = `<div class="hiword-empty">${t("插件尚未就绪")}</div>`;
       return;
     }
 
@@ -3509,7 +3586,7 @@ export default class RewordPlugin extends Plugin {
     const book = currentBookIsAll ? this.vocabStore.getBook(ALL_BOOK_ID) : this.vocabStore.getActiveBook();
     const theme = currentBookIsAll ? book?.themes[0] : this.vocabStore.getActiveTheme();
     if (!book || !theme) {
-      contentEl.innerHTML = `<div class="hiword-empty">词库为空</div>`;
+      contentEl.innerHTML = `<div class="hiword-empty">${t("词库为空")}</div>`;
       return;
     }
 
@@ -3520,37 +3597,38 @@ export default class RewordPlugin extends Plugin {
     const visibleWords = this.applyVocabLabelFilter(words);
 
     contentEl.innerHTML = `
+      ${this.renderVocabDraftBanner()}
       <div class="hiword-vb-bar">
         <select class="b3-select hiword-vb-book" id="hiword-vb-book">
-          ${books.map((b) => `<option value="${b.id}" ${b.id === book.id ? "selected" : ""}>${this.escapeHtml(b.name)}</option>`).join("")}
+          ${books.map((b) => `<option value="${b.id}" ${b.id === book.id ? "selected" : ""} ${b.id !== ALL_BOOK_ID && (b as { status?: string }).status === "draft" ? 'class="hiword-vb-book-draft"' : ""}>${this.vocabBookStatusPrefix(b as { status?: string; id: string })}${this.escapeHtml(b.name)}</option>`).join("")}
         </select>
-        ${currentBookIsAll ? `<span class="hiword-vb-master-badge" title="总库为只读聚合，包含所有单词本与全部状态（已收藏/已毕业/已忽略）">总库只读</span>` : ""}
-        <button class="b3-button b3-button--small b3-button--outline" id="hiword-vb-add-book" title="新建单词本" ${currentBookIsAll ? "style=\"display:none\"" : ""}>＋本</button>
-        <button class="b3-button b3-button--small hiword-vb-del-book-btn" id="hiword-vb-del-book" title="删除当前单词本" ${currentBookIsAll || realBooks.length <= 1 ? "style=\"display:none\"" : ""}>✕</button>
+        ${currentBookIsAll ? `<span class="hiword-vb-master-badge" title="${t("总库为只读聚合，包含所有单词本与全部状态（已收藏/已毕业/已忽略）")}">${t("总库只读")}</span>` : ""}
+        <button class="b3-button b3-button--small b3-button--outline" id="hiword-vb-add-book" title="${t("新建单词本")}" ${currentBookIsAll ? "style=\"display:none\"" : ""}>${t("＋本")}</button>
+        <button class="b3-button b3-button--small hiword-vb-del-book-btn" id="hiword-vb-del-book" title="${t("删除当前单词本")}" ${currentBookIsAll || realBooks.length <= 1 ? "style=\"display:none\"" : ""}>✕</button>
       </div>
       <div class="hiword-vb-themes" id="hiword-vb-themes">
         ${book.themes
           .map((t) => `<span class="hiword-vb-theme ${t.id === theme.id ? "active" : ""}" data-theme="${t.id}">
-            <span class="hiword-vb-theme-name">${this.escapeHtml(t.name)}</span>${!currentBookIsAll && t.name !== "未分类" ? `<button type="button" class="hiword-vb-theme-del" data-action="theme-delete" data-theme="${t.id}" title="删除分类（单词移至未分类）">✕</button>` : ""}
+            <span class="hiword-vb-theme-name">${this.escapeHtml(t.name)}</span>${!currentBookIsAll && t.name !== "未分类" ? `<button type="button" class="hiword-vb-theme-del" data-action="theme-delete" data-theme="${t.id}" title="${T("删除分类（单词移至未分类）")}">✕</button>` : ""}
           </span>`)
           .join("")}
-        ${currentBookIsAll ? "" : `<span class="hiword-vb-addtheme" id="hiword-vb-add-theme" title="新建主题">＋</span>`}
+        ${currentBookIsAll ? "" : `<span class="hiword-vb-addtheme" id="hiword-vb-add-theme" title="${t("新建主题")}">＋</span>`}
       </div>
       <!-- 2026-09-04 移除：文档内自动高亮词库单词开关（功能整体下线） -->
       <!-- 2026-08-14 新增：标签横切筛选（不限词本/主题） -->
       ${this.renderVocabLabelFilterRow()}
       <div class="hiword-vb-toolbar">
-        <input class="b3-text-field" id="hiword-vb-search" placeholder="搜索单词..." />
-        <select class="b3-select" id="hiword-vb-sort" title="排序方式">
-          <option value="time" ${this.vocabSort === "time" ? "selected" : ""}>纳入时间</option>
-          <option value="mastery" ${this.vocabSort === "mastery" ? "selected" : ""}>熟悉程度</option>
-          <option value="custom" ${this.vocabSort === "custom" ? "selected" : ""}>自定义</option>
+        <input class="b3-text-field" id="hiword-vb-search" placeholder="${t("搜索单词...")}" />
+        <select class="b3-select" id="hiword-vb-sort" title="${t("排序方式")}">
+          <option value="time" ${this.vocabSort === "time" ? "selected" : ""}>${t("纳入时间")}</option>
+          <option value="mastery" ${this.vocabSort === "mastery" ? "selected" : ""}>${t("熟悉程度")}</option>
+          <option value="custom" ${this.vocabSort === "custom" ? "selected" : ""}>${t("自定义")}</option>
         </select>
-        <button class="b3-button b3-button--small hiword-vb-batch-btn" id="hiword-vb-batch" title="批量将选中单词分类到指定单词本 / 子类">⬚ 批量分类</button>
-        <button class="b3-button b3-button--small hiword-vb-import-btn" id="hiword-vb-import" title="从思源文档/块拖入，或粘贴文本批量导入单词（含一级单词本 + 二级分类选择）">⬇ 导入</button>
+        <button class="b3-button b3-button--small hiword-vb-batch-btn" id="hiword-vb-batch" title="${t("批量将选中单词分类到指定单词本 / 子类")}">${t("⬚ 批量分类")}</button>
+        <button class="b3-button b3-button--small hiword-vb-import-btn" id="hiword-vb-import" title="${t("从思源文档/块拖入，或粘贴文本批量导入单词（含一级单词本 + 二级分类选择）")}">${t("⬇ 导入")}</button>
         <div class="hiword-vb-readctrl" id="hiword-vb-readctrl">
-          <button class="b3-button b3-button--small b3-button--primary" id="hiword-vb-readall" title="列表朗读（顺序播放所有单词）">▶ 朗读列表</button>
-          <button class="b3-button b3-button--small" id="hiword-vb-readstop" title="停止朗读" style="display:none;">⏹ 停止</button>
+          <button class="b3-button b3-button--small b3-button--primary" id="hiword-vb-readall" title="${t("列表朗读（顺序播放所有单词）")}">${t("▶ 朗读列表")}</button>
+          <button class="b3-button b3-button--small" id="hiword-vb-readstop" title="${t("停止朗读")}" style="display:none;">${t("⏹ 停止")}</button>
           <span class="hiword-vb-readprog" id="hiword-vb-readprog" style="display:none;"></span>
         </div>
       </div>
@@ -3579,16 +3657,16 @@ export default class RewordPlugin extends Plugin {
     // 2026-09-04 移除：文档内自动高亮开关的事件监听（功能下线）
     // 新建单词本（2026-08-14 改：window.prompt 在思源 Electron 中常被禁用，改用自定义弹窗）
     contentEl.querySelector("#hiword-vb-add-book")?.addEventListener("click", async () => {
-      const name = await this.copilotPromptDialog("新建单词本名称：", "我的单词本");
+      const name = await this.copilotPromptDialog(t("新建单词本名称："), "我的单词本");
       if (name) this.vocabStore.addBook(name).then(() => this.renderVocabPanel(dockElement));
     });
     // 删除单词本（2026-08-15 新增；至少保留一个）
     contentEl.querySelector("#hiword-vb-del-book")?.addEventListener("click", async () => {
       if (realBooks.length <= 1) {
-        showMessage("至少保留一个单词本，无法删除", 2000, "info");
+        showMessage(t("至少保留一个单词本，无法删除"), 2000, "info");
         return;
       }
-      const ok = await confirmDelete(`删除单词本「${book.name}」？\n该单词本及其下所有分类与单词将被删除。`);
+      const ok = await confirmDelete(t("删除单词本「{n}」？\n该单词本及其下所有分类与单词将被删除。", { n: book.name }));
       if (ok) {
         await this.vocabStore.removeBook(book.id);
         this.renderVocabPanel(dockElement);
@@ -3605,7 +3683,7 @@ export default class RewordPlugin extends Plugin {
         const theme = book.themes.find((x) => x.id === themeId);
         if (!theme) return;
         const ok = await confirmDelete(
-          `删除分类「${theme.name}」？\n该分类下的 ${theme.words.length} 个单词会移入「未分类」（不删除单词）。`
+          T("删除分类「{n}」？\n该分类下的 {m} 个单词会移入「未分类」（不删除单词）。", { n: theme.name, m: theme.words.length })
         );
         if (ok) {
           await this.vocabStore.removeTheme(book.id, themeId);
@@ -3619,7 +3697,7 @@ export default class RewordPlugin extends Plugin {
       } else if ((e.target as HTMLElement).id === "hiword-vb-add-theme") {
         // 新建主题（同样改用自定义弹窗）
         const name = await this.copilotPromptDialog(
-          "新建主题名称（如 工作职业/国家政绩/商业娱乐）：",
+          T("新建主题名称（如 工作职业/国家政绩/商业娱乐）："),
           "新主题"
         );
         if (name) {
@@ -3637,14 +3715,14 @@ export default class RewordPlugin extends Plugin {
       if (!theme) return;
       const action = await this.showThemeContextMenu(theme, t);
       if (action === "rename") {
-        const newName = await this.copilotPromptDialog("重命名主题：", theme.name);
+        const newName = await this.copilotPromptDialog(T("重命名主题："), theme.name);
         if (newName) {
           await this.vocabStore.renameTheme(book.id, themeId, newName);
           this.renderVocabPanel(dockElement);
         }
       } else if (action === "delete") {
         const ok = await confirmDelete(
-          `删除分类「${theme.name}」？\n该分类下的 ${theme.words.length} 个单词会移入「未分类」（不删除单词）。`
+          T("删除分类「{n}」？\n该分类下的 {m} 个单词会移入「未分类」（不删除单词）。", { n: theme.name, m: theme.words.length })
         );
         if (ok) {
           await this.vocabStore.removeTheme(book.id, themeId);
@@ -3709,13 +3787,13 @@ export default class RewordPlugin extends Plugin {
         // 切换按钮文字
         if (action === "vocab-tags-expand") {
           t.setAttribute("data-action", "vocab-tags-collapse");
-          t.textContent = "收起";
-          t.setAttribute("title", "折叠标签");
+          t.textContent = T("收起");
+          t.setAttribute("title", T("折叠标签"));
         } else {
           const hidden = hiddenWrap?.children.length || 0;
           t.setAttribute("data-action", "vocab-tags-expand");
-          t.textContent = `+${hidden} 展开`;
-          t.setAttribute("title", `展开全部标签`);
+          t.textContent = T("+{n} 展开", { n: hidden });
+          t.setAttribute("title", T("展开全部标签"));
         }
       } else if (action === "vocab-status-set" && word) {
         // 2026-08-22 新增 / 2026-08-23 改:词库面板"未掌握/已掌握/需复习/清除"切换
@@ -3776,7 +3854,7 @@ export default class RewordPlugin extends Plugin {
           const btn = bar.querySelector(".hiword-vb-status-collapse") as HTMLElement | null;
           if (btn) {
             const text = willExpand ? "▴" : "▾";
-            const t = willExpand ? "收起状态条" : "展开状态条";
+            const t = willExpand ? T("收起状态条") : T("展开状态条");
             btn.textContent = text;
             btn.setAttribute("title", t);
             btn.setAttribute("aria-label", t);
@@ -3798,7 +3876,7 @@ export default class RewordPlugin extends Plugin {
         // 开始新的列表朗读
         const currentWords = this.getCurrentVocabWords();
         if (currentWords.length === 0) {
-          showMessage("当前列表没有单词", 2000, "info" as any);
+          showMessage(t("当前列表没有单词"), 2000, "info" as any);
           return;
         }
         this.startListReading(currentWords, dockElement);
@@ -3840,10 +3918,10 @@ export default class RewordPlugin extends Plugin {
     const cur = w.learningStatus as LearningStatusT | undefined; // undefined = 清除态
     // 2026-08-23 改:4 项 = 3 颜色 + 1 清除;status 为空字符串时,语义上视为 undefined
     const items: Array<{ status: LearningStatusT | ""; label: string; title: string }> = [
-      { status: LearningStatus.Learning, label: "未掌握", title: "未掌握(黄色高亮)" },
-      { status: LearningStatus.Mastered, label: "已掌握", title: "已掌握(绿色高亮)" },
-      { status: LearningStatus.Review,    label: "需复习", title: "需复习(紫色高亮)" },
-      { status: "" /* sentinel = 清除 */,     label: "✕",      title: "清除样式(文档内不再高亮)" },
+      { status: LearningStatus.Learning, label: t("未掌握"), title: t("未掌握(黄色高亮)") },
+      { status: LearningStatus.Mastered, label: t("已掌握"), title: t("已掌握(绿色高亮)") },
+      { status: LearningStatus.Review,    label: t("需复习"), title: t("需复习(紫色高亮)") },
+      { status: "" /* sentinel = 清除 */,     label: "✕",      title: t("清除样式(文档内不再高亮)") },
     ];
     const word = this.escapeAttr(w.word);
     const chips = items.map((it) => {
@@ -3862,7 +3940,7 @@ export default class RewordPlugin extends Plugin {
     const isExpanded = this.vocabStatusBarExpandedWords.has(w.word);
     const collapsed = !isExpanded;
     const chevron = collapsed ? "▾" : "▴";
-    const chevronTitle = collapsed ? "展开状态条" : "收起状态条";
+    const chevronTitle = collapsed ? t("展开状态条") : t("收起状态条");
     // collapsed class 控制 4 颗 chip 隐藏 / chevron 单独显示
     return `<div class="hiword-vb-status-bar${collapsed ? " hiword-vb-status-bar--collapsed" : ""}" data-status-bar-word="${word}">
       ${chips}
@@ -3880,18 +3958,20 @@ export default class RewordPlugin extends Plugin {
    * 先清空可能把目标过滤掉的 label 筛选。
    */
   private scrollVocabPanelToWord(word: string): void {
+    // 2026-09-11 组合栏退役：词库可能承载在主区页签 / 独立 Dock
+    const panelEl = this.getFeatureElement("vocab");
     // 1) 清空当前标签筛选(可能把目标过滤掉了)
     if (this.vocabLabelFilter && this.vocabLabelFilter !== "all") {
       this.vocabLabelFilter = "all";
-      if (this.dockElement) this.renderVocabPanel(this.dockElement);
+      if (panelEl) this.renderVocabPanel(panelEl);
     }
     // 2) 找目标行
     const safe = (window as any).CSS?.escape ? (window as any).CSS.escape(word) : word.replace(/"/g, '\\"');
-    const row = this.dockElement?.querySelector(
+    const row = panelEl?.querySelector(
       `.hiword-vb-row[data-word="${safe}"]`
     ) as HTMLElement | null;
     if (!row) {
-      showMessage(`「${word}」不在当前词本/主题中`, 2000, "info");
+      showMessage(t("「{w}」不在当前词本/主题中", { w: word }), 2000, "info");
       return;
     }
     // 3) 滚动 + 闪烁
@@ -3917,9 +3997,9 @@ export default class RewordPlugin extends Plugin {
     if (words.length === 0) {
       // 2026-08-14 优化：「无标签」筛选时的空状态文案引导添加
       if (this.vocabLabelFilter === "__no_label__") {
-        return `<div class="hiword-empty">这些词卡还没打标签<br/>点击任一词卡的「＋ 添加标签」按钮开始分类</div>`;
+        return `<div class="hiword-empty">${t("这些词卡还没打标签")}<br/>${t("点击任一词卡的「＋ 添加标签」按钮开始分类")}</div>`;
       }
-      return `<div class="hiword-empty">该主题还没有单词<br/>查词时点 ★ 即可收藏到这里</div>`;
+      return `<div class="hiword-empty">${t("该主题还没有单词")}<br/>${t("查词时点 ★ 即可收藏到这里")}</div>`;
     }
     return words
       .map((w) => {
@@ -3952,7 +4032,7 @@ export default class RewordPlugin extends Plugin {
         const mainHtml = hit
           ? dictRenderer.renderVocabCompactCard(w.word, phonetic, groups, w.mastery, w.id, inflections, w.queryCount)
           : dictRenderer.renderVocabCompactCard(w.word, phonetic, groups, w.mastery, w.id, inflections, w.queryCount)
-            + (this.dictReady ? `<div class="hiword-vb-dict-miss">当前词典未收录</div>` : "");
+            + (this.dictReady ? `<div class="hiword-vb-dict-miss">${t("当前词典未收录")}</div>` : "");
 
         // 掌握度星
         const starsHtml = this.renderMasteryStars(w.word, w.mastery);
@@ -3964,7 +4044,7 @@ export default class RewordPlugin extends Plugin {
 
         return `
         <div class="hiword-vb-row" draggable="${this.vocabSort === "custom" && !withSelect}" data-id="${w.id}" data-word="${this.escapeAttr(w.word)}">
-          ${withSelect ? `<label class="hiword-vb-sel-wrap"><input type="checkbox" class="hiword-vb-sel" data-word="${this.escapeAttr(w.word)}"></label>` : `<span class="hiword-vb-drag" title="拖动排序">⋮⋮</span>`}
+          ${withSelect ? `<label class="hiword-vb-sel-wrap"><input type="checkbox" class="hiword-vb-sel" data-word="${this.escapeAttr(w.word)}"></label>` : `<span class="hiword-vb-drag" title="${t("拖动排序")}">⋮⋮</span>`}
           <div class="hiword-vb-main">
             ${mainHtml}
             ${tagsHtml}
@@ -3973,9 +4053,9 @@ export default class RewordPlugin extends Plugin {
           <div class="hiword-vb-right">
             ${starsHtml}
             <div class="hiword-vb-actions">
-              <button class="hiword-vb-btn" data-action="tts" data-word="${this.escapeAttr(w.word)}" title="朗读">🔊</button>
-              <button class="hiword-vb-btn" data-action="vocab-detail" data-word="${this.escapeAttr(w.word)}" title="详细释义">📖</button>
-              <button class="hiword-vb-btn" data-action="unvocab" data-word="${this.escapeAttr(w.word)}" title="移出词库">✕</button>
+              <button class="hiword-vb-btn" data-action="tts" data-word="${this.escapeAttr(w.word)}" title="${t("朗读")}">🔊</button>
+              <button class="hiword-vb-btn" data-action="vocab-detail" data-word="${this.escapeAttr(w.word)}" title="${t("详细释义")}">📖</button>
+              <button class="hiword-vb-btn" data-action="unvocab" data-word="${this.escapeAttr(w.word)}" title="${t("移出词库")}">✕</button>
             </div>
           </div>
         </div>
@@ -3983,7 +4063,7 @@ export default class RewordPlugin extends Plugin {
         `;
         } catch (err) {
           getLogger().error("[REword] 渲染词卡失败: " + w.word, { error: err });
-          return `<div class="hiword-vb-row hiword-vb-row--error" data-word="${this.escapeAttr(w.word)}"><span class="hiword-vb-card-word">${this.escapeHtml(w.word)}</span><span class="hiword-vb-dict-miss">词卡渲染失败</span></div>`;
+          return `<div class="hiword-vb-row hiword-vb-row--error" data-word="${this.escapeAttr(w.word)}"><span class="hiword-vb-card-word">${this.escapeHtml(w.word)}</span><span class="hiword-vb-dict-miss">${t("词卡渲染失败")}</span></div>`;
         }
       })
       .join("");
@@ -4024,9 +4104,9 @@ export default class RewordPlugin extends Plugin {
     const pages = Math.ceil(total / this.vocabPageSize);
     const cur = this.vocabPage + 1;
     return `<div class="hiword-vb-pager" id="hiword-vb-pager">
-      <button class="b3-button b3-button--small" id="hiword-vb-prev" ${this.vocabPage <= 0 ? "disabled" : ""}>‹ 上一页</button>
-      <span class="hiword-vb-pager-info">第 ${cur} / ${pages} 页 · 共 ${total} 词</span>
-      <button class="b3-button b3-button--small" id="hiword-vb-next" ${this.vocabPage >= pages - 1 ? "disabled" : ""}>下一页 ›</button>
+      <button class="b3-button b3-button--small" id="hiword-vb-prev" ${this.vocabPage <= 0 ? "disabled" : ""}>${t("‹ 上一页")}</button>
+      <span class="hiword-vb-pager-info">${t("第 {c} / {p} 页 · 共 {n} 词", { c: cur, p: pages, n: total })}</span>
+      <button class="b3-button b3-button--small" id="hiword-vb-next" ${this.vocabPage >= pages - 1 ? "disabled" : ""}>${t("下一页 ›")}</button>
     </div>`;
   }
 
@@ -4066,12 +4146,12 @@ export default class RewordPlugin extends Plugin {
     const book = currentBookIsAll ? this.vocabStore.getBook(ALL_BOOK_ID) : this.vocabStore.getActiveBook();
     const theme = currentBookIsAll ? book?.themes[0] : this.vocabStore.getActiveTheme();
     if (!book || !theme) {
-      showMessage("词库为空，无法批量分类", 2000, "info" as any);
+      showMessage(t("词库为空，无法批量分类"), 2000, "info" as any);
       return;
     }
     const realBooks = this.vocabStore.getBooks().filter((b) => b.id !== ALL_BOOK_ID);
     if (realBooks.length === 0) {
-      showMessage("尚未创建单词本，无法批量分类", 2000, "info" as any);
+      showMessage(t("尚未创建单词本，无法批量分类"), 2000, "info" as any);
       return;
     }
     const words = this.applyVocabLabelFilter(this.vocabStore.getSortedWords(theme, this.vocabSort));
@@ -4082,7 +4162,7 @@ export default class RewordPlugin extends Plugin {
     const initialThemeId = initialBook.themes[0]?.id ?? "";
 
     const dialog = new Dialog({
-      title: `批量分类（共 ${words.length} 词）`,
+      title: t("批量分类（共 {n} 词）", { n: words.length }),
       width: responsiveDialogSize(560, "width"),
       height: "72vh",
       content: this.renderBatchClassifyDialogHtml(words, realBooks, initialBookId, initialThemeId),
@@ -4106,19 +4186,19 @@ export default class RewordPlugin extends Plugin {
     return `
       <div class="hiword-bc-dialog">
         <div class="hiword-bc-toolbar">
-          <span class="hiword-bc-label">目标单词本</span>
+          <span class="hiword-bc-label">${t("目标单词本")}</span>
           <select class="b3-select hiword-bc-book" id="hiword-bc-book">${bookOptions}</select>
-          <span class="hiword-bc-label">子类</span>
+          <span class="hiword-bc-label">${t("子类")}</span>
           <span class="hiword-bc-themes" id="hiword-bc-themes">${themeChips}</span>
-          <button class="hiword-bc-toggle" id="hiword-bc-toggle" title="选中/取消当前可见全部单词">全选</button>
+          <button class="hiword-bc-toggle" id="hiword-bc-toggle" title="${t("选中/取消当前可见全部单词")}">${t("全选")}</button>
         </div>
-        <input class="b3-text-field hiword-bc-search" id="hiword-bc-search" placeholder="搜索单词..." />
+        <input class="b3-text-field hiword-bc-search" id="hiword-bc-search" placeholder="${t("搜索单词...")}" />
         <div class="hiword-bc-grid" id="hiword-bc-grid">${cards}</div>
         <div class="hiword-bc-footer">
-          <span class="hiword-bc-count">已选 <b id="hiword-bc-count">0</b> 词</span>
+          <span class="hiword-bc-count">${t("已选")} <b id="hiword-bc-count">0</b> ${t("词")}</span>
           <div class="hiword-bc-actions">
-            <button class="b3-button b3-button--small" id="hiword-bc-cancel">取消</button>
-            <button class="b3-button b3-button--small b3-button--primary" id="hiword-bc-confirm">确认分类</button>
+            <button class="b3-button b3-button--small" id="hiword-bc-cancel">${t("取消")}</button>
+            <button class="b3-button b3-button--small b3-button--primary" id="hiword-bc-confirm">${t("确认分类")}</button>
           </div>
         </div>
       </div>
@@ -4129,7 +4209,7 @@ export default class RewordPlugin extends Plugin {
   private renderBatchClassifyThemeChips(bookId: string, themeId: string): string {
     const book = this.vocabStore.getBook(bookId);
     if (!book || book.themes.length === 0) {
-      return `<span class="hiword-bc-themes-empty">暂无子类</span>`;
+      return `<span class="hiword-bc-themes-empty">${t("暂无子类")}</span>`;
     }
     return book.themes
       .map(
@@ -4225,18 +4305,18 @@ export default class RewordPlugin extends Plugin {
     root.querySelector("#hiword-bc-cancel")?.addEventListener("click", () => dialog.destroy());
     root.querySelector("#hiword-bc-confirm")?.addEventListener("click", async () => {
       if (!pickedBookId || !pickedThemeId) {
-        showMessage("请先选择目标单词本与子类", 2000, "info" as any);
+        showMessage(t("请先选择目标单词本与子类"), 2000, "info" as any);
         return;
       }
       const chosen = checks.filter((c) => c.checked).map((c) => c.value);
       if (chosen.length === 0) {
-        showMessage("请先勾选要分类的单词", 2000, "info" as any);
+        showMessage(T("请先勾选要分类的单词"), 2000, "info" as any);
         return;
       }
       const btn = root.querySelector("#hiword-bc-confirm") as HTMLButtonElement | null;
       if (btn) {
         btn.disabled = true;
-        btn.textContent = "归类中…";
+        btn.textContent = T("归类中…");
       }
       let moved = 0;
       for (const w of chosen) {
@@ -4247,7 +4327,7 @@ export default class RewordPlugin extends Plugin {
       const tName = this.vocabStore.getTheme(pickedBookId, pickedThemeId)?.name ?? "";
       dialog.destroy();
       if (this.dockElement) this.renderVocabPanel(this.dockElement);
-      showMessage(`已将 ${moved} 个单词归类到「${bName}」/「${tName}」`, 3000, "success" as any);
+      showMessage(T("已将 {moved} 个单词归类到「{bName}」/「{tName}」", { moved, bName, tName }), 3000, "success" as any);
     });
   }
 
@@ -4263,14 +4343,14 @@ export default class RewordPlugin extends Plugin {
     // 2026-08-15 新增：标签筛选区可折叠/展开（按钮始终可见）
     return `<div class="hiword-vb-labels-wrap ${this.vocabTagsCollapsed ? 'hiword-vb-labels-wrap--collapsed' : ''}">
       <button type="button" class="hiword-vb-tags-collapse-btn" id="hiword-vb-tags-collapse-btn"
-              aria-expanded="${this.vocabTagsCollapsed ? 'false' : 'true'}" title="收起/展开标签筛选">
+              aria-expanded="${this.vocabTagsCollapsed ? 'false' : 'true'}" title="${T("收起/展开标签筛选")}">
         ${this.vocabTagsCollapsed ? '🏷️ 标签 ▸ 展开' : '🏷️ 标签 ▾ 收起'}
       </button>
       <div class="hiword-vb-labels" id="hiword-vb-labels">
-        <button type="button" class="hiword-vb-label ${this.vocabLabelFilter === "all" ? "active" : ""}" data-filter="all">全部</button>
+        <button type="button" class="hiword-vb-label ${this.vocabLabelFilter === "all" ? "active" : ""}" data-filter="all">${T("全部")}</button>
         ${chips}
-        <button type="button" class="hiword-vb-label hiword-vb-label--no-label ${noLabelActive}" data-filter="__no_label__" title="未打标签的词卡">🏷️ 无标签</button>
-        <button type="button" class="hiword-vb-label-manage-btn" data-action="vocab-manage-labels" title="管理词库标签">⚙ 管理</button>
+        <button type="button" class="hiword-vb-label hiword-vb-label--no-label ${noLabelActive}" data-filter="__no_label__" title="${T("未打标签的词卡")}">${T("🏷️ 无标签")}</button>
+        <button type="button" class="hiword-vb-label-manage-btn" data-action="vocab-manage-labels" title="${t("管理词库标签")}">${t("⚙ 管理")}</button>
       </div>
     </div>`;
   }
@@ -4340,7 +4420,7 @@ export default class RewordPlugin extends Plugin {
     if (tagged.length === 0) {
       // 未打标签：占位引导
       return `<div class="hiword-vb-row-tags hiword-vb-row-tags--empty">
-        <button type="button" class="hiword-vb-tag-empty-btn" data-action="vocab-label-edit" data-word="${wEsc}" title="为该词卡添加标签">＋ 添加标签</button>
+        <button type="button" class="hiword-vb-tag-empty-btn" data-action="vocab-label-edit" data-word="${wEsc}" title="${T("为该词卡添加标签")}">${T("＋ 添加标签")}</button>
       </div>`;
     }
 
@@ -4349,9 +4429,9 @@ export default class RewordPlugin extends Plugin {
       `<span class="hiword-vb-tag-chip" style="--tag-color:${l.color}" title="#${this.escapeHtml(l.name)}">#${this.escapeHtml(l.name)}</span>`
     ).join("");
     const expandBtn = hiddenCount > 0
-      ? `<button type="button" class="hiword-vb-tags-expand" data-action="vocab-tags-expand" data-id="${this.escapeAttr(w.id)}" data-state="collapsed" title="展开全部 ${tagged.length} 个标签">+${hiddenCount} 展开</button>`
+      ? `<button type="button" class="hiword-vb-tags-expand" data-action="vocab-tags-expand" data-id="${this.escapeAttr(w.id)}" data-state="collapsed" title="${T("展开全部 {n} 个标签", { n: tagged.length })}">+${hiddenCount} ${T("展开")}</button>`
       : (tagged.length > COLLAPSED_COUNT
-        ? `<button type="button" class="hiword-vb-tags-expand" data-action="vocab-tags-collapse" data-id="${this.escapeAttr(w.id)}" title="折叠">收起</button>`
+        ? `<button type="button" class="hiword-vb-tags-expand" data-action="vocab-tags-collapse" data-id="${this.escapeAttr(w.id)}" title="${T("折叠")}">${T("收起")}</button>`
         : "");
     const hiddenChips = hiddenCount > 0
       ? `<span class="hiword-vb-tag-chip hiword-vb-tag-chip--hidden" data-id="${this.escapeAttr(w.id)}" style="display:none;">${tagged.slice(COLLAPSED_COUNT).map((l) =>
@@ -4359,10 +4439,10 @@ export default class RewordPlugin extends Plugin {
       : "";
 
     return `<div class="hiword-vb-row-tags" data-id="${this.escapeAttr(w.id)}">
-      <span class="hiword-vb-tags-count" title="已选 ${tagged.length} 个标签">🏷️ ${tagged.length}</span>
+      <span class="hiword-vb-tags-count" title="${T("已选 {n} 个标签", { n: tagged.length })}">🏷️ ${tagged.length}</span>
       <span class="hiword-vb-tag-chips">${chipsHtml}${hiddenChips}</span>
       ${expandBtn}
-      <button type="button" class="hiword-vb-tag-edit-btn" data-action="vocab-label-edit" data-word="${wEsc}" title="编辑标签">✎</button>
+      <button type="button" class="hiword-vb-tag-edit-btn" data-action="vocab-label-edit" data-word="${wEsc}" title="${T("编辑标签")}">✎</button>
     </div>`;
   }
 
@@ -4389,28 +4469,28 @@ export default class RewordPlugin extends Plugin {
       <div class="whale-dlg" style="width:480px;">
         <div class="whale-dlg-head">
           <span class="whale-dlg-title">🏷️ 给「${wordEsc}」打标签</span>
-          <button type="button" class="whale-dlg-iconbtn" data-action="close" title="关闭">✕</button>
+          <button type="button" class="whale-dlg-iconbtn" data-action="close" title="${T("关闭")}">✕</button>
         </div>
         <div class="hiword-vb-label-edit-body">
           <div class="hiword-vb-label-current">
             <span class="hiword-vb-section-tag whale-card-tag-primary">
-              <span class="whale-card-section-icon">✏️</span><span>当前标签</span>
+              <span class="whale-card-section-icon">✏️</span><span>${T("当前标签")}</span>
               <span class="hiword-vb-label-current-count" id="hiword-vb-label-current-count">${selected.size}</span>
             </span>
             <div class="hiword-vb-label-current-chips" id="hiword-vb-label-current-chips">
               ${[...selected].map((id) => {
                 const l = all.find((x) => x.id === id);
                 const name = l?.name || id;
-                return `<span class="hiword-vb-tag-chip hiword-vb-tag-chip--active" style="--tag-color:${l?.color || "#9ca3af"}" data-id="${this.escapeAttr(id)}" title="点击移除">#${this.escapeHtml(name)} ✕</span>`;
-              }).join("") || `<span class="hiword-vb-label-empty-hint">还没选任何标签，从下方选择或新建</span>`}
+                return `<span class="hiword-vb-tag-chip hiword-vb-tag-chip--active" style="--tag-color:${l?.color || "#9ca3af"}" data-id="${this.escapeAttr(id)}" title="${T("点击移除")}">#${this.escapeHtml(name)} ✕</span>`;
+              }).join("") || `<span class="hiword-vb-label-empty-hint">${T("还没选任何标签，从下方选择或新建")}</span>`}
             </div>
           </div>
           <div class="hiword-vb-label-search">
             <span class="whale-card-section-icon">🔍</span>
-            <input type="text" id="hiword-vb-label-search-input" class="b3-text-field" placeholder="搜索标签…" />
+            <input type="text" id="hiword-vb-label-search-input" class="b3-text-field" placeholder="${T("搜索标签…")}" />
           </div>
           <div class="hiword-vb-section-tag whale-card-tag-readonly">
-            <span class="whale-card-section-icon">📚</span><span>已有标签（点击切换）</span>
+            <span class="whale-card-section-icon">📚</span><span>${T("已有标签（点击切换）")}</span>
           </div>
           <div class="hiword-vb-label-list" id="hiword-vb-label-list">
             ${all.map((l) => {
@@ -4423,13 +4503,13 @@ export default class RewordPlugin extends Plugin {
           </div>
           <div class="hiword-vb-label-new">
             <span class="whale-card-section-icon">➕</span>
-            <input type="text" id="hiword-vb-label-new-input" class="b3-text-field" placeholder="新建标签名称（如 口语 / 作文素材）" />
-            <button type="button" class="b3-button b3-button--small b3-button--outline" id="hiword-vb-label-new-btn">创建</button>
+            <input type="text" id="hiword-vb-label-new-input" class="b3-text-field" placeholder="${T("新建标签名称（如 口语 / 作文素材）")}" />
+            <button type="button" class="b3-button b3-button--small b3-button--outline" id="hiword-vb-label-new-btn">${T("创建")}</button>
           </div>
         </div>
         <div class="whale-dlg-foot">
           <div class="whale-dlg-foot-left"></div>
-          <button type="button" class="b3-button b3-button--primary" id="hiword-vb-label-save">确定</button>
+          <button type="button" class="b3-button b3-button--primary" id="hiword-vb-label-save">${T("确定")}</button>
         </div>
       </div>
     `;
@@ -4475,8 +4555,8 @@ export default class RewordPlugin extends Plugin {
       wrap.innerHTML = [...selected].map((id) => {
         const l = all.find((x) => x.id === id);
         const name = l?.name || id;
-        return `<span class="hiword-vb-tag-chip hiword-vb-tag-chip--active" style="--tag-color:${l?.color || "#9ca3af"}" data-id="${this.escapeAttr(id)}" title="点击移除">#${this.escapeHtml(name)} ✕</span>`;
-      }).join("") || `<span class="hiword-vb-label-empty-hint">还没选任何标签，从下方选择或新建</span>`;
+        return `<span class="hiword-vb-tag-chip hiword-vb-tag-chip--active" style="--tag-color:${l?.color || "#9ca3af"}" data-id="${this.escapeAttr(id)}" title="${T("点击移除")}">#${this.escapeHtml(name)} ✕</span>`;
+      }).join("") || `<span class="hiword-vb-label-empty-hint">${T("还没选任何标签，从下方选择或新建")}</span>`;
       // 绑定移除
       wrap.querySelectorAll<HTMLElement>(".hiword-vb-tag-chip").forEach((c) => {
         c.addEventListener("click", () => {
@@ -4506,7 +4586,7 @@ export default class RewordPlugin extends Plugin {
       // 重建列表 + 选中区（labelStore 已落盘）
       rebuildList();
       newInput.value = "";
-      showMessage(`已新建标签 #${created.name}`, 1500, "info");
+      showMessage(T("已新建标签 #{v1}", { v1: created.name }), 1500, "info");
     };
     newBtn.addEventListener("click", doCreate);
     newInput.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); doCreate(); } });
@@ -4541,11 +4621,11 @@ export default class RewordPlugin extends Plugin {
     overlay.querySelector("#hiword-vb-label-save")?.addEventListener("click", async () => {
       try {
         await this.vocabStore.updateWordLabels(word.toLowerCase(), [...selected]);
-        showMessage(`已保存 ${selected.size} 个标签到「${word}」`, 1800, "success" as any);
+        showMessage(T("已保存 {v1} 个标签到「{word}」", { v1: selected.size, word }), 1800, "success" as any);
         overlay.remove();
         if (this.dockElement) this.renderVocabPanel(this.dockElement);
       } catch (err: any) {
-        showMessage(`保存失败：${err?.message || err}`, 3000, "error");
+        showMessage(T("保存失败：{v1}", { v1: err?.message || err }), 3000, "error");
       }
     });
   }
@@ -4560,7 +4640,7 @@ export default class RewordPlugin extends Plugin {
   private openLabelManagementDialog(domain: "vocab" | "annotation" = "annotation"): void {
     const store = domain === "vocab" ? this.vocabLabelStore : this.annotationLabelStore;
     const isVocab = domain === "vocab";
-    const title = isVocab ? "⚙️ 管理词库标签" : "⚙️ 管理批注标签";
+    const title = isVocab ? t("⚙️ 管理词库标签") : t("⚙️ 管理批注标签");
     const domainName = isVocab ? "词卡" : "批注";
     document.querySelector(".whale-dlg-label-mgmt-overlay")?.remove();
     const render = () => {
@@ -4571,13 +4651,13 @@ export default class RewordPlugin extends Plugin {
         <div class="whale-dlg" style="width:560px;">
           <div class="whale-dlg-head">
             <span class="whale-dlg-title">${title}</span>
-            <button type="button" class="whale-dlg-iconbtn" data-action="close" title="关闭">✕</button>
+            <button type="button" class="whale-dlg-iconbtn" data-action="close" title="${T("关闭")}">✕</button>
           </div>
           <div class="whale-dlg-body">${renderLabelManagementDialog(labels)}</div>
           <div class="whale-dlg-foot">
             <span class="whale-dlg-section-label">${labels.length} 个标签</span>
             <span class="hiword-vb-labels-foot-spacer"></span>
-            <button type="button" class="b3-button b3-button--primary" data-action="close">完成</button>
+            <button type="button" class="b3-button b3-button--primary" data-action="close">${T("完成")}</button>
           </div>
         </div>
       `;
@@ -4646,10 +4726,10 @@ export default class RewordPlugin extends Plugin {
           const row = btn.closest(".hiword-vb-label-mgmt-row") as HTMLElement;
           const id = row?.dataset.id || "";
           const name = row?.querySelector('[data-action="label-rename"]')?.textContent || id;
-          const ok = await confirmDelete(`删除标签「${name}」？\n已标注的${domainName}/词条中残留引用会保留（显示灰色 #id 后缀）。`);
+          const ok = await confirmDelete(`${T("删除标签「{name}」？", { name })}\n${T("已标注的{n}/词条中残留引用会保留（显示灰色 #id 后缀）。", { n: domainName })}`);
           if (!ok) return;
           store.remove(id);
-          showMessage(`已删除标签 #${name}`, 1500, "info");
+          showMessage(T("已删除标签 #{name}", { name }), 1500, "info");
           rerender();
         });
       });
@@ -4662,7 +4742,7 @@ export default class RewordPlugin extends Plugin {
         if (!name) return;
         const created = store.add(name);
         newInput.value = "";
-        showMessage(`已新建标签 #${created.name}`, 1500, "info");
+        showMessage(T("已新建标签 #{v1}", { v1: created.name }), 1500, "info");
         rerender();
       };
       newBtn.addEventListener("click", doCreate);
@@ -4682,11 +4762,15 @@ export default class RewordPlugin extends Plugin {
     render();
   }
 
-  /** 5 星掌握度（DOM 逆序 + CSS row-reverse 实现悬浮预览） */
+  /**
+   * 熟练度圆圈（5 点，空心→实心；DOM 逆序 + CSS row-reverse 实现悬浮预览）。
+   * 2026-09-11 v4：★ 字符改为纯 CSS 圆圈；分级变色——1-4 级实心为主题色，
+   * 第 5 级（标熟）实心为成功色；空心为中性灰描边。词库与复习面板共用。
+   */
   private renderMasteryStars(word: string, mastery: number): string {
     let stars = "";
     for (let i = MASTERY_MAX; i >= 1; i--) {
-      stars += `<span class="hiword-star ${i <= mastery ? "filled" : ""}" data-action="mastery" data-word="${this.escapeAttr(word)}" data-level="${i}">★</span>`;
+      stars += `<span class="hiword-star ${i <= mastery ? "filled" : ""} ${i === MASTERY_MAX ? "hiword-star--ripe" : ""}" data-action="mastery" data-word="${this.escapeAttr(word)}" data-level="${i}" title="${i === MASTERY_MAX ? T("5 级 · 标熟") : T("{n} 级", { n: i })}"></span>`;
     }
     return `<span class="hiword-stars" data-word="${this.escapeAttr(word)}">${stars}</span>`;
   }
@@ -4742,29 +4826,29 @@ export default class RewordPlugin extends Plugin {
     // 「管理词典」「朗读设置」按钮与搜索框始终显示，确保任何状态下都能进入词典管理
     contentEl.innerHTML = `
       <div class="hiword-dict-head">
-        <span class="hiword-dict-current" title="当前词典">📚 ${activeInfo ? activeInfo.name : "未加载"}</span>
-        <button class="b3-button b3-button--outline b3-button--small" id="hiword-dict-manage" title="管理词典">管理词典</button>
-        <button class="b3-button b3-button--outline b3-button--small" id="hiword-tts-setting" title="朗读设置">🔊</button>
+        <span class="hiword-dict-current" title="${T("当前词典")}">📚 ${activeInfo ? activeInfo.name : "未加载"}</span>
+        <button class="b3-button b3-button--outline b3-button--small" id="hiword-dict-manage" title="${T("管理词典")}">${T("管理词典")}</button>
+        <button class="b3-button b3-button--outline b3-button--small" id="hiword-tts-setting" title="${T("朗读设置")}">🔊</button>
       </div>
       <div class="hiword-dict-tabbar">
-        <button class="hiword-dict-tab ${this.dictLookupTab === "offline" ? "is-active" : ""}" data-dtab="offline" title="离线词典查询（本地 MDX / StarDict）">📖 离线查词</button>
-        <button class="hiword-dict-tab ${this.dictLookupTab === "online" ? "is-active" : ""}" data-dtab="online" title="在线词典查询（词海 corp.dict.cn）">🌐 在线查词</button>
+        <button class="hiword-dict-tab ${this.dictLookupTab === "offline" ? "is-active" : ""}" data-dtab="offline" title="${T("离线词典查询（本地 MDX / StarDict）")}">${T("📖 离线查词")}</button>
+        <button class="hiword-dict-tab ${this.dictLookupTab === "online" ? "is-active" : ""}" data-dtab="online" title="${T("在线词典查询（词海 corp.dict.cn）")}">${T("🌐 在线查词")}</button>
         <span class="hiword-dict-tabbar-spacer"></span>
-        <div class="hiword-dict-crumbbox is-empty" id="hiword-dict-crumbbox" title="跳转路径（点击层级回跳）">
+        <div class="hiword-dict-crumbbox is-empty" id="hiword-dict-crumbbox" title="${T("跳转路径（点击层级回跳）")}">
           <span class="hiword-dict-crumb-scroll" id="hiword-dict-crumb-scroll"></span>
-          <button class="hiword-dict-crumb-clear" id="hiword-dict-crumb-clear" data-action="dict-crumb-clear" title="清空导航路径">×</button>
+          <button class="hiword-dict-crumb-clear" id="hiword-dict-crumb-clear" data-action="dict-crumb-clear" title="${T("清空导航路径")}">×</button>
         </div>
-        <button class="hiword-dict-tab-setting" id="hiword-dict-src-setting" title="设置：单词小窗默认词典源">⚙️</button>
+        <button class="hiword-dict-tab-setting" id="hiword-dict-src-setting" title="${T("设置：单词小窗默认词典源")}">⚙️</button>
       </div>
       <div class="hiword-dict-search">
-        <input class="b3-text-field" id="hiword-dict-input" placeholder="输入单词查询..." autofocus />
-        <button class="b3-button" id="hiword-dict-btn" title="查询单词">查询</button>
+        <input class="b3-text-field" id="hiword-dict-input" placeholder="${T("输入单词查询...")}" autofocus />
+        <button class="b3-button" id="hiword-dict-btn" title="${T("查询单词")}">${T("查询")}</button>
       </div>
       <div class="hiword-dict-result" id="hiword-dict-result">
         ${this.dictLookupTab === "online"
-          ? `<p class="hiword-dict-hint">在线查询「词海」，输入单词后按回车</p>`
+          ? `<p class="hiword-dict-hint">${T("在线查询「词海」，输入单词后按回车")}</p>`
           : dictStatus === "ready"
-            ? `<p class="hiword-dict-hint">输入单词后按回车或点击查询</p>`
+            ? `<p class="hiword-dict-hint">${T("输入单词后按回车或点击查询")}</p>`
             : dictRenderer.renderInitRequired()}
       </div>
     `;
@@ -4865,8 +4949,8 @@ export default class RewordPlugin extends Plugin {
         return (
           (i > 0 ? `<span class="hiword-dict-crumb-sep">›</span>` : "") +
           (isCur
-            ? `<span class="hiword-dict-crumb is-current" title="当前词">${this.escapeHtml(w)}</span>`
-            : `<span class="hiword-dict-crumb" data-action="dict-crumb-jump" data-word="${wEsc}" title="跳回 ${wEsc}">${this.escapeHtml(w)}</span>`)
+            ? `<span class="hiword-dict-crumb is-current" title="${T("当前词")}">${this.escapeHtml(w)}</span>`
+            : `<span class="hiword-dict-crumb" data-action="dict-crumb-jump" data-word="${wEsc}" title="${T("跳回 {n}", { n: wEsc })}">${this.escapeHtml(w)}</span>`)
         );
       })
       .join("");
@@ -4879,38 +4963,38 @@ export default class RewordPlugin extends Plugin {
    */
   private openDictSourceSetting(onSaved?: () => void) {
     const dlg = new Dialog({
-      title: "查词典设置",
+      title: t("查词典设置"),
       width: responsiveDialogSize(360, "width"),
       height: "auto",
       content: `
         <div class="hiword-dict-src-setting" style="padding:14px 18px 18px;">
           <div class="fn__flex-1 b3-label" style="padding:6px 0;">
-            <div style="font-weight:600;margin-bottom:8px;">单词小窗默认词典源</div>
+            <div style="font-weight:600;margin-bottom:8px;">${t("单词小窗默认词典源")}</div>
             <label style="display:flex;align-items:center;gap:8px;padding:5px 0;cursor:pointer;">
               <input type="radio" name="hiword-dict-src" value="offline" ${this.onlineSettings?.popupSource !== "online" ? "checked" : ""} />
-              <span>📖 先使用离线词典</span>
+              <span>📖 ${t("先使用离线词典")}</span>
             </label>
             <label style="display:flex;align-items:center;gap:8px;padding:5px 0;cursor:pointer;">
               <input type="radio" name="hiword-dict-src" value="online" ${this.onlineSettings?.popupSource === "online" ? "checked" : ""} />
-              <span>🌐 先使用在线词典（词海）</span>
+              <span>🌐 ${t("先使用在线词典（词海）")}</span>
             </label>
-            <p class="b3-label__note" style="margin-top:8px;">同时决定侧边栏「查词典」打开时默认所在的页签；🌐 按钮可随时临时切换。</p>
+            <p class="b3-label__note" style="margin-top:8px;">${t("同时决定侧边栏「查词典」打开时默认所在的页签；")}🌐 ${t("按钮可随时临时切换。")}</p>
           </div>
           <div class="fn__flex-1 b3-label" style="padding:10px 0 2px;">
-            <div style="font-weight:600;margin-bottom:6px;">在线词典卡片字体大小</div>
+            <div style="font-weight:600;margin-bottom:6px;">${t("在线词典卡片字体大小")}</div>
             <div class="hiword-fs-slider-wrap" style="margin:2px 0;">
-              <span class="hiword-fs-label">小</span>
+              <span class="hiword-fs-label">${t("小")}</span>
               <div class="hiword-fs-track-wrap">
                 <input id="hiword-dss-scale" class="hiword-fs-slider" type="range" min="0" max="6" step="1" value="${dictScaleIndex(this.onlineSettings?.dictFontScale ?? 1.0)}" />
                 <output class="hiword-fs-thumblabel" id="hiword-dss-scale-label" style="left:${dictScaleIndex(this.onlineSettings?.dictFontScale ?? 1.0) / 6 * 100}%">${Math.round((this.onlineSettings?.dictFontScale ?? 1.0) * 100)}%</output>
               </div>
-              <span class="hiword-fs-label">大</span>
+              <span class="hiword-fs-label">${t("大")}</span>
             </div>
-            <p class="b3-label__note" style="margin-top:6px;">缩放范围 80%~140%，默认 100%；拖动即时预览，保存后生效。</p>
+            <p class="b3-label__note" style="margin-top:6px;">${t("缩放范围 80%~140%，默认 100%；拖动即时预览，保存后生效。")}</p>
           </div>
           <div class="fn__flex" style="justify-content:flex-end;gap:8px;margin-top:10px;">
-            <button class="b3-button b3-button--text" id="hiword-dss-cancel">取消</button>
-            <button class="b3-button b3-button--text" id="hiword-dss-save">保存</button>
+            <button class="b3-button b3-button--text" id="hiword-dss-cancel">${t("取消")}</button>
+            <button class="b3-button b3-button--text" id="hiword-dss-save">${t("保存")}</button>
           </div>
         </div>
       `,
@@ -4938,7 +5022,7 @@ export default class RewordPlugin extends Plugin {
         await this.saveOnlineSettings({ ...(this.onlineSettings || { ...DEFAULT_ONLINE }), enabled: this.onlineSettings?.enabled ?? true, popupSource, dictFontScale });
       }
       dlg.destroy();
-      showMessage("已保存：查词典设置", 1800, "success" as any);
+      showMessage(T("已保存：查词典设置"), 1800, "success" as any);
       onSaved?.();
     });
   }
@@ -5001,7 +5085,7 @@ export default class RewordPlugin extends Plugin {
    *  - 失败/未收录 → toast 提示 + 回退 renderDictSuggestions（相似候选）
    */
   private async doOnlineDictFallback(word: string, resultEl: HTMLElement): Promise<void> {
-    resultEl.innerHTML = `<div class="hiword-online-loading">🌐 在线词典查询中…</div>`;
+    resultEl.innerHTML = `<div class="hiword-online-loading">${T("🌐 在线词典查询中…")}</div>`;
     const r = await fetchOnlineDict(word);
     // 用户可能已切换到其它词 → 结果元素已不是当前词，直接放弃
     if (!resultEl.isConnected) return;
@@ -5010,7 +5094,7 @@ export default class RewordPlugin extends Plugin {
       return;
     }
     // 在线也查不到 → toast 提示 + 回退相似候选
-    showMessage(`「${word}」离线与在线词典均未收录`, 2500, "info");
+    showMessage(T("「{word}」离线与在线词典均未收录", { word }), 2500, "info");
     const candidates = dictEngine.searchCandidates(word, 3);
     resultEl.innerHTML = dictRenderer.renderDictSuggestions(word, candidates);
   }
@@ -5021,19 +5105,19 @@ export default class RewordPlugin extends Plugin {
    * 失败时不回退离线候选，而是提示未收录（用户可切回离线页签）。
    */
   private async doOnlineDictLookup(word: string, resultEl: HTMLElement): Promise<void> {
-    resultEl.innerHTML = `<div class="hiword-online-loading">🌐 在线词典查询中…</div>`;
+    resultEl.innerHTML = `<div class="hiword-online-loading">${T("🌐 在线词典查询中…")}</div>`;
     const r = await fetchOnlineDict(word);
     if (!resultEl.isConnected) return;
     if (r) {
       resultEl.innerHTML = renderOnlineDictCard(r, this.vocabStore.hasWord(word));
       return;
     }
-    showMessage(`「${word}」在线词典未收录`, 2200, "info");
+    showMessage(T("「{word}」在线词典未收录", { word }), 2200, "info");
     resultEl.innerHTML =
       `<div class="hiword-dict-notfound">` +
         `<div class="hiword-dict-notfound-icon">🌐</div>` +
-        `<p>在线词典未收录 "<strong>${this.escapeHtml(word)}</strong>"</p>` +
-        `<p class="hiword-dict-hint">可切到「📖 离线查词」页签查询本地词典</p>` +
+        `<p>${T("在线词典未收录")}"<strong>${this.escapeHtml(word)}</strong>"</p>` +
+        `<p class="hiword-dict-hint">${T("可切到「📖 离线查词」页签查询本地词典")}</p>` +
       `</div>`;
   }
 
@@ -5114,7 +5198,7 @@ export default class RewordPlugin extends Plugin {
       });
     } else if (action === "unvocab" && word) {
       this.vocabStore.removeWord(word).then(() => {
-        showMessage(`已移出词库：「${word}」`, 2000, "info");
+        showMessage(t("已移出词库：「{w}」", { w: word }), 2000, "info");
         this.renderVocabPanel(dockElement);
       });
     } else if (action === "vocab-detail" && word) {
@@ -5137,24 +5221,24 @@ export default class RewordPlugin extends Plugin {
           } else {
             // 词库详情离线查不到 → 在线词典兜底（2026-08-15 新增）
             if (this.onlineSettings?.enabled) {
-              panel.innerHTML = `<div class="hiword-online-loading">🌐 在线词典查询中…</div>`;
+              panel.innerHTML = `<div class="hiword-online-loading">${T("🌐 在线词典查询中…")}</div>`;
               fetchOnlineDict(word).then((r) => {
                 if (!panel.isConnected) return;
-                panel.innerHTML = r ? renderOnlineDictCard(r, false) : `<div class="hiword-vb-detail-empty">未找到「${this.escapeHtml(word)}」的详细释义</div>`;
+                panel.innerHTML = r ? renderOnlineDictCard(r, false) : `<div class="hiword-vb-detail-empty">${T("未找到「{word}」的详细释义", { word: this.escapeHtml(word) })}</div>`;
               });
             } else {
-              panel.innerHTML = `<div class="hiword-vb-detail-empty">未找到「${this.escapeHtml(word)}」的详细释义</div>`;
+              panel.innerHTML = `<div class="hiword-vb-detail-empty">${T("未找到「{word}」的详细释义", { word: this.escapeHtml(word) })}</div>`;
             }
           }
           panel.dataset.rendered = "1";
         }
         target.classList.add("active");
-        target.title = "收起详情";
+        target.title = T("收起详情");
       } else {
         // 收起
         panel.style.display = "none";
         target.classList.remove("active");
-        target.title = "详细释义";
+        target.title = T("详细释义");
       }
     } else if (action === "toggle-pos") {
       // 简洁/详细模式共用：独立展开/收起某个词性区块（互不影响，不自动收起其他）
@@ -5186,7 +5270,7 @@ export default class RewordPlugin extends Plugin {
         const willShow = rest.hidden;
         rest.hidden = !willShow;
         const exCount = moreContainer.querySelectorAll(".hiword-dict-sense-ex-row").length;
-        target.innerHTML = `<span class="hiword-dict-sense-toggle-arrow">${willShow ? "▴" : "▾"}</span> ${willShow ? "收起例句" : `展开 ${Math.max(0, exCount - 1)} 条例句`}`;
+        target.innerHTML = `<span class="hiword-dict-sense-toggle-arrow">${willShow ? "▴" : "▾"}</span> ${willShow ? T("收起例句") : `${T("展开 {n} 条例句", { n: Math.max(0, exCount - 1) })}`}`;
       }
     } else if (action === "add-vocab" && word && this.isReady) {
       this.addWordToVocab(word).then(() => {
@@ -5246,8 +5330,8 @@ export default class RewordPlugin extends Plugin {
         const resultEl = dockElement.querySelector("#hiword-dict-result") as HTMLElement | null;
         if (resultEl) {
           resultEl.innerHTML = this.dictLookupTab === "online"
-            ? `<p class="hiword-dict-hint">在线查询「词海」，输入单词后按回车</p>`
-            : `<p class="hiword-dict-hint">输入单词后按回车或点击查询</p>`;
+            ? `<p class="hiword-dict-hint">${T("在线查询「词海」，输入单词后按回车")}</p>`
+            : `<p class="hiword-dict-hint">${T("输入单词后按回车或点击查询")}</p>`;
         }
       } else {
         this.dictCrumbs.pop();
@@ -5283,7 +5367,7 @@ export default class RewordPlugin extends Plugin {
       const mastery = this.vocabStore.findRecord(orig)?.mastery ?? 0;
       let html = dictRenderer.renderVocabCompactCard(cand, parsed.phonetic, groups, mastery, wordId, inflections, this.vocabStore.getQueryCount(cand));
       if (cand.toLowerCase() !== orig.toLowerCase()) {
-        html += `<div class="hiword-vb-infer-note">⟵ 由「${this.escapeHtml(orig)}」推断</div>`;
+        html += `<div class="hiword-vb-infer-note">${T("⟵ 由「{orig}」推断", { orig: this.escapeHtml(orig) })}</div>`;
       }
       main.innerHTML = html;
     } else {
@@ -5754,7 +5838,7 @@ export default class RewordPlugin extends Plugin {
           ) as HTMLElement;
           this.showFloatingDictPopup(selection, btn || undefined);
         } else {
-          showMessage("请先选中一个单词", 2000, "info");
+          showMessage(T("请先选中一个单词"), 2000, "info");
         }
       },
     });
@@ -5794,7 +5878,7 @@ export default class RewordPlugin extends Plugin {
 
     const blockId = this.getSelectionBlockId();
     if (!blockId) {
-      showMessage("无法定位选中内容所在的块", 3000, "error");
+      showMessage(T("无法定位选中内容所在的块"), 3000, "error");
       return;
     }
     const sentence = this.extractContextSentence() || selection;
@@ -5809,9 +5893,9 @@ export default class RewordPlugin extends Plugin {
       ["wavy", "波浪", "﹏"],
     ];
     pop.innerHTML = `
-      <div class="hiword-quick-mark-head">🎨 快速标记（不写文字）</div>
+      <div class="hiword-quick-mark-head">${T("🎨 快速标记（不写文字）")}</div>
       <div class="hiword-quick-mark-row" data-kind="color">
-        ${colors.map((c) => `<button type="button" class="hiword-quick-mark-swatch" data-color="${c.value}" title="背景高亮 · ${c.name}" style="background:${c.value}"></button>`).join("")}
+        ${colors.map((c) => `<button type="button" class="hiword-quick-mark-swatch" data-color="${c.value}" title="${T("背景高亮 · {name}", { name: c.name })}" style="background:${c.value}"></button>`).join("")}
       </div>
       <div class="hiword-quick-mark-row" data-kind="line">
         ${lines.map(([k, label, icon]) => `<button type="button" class="hiword-quick-mark-line" data-style="${k}" title="${label}" ${k === "highlight" ? `style="background:#06b6d4;color:#fff"` : `style="text-decoration:underline;text-decoration-style:${k === "wavy" ? "wavy" : "solid"}"`}>Aa</button>`).join("")}
@@ -5849,9 +5933,9 @@ export default class RewordPlugin extends Plugin {
         });
         this.applyAnnotationBlockMarks();
         this.renderDockIfTab("annotations");
-        showMessage("已标记", 1500, "success" as any);
+        showMessage(T("已标记"), 1500, "success" as any);
       } catch (e: any) {
-        showMessage(`标记失败：${e?.message || e}`, 3000, "error");
+        showMessage(T("标记失败：{v1}", { v1: e?.message || e }), 3000, "error");
       }
       pop.remove();
     };
@@ -5916,7 +6000,7 @@ export default class RewordPlugin extends Plugin {
       }
       // 离线查不到 → 开启兜底时自动转在线（保持原有兜底体验）
       if (this.onlineSettings?.enabled) {
-        body.innerHTML = `<div class="hiword-online-loading">🌐 离线未收录，在线词典查询中…</div>`;
+        body.innerHTML = `<div class="hiword-online-loading">${T("🌐 离线未收录，在线词典查询中…")}</div>`;
         const r = await fetchOnlineDict(word);
         if (isStale()) return;
         body.innerHTML = r
@@ -5930,7 +6014,7 @@ export default class RewordPlugin extends Plugin {
     }
 
     // online 模式：直接查海词
-    body.innerHTML = `<div class="hiword-online-loading">🌐 在线词典查询中…</div>`;
+    body.innerHTML = `<div class="hiword-online-loading">${T("🌐 在线词典查询中…")}</div>`;
     const r = await fetchOnlineDict(word);
     if (isStale()) return;
     if (r) {
@@ -5940,8 +6024,8 @@ export default class RewordPlugin extends Plugin {
     body.innerHTML =
       `<div class="hiword-dict-notfound">` +
         `<div class="hiword-dict-notfound-icon">🌐</div>` +
-        `<p>在线词典未收录「<strong>${this.escapeHtml(word)}</strong>」</p>` +
-        `<button class="b3-button b3-button--small" data-action="dict-switch-offline" title="切换到离线词典">🌐 切换到离线词典查询</button>` +
+        `<p>${T("在线词典未收录「")}<strong>${this.escapeHtml(word)}</strong>」</p>` +
+        `<button class="b3-button b3-button--small" data-action="dict-switch-offline" title="${T("切换到离线词典")}">${T("🌐 切换到离线词典查询")}</button>` +
       `</div>`;
   }
 
@@ -5958,16 +6042,16 @@ export default class RewordPlugin extends Plugin {
       <div class="hiword-float-popup-header">
         <span class="hiword-float-popup-word">${this.escapeHtml(word)}</span>
         <div class="hiword-float-popup-actions">
-          <button class="hiword-float-btn" data-action="tts" title="朗读">🔊</button>
-          <button class="hiword-float-btn hiword-float-lookup" data-action="lookup-in-sidebar" data-word="${this.escapeAttr(word)}" title="在侧边栏查词并展示完整释义">🔍</button>
-          <button class="hiword-float-btn hiword-float-star ${this.vocabStore.hasWord(word) ? "star-on" : ""}" data-action="vocab-star" title="${this.vocabStore.hasWord(word) ? "移出词库" : "加入词库"}">${this.vocabStore.hasWord(word) ? "★" : "☆"}</button>
-          <button class="hiword-float-btn hiword-float-close" data-action="close" title="关闭">✕</button>
+          <button class="hiword-float-btn" data-action="tts" title="${T("朗读")}">🔊</button>
+          <button class="hiword-float-btn hiword-float-lookup" data-action="lookup-in-sidebar" data-word="${this.escapeAttr(word)}" title="${T("在侧边栏查词并展示完整释义")}">🔍</button>
+          <button class="hiword-float-btn hiword-float-star ${this.vocabStore.hasWord(word) ? "star-on" : ""}" data-action="vocab-star" title="${this.vocabStore.hasWord(word) ? t("移出词库") : t("加入词库")}">${this.vocabStore.hasWord(word) ? "★" : "☆"}</button>
+          <button class="hiword-float-btn hiword-float-close" data-action="close" title="${T("关闭")}">✕</button>
         </div>
       </div>
       <div class="hiword-float-popup-body" id="hiword-float-body">
         <div class="hiword-float-loading">
           <div class="hiword-dict-spinner"></div>
-          <span>查询中...</span>
+          <span>${T("查询中...")}</span>
         </div>
       </div>
     `;
@@ -6092,7 +6176,7 @@ export default class RewordPlugin extends Plugin {
           const willShow = rest.hidden;
           rest.hidden = !willShow;
           const exCount = moreContainer.querySelectorAll(".hiword-dict-sense-ex-row").length;
-          target.innerHTML = `<span class="hiword-dict-sense-toggle-arrow">${willShow ? "▴" : "▾"}</span> ${willShow ? "收起例句" : `展开 ${Math.max(0, exCount - 1)} 条例句`}`;
+          target.innerHTML = `<span class="hiword-dict-sense-toggle-arrow">${willShow ? "▴" : "▾"}</span> ${willShow ? T("收起例句") : `${T("展开 {n} 条例句", { n: Math.max(0, exCount - 1) })}`}`;
         }
       } else if (action === "toggle-section") {
         // 「词组·短语」层折叠/展开
@@ -6312,8 +6396,8 @@ export default class RewordPlugin extends Plugin {
       if (!word) return;
       e.preventDefault();
       e.stopPropagation();
-      this.focusFeatureDock("vocab");
-      this.scrollVocabPanelToWord(word);
+      // 页签化后 openTab 异步：等词库承载元素就绪再滚动定位
+      void withFeatureTab(this, "vocab", (el) => this.scrollVocabPanelToWord(word));
     };
     this.disposables.addEventListener(document, "click", onVocabMarkClick, true);
   }
@@ -6481,10 +6565,10 @@ export default class RewordPlugin extends Plugin {
     popup.innerHTML =
       '<div class="hiword-hover-popup-head">' +
         '<span class="hiword-hover-popup-word"></span>' +
-        '<button class="hiword-hover-popup-close" data-action="close" title="关闭（Esc 或点击外部）" aria-label="关闭">×</button>' +
+        '<button class="hiword-hover-popup-close" data-action="close" title="${T("关闭（Esc 或点击外部）")}" aria-label="${T("关闭")}">×</button>' +
       "</div>" +
       '<div class="hiword-hover-popup-body">' +
-        '<div class="hiword-float-loading"><div class="hiword-dict-spinner"></div><span>查询中…</span></div>' +
+        '<div class="hiword-float-loading"><div class="hiword-dict-spinner"></div><span>${T("查询中…")}</span></div>' +
       "</div>";
     document.body.appendChild(popup);
     this._hoverPopup = popup;
@@ -6694,7 +6778,7 @@ export default class RewordPlugin extends Plugin {
       const res = await fetch(url, { method: "GET", headers, signal: AbortSignal.timeout(15000) });
       if (!res.ok) {
         const text = await res.text().catch(() => "");
-        let hint = `请求失败 (${res.status})`;
+        let hint = `${T("请求失败 ({status})", { status: res.status })}`;
         if (res.status === 401 || res.status === 403) hint = "API Key 无效或无权限";
         else if (res.status === 404) hint = "接口地址不存在（请检查 Base URL）";
         else if (res.status === 429) hint = "请求过于频繁";
@@ -6726,25 +6810,20 @@ export default class RewordPlugin extends Plugin {
   }
 
   /**
-   * 在侧边栏中查询单词（2026-08-22：兼容组合栏 / 独立 Dock 两种停靠方式）
+   * 在侧边栏/页签中查询单词（2026-09-11：兼容主区页签 / 独立 Dock 两种承载方式）
    */
   private lookupWordInDock(word: string) {
-    this.focusFeatureDock("dict");
-    const el = this.getFeatureElement("dict");
-    if (!el) {
-      // 侧边栏未打开时，用对话框显示
-      this.showDictDialog(word);
-      return;
-    }
-    setTimeout(() => {
-      const input = el.querySelector("#hiword-dict-input") as HTMLInputElement | null;
-      if (input) {
-        input.value = word.trim();
-        this.doDictLookup(word.trim(), el);
-      } else {
-        this.showDictDialog(word);
-      }
-    }, 150);
+    void withFeatureTab(this, "dict", (el) => {
+      setTimeout(() => {
+        const input = el.querySelector("#hiword-dict-input") as HTMLInputElement | null;
+        if (input) {
+          input.value = word.trim();
+          this.doDictLookup(word.trim(), el);
+        } else {
+          this.showDictDialog(word);
+        }
+      }, 150);
+    }, { onMissing: () => this.showDictDialog(word) });
   }
 
   /**
@@ -6753,7 +6832,7 @@ export default class RewordPlugin extends Plugin {
   private lookupSelectedWord() {
     const selection = window.getSelection()?.toString()?.trim();
     if (!selection) {
-      showMessage("请先选中一个单词", 3000, "info");
+      showMessage(T("请先选中一个单词"), 3000, "info");
       return;
     }
     this.lookupWordInDock(selection);
@@ -6771,38 +6850,51 @@ export default class RewordPlugin extends Plugin {
     const contentEl = dockElement.querySelector("#hiword-dock-content") as HTMLElement;
     if (!contentEl) return;
     if (!this.isReady || !this.vocabStore) {
-      contentEl.innerHTML = `<div class="hiword-empty">插件尚未就绪</div>`;
+      contentEl.innerHTML = `<div class="hiword-empty">${t("插件尚未就绪")}</div>`;
       return;
     }
 
     const m = this.computeReviewMetrics();
     const all = this.vocabStore.getAllWords();
-    const filtered = all.filter(
-      (w) => this.reviewStatusFilter === "all" || w.status === this.reviewStatusFilter
-    );
+    // 2026-09-11 v4：四状态（全部/待学习/已学习/标熟词）——零新增字段：
+    // 待学习 = 从未复习（reps 0）；已学习 = 复习过且未标熟；标熟 = mastery 满级。
+    const bandOf = (w: WordRecord): "todo" | "done" | "ripe" =>
+      w.mastery >= MASTERY_MAX ? "ripe" : (w.reps ?? 0) === 0 ? "todo" : "done";
+    const cnt = { all: all.length, todo: 0, done: 0, ripe: 0 };
+    for (const w of all) cnt[bandOf(w)]++;
+    const filtered = all.filter((w) => this.reviewListFilter === "all" || bandOf(w) === this.reviewListFilter);
     const now = Date.now();
     const list = [...filtered]
       .sort((a, b) => this.dueTimeValue(a, now) - this.dueTimeValue(b, now))
       .slice(0, 60);
 
-    const filters: { key: "all" | "active" | "archived" | "ignored"; label: string }[] = [
-      { key: "active", label: "学习中" },
-      { key: "archived", label: "已归档" },
-      { key: "ignored", label: "已忽略" },
-      { key: "all", label: "全部" },
+    const stateTabs: { key: "all" | "todo" | "done" | "ripe"; label: string }[] = [
+      { key: "all", label: t("全部") },
+      { key: "todo", label: t("待学习") },
+      { key: "done", label: t("已学习") },
+      { key: "ripe", label: t("标熟词") },
     ];
+    const stateTabsHtml = stateTabs
+      .map(
+        (s) =>
+          `<button class="hiword-rp-stab ${this.reviewListFilter === s.key ? "hiword-rp-stab--on" : ""}" data-rp-list="${s.key}">${s.label}<span class="hiword-rp-stab-n">${cnt[s.key]}</span></button>`
+      )
+      .join("");
 
     const rows = list
       .map((w) => {
         const due = this.dueLabel(w, now);
-        const iv = w.intervalDays ? `${w.intervalDays}天` : "—";
-        const retStr = (!w.intervalDays || !w.lastReview)
-          ? `<span class="hiword-rp-ret hiword-rp-ret--new" title="尚未安排过复习">新</span>`
-          : `<span class="hiword-rp-ret" title="估计记忆保留率">${Math.round(this.wordRetention(w, now) * 100)}%</span>`;
-        const statusTag =
-          w.status === "archived" ? `<span class="hiword-rp-tag hiword-rp-tag--arc">已归档</span>`
-          : w.status === "ignored" ? `<span class="hiword-rp-tag hiword-rp-tag--ig">已忽略</span>`
-          : "";
+        // 到期徽章三态（基于时间判定，不依赖文案语言）
+        const sod = new Date(now);
+        sod.setHours(0, 0, 0, 0);
+        const startOfToday = sod.getTime();
+        const endOfToday = startOfToday + 86_400_000;
+        const dueTs = w.due ? Date.parse(w.due) : NaN;
+        const badgeCls = (!Number.isNaN(dueTs) && dueTs < startOfToday)
+          ? "hiword-rp-badge--overdue"
+          : (Number.isNaN(dueTs) || dueTs < endOfToday)
+            ? "hiword-rp-badge--today"
+            : "hiword-rp-badge--later";
         // 词性兜底：已有 pos → meaning 反提 → 本地词典实时反查；查到后异步回填词库
         const posResolved = this.resolvePosWithFallback(w.word, w.pos, w.meaning);
         if (posResolved.fromDict && !this.posBackfillCache.has(w.word)) {
@@ -6813,68 +6905,135 @@ export default class RewordPlugin extends Plugin {
         const posText = parsed.pos || "";
         const concise = parsed.senses.slice(0, 2).join("；") || "（暂无释义）";
         const fullSenses = parsed.senses.map((s, i) => `${i + 1}. ${s}`).join("　");
+        const phonetic = w.phonetic ? this.cleanPhonetic(w.phonetic) : "";
         return `<div class="hiword-rp-row" data-rp-word="${this.escapeHtml(w.word)}">
-          <button class="hiword-rp-toggle" type="button" title="展开 / 收起释义">▸</button>
-          <div class="hiword-rp-main">
-            <div class="hiword-rp-line1">
-              <span class="hiword-rp-word">${this.escapeHtml(w.word)}</span>
-              ${posText ? `<span class="hiword-rp-pos">${this.escapeHtml(posText)}</span>` : `<span class="hiword-rp-pos hiword-rp-pos--unknown">词性未知</span>`}
-              ${statusTag}
+          <div class="hiword-rp-body">
+            <button class="hiword-rp-speak" type="button" data-action="rp-speak" data-word="${this.escapeAttr(w.word)}" title="${T("朗读")}">
+              <svg viewBox="0 0 24 24" fill="currentColor"><path d="M11 5L6 9H2v6h4l5 4V5z"/><path d="M15.5 8.5a5 5 0 0 1 0 7" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+            </button>
+            <div class="hiword-rp-main">
+              <div class="hiword-rp-line1">
+                <span class="hiword-rp-word">${this.escapeHtml(w.word)}</span>
+                ${phonetic ? `<span class="hiword-rp-phon">${this.escapeHtml(phonetic)}</span>` : ""}
+                ${posText ? `<span class="hiword-rp-pos">${this.escapeHtml(posText)}</span>` : `<span class="hiword-rp-pos hiword-rp-pos--unknown">${T("词性未知")}</span>`}
+              </div>
+              <div class="hiword-rp-line2">${this.escapeHtml(concise)}</div>
+              <div class="hiword-rp-detail" hidden>
+                <div class="hiword-rp-detail-meaning">${this.escapeHtml(fullSenses)}</div>
+              </div>
             </div>
-            <div class="hiword-rp-line2">${this.escapeHtml(concise)}</div>
-            <div class="hiword-rp-detail" hidden>
-              <div class="hiword-rp-detail-meaning">${this.escapeHtml(fullSenses)}</div>
+            <div class="hiword-rp-side">
+              ${this.renderMasteryStars(w.word, w.mastery)}
+              <span class="hiword-rp-badge ${badgeCls}">${this.escapeHtml(due)}</span>
             </div>
           </div>
-          <span class="hiword-rp-due">${this.escapeHtml(due)}</span>
-          <span class="hiword-rp-iv">${iv}</span>
-          ${retStr}
-          <button class="hiword-rp-open" type="button" data-action="rp-open" title="在词典中打开">🔍</button>
+          <div class="hiword-rp-ops">
+            <button class="hiword-rp-ops-btn" type="button" data-action="rp-open" title="${T("在词典中打开")}">${t("查词典")}</button>
+            <button class="hiword-rp-ops-btn hiword-rp-ops-btn--danger" type="button" data-action="rp-unqueue" title="${t("归档并移出复习队列")}">${t("移出队列")}</button>
+          </div>
         </div>`;
       })
       .join("");
 
     const emptyHint =
       all.length === 0
-        ? `<div class="hiword-empty">词库还没有单词，先添加一些再来复习吧</div>`
+        ? `<div class="hiword-empty">${t("词库还没有单词，先添加一些再来复习吧")}</div>`
         : filtered.length === 0
-        ? `<div class="hiword-empty">该筛选下暂无单词</div>`
+        ? `<div class="hiword-empty">${t("该筛选下暂无单词")}</div>`
         : "";
 
     // 今日已达标：有活跃词但当前无到期项
     const doneBanner = m.active > 0 && m.dueCount === 0
-      ? `<div class="hiword-rp-done-banner">🎉 今天没有到期单词，去学点新词或稍后再来</div>`
+      ? `<div class="hiword-rp-done-banner">${t("今天没有到期单词，去学点新词或稍后再来")}</div>`
       : "";
+
+    // 2026-09-11 复习面板重构：双小 Tab（学习记忆 / 数据统计）
+    const paneCls = (p: "learn" | "stats") => `hiword-rp-pane${this.reviewPane === p ? " hiword-rp-pane--on" : ""}`;
+    const subtabCls = (p: "learn" | "stats") => `hiword-rp-subtab${this.reviewPane === p ? " hiword-rp-subtab--on" : ""}`;
+    // 2026-09-11 v4：今日到期行动条（约 40 秒/词粗估用时）
+    const estMin = Math.max(1, Math.round((m.dueCount * 2) / 3));
 
     contentEl.innerHTML = `
       <div class="hiword-review-panel">
-        <div class="hiword-rp-metrics">
-          <div class="hiword-rp-metric"><div class="hiword-rp-metric-val">${m.dueToday}</div><div class="hiword-rp-metric-label">今日待复习</div></div>
-          <div class="hiword-rp-metric hiword-rp-metric--warn"><div class="hiword-rp-metric-val">${m.overdue}</div><div class="hiword-rp-metric-label">逾期</div></div>
-          <div class="hiword-rp-metric"><div class="hiword-rp-metric-val">${m.weekReviewed}</div><div class="hiword-rp-metric-label">本周已复习</div></div>
-          <div class="hiword-rp-metric"><div class="hiword-rp-metric-val">${m.retention}%</div><div class="hiword-rp-metric-label">估计保留率</div></div>
+        <div class="hiword-rp-subtabs">
+          <button class="${subtabCls("learn")}" data-rp-pane="learn">${t("学习记忆")}</button>
+          <button class="${subtabCls("stats")}" data-rp-pane="stats">${t("数据统计")}</button>
         </div>
-        ${doneBanner}
-        <div class="hiword-rp-import-hint" title="将思源笔记中的文档或块拖到本面板，自动识别其中的英文单词并加入复习">⬇ 把思源文档 / 块拖到此处，自动导入英文单词</div>
-        <div class="hiword-rp-actions">
-          <button class="b3-button hiword-rp-start" data-action="review-start">▶ 开始复习${m.dueCount ? ` (${m.dueCount})` : ""}</button>
-          <button class="b3-button" data-action="review-settings" title="调试复习算法参数">⚙️ 算法设置</button>
-          <button class="b3-button" data-action="review-add-vocab" title="从单词库挑选单词加入复习队列">＋ 从单词库添加</button>
+        <div class="${paneCls("learn")}" data-rp-pane-body="learn">
+          ${this.renderReviewDraftNotice()}
+          <div class="hiword-rp-state-tabs">${stateTabsHtml}</div>
+          <div class="hiword-rp-duebar">
+            <span class="hiword-rp-duebar-ic">⏰</span>
+            <span class="hiword-rp-duebar-txt">
+              ${m.dueCount > 0
+                ? `<b>${T("今日到期 {n} 词", { n: m.dueCount })}</b><small>${T("按 SRS 计划复习，预计约 {min} 分钟", { min: estMin })}</small>`
+                : `<b>${t("今日复习已完成")}</b><small>${t("没有到期单词，去学点新词或稍后再来")}</small>`}
+            </span>
+            ${m.dueCount > 0 ? `<button class="b3-button hiword-rp-start" data-action="review-start">▶ ${t("开始复习")}</button>` : ""}
+          </div>
+          <div class="hiword-rp-import-hint" title="${t("将思源笔记中的文档或块拖到本面板，自动识别其中的英文单词并加入复习")}">${t("⬇ 把思源文档 / 块拖到此处，自动导入英文单词")}</div>
+          <div class="hiword-rp-list-head">
+            <span class="hiword-rp-count">${T("共 {n} 词", { n: all.length })}</span>
+            <span style="flex:1"></span>
+            <button class="b3-button b3-button--small" data-action="review-settings" title="${t("调试复习算法参数")}">${t("算法设置")}</button>
+            <button class="b3-button b3-button--small" data-action="review-add-book" title="${t("把词库中的单词本 / 主题绑定为复习书源，按每日配额释放新词")}">${t("＋ 添加单词书")}</button>
+            <label class="hiword-rp-qsearch">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
+              <input id="hiword-rp-qsearch" placeholder="${t("搜索单词…")}">
+            </label>
+          </div>
+          <div class="hiword-rp-list">
+            ${emptyHint || rows}
+          </div>
         </div>
-        <div class="hiword-rp-filters">
-          ${filters
-            .map(
-              (f) =>
-                `<button class="hiword-rp-filter ${this.reviewStatusFilter === f.key ? "active" : ""}" data-rp-filter="${f.key}">${f.label}</button>`
-            )
-            .join("")}
-        </div>
-        <div class="hiword-rp-list">
-          ${emptyHint || rows}
+        <div class="${paneCls("stats")}" data-rp-pane-body="stats">
+          ${this.buildReviewStatsHtml()}
         </div>
       </div>
     `;
 
+    // 面板内小 Tab 切换（学习记忆 / 数据统计）
+    contentEl.querySelectorAll<HTMLElement>("[data-rp-pane]").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        this.reviewPane = (btn.dataset.rpPane as "learn" | "stats") ?? "learn";
+        this.renderReviewPanel(dockElement);
+      });
+    });
+    // 四状态 Tab（全部/待学习/已学习/标熟词）
+    contentEl.querySelectorAll<HTMLElement>("[data-rp-list]").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        this.reviewListFilter = (btn.dataset.rpList as typeof this.reviewListFilter) ?? "all";
+        this.renderReviewPanel(dockElement);
+      });
+    });
+    // 熟练度圆圈：点击第 k 点设 k；再点当前最大值归零（与词库交互一致）
+    contentEl.querySelectorAll<HTMLElement>('[data-action="mastery"]').forEach((el) => {
+      el.addEventListener("click", async (e) => {
+        e.stopPropagation();
+        const word = el.dataset.word;
+        const lvl = Number(el.dataset.level);
+        if (!word || !this.vocabStore) return;
+        const cur = this.vocabStore.findRecord(word)?.mastery ?? 0;
+        const next = cur === lvl ? 0 : lvl;
+        await this.vocabStore.updateMastery(word, next);
+        showMessage(
+          next === MASTERY_MAX
+            ? t("「{w}」已标熟（5 级）", { w: word })
+            : t("「{w}」熟练度设为 {n} 级", { w: word, n: next }),
+          1600,
+          "info"
+        );
+        this.renderReviewPanel(dockElement);
+      });
+    });
+    // 朗读
+    contentEl.querySelectorAll<HTMLElement>('[data-action="rp-speak"]').forEach((el) => {
+      el.addEventListener("click", (e) => {
+        e.stopPropagation();
+        const w = el.dataset.word;
+        if (w) this.speak(w);
+      });
+    });
     // 开始复习
     contentEl.querySelector('[data-action="review-start"]')?.addEventListener("click", () => {
       this.startReviewSession();
@@ -6883,46 +7042,186 @@ export default class RewordPlugin extends Plugin {
     contentEl.querySelector('[data-action="review-settings"]')?.addEventListener("click", () => {
       this.openReviewSettings();
     });
-    // 状态筛选
-    contentEl.querySelectorAll<HTMLElement>("[data-rp-filter]").forEach((btn) => {
-      btn.addEventListener("click", () => {
-        this.reviewStatusFilter = (btn.dataset.rpFilter as typeof this.reviewStatusFilter) ?? "active";
-        this.renderReviewPanel(dockElement);
+    // 添加单词书（书源绑定；弹层内保留"手动挑词"入口）
+    contentEl.querySelector('[data-action="review-add-book"]')?.addEventListener("click", () => {
+      this.showAddBookDialog();
+    });
+    // 列表搜索：按单词名即时过滤（轻量 DOM 过滤，不重渲染）
+    const qs = contentEl.querySelector<HTMLInputElement>("#hiword-rp-qsearch");
+    qs?.addEventListener("input", () => {
+      const q = qs.value.trim().toLowerCase();
+      contentEl.querySelectorAll<HTMLElement>("[data-rp-word]").forEach((row) => {
+        const w = (row.dataset.rpWord || "").toLowerCase();
+        row.style.display = !q || w.includes(q) ? "" : "none";
       });
     });
-    // 从单词库添加
-    contentEl.querySelector('[data-action="review-add-vocab"]')?.addEventListener("click", () => {
-      this.showAddFromVocabDialog();
+    // 统计 Tab · 易忘词「定向复习」：置为立即可复习并切回学习 Tab
+    contentEl.querySelectorAll<HTMLElement>('[data-action="st-focus"]').forEach((btn) => {
+      btn.addEventListener("click", async (e) => {
+        e.stopPropagation();
+        const word = btn.dataset.word;
+        if (!word || !this.vocabStore) return;
+        try {
+          await this.vocabStore.reactivateWord(word);
+          await this.vocabStore.updateReviewStats(word, { due: new Date().toISOString() });
+          this.reviewPane = "learn";
+          this.reviewListFilter = "all";
+          showMessage(t("已将「{word}」置为立即可复习", { word }), 2400, "success" as any);
+        } finally {
+          if (this.dockElement) this.renderReviewPanel(this.dockElement);
+        }
+      });
     });
     // 拖入文档 / 块 → 自动识别英文词并加入复习
     const rpPanel = contentEl.querySelector(".hiword-review-panel") as HTMLElement | null;
     if (rpPanel) this.bindReviewDropZone(rpPanel);
-    // 列表行：点击单词行就地展开/收起释义；仅 🔍 按钮跳转到词典 Tab
-    contentEl.querySelectorAll<HTMLElement>("[data-rp-word]").forEach((row) => {
-      const w = row.dataset.rpWord;
-      if (!w) return;
+    // 列表行：左拉手势（滑出操作区）+ 右键菜单 + 点击展开释义
+    const OPS_W = 132; // 操作区宽度（px），与 less 中 --rp-ops-w 一致
+    const setRowDrag = (row: HTMLElement, px: number) => {
+      row.style.setProperty("--rp-drag", `${Math.max(-OPS_W, Math.min(0, px))}px`);
+    };
+    contentEl.querySelectorAll<HTMLElement>(".hiword-rp-row").forEach((row) => {
+      const word = row.dataset.rpWord || "";
+      // —— 右键菜单 ——
+      row.addEventListener("contextmenu", (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        this.openReviewCtxMenu(e.clientX, e.clientY, word);
+      });
+      // —— 左拉手势（Pointer Events 统一鼠标 / 触屏）——
+      let sx = 0, sy = 0, moved = false, dragging = false, canceled = false;
+      row.addEventListener("pointerdown", (e) => {
+        if (e.button !== 0) return; // 仅左键
+        if ((e.target as HTMLElement).closest(".hiword-rp-ops, .hiword-rp-speak, .hiword-stars, .hiword-rp-ops-btn")) return;
+        sx = e.clientX; sy = e.clientY; moved = false; dragging = false; canceled = false;
+      });
+      row.addEventListener("pointermove", (e) => {
+        if (sx === 0 && sy === 0) return;
+        const dx = e.clientX - sx;
+        const dy = e.clientY - sy;
+        if (!moved && Math.abs(dx) < 6 && Math.abs(dy) < 6) return;
+        // 纵向为主（滚动意图）→ 取消拖拽，把滚动交还给容器
+        if (Math.abs(dy) > Math.abs(dx) * 1.2) {
+          canceled = true;
+          if (dragging) {
+            dragging = false;
+            row.classList.remove("hiword-rp-row--dragging");
+            setRowDrag(row, 0);
+          }
+          return;
+        }
+        if (canceled) return;
+        moved = true;
+        if (!dragging) {
+          dragging = true;
+          row.classList.add("hiword-rp-row--dragging");
+        }
+        setRowDrag(row, dx); // 左拉 dx<0
+      });
+      const endDrag = () => {
+        if (!moved || canceled) { sx = sy = 0; return; }
+        const current = parseFloat(row.style.getPropertyValue("--rp-drag") || "0");
+        const open = current < -48; // 越过阈值 → 保持展开
+        row.classList.remove("hiword-rp-row--dragging");
+        row.classList.toggle("hiword-rp-row--ops-open", open);
+        setRowDrag(row, open ? -OPS_W : 0);
+        row.dataset.dragged = "1"; // 抑制随后的 click 展开释义
+        setTimeout(() => delete row.dataset.dragged, 350);
+        sx = sy = 0; moved = false;
+      };
+      row.addEventListener("pointerup", endDrag);
+      row.addEventListener("pointercancel", endDrag);
+      // 点击已展开行的空白区 → 收起
+      row.addEventListener("click", (e) => {
+        if (row.classList.contains("hiword-rp-row--ops-open") && !(e.target as HTMLElement).closest(".hiword-rp-ops")) {
+          row.classList.remove("hiword-rp-row--ops-open");
+          setRowDrag(row, 0);
+        }
+      });
+      // 滑出区按钮：查词典 / 移出队列
+      row.querySelector('[data-action="rp-open"]')?.addEventListener("click", (e) => {
+        e.stopPropagation();
+        this.lookupWordInDock(word);
+      });
+      row.querySelector('[data-action="rp-unqueue"]')?.addEventListener("click", (e) => {
+        e.stopPropagation();
+        if (word) void this.unqueueReviewWord(word);
+      });
+      // 点击主区域展开 / 收起释义（拖拽后 350ms 内抑制）
       const main = row.querySelector(".hiword-rp-main") as HTMLElement | null;
-      const toggle = row.querySelector(".hiword-rp-toggle") as HTMLElement | null;
-      const openBtn = row.querySelector('[data-action="rp-open"]') as HTMLElement | null;
-      const toggleDetail = () => {
+      main?.addEventListener("click", () => {
+        if (row.dataset.dragged) return;
         const detail = row.querySelector(".hiword-rp-detail") as HTMLElement | null;
         if (!detail) return;
         detail.toggleAttribute("hidden");
         row.classList.toggle("hiword-rp-row--expanded", !detail.hasAttribute("hidden"));
-      };
-      main?.addEventListener("click", (e) => {
-        if ((e.target as HTMLElement).closest('[data-action="rp-open"]')) return;
-        toggleDetail();
-      });
-      toggle?.addEventListener("click", (e) => {
-        e.stopPropagation();
-        toggleDetail();
-      });
-      openBtn?.addEventListener("click", (e) => {
-        e.stopPropagation();
-        this.lookupWordInDock(w);
       });
     });
+    // 列表滚动 → 收起所有滑出操作区
+    contentEl.querySelector(".hiword-rp-list")?.addEventListener("scroll", () => {
+      contentEl.querySelectorAll<HTMLElement>(".hiword-rp-row--ops-open").forEach((row) => {
+        row.classList.remove("hiword-rp-row--ops-open");
+        row.style.removeProperty("--rp-drag");
+      });
+    }, { passive: true });
+    // 右键菜单全局关闭（仅绑定一次）
+    if (!document.body.dataset.rewordCtxBound) {
+      document.body.dataset.rewordCtxBound = "1";
+      document.addEventListener("click", (e) => {
+        if (!(e.target as HTMLElement).closest(".hiword-rp-ctx")) this.closeReviewCtxMenu();
+      });
+      document.addEventListener("contextmenu", (e) => {
+        if (!(e.target as HTMLElement).closest(".hiword-rp-ctx")) this.closeReviewCtxMenu();
+      });
+      document.addEventListener("keydown", (e) => {
+        if (e.key === "Escape") this.closeReviewCtxMenu();
+      });
+    }
+  }
+
+  /** 归档并移出复习队列（滑出区按钮与右键菜单共用） */
+  private async unqueueReviewWord(word: string): Promise<void> {
+    if (!this.vocabStore) return;
+    await this.vocabStore.archiveWord(word);
+    showMessage(t("已归档并移出复习队列：「{w}」", { w: word }), 2000, "info");
+    if (this.dockElement) this.renderReviewPanel(this.dockElement);
+  }
+
+  /** 复习词卡右键菜单（单例容器，惰性创建） */
+  private reviewCtxMenu: HTMLElement | null = null;
+
+  private ensureReviewCtxMenu(): HTMLElement {
+    if (this.reviewCtxMenu && document.body.contains(this.reviewCtxMenu)) return this.reviewCtxMenu;
+    const el = document.createElement("div");
+    el.className = "hiword-rp-ctx";
+    el.hidden = true;
+    document.body.appendChild(el);
+    this.reviewCtxMenu = el;
+    return el;
+  }
+
+  private openReviewCtxMenu(x: number, y: number, word: string) {
+    const menu = this.ensureReviewCtxMenu();
+    menu.innerHTML = `
+      <button class="hiword-rp-ctx-item" data-action="rp-open">${t("查词典")}</button>
+      <button class="hiword-rp-ctx-item hiword-rp-ctx-item--danger" data-action="rp-unqueue">${t("移出队列")}</button>`;
+    menu.hidden = false;
+    const rect = menu.getBoundingClientRect();
+    const px = Math.max(4, Math.min(x, window.innerWidth - rect.width - 8));
+    const py = Math.max(4, Math.min(y, window.innerHeight - rect.height - 8));
+    menu.style.left = `${px}px`;
+    menu.style.top = `${py}px`;
+    menu.querySelectorAll<HTMLElement>("[data-action]").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        menu.hidden = true;
+        if (btn.dataset.action === "rp-open") this.lookupWordInDock(word);
+        else void this.unqueueReviewWord(word);
+      });
+    });
+  }
+
+  private closeReviewCtxMenu() {
+    if (this.reviewCtxMenu) this.reviewCtxMenu.hidden = true;
   }
 
   /**
@@ -6987,12 +7286,12 @@ export default class RewordPlugin extends Plugin {
     const DAY = 86_400_000;
     if (diff <= 0) {
       const days = Math.ceil(-diff / DAY);
-      return days <= 0 ? "今天到期" : `逾期 ${days} 天`;
+      return days <= 0 ? T("今天到期") : `${T("逾期 {n} 天", { n: days })}`;
     }
     const days = Math.floor(diff / DAY);
-    if (days === 0) return "今天到期";
+    if (days === 0) return T("今天到期");
     if (days === 1) return "明天到期";
-    return `${days} 天后`;
+    return `${T("{n} 天后", { n: days })}`;
   }
 
   /**
@@ -7000,7 +7299,7 @@ export default class RewordPlugin extends Plugin {
    * 提供「保存 / 立即校准 / 重置默认」三动作，保存即落盘并刷新面板。
    */
   private openReviewSettings() {
-    if (!this.vocabStore) { showMessage("词库尚未就绪", 2000, "info"); return; }
+    if (!this.vocabStore) { showMessage(t("词库尚未就绪"), 2000, "info"); return; }
 
     // 数字/复选框输入生成器（data-cfg 为嵌套路径，保存时回写）
     const num = (label: string, path: string, val: number, step = "any", min = "", max = "") =>
@@ -7011,64 +7310,64 @@ export default class RewordPlugin extends Plugin {
     // 表单 body：从当前 ReviewConfig 生成（校准/重置后重建即可反映最新值）
     const buildBody = (cfg: ReviewConfig): string => `
       <div class="hiword-rs-group">
-        <div class="hiword-rs-group-name">核心调度</div>
-        ${num("每日复习上限（0=不限）", "dailyLimit", cfg.dailyLimit, "1", "0")}
-        ${num("难度修正系数 c", "difficultyCorrection", cfg.difficultyCorrection, "0.05", "0", "0.8")}
-        ${num("词频表规模", "frequencyCorpusSize", cfg.frequencyCorpusSize, "1", "100")}
-        ${chk("启用高频词种子", "enableFrequencySeed", cfg.enableFrequencySeed)}
+        <div class="hiword-rs-group-name">${t("核心调度")}</div>
+        ${num(t("每日复习上限（0=不限）"), "dailyLimit", cfg.dailyLimit, "1", "0")}
+        ${num(t("难度修正系数 c"), "difficultyCorrection", cfg.difficultyCorrection, "0.05", "0", "0.8")}
+        ${num(t("词频表规模"), "frequencyCorpusSize", cfg.frequencyCorpusSize, "1", "100")}
+        ${chk(t("启用高频词种子"), "enableFrequencySeed", cfg.enableFrequencySeed)}
       </div>
       <div class="hiword-rs-group">
-        <div class="hiword-rs-group-name">间隔倍率（gradeMultiplier）</div>
+        <div class="hiword-rs-group-name">${t("间隔倍率（gradeMultiplier）")}</div>
         ${num("again", "gradeMultiplier.again", cfg.gradeMultiplier.again, "0.1", "0")}
         ${num("hard", "gradeMultiplier.hard", cfg.gradeMultiplier.hard, "0.1", "0")}
         ${num("good", "gradeMultiplier.good", cfg.gradeMultiplier.good, "0.1", "0")}
         ${num("easy", "gradeMultiplier.easy", cfg.gradeMultiplier.easy, "0.1", "0")}
       </div>
       <div class="hiword-rs-group">
-        <div class="hiword-rs-group-name">初始间隔（天，initInterval）</div>
+        <div class="hiword-rs-group-name">${t("初始间隔（天，initInterval）")}</div>
         ${num("hard", "initInterval.hard", cfg.initInterval.hard, "1", "0")}
         ${num("good", "initInterval.good", cfg.initInterval.good, "1", "0")}
         ${num("easy", "initInterval.easy", cfg.initInterval.easy, "1", "0")}
       </div>
       <div class="hiword-rs-group">
-        <div class="hiword-rs-group-name">Ease 参数（SM-2）</div>
+        <div class="hiword-rs-group-name">${T("Ease 参数（SM-2）")}</div>
         ${num("default", "ease.default", cfg.ease.default, "0.1", "1", "4")}
         ${num("min", "ease.min", cfg.ease.min, "0.1", "1", "4")}
         ${num("max", "ease.max", cfg.ease.max, "0.1", "1", "4")}
-        ${num("again 降幅", "ease.againDelta", cfg.ease.againDelta, "0.05", "0")}
-        ${num("hard 降幅", "ease.hardDelta", cfg.ease.hardDelta, "0.05", "0")}
-        ${num("easy 升幅", "ease.easyDelta", cfg.ease.easyDelta, "0.05", "0")}
+        ${num(t("again 降幅"), "ease.againDelta", cfg.ease.againDelta, "0.05", "0")}
+        ${num(t("hard 降幅"), "ease.hardDelta", cfg.ease.hardDelta, "0.05", "0")}
+        ${num(t("easy 升幅"), "ease.easyDelta", cfg.ease.easyDelta, "0.05", "0")}
       </div>
       <div class="hiword-rs-group">
-        <div class="hiword-rs-group-name">优先级权重（weights）</div>
-        ${num("查询 query", "weights.query", cfg.weights.query, "0.1", "0")}
-        ${num("星标 star", "weights.star", cfg.weights.star, "0.1", "0")}
-        ${num("时间 time", "weights.time", cfg.weights.time, "0.1", "0")}
-        ${num("易度 ease", "weights.ease", cfg.weights.ease, "0.1", "0")}
-        ${num("遗忘 lapse", "weights.lapse", cfg.weights.lapse, "0.1", "0")}
-        ${num("难度 difficulty", "weights.difficulty", cfg.weights.difficulty, "0.1", "0")}
-        ${num("记忆 recall(负向)", "weights.recall", cfg.weights.recall, "0.1", "0")}
+        <div class="hiword-rs-group-name">${t("优先级权重（weights）")}</div>
+        ${num(t("查询 query"), "weights.query", cfg.weights.query, "0.1", "0")}
+        ${num(t("星标 star"), "weights.star", cfg.weights.star, "0.1", "0")}
+        ${num(t("时间 time"), "weights.time", cfg.weights.time, "0.1", "0")}
+        ${num(t("易度 ease"), "weights.ease", cfg.weights.ease, "0.1", "0")}
+        ${num(t("遗忘 lapse"), "weights.lapse", cfg.weights.lapse, "0.1", "0")}
+        ${num(t("难度 difficulty"), "weights.difficulty", cfg.weights.difficulty, "0.1", "0")}
+        ${num(t("记忆 recall(负向)"), "weights.recall", cfg.weights.recall, "0.1", "0")}
       </div>
       <div class="hiword-rs-group">
-        <div class="hiword-rs-group-name">难度因子权重（difficultyWeights）</div>
-        ${num("稀有度 rarity", "difficultyWeights.rarity", cfg.difficultyWeights.rarity, "0.05", "0")}
-        ${num("长度 length", "difficultyWeights.length", cfg.difficultyWeights.length, "0.05", "0")}
-        ${num("AWL awl", "difficultyWeights.awl", cfg.difficultyWeights.awl, "0.05", "0")}
-        ${num("多义 polysemy", "difficultyWeights.polysemy", cfg.difficultyWeights.polysemy, "0.05", "0")}
+        <div class="hiword-rs-group-name">${t("难度因子权重（difficultyWeights）")}</div>
+        ${num(t("稀有度 rarity"), "difficultyWeights.rarity", cfg.difficultyWeights.rarity, "0.05", "0")}
+        ${num(t("长度 length"), "difficultyWeights.length", cfg.difficultyWeights.length, "0.05", "0")}
+        ${num(t("AWL awl"), "difficultyWeights.awl", cfg.difficultyWeights.awl, "0.05", "0")}
+        ${num(t("多义 polysemy"), "difficultyWeights.polysemy", cfg.difficultyWeights.polysemy, "0.05", "0")}
       </div>`;
 
     const dialog = new Dialog({
-      title: "复习算法设置（调试参数）",
+      title: t("复习算法设置（调试参数）"),
       width: responsiveDialogSize(760, "width"),
       height: "620px",
       content: `<div class="hiword-rs">
         <div class="hiword-rs-body">${buildBody(getReviewConfig())}</div>
         <div class="hiword-rs-status" data-rs-status style="display:none"></div>
         <div class="hiword-rs-foot">
-          <button class="b3-button" data-action="rs-save">保存</button>
-          <button class="b3-button b3-button--outline" data-action="rs-calibrate">立即校准</button>
-          <button class="b3-button b3-button--outline" data-action="rs-reset">重置默认</button>
-          <span class="hiword-rs-hint">保存即写入 hiword-review-config.json 并立即生效</span>
+          <button class="b3-button" data-action="rs-save">${t("保存")}</button>
+          <button class="b3-button b3-button--outline" data-action="rs-calibrate">${t("立即校准")}</button>
+          <button class="b3-button b3-button--outline" data-action="rs-reset">${t("重置默认")}</button>
+          <span class="hiword-rs-hint">${t("保存即写入 hiword-review-config.json 并立即生效")}</span>
         </div>
       </div>`,
     });
@@ -7105,7 +7404,7 @@ export default class RewordPlugin extends Plugin {
       setReviewConfig(readForm());
       void this.saveReviewConfig();
       this.refreshActivePanel();
-      setStatus("✓ 复习参数已保存并立即生效", "ok");
+      setStatus(t("✓ 复习参数已保存并立即生效"), "ok");
     });
     root.querySelector('[data-action="rs-calibrate"]')?.addEventListener("click", () => {
       const before = { ...getReviewConfig().gradeMultiplier };
@@ -7116,7 +7415,7 @@ export default class RewordPlugin extends Plugin {
       const changed = (["hard", "good", "easy"] as const).some((g) => before[g] !== after[g]);
       setStatus(
         changed
-          ? `✓ 已校准：good ${before.good.toFixed(2)}→${after.good.toFixed(2)}，hard ${before.hard.toFixed(2)}→${after.hard.toFixed(2)}，easy ${before.easy.toFixed(2)}→${after.easy.toFixed(2)}（详见结果弹窗）`
+          ? `✓ ${T("已校准：")}good ${before.good.toFixed(2)}→${after.good.toFixed(2)}，hard ${before.hard.toFixed(2)}→${after.hard.toFixed(2)}，easy ${before.easy.toFixed(2)}→${after.easy.toFixed(2)}${T("（详见结果弹窗）")}`
           : "已尝试校准：历史数据不足或无需调整，保持原值（详见提示）",
         changed ? "ok" : "warn"
       );
@@ -7124,7 +7423,7 @@ export default class RewordPlugin extends Plugin {
     root.querySelector('[data-action="rs-reset"]')?.addEventListener("click", () => {
       this.resetReviewConfigCmd();
       bodyEl.innerHTML = buildBody(getReviewConfig());
-      setStatus("已重置为研究级默认值", "info");
+      setStatus(t("已重置为研究级默认值"), "info");
     });
   }
 
@@ -7134,7 +7433,7 @@ export default class RewordPlugin extends Plugin {
    */
   private startReviewSession() {
     if (!this.isReady || !this.vocabStore) {
-      showMessage("词库尚未就绪", 2000, "info");
+      showMessage(t("词库尚未就绪"), 2000, "info");
       return;
     }
     const candidates = this.vocabStore.getReviewCandidates();
@@ -7143,12 +7442,12 @@ export default class RewordPlugin extends Plugin {
     const queue = getDueQueue(candidates, { includeNotDue: true, limit: dailyLimit > 0 ? dailyLimit : undefined });
     const dueCount = candidates.filter((w) => isDue(w)).length;
     if (queue.length === 0) {
-      showMessage("词库还没有单词，先添加一些再来复习吧", 2600, "info");
+      showMessage(t("词库还没有单词，先添加一些再来复习吧"), 2600, "info");
       return;
     }
 
     const dialog = new Dialog({
-      title: `RE word 复习（${queue.length}${dailyLimit > 0 ? " / 每日 " + dailyLimit : ""} 个候选）`,
+      title: t("RE word 复习（{n}{daily} 个候选）", { n: queue.length, daily: dailyLimit > 0 ? " / 每日 " + dailyLimit : "" }),
       width: responsiveDialogSize(480, "width"),
       height: "520px",
       content: `<div class="hiword-review" id="hiword-review"></div>`,
@@ -7163,10 +7462,10 @@ export default class RewordPlugin extends Plugin {
 
     // 各档位提示的「安排后预期留存」（与 calibrate 的 targetRetention 概念一致，用于 UI 引导）
     const GRADE_HINT: Record<string, { label: string; retention: string; key: string }> = {
-      again: { label: "忘记", retention: "立刻重来", key: "1" },
-      hard: { label: "困难", retention: "约 65%", key: "2" },
-      good: { label: "良好", retention: "约 90%", key: "3" },
-      easy: { label: "简单", retention: "约 98%", key: "4" },
+      again: { label: t("忘记"), retention: t("立刻重来"), key: "1" },
+      hard: { label: t("困难"), retention: t("约 65%"), key: "2" },
+      good: { label: t("良好"), retention: t("约 90%"), key: "3" },
+      easy: { label: t("简单"), retention: t("约 98%"), key: "4" },
     };
 
     // 2026-08-22 释义偏好:复习卡片只显示首选,可切回完整 meaning
@@ -7177,16 +7476,16 @@ export default class RewordPlugin extends Plugin {
         const done = index;
         const remain = dueCount - done > 0 ? Math.max(0, dueCount - done) : 0;
         const sub = [
-          `已复习 ${done} 个`,
-          archivedCount ? `归档 ${archivedCount}` : "",
-          ignoredCount ? `忽略 ${ignoredCount}` : "",
-          remain ? `剩余待复习 ${remain}` : "",
+          t("已复习 {n} 个", { n: done }),
+          archivedCount ? t("归档 {n}", { n: archivedCount }) : "",
+          ignoredCount ? t("忽略 {n}", { n: ignoredCount }) : "",
+          remain ? t("剩余待复习 {n}", { n: remain }) : "",
         ].filter(Boolean).join(" · ");
         root!.innerHTML = `<div class="hiword-review__done">
           <div class="hiword-review__done-emoji">✅</div>
-          <div>本轮复习完成！</div>
+          <div>${t("本轮复习完成！")}</div>
           <div class="hiword-review__done-sub">${sub}</div>
-          <button class="b3-button" data-action="review-exit">关闭</button>
+          <button class="b3-button" data-action="review-exit">${t("关闭")}</button>
         </div>`;
         return;
       }
@@ -7221,23 +7520,23 @@ export default class RewordPlugin extends Plugin {
         <div class="hiword-review__head">
           <span class="hiword-review__counter">${index + 1} / ${queue.length}</span>
           <span class="hiword-review__due">待复习 ${dueCount}</span>
-          <button class="b3-button b3-button--small" data-action="review-exit">退出</button>
+          <button class="b3-button b3-button--small" data-action="review-exit">${T("退出")}</button>
         </div>
         <div class="hiword-review__progress"><div class="hiword-review__progress-bar" style="width:${pct}%"></div></div>
-        <div class="hiword-review__card" title="点击卡片朗读单词">
+        <div class="hiword-review__card" title="${T("点击卡片朗读单词")}">
           <div class="hiword-review__word-row">
             <div class="hiword-review__word">${this.escapeHtml(rec.word)}</div>
-            <button class="b3-button hiword-review__speak" data-action="review-tts" title="朗读 ${this.escapeHtml(rec.word)}">🔊</button>
+            <button class="b3-button hiword-review__speak" data-action="review-tts" title="${T("朗读 {word}", { word: this.escapeHtml(rec.word) })}">🔊</button>
           </div>
           <div class="hiword-review__phon">${this.escapeHtml(phonetic)}</div>
           <div class="hiword-review__pos">${this.escapeHtml(posText)}</div>
           <div class="hiword-review__meaning" ${revealed ? "" : "hidden"}>${meaningHtml}</div>
           ${prefHint}
-          <button class="b3-button hiword-review__reveal" data-action="review-reveal" ${revealed ? "hidden" : ""}>显示释义 <span class="hiword-review__kbd">空格</span></button>
+          <button class="b3-button hiword-review__reveal" data-action="review-reveal" ${revealed ? "hidden" : ""}>${T("显示释义")} <span class="hiword-review__kbd">${T("空格")}</span></button>
         </div>
         <div class="hiword-review__manage">
-          <button class="b3-button b3-button--small hiword-review__ignore" data-action="review-ignore">忽略</button>
-          <button class="b3-button b3-button--small hiword-review__archive" data-action="review-archive">已掌握·归档</button>
+          <button class="b3-button b3-button--small hiword-review__ignore" data-action="review-ignore">${T("忽略")}</button>
+          <button class="b3-button b3-button--small hiword-review__archive" data-action="review-archive">${T("已掌握·归档")}</button>
         </div>
         <div class="hiword-review__grades">
           ${(["again", "hard", "good", "easy"] as const).map((g) => `
@@ -7320,7 +7619,7 @@ export default class RewordPlugin extends Plugin {
     const rec = this.vocabStore?.findRecord(word);
     const preferredDefinitions = rec?.preferredDefinitions;
     const dialog = new Dialog({
-      title: `词典: ${word}`,
+      title: `${T("词典: {word}", { word })}`,
       width: responsiveDialogSize(600, "width"),
       height: "500px",
       content: entry
@@ -7351,29 +7650,24 @@ export default class RewordPlugin extends Plugin {
   private fillSelectionToSidebar() {
     const selection = window.getSelection()?.toString()?.trim();
     if (!selection) {
-      showMessage("请先选中一个单词", 2000, "info");
+      showMessage(T("请先选中一个单词"), 2000, "info");
       return;
     }
     const word = selection;
 
     const fillAndLookup = () => {
-      this.focusFeatureDock("dict");
-      const el = this.getFeatureElement("dict");
-      if (!el) {
-        // Dock 尚未初始化，降级为对话框
-        this.showDictDialog(word);
-        return;
-      }
-      setTimeout(() => {
-        const input = el.querySelector("#hiword-dict-input") as HTMLInputElement | null;
-        if (input) {
-          input.value = word;
-          this.doDictLookup(word, el);
-          input.focus();
-        } else {
-          this.showDictDialog(word);
-        }
-      }, 120);
+      void withFeatureTab(this, "dict", (el) => {
+        setTimeout(() => {
+          const input = el.querySelector("#hiword-dict-input") as HTMLInputElement | null;
+          if (input) {
+            input.value = word;
+            this.doDictLookup(word, el);
+            input.focus();
+          } else {
+            this.showDictDialog(word);
+          }
+        }, 120);
+      }, { onMissing: () => this.showDictDialog(word) });
     };
 
     // Dock 若刚被点击，需等待其 init 渲染完成
@@ -7386,12 +7680,20 @@ export default class RewordPlugin extends Plugin {
    */
   private openDictManager() {
     const dialog = new Dialog({
-      title: "RE word 词典管理",
+      title: t("RE word 词典管理"),
       width: responsiveDialogSize(640, "width"),
       height: "480px",
       content: `<div class="hiword-dict-manager" id="hiword-dict-manager"></div>`,
     });
     this.renderDictManagerContent(dialog);
+  }
+
+  /** 语言持久化 IO（onload 初始化与设置面板内切换共用同一份实现） */
+  private i18nIO(): I18nIO {
+    return {
+      load: (f: string) => this.loadData(f),
+      save: (f: string, d: unknown) => this.saveData(f, d),
+    };
   }
 
   /**
@@ -7406,44 +7708,52 @@ export default class RewordPlugin extends Plugin {
     const fsLabels: Record<string, string> = { small: "小", medium: "默认", large: "大", xlarge: "特大" };
 
     const dialog = new Dialog({
-      title: "RE word 设置",
+      title: t("RE word 设置"),
       width: responsiveDialogSize(880, "width"),
       height: responsiveDialogSize(680, "height"),
       content: `
         <div class="hiword-unified-panel">
           <!-- 左侧导航 -->
           <nav class="hiword-up-nav">
+            <!-- 2026-09-10 P2：界面语言切换（常驻块，不属于任何 page） -->
+            <div class="hiword-up-langbox" id="up-langbox">
+              <div class="hiword-up-langbox-title"><span class="hiword-up-nav-icon">🌐</span>${t("界面语言")}</div>
+              <div class="hiword-up-langbox-row">
+                <button type="button" class="hiword-up-langbtn${getLang() === "zh_CN" ? " is-active" : ""}" data-lang="zh_CN">${T("中文")}</button>
+                <button type="button" class="hiword-up-langbtn${getLang() === "en_US" ? " is-active" : ""}" data-lang="en_US">English</button>
+              </div>
+            </div>
             <!-- 2026-08-22 许可证已封存：原「🔑 许可证」nav 项在此（恢复时加回）
             <div class="hiword-up-nav-item" data-up-tab="license">
               <span class="hiword-up-nav-icon">🔑</span>许可证
             </div>
             -->
             <div class="hiword-up-nav-item active" data-up-tab="tts">
-              <span class="hiword-up-nav-icon">🎤</span>朗读设置
+              <span class="hiword-up-nav-icon">🎤</span>${t("朗读设置")}
             </div>
             <div class="hiword-up-nav-item" data-up-tab="reader">
-              <span class="hiword-up-nav-icon">📚</span>阅读设置
+              <span class="hiword-up-nav-icon">📚</span>${t("阅读设置")}
             </div>
             <div class="hiword-up-nav-item" data-up-tab="dict">
-              <span class="hiword-up-nav-icon">📖</span>查词典管理
+              <span class="hiword-up-nav-icon">📖</span>${t("查词典管理")}
             </div>
             <div class="hiword-up-nav-item" data-up-tab="ai">
-              <span class="hiword-up-nav-icon">🤖</span>AI 精读
+              <span class="hiword-up-nav-icon">🤖</span>${t("AI 精读")}
             </div>
             <div class="hiword-up-nav-item" data-up-tab="annotation">
-              <span class="hiword-up-nav-icon">🖍️</span>标注与批注
+              <span class="hiword-up-nav-icon">🖍️</span>${t("标注与批注")}
             </div>
             <div class="hiword-up-nav-item" data-up-tab="review">
-              <span class="hiword-up-nav-icon">📅</span>复习计划
+              <span class="hiword-up-nav-icon">📅</span>${t("复习计划")}
             </div>
             <div class="hiword-up-nav-item" data-up-tab="shortcuts">
-              <span class="hiword-up-nav-icon">⌨️</span>快捷键
+              <span class="hiword-up-nav-icon">⌨️</span>${t("快捷键")}
             </div>
             <div class="hiword-up-nav-item" data-up-tab="data">
-              <span class="hiword-up-nav-icon">💾</span>数据与备份
+              <span class="hiword-up-nav-icon">💾</span>${t("数据与备份")}
             </div>
             <div class="hiword-up-nav-item" data-up-tab="about">
-              <span class="hiword-up-nav-icon">ℹ️</span>关于
+              <span class="hiword-up-nav-icon">ℹ️</span>${t("关于")}
             </div>
             <!-- 2026-08-21 精简：AI 设置从顶栏 cog 直接进 openAiSettings(更专注/更现代) -->
           </nav>
@@ -7454,15 +7764,15 @@ export default class RewordPlugin extends Plugin {
             <!-- ===== Tab 1: 朗读设置 ===== -->
             <section class="hiword-up-page active" data-page="tts">
               <div class="hiword-up-group">
-                <div class="hiword-up-group-label"><span class="hiword-up-group-name">界面字体</span></div>
+                <div class="hiword-up-group-label"><span class="hiword-up-group-name">${t("界面字体")}</span></div>
                 <fieldset class="hiword-fs-fieldset">
                   <div class="hiword-fs-slider-wrap">
-                    <span class="hiword-fs-label">小</span>
+                    <span class="hiword-fs-label">${t("小")}</span>
                     <div class="hiword-fs-track-wrap">
                       <input id="up-font-size" class="hiword-fs-slider" type="range" min="0" max="3" step="1" value="${fs === "small" ? "0" : fs === "large" ? "2" : fs === "xlarge" ? "3" : "1"}" />
-                      <output class="hiword-fs-thumblabel" id="up-fs-thumb-label" style="left:${(fs === "small" ? 0 : fs === "large" ? 2 : fs === "xlarge" ? 3 : 1) / 3 * 100}%">${fsLabels[fs]}</output>
+                      <output class="hiword-fs-thumblabel" id="up-fs-thumb-label" style="left:${(fs === "small" ? 0 : fs === "large" ? 2 : fs === "xlarge" ? 3 : 1) / 3 * 100}%">${t(fsLabels[fs])}</output>
                     </div>
-                    <span class="hiword-fs-label">特大</span>
+                    <span class="hiword-fs-label">${t("特大")}</span>
                   </div>
                   <div class="hiword-fs-ticks">
                     <span class="hiword-fs-tick"></span>
@@ -7472,132 +7782,132 @@ export default class RewordPlugin extends Plugin {
                   </div>
                 </fieldset>
                 <div class="us-font-preview">
-                  <p class="us-preview-label">预览效果：</p>
+                  <p class="us-preview-label">${t("预览效果：")}</p>
                   <div class="us-preview-card">
                     <span class="us-pw">world</span> <span class="us-pp">/wɜːld/</span>
-                    <div class="us-pos-row"><span class="us-pos-chip">n.</span> <span class="us-meaning">1. 世界；地球</span></div>
+                    <div class="us-pos-row"><span class="us-pos-chip">n.</span> <span class="us-meaning">${t("1. 世界；地球")}</span></div>
                   </div>
                 </div>
               </div>
 
               <div class="hiword-up-group">
-                <div class="hiword-up-group-label"><span class="hiword-up-group-name">语音引擎</span></div>
+                <div class="hiword-up-group-label"><span class="hiword-up-group-name">${t("语音引擎")}</span></div>
                 <div class="hiword-up-field">
-                  <label class="hiword-up-field-label" for="up-tts-engine">朗读引擎</label>
+                  <label class="hiword-up-field-label" for="up-tts-engine">${t("朗读引擎")}</label>
                   <select id="up-tts-engine" class="hiword-up-select">
-                    <option value="auto" ${(!s.engine || s.engine === "auto") ? "selected" : ""}>自动（在线优先，离线回退，推荐）</option>
-                    <option value="system" ${s.engine === "system" ? "selected" : ""}>仅系统语音（离线，最稳）</option>
-                    <option value="youdao" ${s.engine === "youdao" ? "selected" : ""}>仅在线真人音（有道）</option>
-                    <option value="edge" ${s.engine === "edge" ? "selected" : ""}>Edge 云端神经音（2024 起公开端点已下线，慎选）</option>
+                    <option value="auto" ${(!s.engine || s.engine === "auto") ? "selected" : ""}>${t("自动（在线优先，离线回退，推荐）")}</option>
+                    <option value="system" ${s.engine === "system" ? "selected" : ""}>${t("仅系统语音（离线，最稳）")}</option>
+                    <option value="youdao" ${s.engine === "youdao" ? "selected" : ""}>${t("仅在线真人音（有道）")}</option>
+                    <option value="edge" ${s.engine === "edge" ? "selected" : ""}>${t("Edge 云端神经音（2024 起公开端点已下线，慎选）")}</option>
                   </select>
                 </div>
                 <div class="hiword-up-field">
-                  <label class="hiword-up-field-label" for="up-tts-accent">口音（在线真人音）</label>
+                  <label class="hiword-up-field-label" for="up-tts-accent">${t("口音（在线真人音）")}</label>
                   <select id="up-tts-accent" class="hiword-up-select">
-                    <option value="us" ${s.accent === "us" ? "selected" : ""}>美音 (American)</option>
-                    <option value="uk" ${s.accent === "uk" ? "selected" : ""}>英音 (British)</option>
+                    <option value="us" ${s.accent === "us" ? "selected" : ""}>${t("美音 (American)")}</option>
+                    <option value="uk" ${s.accent === "uk" ? "selected" : ""}>${t("英音 (British)")}</option>
                   </select>
                 </div>
                 <div class="hiword-up-field">
-                  <label class="hiword-up-field-label" for="up-tts-rate">语速 <em id="up-rate-val">${s.rate}</em></label>
+                  <label class="hiword-up-field-label" for="up-tts-rate">${t("语速")} <em id="up-rate-val">${s.rate}</em></label>
                   <input id="up-tts-rate" class="hiword-up-slider" type="range" min="0.5" max="2" step="0.1" value="${s.rate}" />
                 </div>
                 <div class="hiword-up-field">
-                  <label class="hiword-up-field-label" for="up-tts-pitch">音高 <em id="up-pitch-val">${s.pitch}</em>（系统语音）</label>
+                  <label class="hiword-up-field-label" for="up-tts-pitch">${t("音高")} <em id="up-pitch-val">${s.pitch}</em>${t("（系统语音）")}</label>
                   <input id="up-tts-pitch" class="hiword-up-slider" type="range" min="0.5" max="2" step="0.1" value="${s.pitch}" />
                 </div>
               </div>
 
               <div class="hiword-up-group">
-                <div class="hiword-up-group-label"><span class="hiword-up-group-name">📋 列表朗读</span></div>
+                <div class="hiword-up-group-label"><span class="hiword-up-group-name">📋 ${t("列表朗读")}</span></div>
                 <div class="hiword-up-field">
-                  <label class="hiword-up-field-label" for="up-tts-interval">朗读间隔 <em id="up-interval-val">${s.interval ?? 800}ms</em></label>
+                  <label class="hiword-up-field-label" for="up-tts-interval">${t("朗读间隔")} <em id="up-interval-val">${s.interval ?? 800}ms</em></label>
                   <input id="up-tts-interval" class="hiword-up-slider" type="range" min="200" max="3000" step="100" value="${s.interval ?? 800}" />
                 </div>
                 <div class="hiword-up-field">
-                  <label class="hiword-up-field-label" for="up-tts-voice">系统语音音色</label>
+                  <label class="hiword-up-field-label" for="up-tts-voice">${t("系统语音音色")}</label>
                   <select id="up-tts-voice" class="hiword-up-select">
-                    <option value="">（自动优选最佳英文发音）</option>
+                    <option value="">${t("（自动优选最佳英文发音）")}</option>
                   </select>
                 </div>
-                <button class="b3-button b3-button--outline" id="up-tts-test" style="margin-top:8px;">试听 "Hello"</button>
+                <button class="b3-button b3-button--outline" id="up-tts-test" style="margin-top:8px;">${t('试听 "Hello"')}</button>
               </div>
 
               <div class="hiword-up-group">
-                <div class="hiword-up-group-label"><span class="hiword-up-group-name">在线词典（词海）</span><span class="hiword-up-group-desc">离线词典查不到时自动查询词海 corp.dict.cn（2026-09-07 起数据源为海词）</span></div>
+                <div class="hiword-up-group-label"><span class="hiword-up-group-name">${t("在线词典（词海）")}</span><span class="hiword-up-group-desc">${t("离线词典查不到时自动查询词海 corp.dict.cn（2026-09-07 起数据源为海词）")}</span></div>
                 <div class="hiword-up-field">
                   <label class="hiword-up-switch-row">
                     <input type="checkbox" id="up-online-enabled" class="b3-switch" ${this.onlineSettings?.enabled ? "checked" : ""} />
-                    <span>启用在线词典（词海）</span>
+                    <span>${t("启用在线词典（词海）")}</span>
                   </label>
                 </div>
                 <div class="hiword-up-field" style="margin-top:10px;">
-                  <label class="hiword-up-field-label" for="up-dict-font-scale">在线词典卡片字体大小</label>
+                  <label class="hiword-up-field-label" for="up-dict-font-scale">${t("在线词典卡片字体大小")}</label>
                   <div class="hiword-fs-slider-wrap">
-                    <span class="hiword-fs-label">小</span>
+                    <span class="hiword-fs-label">${t("小")}</span>
                     <div class="hiword-fs-track-wrap">
                       <input id="up-dict-font-scale" class="hiword-fs-slider" type="range" min="0" max="6" step="1" value="${dictScaleIndex(this.onlineSettings?.dictFontScale ?? 1.0)}" />
                       <output class="hiword-fs-thumblabel" id="up-dict-scale-label" style="left:${dictScaleIndex(this.onlineSettings?.dictFontScale ?? 1.0) / 6 * 100}%">${Math.round((this.onlineSettings?.dictFontScale ?? 1.0) * 100)}%</output>
                     </div>
-                    <span class="hiword-fs-label">大</span>
+                    <span class="hiword-fs-label">${t("大")}</span>
                   </div>
-                  <p class="b3-label__note" style="margin-top:6px;">缩放范围 80%~140%，默认 100%；拖动即时预览，保存后生效。</p>
+                  <p class="b3-label__note" style="margin-top:6px;">${t("缩放范围 80%~140%，默认 100%；拖动即时预览，保存后生效。")}</p>
                 </div>
-                <button class="b3-button b3-button--outline b3-button--small" id="up-online-test">测试在线词典（查 "mastery"）</button>
+                <button class="b3-button b3-button--outline b3-button--small" id="up-online-test">${t('测试在线词典（查 "mastery"）')}</button>
               </div>
 
               <div class="hiword-up-group">
-                <div class="hiword-up-group-label"><span class="hiword-up-group-name">单词导入</span><span class="hiword-up-group-desc">从 CSV 文件批量导入单词到词库</span></div>
+                <div class="hiword-up-group-label"><span class="hiword-up-group-name">${t("单词导入")}</span><span class="hiword-up-group-desc">${t("从 CSV 文件批量导入单词到词库")}</span></div>
                 <div class="hiword-up-field">
                   <input id="up-csv-file" type="file" accept=".csv,.txt" />
                 </div>
                 <div class="us-import-preview" id="up-import-preview">
-                  <p class="us-empty-hint">选择文件后在此预览内容</p>
+                  <p class="us-empty-hint">${t("选择文件后在此预览内容")}</p>
                 </div>
-                <button class="b3-button b3-button--outline b3-button--small" id="up-import-btn" disabled>导入到词库</button>
+                <button class="b3-button b3-button--outline b3-button--small" id="up-import-btn" disabled>${t("导入到词库")}</button>
               </div>
             </section>
 
             <!-- ===== Tab 2: 阅读设置（2026-08-27 统一：与阅读器内文本面板共用同一 ReaderSettingsStore，改动即时生效到已开 Tab） ===== -->
             <section class="hiword-up-page" data-page="reader" style="display:none;">
-              <div id="up-reader-settings"><p style="color:#888;padding:20px;text-align:center;">加载中…</p></div>
+              <div id="up-reader-settings"><p style="color:#888;padding:20px;text-align:center;">${t("加载中…")}</p></div>
             </section>
 
             <!-- ===== Tab 3: 查词典管理 ===== -->
             <section class="hiword-up-page" data-page="dict" style="display:none;">
               <div class="hiword-dict-manager" id="up-dict-manager">
-                <p style="color:#888;padding:20px;text-align:center;">加载中…</p>
+                <p style="color:#888;padding:20px;text-align:center;">${t("加载中…")}</p>
               </div>
             </section>
 
             <!-- ===== Tab 4: AI 精读（2026-08-27 统一：复用 renderAiSettingsInto，与独立入口同源） ===== -->
             <section class="hiword-up-page" data-page="ai" style="display:none;">
-              <div id="up-ai-settings"><p style="color:#888;padding:20px;text-align:center;">加载中…</p></div>
+              <div id="up-ai-settings"><p style="color:#888;padding:20px;text-align:center;">${t("加载中…")}</p></div>
             </section>
 
             <!-- ===== Tab 5: 标注与批注 ===== -->
             <section class="hiword-up-page" data-page="annotation" style="display:none;">
-              <div id="up-annotation-settings"><p style="color:#888;padding:20px;text-align:center;">加载中…</p></div>
+              <div id="up-annotation-settings"><p style="color:#888;padding:20px;text-align:center;">${t("加载中…")}</p></div>
             </section>
 
             <!-- ===== Tab 4: 复习计划 ===== -->
             <section class="hiword-up-page" data-page="review" style="display:none;">
-              <div id="up-review-settings"><p style="color:#888;padding:20px;text-align:center;">加载中…</p></div>
+              <div id="up-review-settings"><p style="color:#888;padding:20px;text-align:center;">${t("加载中…")}</p></div>
             </section>
 
             <!-- ===== Tab 5: 快捷键 ===== -->
             <section class="hiword-up-page" data-page="shortcuts" style="display:none;">
-              <div id="up-shortcut-settings"><p style="color:#888;padding:20px;text-align:center;">加载中…</p></div>
+              <div id="up-shortcut-settings"><p style="color:#888;padding:20px;text-align:center;">${t("加载中…")}</p></div>
             </section>
 
             <!-- ===== Tab 6: 数据与备份 ===== -->
             <section class="hiword-up-page" data-page="data" style="display:none;">
-              <div id="up-data-settings"><p style="color:#888;padding:20px;text-align:center;">加载中…</p></div>
+              <div id="up-data-settings"><p style="color:#888;padding:20px;text-align:center;">${t("加载中…")}</p></div>
             </section>
 
             <!-- ===== Tab 7: 关于 ===== -->
             <section class="hiword-up-page" data-page="about" style="display:none;">
-              <div id="up-about-settings"><p style="color:#888;padding:20px;text-align:center;">加载中…</p></div>
+              <div id="up-about-settings"><p style="color:#888;padding:20px;text-align:center;">${t("加载中…")}</p></div>
             </section>
 
             <!-- 2026-08-22 许可证已封存：原「data-page="license"」页面 section 在此（恢复时加回，含 Hero/设备码/激活码/答疑交流） -->
@@ -7607,8 +7917,8 @@ export default class RewordPlugin extends Plugin {
 
             <!-- 底部操作栏（粘在 main 底部） -->
             <div class="hiword-up-footer">
-              <button class="b3-button b3-button--outline" id="up-cancel">取消</button>
-              <button class="b3-button b3-button--primary" id="up-save">保存所有设置</button>
+              <button class="b3-button b3-button--outline" id="up-cancel">${t("取消")}</button>
+              <button class="b3-button b3-button--primary" id="up-save">${t("保存所有设置")}</button>
             </div>
 
           </main><!-- /main -->
@@ -7623,6 +7933,23 @@ export default class RewordPlugin extends Plugin {
 
     setTimeout(() => {
       const dlg = dialog.element as HTMLElement;
+
+      // ========== 界面语言切换（2026-09-10 P2 新增）==========
+      // 设置面板全部走 innerHTML 渲染 ⇒ 落盘后重建弹窗即可立即换语言；
+      // 其余界面（Svelte 组件）需重载插件，提示里说明。
+      dlg.querySelectorAll<HTMLElement>(".hiword-up-langbtn").forEach((btn) => {
+        btn.addEventListener("click", async () => {
+          const next = btn.dataset.lang === "en_US" ? "en_US" : "zh_CN";
+          if (next === getLang()) return;
+          const curTab = (dlg.querySelector(".hiword-up-nav-item.active") as HTMLElement | null)?.dataset.upTab;
+          try {
+            await saveLang(this.i18nIO(), next);
+          } catch (__swallowErr) { logSwallow(__swallowErr, "index.ts · 切换界面语言", "warn"); }
+          try { dialog.destroy(); } catch { /* 已销毁 */ }
+          this.openUnifiedSettings(curTab);
+          showMessage(t("界面语言已切换：设置面板已即时生效，其余界面重载插件后生效"), 3200, "info" as any);
+        });
+      });
 
       // ========== 左侧导航切换 ==========
       dlg.querySelectorAll(".hiword-up-nav-item").forEach((item) => {
@@ -7661,7 +7988,7 @@ export default class RewordPlugin extends Plugin {
         const v = parseInt(upFsSlider.value, 10);
         const size = fsSizeMap[v] || "medium";
         if (upFsLabel) {
-          upFsLabel.textContent = fsLabels[size];
+          upFsLabel.textContent = t(fsLabels[size]);
           // 标签跟随滑块位置（百分比定位，配合 .hiword-fs-thumblabel 绝对居中）
           upFsLabel.style.left = `${(v / 3) * 100}%`;
         }
@@ -7689,7 +8016,7 @@ export default class RewordPlugin extends Plugin {
       if (upVoiceSel && "speechSynthesis" in window) {
         const fillVoices = () => {
           const voices = window.speechSynthesis.getVoices() || [];
-          upVoiceSel.innerHTML = `<option value="">（自动优选最佳英文发音）</option>` +
+          upVoiceSel.innerHTML = `<option value="">${t("（自动优选最佳英文发音）")}</option>` +
             voices.map(v => `<option value="${v.voiceURI}" ${v.voiceURI === s.preferVoiceURI ? "selected" : ""}>${v.name} (${v.lang})</option>`).join("");
         };
         fillVoices();
@@ -7721,10 +8048,10 @@ export default class RewordPlugin extends Plugin {
 
       // ========== 在线词典测试 ==========
       dlg.querySelector("#up-online-test")?.addEventListener("click", async () => {
-        showMessage("正在查询在线词典（mastery）…", 1500, "info");
+        showMessage(t("正在查询在线词典（mastery）…"), 1500, "info");
         const r = await fetchOnlineDict("mastery");
-        if (r) showMessage(`在线词典可用：${r.phonetic || "无音标"} · ${r.meanings.length} 条释义`, 3000, "success" as any);
-        else showMessage("在线词典不可达，请打开控制台查看 [REword] 日志", 4000, "error");
+        if (r) showMessage(t("在线词典可用：{p} · {n} 条释义", { p: r.phonetic || t("无音标"), n: r.meanings.length }), 3000, "success" as any);
+        else showMessage(t("在线词典不可达，请打开控制台查看 [REword] 日志"), 4000, "error");
       });
 
       // ========== CSV 单词导入 ==========
@@ -7740,22 +8067,22 @@ export default class RewordPlugin extends Plugin {
           const lines = text.split(/\r?\n/).map(l => l.trim()).filter(l => l);
           csvWords = lines.map(l => l.split(/[,\t]/)[0].trim()).filter(w => w && /^[a-zA-Z]/.test(w));
           if (csvWords.length > 0) {
-            importPreview.innerHTML = `<p>检测到 <b>${csvWords.length}</b> 个单词：</p><ul>${csvWords.slice(0, 20).map(w => `<li>${w}</li>`).join("")}${csvWords.length > 20 ? `<li>... 等 ${csvWords.length - 20} 个</li>` : ""}</ul>`;
+            importPreview.innerHTML = `<p>${t("检测到 <b>{n}</b> 个单词：", { n: csvWords.length })}</p><ul>${csvWords.slice(0, 20).map(w => `<li>${w}</li>`).join("")}${csvWords.length > 20 ? `<li>${t("... 等 {n} 个", { n: csvWords.length - 20 })}</li>` : ""}</ul>`;
             importBtn.disabled = false;
           } else {
-            importPreview.innerHTML = `<p class="us-empty-hint">未检测到有效单词</p>`;
+            importPreview.innerHTML = `<p class="us-empty-hint">${t("未检测到有效单词")}</p>`;
             importBtn.disabled = true;
           }
-        } catch { importPreview.innerHTML = `<p class="us-empty-hint">文件读取失败</p>`; }
+        } catch { importPreview.innerHTML = `<p class="us-empty-hint">${t("文件读取失败")}</p>`; }
       });
       importBtn?.addEventListener("click", async () => {
         if (!csvWords.length) return;
         let added = 0;
         for (const w of csvWords) { try { await this.vocabStore.addWord(w); added++; } catch (__swallowErr) { logSwallow(__swallowErr, "index.ts · try { await this.vocabStore.addWord(w); added++; }", "debug"); } }
-        showMessage(`已导入 ${added}/${csvWords.length} 个单词`, 3000, "success" as any);
+        showMessage(t("已导入 {a}/{b} 个单词", { a: added, b: csvWords.length }), 3000, "success" as any);
         this.renderVocabPanel(this.dockElement!);
         csvWords = [];
-        importPreview.innerHTML = `<p class="us-empty-hint">导入完成！可继续选择新文件</p>`;
+        importPreview.innerHTML = `<p class="us-empty-hint">${t("导入完成！可继续选择新文件")}</p>`;
         importBtn.disabled = true;
         csvFileInput.value = "";
       });
@@ -7799,7 +8126,7 @@ export default class RewordPlugin extends Plugin {
         // 2026-08-21 精简：unified panel 不再保存 AI 设置(已搬到独立对话框 openAiSettings)
 
         dialog.destroy();
-        showMessage("所有设置已保存", 2000, "success" as any);
+        showMessage(t("所有设置已保存"), 2000, "success" as any);
       });
     }, 50);
   }
@@ -7821,22 +8148,22 @@ export default class RewordPlugin extends Plugin {
       const rows = dicts.map(meta => {
         const info = loaded.get(meta.id);
         const isActive = actives.includes(meta.id);
-        const count = info ? `${info.count} 词` : "未加载";
+        const count = info ? t("{n} 词", { n: info.count }) : t("未加载");
         const typeLabel = meta.type === "stardict" ? "StarDict" : "MDX";
         return `
         <div class="hiword-dm-row" data-id="${meta.id}">
           <div class="hiword-dm-ico">${icon}</div>
           <div class="hiword-dm-info">
             <span class="hiword-dm-name">${meta.name}</span>
-            <span class="hiword-dm-meta">${typeLabel}${meta.builtin ? " · 内置" : ""}</span>
+            <span class="hiword-dm-meta">${typeLabel}${meta.builtin ? " · " + t("内置") : ""}</span>
           </div>
           <div class="hiword-dm-right">
             <span class="hiword-dm-count ${info ? "is-loaded" : "is-unloaded"}">${count}</span>
-            <label class="hiword-dm-toggle ${isActive ? "is-active" : ""}" title="点击启用/停用">
+            <label class="hiword-dm-toggle ${isActive ? "is-active" : ""}" title="${t("点击启用/停用")}">
               <input type="checkbox" data-action="toggle-dict" data-id="${meta.id}" ${isActive ? "checked" : ""} />
-              <span>${isActive ? "已启用" : "未启用"}</span>
+              <span>${isActive ? t("已启用") : t("未启用")}</span>
             </label>
-            ${meta.builtin ? "" : `<button class="b3-button b3-button--small b3-button--outline hiword-dm-del" data-action="delete" data-id="${meta.id}">删除</button>`}
+            ${meta.builtin ? "" : `<button class="b3-button b3-button--small b3-button--outline hiword-dm-del" data-action="delete" data-id="${meta.id}">${t("删除")}</button>`}
           </div>
         </div>`;
       }).join("");
@@ -7848,24 +8175,24 @@ export default class RewordPlugin extends Plugin {
         <div class="hiword-dm-title">
           <svg class="hiword-dm-title-ico"><use xlink:href="#iconREwordDict"></use></svg>
           <div class="hiword-dm-title-text">
-            <div class="hiword-dm-h">词典管理</div>
-            <div class="hiword-dm-sub">英文词典与中文词典独立管理 · 各常驻一本</div>
+            <div class="hiword-dm-h">${t("词典管理")}</div>
+            <div class="hiword-dm-sub">${t("英文词典与中文词典独立管理 · 各常驻一本")}</div>
           </div>
         </div>
       </div>
-      <div class="hiword-dm-hint">选中文本后按 <kbd>⌥⌘L</kbd> 可一键在右侧边栏查词 · <kbd>⌥⌘E</kbd> 框选提取单词</div>
-      ${renderGroup("英文词典", "🔤", enDicts)}
-      ${renderGroup("中文词典", "🀄", zhDicts)}
+      <div class="hiword-dm-hint">${t("选中文本后按")} <kbd>⌥⌘L</kbd> ${t("可一键在右侧边栏查词")} · <kbd>⌥⌘E</kbd> ${t("框选提取单词")}</div>
+      ${renderGroup(t("英文词典"), "🔤", enDicts)}
+      ${renderGroup(t("中文词典"), "🀄", zhDicts)}
       ${this.renderOnlineDictSectionHtml()}
-      ${this.lastDictError ? `<div class="hiword-dm-diag"><details open><summary>🔍 诊断信息</summary><pre class="hiword-dm-diag-body">${this.escapeHtml(this.getDiagnosticInfo())}</pre></details></div>` : ""}
+      ${this.lastDictError ? `<div class="hiword-dm-diag"><details open><summary>🔍 ${t("诊断信息")}</summary><pre class="hiword-dm-diag-body">${this.escapeHtml(this.getDiagnosticInfo())}</pre></details></div>` : ""}
       <div class="hiword-dm-add">
-        <button class="hiword-dm-add-btn" id="up-dm-add-mdx"><span class="hiword-dm-add-ico">📥</span><span class="hiword-dm-add-body"><span class="hiword-dm-add-t">导入 MDX 词典</span><span class="hiword-dm-add-d">选择 .mdx 原包</span></span></button>
-        <button class="hiword-dm-add-btn hiword-dm-add-btn--ghost" id="up-dm-add-stardict"><span class="hiword-dm-add-ico">📚</span><span class="hiword-dm-add-body"><span class="hiword-dm-add-t">导入 StarDict</span><span class="hiword-dm-add-d">多选 .ifo/.idx/.dict 包</span></span></button>
+        <button class="hiword-dm-add-btn" id="up-dm-add-mdx"><span class="hiword-dm-add-ico">📥</span><span class="hiword-dm-add-body"><span class="hiword-dm-add-t">${t("导入 MDX 词典")}</span><span class="hiword-dm-add-d">${t("选择 .mdx 原包")}</span></span></button>
+        <button class="hiword-dm-add-btn hiword-dm-add-btn--ghost" id="up-dm-add-stardict"><span class="hiword-dm-add-ico">📚</span><span class="hiword-dm-add-body"><span class="hiword-dm-add-t">${t("导入 StarDict")}</span><span class="hiword-dm-add-d">${t("多选 .ifo/.idx/.dict 包")}</span></span></button>
         <input type="file" id="up-dm-file-mdx" accept=".mdx" style="display:none" />
         <input type="file" id="up-dm-file-stardict" accept=".ifo,.idx,.dict,.dict.dz,.syn" multiple style="display:none" />
       </div>
-      <div class="hiword-dm-tip"><strong>支持格式：</strong><br/>• <strong>MDX</strong>：直接选择 .mdx 原包<br/>• <strong>StarDict</strong>：需同时选择 .ifo/.idx/.dict 或 .dict.dz（.syn 可选）<br/>选择文件后将自动写入插件 dict/ 目录并立即建索引。</div>
-      <div class="hiword-dm-footer"><button class="b3-button b3-button--outline b3-button--small" id="up-dm-refresh">刷新</button></div>
+      <div class="hiword-dm-tip"><strong>${t("支持格式：")}</strong><br/>• <strong>MDX</strong>：${t("直接选择 .mdx 原包")}<br/>• <strong>StarDict</strong>：${t("需同时选择 .ifo/.idx/.dict 或 .dict.dz（.syn 可选）")}<br/>${t("选择文件后将自动写入插件 dict/ 目录并立即建索引。")}</div>
+      <div class="hiword-dm-footer"><button class="b3-button b3-button--outline b3-button--small" id="up-dm-refresh">${t("刷新")}</button></div>
     `;
 
     // MDX 导入
@@ -7914,7 +8241,7 @@ export default class RewordPlugin extends Plugin {
       if (active) await this.loadDictFile(active);
       (container as HTMLElement).dataset.rendered = "false"; // 重置以便重新渲染
       this.renderUnifiedDictPanel(dlg, dialog);
-      showMessage("已刷新", 2000, "info");
+      showMessage(t("已刷新"), 2000, "info");
     });
   }
 
@@ -7927,7 +8254,7 @@ export default class RewordPlugin extends Plugin {
     const host = dlg.querySelector("#up-reader-settings") as HTMLElement | null;
     if (!host) return;
     if (!this.readerDock) {
-      host.innerHTML = '<p style="color:#888;padding:20px;text-align:center;">阅读器未就绪</p>';
+      host.innerHTML = `<p style="color:#888;padding:20px;text-align:center;">${t("阅读器未就绪")}</p>`;
       return;
     }
     // 2026-09-09 P0 设置双分家：插件级统一设置面板面向图书主场景，显式路由 book 分片
@@ -7954,55 +8281,55 @@ export default class RewordPlugin extends Plugin {
 
     host.innerHTML = `
       <div class="hiword-up-group">
-        <div class="hiword-up-group-label"><span class="hiword-up-group-name">主题与字体</span><span class="hiword-up-group-desc">修改即时生效到所有已打开的阅读 Tab</span></div>
-        ${sel("up-rd-theme", "阅读主题", [
-          ["auto", "跟随思源"], ["light", "默认"], ["almond", "杏仁黄"], ["autumn", "秋叶褐"],
-          ["green", "青草绿"], ["blue", "海天蓝"], ["night", "夜间"], ["dark", "暗黑"],
-          ["gold", "赤金"], ["custom", "自定义（在阅读器内调色）"],
+        <div class="hiword-up-group-label"><span class="hiword-up-group-name">${t("主题与字体")}</span><span class="hiword-up-group-desc">${t("修改即时生效到所有已打开的阅读 Tab")}</span></div>
+        ${sel("up-rd-theme", t("阅读主题"), [
+          ["auto", t("跟随思源")], ["light", t("默认")], ["almond", t("杏仁黄")], ["autumn", t("秋叶褐")],
+          ["green", t("青草绿")], ["blue", t("海天蓝")], ["night", t("夜间")], ["dark", t("暗黑")],
+          ["gold", t("赤金")], ["custom", t("自定义（在阅读器内调色）")],
         ], String(st.theme))}
-        ${sel("up-rd-fontmode", "正文字体", [
-          ["follow-siyuan", "跟随思源（霞鹜文楷等）"], ["custom", "自定义导入字体"], ["system", "系统默认"],
+        ${sel("up-rd-fontmode", t("正文字体"), [
+          ["follow-siyuan", t("跟随思源（霞鹜文楷等）")], ["custom", t("自定义导入字体")], ["system", t("系统默认")],
         ], String(st.fontMode))}
-        ${sel("up-rd-linewidth", "正文行宽", [["narrow", "窄"], ["normal", "标准"], ["wide", "宽"]], String(st.lineWidth))}
+        ${sel("up-rd-linewidth", t("正文行宽"), [["narrow", t("窄")], ["normal", t("标准")], ["wide", t("宽")]], String(st.lineWidth))}
       </div>
 
       <div class="hiword-up-group">
-        <div class="hiword-up-group-label"><span class="hiword-up-group-name">字号与排版</span></div>
-        ${rng("up-rd-fontsize", "正文字号", 12, 28, 1, st.fontSize, "px")}
-        ${rng("up-rd-lineheight", "行距", 1.4, 2.2, 0.05, st.lineHeight)}
-        ${sw("up-rd-ovpub", "覆盖出版商字体（强制使用所选字体）", st.overridePublisherFont !== false)}
-        ${sw("up-rd-ovfs", "统一正文字号（压平书籍写死字号，A+/A- 全局生效）", st.overrideBookFontSize !== false)}
+        <div class="hiword-up-group-label"><span class="hiword-up-group-name">${t("字号与排版")}</span></div>
+        ${rng("up-rd-fontsize", t("正文字号"), 12, 28, 1, st.fontSize, "px")}
+        ${rng("up-rd-lineheight", t("行距"), 1.4, 2.2, 0.05, st.lineHeight)}
+        ${sw("up-rd-ovpub", t("覆盖出版商字体（强制使用所选字体）"), st.overridePublisherFont !== false)}
+        ${sw("up-rd-ovfs", t("统一正文字号（压平书籍写死字号，A+/A- 全局生效）"), st.overrideBookFontSize !== false)}
       </div>
 
       <div class="hiword-up-group">
-        <div class="hiword-up-group-label"><span class="hiword-up-group-name">文本与段落</span></div>
-        ${rng("up-rd-fw", "字重", 100, 900, 100, st.text?.fontWeight ?? 400)}
-        ${rng("up-rd-ls", "字距", -2, 8, 0.5, st.text?.letterSpacing ?? 0, "px")}
-        ${rng("up-rd-ps", "段距", 0, 2, 0.1, st.paragraph?.paragraphSpacing ?? 0.8, "em")}
-        ${rng("up-rd-ti", "首行缩进", 0, 4, 0.5, st.paragraph?.textIndent ?? 0, "em")}
+        <div class="hiword-up-group-label"><span class="hiword-up-group-name">${t("文本与段落")}</span></div>
+        ${rng("up-rd-fw", t("字重"), 100, 900, 100, st.text?.fontWeight ?? 400)}
+        ${rng("up-rd-ls", t("字距"), -2, 8, 0.5, st.text?.letterSpacing ?? 0, "px")}
+        ${rng("up-rd-ps", t("段距"), 0, 2, 0.1, st.paragraph?.paragraphSpacing ?? 0.8, "em")}
+        ${rng("up-rd-ti", t("首行缩进"), 0, 4, 0.5, st.paragraph?.textIndent ?? 0, "em")}
       </div>
 
       <div class="hiword-up-group">
-        <div class="hiword-up-group-label"><span class="hiword-up-group-name">阅读模式</span></div>
-        ${sel("up-rd-flow", "阅读模式", [["paginated", "分页"], ["scrolled", "连续滚动"]], String(st.flow))}
-        ${sel("up-rd-turn", "翻页动画", [["default", "默认"], ["slide", "滑动"], ["curl", "卷页"]], String(st.turnStyle))}
-        ${sw("up-rd-clickturn", "点击正文左右区域翻页", !!st.clickToTurn)}
+        <div class="hiword-up-group-label"><span class="hiword-up-group-name">${t("阅读模式")}</span></div>
+        ${sel("up-rd-flow", t("阅读模式"), [["paginated", t("分页")], ["scrolled", t("连续滚动")]], String(st.flow))}
+        ${sel("up-rd-turn", t("翻页动画"), [["default", t("默认")], ["slide", t("滑动")], ["curl", t("卷页")]], String(st.turnStyle))}
+        ${sw("up-rd-clickturn", t("点击正文左右区域翻页"), !!st.clickToTurn)}
       </div>
 
       <div class="hiword-up-group">
-        <div class="hiword-up-group-label"><span class="hiword-up-group-name">页面布局</span></div>
-        ${sw("up-rd-header", "显示页眉（书名 · 章节）", st.layout?.showHeader !== false)}
-        ${sw("up-rd-footer", "显示页脚（底部工具栏）", st.layout?.showFooter !== false)}
-        ${sw("up-rd-progress", "显示阅读进度", st.layout?.showProgress !== false)}
-        ${sel("up-rd-progstyle", "进度样式", [["fraction", "分数（如 5/100）"], ["page", "页码（如 12）"], ["percent", "百分比（如 5%）"]], String(st.layout?.progressStyle ?? "fraction"))}
-        ${sw("up-rd-time", "页眉显示当前时间", !!st.layout?.showCurrentTime)}
+        <div class="hiword-up-group-label"><span class="hiword-up-group-name">${t("页面布局")}</span></div>
+        ${sw("up-rd-header", t("显示页眉（书名 · 章节）"), st.layout?.showHeader !== false)}
+        ${sw("up-rd-footer", t("显示页脚（底部工具栏）"), st.layout?.showFooter !== false)}
+        ${sw("up-rd-progress", t("显示阅读进度"), st.layout?.showProgress !== false)}
+        ${sel("up-rd-progstyle", t("进度样式"), [["fraction", t("分数（如 5/100）")], ["page", t("页码（如 12）")], ["percent", t("百分比（如 5%）")]], String(st.layout?.progressStyle ?? "fraction"))}
+        ${sw("up-rd-time", t("页眉显示当前时间"), !!st.layout?.showCurrentTime)}
         <div class="hiword-up-field">
-          <label class="hiword-up-field-label">页面边距（px，上下左右）</label>
+          <label class="hiword-up-field-label">${t("页面边距（px，上下左右）")}</label>
           <div style="display:flex;gap:8px;">
-            <input id="up-rd-mt" class="b3-text-field" type="number" min="0" max="120" value="${st.layout?.marginTopPx ?? 16}" title="上边距" style="width:64px;" />
-            <input id="up-rd-mb" class="b3-text-field" type="number" min="0" max="120" value="${st.layout?.marginBottomPx ?? 16}" title="下边距" style="width:64px;" />
-            <input id="up-rd-ml" class="b3-text-field" type="number" min="0" max="160" value="${st.layout?.marginLeftPx ?? 16}" title="左边距" style="width:64px;" />
-            <input id="up-rd-mr" class="b3-text-field" type="number" min="0" max="160" value="${st.layout?.marginRightPx ?? 16}" title="右边距" style="width:64px;" />
+            <input id="up-rd-mt" class="b3-text-field" type="number" min="0" max="120" value="${st.layout?.marginTopPx ?? 16}" title="${t("上边距")}" style="width:64px;" />
+            <input id="up-rd-mb" class="b3-text-field" type="number" min="0" max="120" value="${st.layout?.marginBottomPx ?? 16}" title="${t("下边距")}" style="width:64px;" />
+            <input id="up-rd-ml" class="b3-text-field" type="number" min="0" max="160" value="${st.layout?.marginLeftPx ?? 16}" title="${t("左边距")}" style="width:64px;" />
+            <input id="up-rd-mr" class="b3-text-field" type="number" min="0" max="160" value="${st.layout?.marginRightPx ?? 16}" title="${t("右边距")}" style="width:64px;" />
           </div>
         </div>
       </div>
@@ -8093,49 +8420,49 @@ export default class RewordPlugin extends Plugin {
 
     container.innerHTML = `
       <div class="hiword-up-group">
-        <div class="hiword-up-group-label"><span class="hiword-up-group-name">默认标注样式</span>
-          <span class="hiword-up-group-hint">新建高亮/批注时自动套用，可在创建工具栏随时改</span></div>
+        <div class="hiword-up-group-label"><span class="hiword-up-group-name">${t("默认标注样式")}</span>
+          <span class="hiword-up-group-hint">${t("新建高亮/批注时自动套用，可在创建工具栏随时改")}</span></div>
         <div class="hiword-up-row">
-          <span class="hiword-up-row-k">默认线型</span>
+          <span class="hiword-up-row-k">${t("默认线型")}</span>
           <div class="hiword-ann-styles" id="up-ann-styles">
             ${STYLE_OPTS.map(o => `<label class="hiword-ann-style ${cfg.defaultStyle === o.v ? "is-active" : ""}" data-ann-style="${o.v}">
               <input type="radio" name="up-ann-style" value="${o.v}" ${cfg.defaultStyle === o.v ? "checked" : ""} />
-              <span class="hiword-ann-style-name">${o.label}</span>
-              <span class="hiword-ann-style-desc">${o.desc}</span>
+              <span class="hiword-ann-style-name">${t(o.label)}</span>
+              <span class="hiword-ann-style-desc">${t(o.desc)}</span>
             </label>`).join("")}
           </div>
         </div>
         <div class="hiword-up-row">
-          <span class="hiword-up-row-k">默认颜色</span>
+          <span class="hiword-up-row-k">${t("默认颜色")}</span>
           <div class="hiword-ann-colors" id="up-ann-colors">
             ${cfg.palette.map(c => swatch(c, c.toLowerCase() === cfg.defaultColor.toLowerCase())).join("")}
-            <input type="color" id="up-ann-custom" value="${cfg.defaultColor}" class="hiword-ann-custom" title="自定义默认色" />
+            <input type="color" id="up-ann-custom" value="${cfg.defaultColor}" class="hiword-ann-custom" title="${t("自定义默认色")}" />
           </div>
         </div>
       </div>
 
       <div class="hiword-up-group">
-        <div class="hiword-up-group-label"><span class="hiword-up-group-name">调色板</span>
-          <span class="hiword-up-group-hint">创建工具栏与高亮卡可选择的颜色组</span></div>
+        <div class="hiword-up-group-label"><span class="hiword-up-group-name">${t("调色板")}</span>
+          <span class="hiword-up-group-hint">${t("创建工具栏与高亮卡可选择的颜色组")}</span></div>
         <div class="hiword-up-row hiword-up-row--block">
           <div class="hiword-ann-palette" id="up-ann-palette">
             ${cfg.palette.map(c => `<div class="hiword-ann-pitem" data-pal="${c}">
               <span class="hiword-ann-pdot" style="background:${c}"></span>
-              <button class="hiword-ann-pdel" data-pal-del="${c}" title="移除">×</button>
+              <button class="hiword-ann-pdel" data-pal-del="${c}" title="${t("移除")}">×</button>
             </div>`).join("")}
           </div>
           <div class="hiword-ann-addrow">
             <input type="color" id="up-ann-add-color" value="#ff6b6b" class="hiword-ann-custom" />
-            <button class="b3-button b3-button--small" id="up-ann-add">加入调色板</button>
+            <button class="b3-button b3-button--small" id="up-ann-add">${t("加入调色板")}</button>
           </div>
         </div>
       </div>
 
       <div class="hiword-up-group">
-        <div class="hiword-up-group-label"><span class="hiword-up-group-name">标签预设</span>
-          <span class="hiword-up-group-hint">每行一个，创建批注时作为可选项</span></div>
+        <div class="hiword-up-group-label"><span class="hiword-up-group-name">${t("标签预设")}</span>
+          <span class="hiword-up-group-hint">${t("每行一个，创建批注时作为可选项")}</span></div>
         <div class="hiword-up-row hiword-up-row--block">
-          <textarea id="up-ann-tags" class="hiword-up-textarea" rows="5" placeholder="每行一个标签，如：生词 / 句法 / 文化">${cfg.tagPresets.join("\n")}</textarea>
+          <textarea id="up-ann-tags" class="hiword-up-textarea" rows="5" placeholder="${t("每行一个标签，如：生词 / 句法 / 文化")}">${cfg.tagPresets.join("\n")}</textarea>
         </div>
       </div>
     `;
@@ -8145,7 +8472,7 @@ export default class RewordPlugin extends Plugin {
         if (!r.checked) return;
         setAnnotationConfig({ defaultStyle: r.value as AnnotationStyle });
         container.querySelectorAll(".hiword-ann-style").forEach(el => el.classList.toggle("is-active", (el as HTMLElement).dataset.annStyle === r.value));
-        showMessage("默认线型已更新", 1500, "info");
+        showMessage(t("默认线型已更新"), 1500, "info");
       });
     });
 
@@ -8155,7 +8482,7 @@ export default class RewordPlugin extends Plugin {
         setAnnotationConfig({ defaultColor: hex });
         container.querySelectorAll(".hiword-ann-swatch").forEach(el => el.classList.toggle("is-active", (el as HTMLElement).dataset.annColor!.toLowerCase() === hex.toLowerCase()));
         (container.querySelector("#up-ann-custom") as HTMLInputElement).value = hex;
-        showMessage("默认颜色已更新", 1500, "info");
+        showMessage(t("默认颜色已更新"), 1500, "info");
       });
     });
     const customColor = container.querySelector("#up-ann-custom") as HTMLInputElement;
@@ -8177,7 +8504,7 @@ export default class RewordPlugin extends Plugin {
     container.querySelector("#up-ann-add")?.addEventListener("click", () => {
       const hex = (addColorI?.value || "#ff6b6b").toLowerCase();
       const pal = getAnnotationPalette();
-      if (pal.some(c => c.toLowerCase() === hex)) { showMessage("该颜色已在调色板中", 1500, "info"); return; }
+      if (pal.some(c => c.toLowerCase() === hex)) { showMessage(t("该颜色已在调色板中"), 1500, "info"); return; }
       pal.push(hex);
       setAnnotationConfig({ palette: pal });
       container.dataset.rendered = "false";
@@ -8188,7 +8515,7 @@ export default class RewordPlugin extends Plugin {
     tagsTa?.addEventListener("change", () => {
       const tags = tagsTa.value.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
       setAnnotationConfig({ tagPresets: tags });
-      showMessage("标签预设已保存", 1500, "info");
+      showMessage(t("标签预设已保存"), 1500, "info");
     });
   }
 
@@ -8204,47 +8531,47 @@ export default class RewordPlugin extends Plugin {
 
     container.innerHTML = `
       <div class="hiword-up-group">
-        <div class="hiword-up-group-label"><span class="hiword-up-group-name">复习节奏</span>
-          <span class="hiword-up-group-hint">影响每天复习队列规模与间隔增长</span></div>
+        <div class="hiword-up-group-label"><span class="hiword-up-group-name">${t("复习节奏")}</span>
+          <span class="hiword-up-group-hint">${t("影响每天复习队列规模与间隔增长")}</span></div>
         <div class="hiword-up-row">
-          <span class="hiword-up-row-k">每日复习上限</span>
+          <span class="hiword-up-row-k">${t("每日复习上限")}</span>
           <div class="hiword-up-slider-row">
             <input type="range" id="up-rv-daily" min="0" max="100" step="5" value="${c.dailyLimit}" />
-            <span class="hiword-up-slider-val" id="up-rv-daily-v">${c.dailyLimit === 0 ? "不限" : c.dailyLimit + " 个"}</span>
+            <span class="hiword-up-slider-val" id="up-rv-daily-v">${c.dailyLimit === 0 ? t("不限") : t("{n} 个", { n: c.dailyLimit })}</span>
           </div>
         </div>
         <div class="hiword-up-row">
-          <span class="hiword-up-row-k">首次「良好」间隔</span>
+          <span class="hiword-up-row-k">${t("首次「良好」间隔")}</span>
           <div class="hiword-up-slider-row">
             <input type="range" id="up-rv-good" min="1" max="14" step="1" value="${c.initInterval.good}" />
-            <span class="hiword-up-slider-val" id="up-rv-good-v">${c.initInterval.good} 天</span>
+            <span class="hiword-up-slider-val" id="up-rv-good-v">${t("{n} 天", { n: c.initInterval.good })}</span>
           </div>
         </div>
         <div class="hiword-up-row">
-          <span class="hiword-up-row-k">首次「轻松」间隔</span>
+          <span class="hiword-up-row-k">${t("首次「轻松」间隔")}</span>
           <div class="hiword-up-slider-row">
             <input type="range" id="up-rv-easy" min="1" max="21" step="1" value="${c.initInterval.easy}" />
-            <span class="hiword-up-slider-val" id="up-rv-easy-v">${c.initInterval.easy} 天</span>
+            <span class="hiword-up-slider-val" id="up-rv-easy-v">${t("{n} 天", { n: c.initInterval.easy })}</span>
           </div>
         </div>
         <div class="hiword-up-row hiword-up-row--block">
-          <span class="hiword-up-row-k">难度折减系数</span>
+          <span class="hiword-up-row-k">${t("难度折减系数")}</span>
           <div class="hiword-up-slider-row">
             <input type="range" id="up-rv-diff" min="0" max="0.6" step="0.05" value="${c.difficultyCorrection}" />
             <span class="hiword-up-slider-val" id="up-rv-diff-v">${c.difficultyCorrection.toFixed(2)}</span>
           </div>
-          <span class="hiword-up-row-sub">越难的词，有效复习间隔被压缩的比例（0~0.6）</span>
+          <span class="hiword-up-row-sub">${t("越难的词，有效复习间隔被压缩的比例（0~0.6）")}</span>
         </div>
         <div class="hiword-up-row hiword-up-row--switch">
-          <label class="hiword-up-switch"><input type="checkbox" id="up-rv-seed" ${c.enableFrequencySeed ? "checked" : ""} /><span>启用内置高频词种子（无外部词频表时回退）</span></label>
+          <label class="hiword-up-switch"><input type="checkbox" id="up-rv-seed" ${c.enableFrequencySeed ? "checked" : ""} /><span>${t("启用内置高频词种子（无外部词频表时回退）")}</span></label>
         </div>
       </div>
 
       <div class="hiword-up-group">
-        <div class="hiword-up-group-label"><span class="hiword-up-group-name">校准与重置</span></div>
+        <div class="hiword-up-group-label"><span class="hiword-up-group-name">${t("校准与重置")}</span></div>
         <div class="hiword-up-row hiword-up-row--actions">
-          <button class="b3-button b3-button--small" id="up-rv-calib">基于复习历史校准</button>
-          <button class="b3-button b3-button--small b3-button--outline" id="up-rv-reset">恢复默认参数</button>
+          <button class="b3-button b3-button--small" id="up-rv-calib">${t("基于复习历史校准")}</button>
+          <button class="b3-button b3-button--small b3-button--outline" id="up-rv-reset">${t("恢复默认参数")}</button>
         </div>
       </div>
     `;
@@ -8253,21 +8580,21 @@ export default class RewordPlugin extends Plugin {
     const dailyV = container.querySelector("#up-rv-daily-v") as HTMLElement;
     dailyI?.addEventListener("input", () => {
       const v = parseInt(dailyI.value, 10);
-      dailyV.textContent = v === 0 ? "不限" : v + " 个";
+      dailyV.textContent = v === 0 ? t("不限") : t("{n} 个", { n: v });
       setReviewConfig({ dailyLimit: v }); persist();
     });
     const goodI = container.querySelector("#up-rv-good") as HTMLInputElement;
     const goodV = container.querySelector("#up-rv-good-v") as HTMLElement;
     goodI?.addEventListener("input", () => {
       const v = parseInt(goodI.value, 10);
-      goodV.textContent = v + " 天";
+      goodV.textContent = t("{n} 天", { n: v });
       setReviewConfig({ initInterval: { ...getReviewConfig().initInterval, good: v } }); persist();
     });
     const easyI = container.querySelector("#up-rv-easy") as HTMLInputElement;
     const easyV = container.querySelector("#up-rv-easy-v") as HTMLElement;
     easyI?.addEventListener("input", () => {
       const v = parseInt(easyI.value, 10);
-      easyV.textContent = v + " 天";
+      easyV.textContent = t("{n} 天", { n: v });
       setReviewConfig({ initInterval: { ...getReviewConfig().initInterval, easy: v } }); persist();
     });
     const diffI = container.querySelector("#up-rv-diff") as HTMLInputElement;
@@ -8285,7 +8612,7 @@ export default class RewordPlugin extends Plugin {
       this.resetReviewConfigCmd();
       container.dataset.rendered = "false";
       this.renderReviewSettings(dlg, dialog);
-      showMessage("复习参数已恢复默认", 1500, "info");
+      showMessage(t("复习参数已恢复默认"), 1500, "info");
     });
   }
 
@@ -8319,8 +8646,8 @@ export default class RewordPlugin extends Plugin {
         const isC = conflicts.includes(item.action);
         return `<div class="hiword-sc-row ${isC ? "is-conflict" : ""}">
           <span class="hiword-sc-keys"><kbd>${item.key}</kbd></span>
-          <span class="hiword-sc-label">${item.label}</span>
-          ${isC ? `<span class="hiword-sc-badge">与思源冲突</span>` : ""}
+          <span class="hiword-sc-label">${t(item.label)}</span>
+          ${isC ? `<span class="hiword-sc-badge">${t("与思源冲突")}</span>` : ""}
         </div>`;
       }).join("");
 
@@ -8329,16 +8656,16 @@ export default class RewordPlugin extends Plugin {
 
     container.innerHTML = `
       <div class="hiword-up-group">
-        <div class="hiword-up-group-label"><span class="hiword-up-group-name">阅读器快捷键</span>
-          <span class="hiword-up-group-hint">Mac 上 Ctrl 组合键对应 ⌘；与思源冲突时阅读器自动让行</span></div>
+        <div class="hiword-up-group-label"><span class="hiword-up-group-name">${t("阅读器快捷键")}</span>
+          <span class="hiword-up-group-hint">${t("Mac 上 Ctrl 组合键对应 ⌘；与思源冲突时阅读器自动让行")}</span></div>
         <div class="hiword-sc-list">${rows(modList)}</div>
       </div>
       <div class="hiword-up-group">
-        <div class="hiword-up-group-label"><span class="hiword-up-group-name">无修饰键</span></div>
+        <div class="hiword-up-group-label"><span class="hiword-up-group-name">${t("无修饰键")}</span></div>
         <div class="hiword-sc-list">${rows(plainList)}</div>
       </div>
       <div class="hiword-up-group hiword-up-group--note">
-        当前版本以只读查看为主。如需自定义键位，可后续版本支持重映射。
+        ${t("当前版本以只读查看为主。如需自定义键位，可后续版本支持重映射。")}
       </div>
     `;
   }
@@ -8356,24 +8683,25 @@ export default class RewordPlugin extends Plugin {
       "hiword-ai-presets.json", "hiword-ai-prompts.json", "hiword-ai-sessions.json",
       "hiword-review-config.json", "hiword-annotation-config.json", "hiword-reader-settings.json",
       "hiword-dock-layout.json", "hiword-dicts.json", "hiword-tts.json",
+      "hiword-review-sources.json",
     ];
 
     container.innerHTML = `
       <div class="hiword-up-group">
-        <div class="hiword-up-group-label"><span class="hiword-up-group-name">备份与恢复</span></div>
+        <div class="hiword-up-group-label"><span class="hiword-up-group-name">${t("备份与恢复")}</span></div>
         <div class="hiword-up-row hiword-up-row--actions">
-          <button class="b3-button b3-button--small" id="up-data-export">导出全部数据</button>
-          <button class="b3-button b3-button--small b3-button--outline" id="up-data-import">从备份导入</button>
+          <button class="b3-button b3-button--small" id="up-data-export">${t("导出全部数据")}</button>
+          <button class="b3-button b3-button--small b3-button--outline" id="up-data-import">${t("从备份导入")}</button>
           <input type="file" id="up-data-file" accept=".json" style="display:none" />
         </div>
-        <span class="hiword-up-row-sub">导出会把批注 / 生词 / 复习配置 / AI 设置等打包成一个 JSON；导入会覆盖同名数据，重启插件后完全生效。</span>
+        <span class="hiword-up-row-sub">${t("导出会把批注 / 生词 / 复习配置 / AI 设置等打包成一个 JSON；导入会覆盖同名数据，重启插件后完全生效。")}</span>
       </div>
 
       <div class="hiword-up-group">
-        <div class="hiword-up-group-label"><span class="hiword-up-group-name">清理与重置</span></div>
+        <div class="hiword-up-group-label"><span class="hiword-up-group-name">${t("清理与重置")}</span></div>
         <div class="hiword-up-row hiword-up-row--actions">
-          <button class="b3-button b3-button--small b3-button--outline" id="up-data-clearcache">清空在线词典缓存</button>
-          <button class="b3-button b3-button--small b3-button--outline" id="up-data-resetreader">重置阅读设置</button>
+          <button class="b3-button b3-button--small b3-button--outline" id="up-data-clearcache">${t("清空在线词典缓存")}</button>
+          <button class="b3-button b3-button--small b3-button--outline" id="up-data-resetreader">${t("重置阅读设置")}</button>
         </div>
       </div>
     `;
@@ -8392,7 +8720,7 @@ export default class RewordPlugin extends Plugin {
       a.download = `reword-backup-${new Date().toISOString().slice(0, 10)}.json`;
       a.click();
       URL.revokeObjectURL(url);
-      showMessage(`已导出 ${n} 项数据`, 2000, "success" as any);
+      showMessage(t("已导出 {n} 项数据", { n }), 2000, "success" as any);
     });
 
     const fileInput = container.querySelector("#up-data-file") as HTMLInputElement;
@@ -8405,9 +8733,9 @@ export default class RewordPlugin extends Plugin {
         const bundle = JSON.parse(text) as Record<string, unknown>;
         let n = 0;
         for (const k of Object.keys(bundle)) { await this.saveData(k, bundle[k]); n++; }
-        showMessage(`已导入 ${n} 项数据，重启插件后生效`, 2600, "success" as any);
+        showMessage(t("已导入 {n} 项数据，重启插件后生效", { n }), 2600, "success" as any);
       } catch (err) {
-        showMessage("导入失败：文件不是有效的备份 JSON", 2600, "error" as any);
+        showMessage(t("导入失败：文件不是有效的备份 JSON"), 2600, "error" as any);
       }
       fileInput.value = "";
     });
@@ -8415,11 +8743,11 @@ export default class RewordPlugin extends Plugin {
     container.querySelector("#up-data-clearcache")?.addEventListener("click", () => {
       resetOnlineDictCache();
       resetOnlinePhoneticCache();
-      showMessage("在线词典缓存已清空", 2000, "info");
+      showMessage(t("在线词典缓存已清空"), 2000, "info");
     });
     container.querySelector("#up-data-resetreader")?.addEventListener("click", () => {
       this.readerDock?.resetReaderSettings();
-      showMessage("阅读设置已重置为默认，重新打开阅读器生效", 2400, "info");
+      showMessage(t("阅读设置已重置为默认，重新打开阅读器生效"), 2400, "info");
     });
   }
 
@@ -8432,25 +8760,25 @@ export default class RewordPlugin extends Plugin {
 
     container.innerHTML = `
       <div class="hiword-up-group">
-        <div class="hiword-up-group-label"><span class="hiword-up-group-name">关于 RE word</span></div>
+        <div class="hiword-up-group-label"><span class="hiword-up-group-name">${t("关于 RE word")}</span></div>
         <div class="hiword-about">
           <div class="hiword-about-logo">RE<span>word</span></div>
           <div class="hiword-about-meta">
-            <div class="hiword-about-ver">版本 <strong>v0.1.0</strong></div>
-            <div class="hiword-about-desc">离线词典 · 批注精读 · 间隔复习 · EPUB 阅读</div>
+            <div class="hiword-about-ver">${t("版本")} <strong>v0.1.0</strong></div>
+            <div class="hiword-about-desc">${t("离线词典 · 批注精读 · 间隔复习 · EPUB 阅读")}</div>
           </div>
         </div>
       </div>
       <div class="hiword-up-group">
-        <div class="hiword-up-group-label"><span class="hiword-up-group-name">更新日志</span></div>
+        <div class="hiword-up-group-label"><span class="hiword-up-group-name">${t("更新日志")}</span></div>
         <ul class="hiword-changelog">
-          <li><b>v0.1.0</b> 阅读器标注层重构：自建 SVG overlay，彻底修复高亮不显示</li>
-          <li><b>v0.1.0</b> 统一设置面板：标注与批注 / 复习计划 / 快捷键 / 数据与备份</li>
-          <li><b>v0.1.0</b> 批注默认样式、SRS 参数、数据导入导出可配置化</li>
+          <li><b>v0.1.0</b> ${t("阅读器标注层重构：自建 SVG overlay，彻底修复高亮不显示")}</li>
+          <li><b>v0.1.0</b> ${t("统一设置面板：标注与批注 / 复习计划 / 快捷键 / 数据与备份")}</li>
+          <li><b>v0.1.0</b> ${t("批注默认样式、SRS 参数、数据导入导出可配置化")}</li>
         </ul>
       </div>
       <div class="hiword-up-group hiword-up-group--note">
-        反馈与建议：在思源笔记「RE word」对话框或 GitHub Issue 提交。
+        ${t("反馈与建议：在思源笔记「RE word」对话框或 GitHub Issue 提交。")}
       </div>
     `;
   }
@@ -8511,7 +8839,7 @@ export default class RewordPlugin extends Plugin {
         onSave: (patch: Partial<AiSettings>) => {
           this.aiSettings = normalizeAiSettings({ ...this.aiSettings, ...patch });
           this.saveAiSettings();
-          showMessage("AI 设置已保存", 2000, "success" as any);
+          showMessage(t("AI 设置已保存"), 2000, "success" as any);
           onClose?.();
           destroyComp();
         },
@@ -8553,7 +8881,7 @@ export default class RewordPlugin extends Plugin {
   /** 独立 AI 设置入口（顶栏 cog / 命令 / whale 面板桥接）：薄壳包一层 Dialog，内容复用 renderAiSettingsInto */
   public openAiSettings() {
     const dialog = new Dialog({
-      title: "AI 精读设置",
+      title: t("AI 精读设置"),
       // 2026-09-07 用户拍板：800×700（原 720×520 偏挤，模型列表要展开两行控件）
       width: responsiveDialogSize(800, "width"),
       height: responsiveDialogSize(700, "height"),
@@ -8586,19 +8914,19 @@ export default class RewordPlugin extends Plugin {
     const on = this.onlineSettings?.enabled ?? true;
     return `
       <div class="hiword-dm-section hiword-dm-section--online">
-        <div class="hiword-dm-section-title">🌐 在线词典 (1)</div>
+        <div class="hiword-dm-section-title">🌐 ${t("在线词典")} (1)</div>
         <div class="hiword-dm-list">
           <div class="hiword-dm-row" data-id="haici-online">
             <div class="hiword-dm-ico">🌐</div>
             <div class="hiword-dm-info">
-              <span class="hiword-dm-name">词海</span>
-              <span class="hiword-dm-meta">在线 · 免费无需 Key（corp.dict.cn）· 无需下载文件</span>
+              <span class="hiword-dm-name">${t("词海")}</span>
+              <span class="hiword-dm-meta">${t("在线 · 免费无需 Key（corp.dict.cn）· 无需下载文件")}</span>
             </div>
             <div class="hiword-dm-right">
-              <span class="hiword-dm-count ${on ? "is-loaded" : "is-unloaded"}">在线</span>
-              <label class="hiword-dm-toggle ${on ? "is-active" : ""}" title="点击启用/停用">
+              <span class="hiword-dm-count ${on ? "is-loaded" : "is-unloaded"}">${t("在线")}</span>
+              <label class="hiword-dm-toggle ${on ? "is-active" : ""}" title="${t("点击启用/停用")}">
                 <input type="checkbox" data-action="toggle-online-dict" ${on ? "checked" : ""} />
-                <span>${on ? "已启用" : "未启用"}</span>
+                <span>${on ? t("已启用") : t("未启用")}</span>
               </label>
             </div>
           </div>
@@ -8622,8 +8950,8 @@ export default class RewordPlugin extends Plugin {
       const toggle = cb.closest(".hiword-dm-toggle");
       toggle?.classList.toggle("is-active", enabled);
       const label = toggle?.querySelector("span");
-      if (label) label.textContent = enabled ? "已启用" : "未启用";
-      showMessage(enabled ? "已启用在线词典（词海）" : "已停用在线词典（词海）", 1600, "info" as any);
+      if (label) label.textContent = enabled ? t("已启用") : t("未启用");
+      showMessage(enabled ? t("已启用在线词典（词海）") : t("已停用在线词典（词海）"), 1600, "info" as any);
     });
   }
 
@@ -8646,7 +8974,7 @@ export default class RewordPlugin extends Plugin {
         .map((meta) => {
           const info = loaded.get(meta.id);
           const isActive = actives.includes(meta.id);
-          const count = info ? `${info.count} 词` : "未加载";
+          const count = info ? t("{n} 词", { n: info.count }) : t("未加载");
           const typeLabel = meta.type === "stardict" ? "StarDict" : "MDX";
           const errHtml =
             isActive && !info && this.lastDictError
@@ -8657,18 +8985,18 @@ export default class RewordPlugin extends Plugin {
             <div class="hiword-dm-ico">${icon}</div>
             <div class="hiword-dm-info">
               <span class="hiword-dm-name">${meta.name}</span>
-              <span class="hiword-dm-meta">${typeLabel}${meta.builtin ? " · 内置" : ""}</span>
+              <span class="hiword-dm-meta">${typeLabel}${meta.builtin ? " · " + t("内置") : ""}</span>
               ${errHtml}
             </div>
             <div class="hiword-dm-right">
               <span class="hiword-dm-count ${info ? "is-loaded" : "is-unloaded"}">${count}</span>
-              <label class="hiword-dm-toggle ${isActive ? "is-active" : ""}" title="点击启用/停用">
+              <label class="hiword-dm-toggle ${isActive ? "is-active" : ""}" title="${t("点击启用/停用")}">
                 <input type="checkbox" data-action="toggle-dict" data-id="${meta.id}" ${isActive ? "checked" : ""} />
-                <span>${isActive ? "已启用" : "未启用"}</span>
+                <span>${isActive ? t("已启用") : t("未启用")}</span>
               </label>
               ${meta.builtin
                 ? ""
-                : `<button class="b3-button b3-button--small b3-button--outline hiword-dm-del" data-action="delete" data-id="${meta.id}">删除</button>`}
+                : `<button class="b3-button b3-button--small b3-button--outline hiword-dm-del" data-action="delete" data-id="${meta.id}">${t("删除")}</button>`}
             </div>
           </div>`;
         })
@@ -8685,21 +9013,21 @@ export default class RewordPlugin extends Plugin {
         <div class="hiword-dm-title">
           <svg class="hiword-dm-title-ico"><use xlink:href="#iconREwordDict"></use></svg>
           <div class="hiword-dm-title-text">
-            <div class="hiword-dm-h">词典管理</div>
-            <div class="hiword-dm-sub">英文词典与中文词典独立管理 · 各常驻一本</div>
+            <div class="hiword-dm-h">${t("词典管理")}</div>
+            <div class="hiword-dm-sub">${t("英文词典与中文词典独立管理 · 各常驻一本")}</div>
           </div>
         </div>
       </div>
       <div class="hiword-dm-hint">
-        选中文本后按 <kbd>⌥⌘L</kbd> 可一键在右侧边栏查词 · <kbd>⌥⌘E</kbd> 框选提取单词
+        ${t("选中文本后按")} <kbd>⌥⌘L</kbd> ${t("可一键在右侧边栏查词")} · <kbd>⌥⌘E</kbd> ${t("框选提取单词")}
       </div>
-      ${renderGroup("英文词典", "🔤", enDicts)}
-      ${renderGroup("中文词典", "🀄", zhDicts)}
+      ${renderGroup(t("英文词典"), "🔤", enDicts)}
+      ${renderGroup(t("中文词典"), "🀄", zhDicts)}
       ${this.renderOnlineDictSectionHtml()}
       ${this.lastDictError ? `
       <div class="hiword-dm-diag">
         <details open>
-          <summary>🔍 诊断信息</summary>
+          <summary>🔍 ${t("诊断信息")}</summary>
           <pre class="hiword-dm-diag-body">${this.escapeHtml(this.getDiagnosticInfo())}</pre>
         </details>
       </div>` : ""}
@@ -8707,28 +9035,28 @@ export default class RewordPlugin extends Plugin {
         <button class="hiword-dm-add-btn" id="hiword-dm-add-mdx">
           <span class="hiword-dm-add-ico">📥</span>
           <span class="hiword-dm-add-body">
-            <span class="hiword-dm-add-t">导入 MDX 词典</span>
-            <span class="hiword-dm-add-d">选择 .mdx 原包</span>
+            <span class="hiword-dm-add-t">${t("导入 MDX 词典")}</span>
+            <span class="hiword-dm-add-d">${t("选择 .mdx 原包")}</span>
           </span>
         </button>
         <button class="hiword-dm-add-btn hiword-dm-add-btn--ghost" id="hiword-dm-add-stardict">
           <span class="hiword-dm-add-ico">📚</span>
           <span class="hiword-dm-add-body">
-            <span class="hiword-dm-add-t">导入 StarDict</span>
-            <span class="hiword-dm-add-d">多选 .ifo/.idx/.dict 包</span>
+            <span class="hiword-dm-add-t">${t("导入 StarDict")}</span>
+            <span class="hiword-dm-add-d">${t("多选 .ifo/.idx/.dict 包")}</span>
           </span>
         </button>
         <input type="file" id="hiword-dm-file-mdx" accept=".mdx" style="display:none" />
         <input type="file" id="hiword-dm-file-stardict" accept=".ifo,.idx,.dict,.dict.dz,.syn" multiple style="display:none" />
       </div>
       <div class="hiword-dm-tip">
-        <strong>支持格式：</strong><br/>
-        &bull; <strong>MDX</strong>：直接选择 <code>.mdx</code> 原包即可<br/>
-        &bull; <strong>StarDict</strong>：需同时选择词典包内所有文件（<code>.ifo</code>、<code>.idx</code>、<code>.dict</code> 或 <code>.dict.dz</code>；<code>.syn</code> 可选）<br/>
-        选择文件后将自动写入插件 <code>dict/</code> 目录并立即建索引，全程无需手动操作。
+        <strong>${t("支持格式：")}</strong><br/>
+        &bull; <strong>MDX</strong>：${t("直接选择")} <code>.mdx</code> ${t("原包即可")}<br/>
+        &bull; <strong>StarDict</strong>：${t("需同时选择词典包内所有文件")}（<code>.ifo</code>${t("、")}<code>.idx</code>${t("、")}<code>.dict</code>${t(" 或 ")}<code>.dict.dz</code>${t("；")}<code>.syn</code>${t(" 可选")}）<br/>
+        ${t("选择文件后将自动写入插件")} <code>dict/</code> ${t("目录并立即建索引，全程无需手动操作。")}
       </div>
       <div class="hiword-dm-footer">
-        <button class="b3-button b3-button--outline b3-button--small" id="hiword-dm-refresh">刷新</button>
+        <button class="b3-button b3-button--outline b3-button--small" id="hiword-dm-refresh">${t("刷新")}</button>
       </div>
     `;
 
@@ -8795,7 +9123,7 @@ export default class RewordPlugin extends Plugin {
         this.dictManifest.dicts[0];
       if (active) await this.loadDictFile(active);
       this.renderDictManagerContent(dialog);
-      showMessage("已刷新", 2000, "info");
+      showMessage(t("已刷新"), 2000, "info");
     });
   }
 
@@ -8811,7 +9139,7 @@ export default class RewordPlugin extends Plugin {
     const name = safeBase || "我的词典";
     const meta: DictMeta = { id, name, type: "mdx", file: `dict/${id}.mdx` };
 
-    showMessage(`正在导入「${name}」(.mdx 原包)...`, 3000, "info");
+    showMessage(t("正在导入「{n}」(.mdx 原包)...", { n: name }), 3000, "info");
 
     // 1) 将 .mdx 原包写入工作空间下的插件 dict 目录。
     // 2026-09-03 修复：之前用 node:fs.writeFileSync 在 Windows 安装版上会失败
@@ -8839,7 +9167,7 @@ export default class RewordPlugin extends Plugin {
       }
     } catch (err) {
       getLogger().warn("[REword] 写入词典文件失败:", { error: err });
-      showMessage("自动写入失败，请检查插件目录写权限后重试", 6000, "error" as any);
+      showMessage(t("自动写入失败，请检查插件目录写权限后重试"), 6000, "error" as any);
     }
 
     // 2) 无论是否写入磁盘，都先登记到清单（便于后续刷新加载）
@@ -8856,9 +9184,9 @@ export default class RewordPlugin extends Plugin {
       const ok = await this.loadDictFile(meta);
       if (ok) {
         this.dictReady = true;
-        showMessage(`已添加并启用词典「${name}」`, 3000, "success" as any);
+        showMessage(t("已添加并启用词典「{n}」", { n: name }), 3000, "success" as any);
       } else {
-        showMessage("文件已保存但加载失败，可点「刷新」重试", 4000, "error");
+        showMessage(t("文件已保存但加载失败，可点「刷新」重试"), 4000, "error");
       }
     }
 
@@ -8879,7 +9207,7 @@ export default class RewordPlugin extends Plugin {
     const synFile = files.find((f) => /\.syn$/i.test(f.name));
 
     if (!ifoFile) {
-      showMessage("StarDict 导入需要 .ifo 文件，请重新选择", 4000, "error");
+      showMessage(t("StarDict 导入需要 .ifo 文件，请重新选择"), 4000, "error");
       return;
     }
 
@@ -8891,7 +9219,7 @@ export default class RewordPlugin extends Plugin {
       .slice(0, 40);
     const name = safeBase || "StarDict 词典";
 
-    showMessage(`正在导入 StarDict「${name}」...`, 3000, "info");
+    showMessage(t("正在导入 StarDict「{n}」...", { n: name }), 3000, "info");
 
     // 写入所有文件到插件 dict/ 目录
     const savedFiles: string[] = [];
@@ -8961,12 +9289,12 @@ export default class RewordPlugin extends Plugin {
       const ok = await this.loadDictFile(meta);
       if (ok) {
         this.dictReady = true;
-        showMessage(`已添加并启用 StarDict「${name}」(${savedFiles.length} 个文件)`, 3000, "success" as any);
+        showMessage(t("已添加并启用 StarDict「{n}」({m} 个文件)", { n: name, m: savedFiles.length }), 3000, "success" as any);
       } else {
-        showMessage("文件已保存但加载失败，可点「刷新」重试", 4000, "error");
+        showMessage(t("文件已保存但加载失败，可点「刷新」重试"), 4000, "error");
       }
     } else {
-      showMessage("部分文件写入失败，请手动将词典包放入 dict/ 目录后点「刷新」", 5000, "error");
+      showMessage(t("部分文件写入失败，请手动将词典包放入 dict/ 目录后点「刷新」"), 5000, "error");
     }
 
     this.renderDictManagerContent(dialog);
@@ -9055,7 +9383,7 @@ export default class RewordPlugin extends Plugin {
         if (this.dictManifest.actives.length === 0) {
           // 不允许全部停用：恢复当前词典
           this.dictManifest.actives.push(id);
-          showMessage("至少需要保持一本词典启用", 1500, "warn" as any);
+          showMessage(t("至少需要保持一本词典启用"), 1500, "warn" as any);
           return;
         }
         // 同步 active 指针（英文组优先）
@@ -9088,7 +9416,7 @@ export default class RewordPlugin extends Plugin {
       // 统一刷新：当前活跃面板（词库面板实时查词依赖新激活词典）+ 词典管理面板
       this.refreshActivePanel();
       this.renderDictManagerContent(dialog);
-      showMessage(`「${meta.name}」${isActivating ? "已启用" : "已停用"}`, 1200, "info");
+      showMessage(isActivating ? t("「{n}」已启用", { n: meta.name }) : t("「{n}」已停用", { n: meta.name }), 1200, "info");
     } finally {
       this._dictSwitching = false;
     }
@@ -9116,12 +9444,12 @@ export default class RewordPlugin extends Plugin {
       } else {
         const ok = await this.loadDictFile(meta);
         if (!ok) {
-          showMessage("该词典文件缺失，请确认 dict/ 目录存在该文件", 4000, "error");
+          showMessage(t("该词典文件缺失，请确认 dict/ 目录存在该文件"), 4000, "error");
           return;
         }
       }
       this.dictReady = true;
-      showMessage(`已切换至「${meta.name}」`, 2000, "success" as any);
+      showMessage(t("已切换至「{n}」", { n: meta.name }), 2000, "success" as any);
       // 同步刷新当前活跃面板（词卡实时查词依赖 lookupSmart，需重绘才体现新词典释义）
       this.refreshActivePanel();
     } finally {
@@ -9157,7 +9485,7 @@ export default class RewordPlugin extends Plugin {
       }
     }
     showMessage(
-      `已移除「${removed.name}」${removedFiles ? `（含 ${removedFiles} 个磁盘文件）` : ""}`,
+      t("已移除「{n}」", { n: removed.name }) + (removedFiles ? t("（含 {n} 个磁盘文件）", { n: removedFiles }) : ""),
       3000,
       "info"
     );
@@ -9340,23 +9668,23 @@ export default class RewordPlugin extends Plugin {
         <div class="hiword-pdef-dialog">
           <div class="hiword-pdef-hint">
             共 <b>${senses.length}</b> 个释义,挑 1-3 个你关心的高亮收藏,复习 / 查词卡会优先显示。
-            <br/><span class="hiword-pdef-tip">不选则按原行为(默认第一个 sense)</span>
+            <br/><span class="hiword-pdef-tip">${T("不选则按原行为(默认第一个 sense)")}</span>
           </div>
           <div class="hiword-pdef-actions-row">
-            <button class="b3-button b3-button--text b3-button--small" data-act="pdef-all">全选</button>
-            <button class="b3-button b3-button--text b3-button--small" data-act="pdef-none">全不选</button>
-            <span class="hiword-pdef-count">已选 <b id="pdef-count">1</b> / ${senses.length}</span>
+            <button class="b3-button b3-button--text b3-button--small" data-act="pdef-all">${T("全选")}</button>
+            <button class="b3-button b3-button--text b3-button--small" data-act="pdef-none">${T("全不选")}</button>
+            <span class="hiword-pdef-count">${T("已选")} <b id="pdef-count">1</b> / ${senses.length}</span>
           </div>
           <div class="hiword-pdef-list">${rows}</div>
           <div class="hiword-pdef-footer">
-            <button class="b3-button" data-act="pdef-default">默认第一个(原行为)</button>
-            <button class="b3-button" data-act="pdef-cancel">取消</button>
-            <button class="b3-button b3-button--primary" data-act="pdef-confirm">用此选择</button>
+            <button class="b3-button" data-act="pdef-default">${T("默认第一个(原行为)")}</button>
+            <button class="b3-button" data-act="pdef-cancel">${T("取消")}</button>
+            <button class="b3-button b3-button--primary" data-act="pdef-confirm">${T("用此选择")}</button>
           </div>
         </div>`;
 
       const dialog = new Dialog({
-        title: `📖 选择释义偏好 — ${this.escapeHtml(word)}`,
+        title: `${T("📖 选择释义偏好 — {word}", { word: this.escapeHtml(word) })}`,
         content: html,
         width: responsiveDialogSize(560, "width"),
         height: "auto",
@@ -9433,7 +9761,7 @@ export default class RewordPlugin extends Plugin {
     const cleanWord = word.toLowerCase().trim();
     if (!this.isReady) return;
     if (this.vocabStore.hasWord(cleanWord)) {
-      showMessage(`"${cleanWord}" 已在词库中`, 2000, "info");
+      showMessage(t("「{w}」已在词库中", { w: cleanWord }), 2000, "info");
       return;
     }
     try {
@@ -9444,12 +9772,12 @@ export default class RewordPlugin extends Plugin {
       const r = await this.vocabStore.addWord(cleanWord, meta);
       if (r.added) {
         const prefHint = pick.preferredDefinitions.length > 0
-          ? `,已应用 ${pick.preferredDefinitions.length} 个偏好`
+          ? `,${T("已应用 {n} 个偏好", { n: pick.preferredDefinitions.length })}`
           : "";
-        showMessage(`已添加 "${cleanWord}" 到词库(未分类)${prefHint}`, 2000, "success" as any);
+        showMessage(t("已添加「{w}」到词库(未分类){p}", { w: cleanWord, p: prefHint }), 2000, "success" as any);
       }
     } catch (err) {
-      showMessage(`添加失败: ${err}`, 2000, "error");
+      showMessage(T("添加失败: {err}", { err: String(err) }), 2000, "error");
     }
   }
 
@@ -9473,9 +9801,9 @@ export default class RewordPlugin extends Plugin {
       if (starEl) {
         starEl.textContent = "☆";
         starEl.classList.remove("star-on");
-        starEl.title = "加入词库";
+        starEl.title = t("加入词库");
       }
-      showMessage(`已移出词库：「${cleanWord}」`, 1500, "info");
+      showMessage(t("已移出词库：「{w}」", { w: cleanWord }), 1500, "info");
       return;
     }
 
@@ -9493,12 +9821,12 @@ export default class RewordPlugin extends Plugin {
     if (starEl) {
       starEl.textContent = "★";
       starEl.classList.add("star-on");
-      starEl.title = "移出词库";
+      starEl.title = t("移出词库");
     }
     const bookName = this.vocabStore.getBook(dest.bookId)?.name ?? "";
     const themeName = this.vocabStore.getTheme(dest.bookId, dest.themeId)?.name ?? "";
-    const labelHint = labels?.length ? `（标签 ${labels.map(l => `#${l}`).join(" ") }）` : "";
-    showMessage(`已加入词库：「${cleanWord}」→ ${bookName} / ${themeName}${labelHint}`, 2200, "success" as any);
+    const labelHint = labels?.length ? `${T("（标签 {labels}）", { labels: labels.map(l => `#${l}`).join(" ") })}` : "";
+    showMessage(t("已加入词库：「{w}」→ {b} / {c}{l}", { w: cleanWord, b: bookName, c: themeName, l: labelHint }), 2200, "success" as any);
     this.refreshVocabPanelIfVisible();
   }
 
@@ -9520,24 +9848,24 @@ export default class RewordPlugin extends Plugin {
         <div class="whale-dlg-head">
           <span class="whale-dlg-title">收藏「${this.escapeHtml(word)}」</span>
           <div class="whale-dlg-head-right">
-            <button class="whale-dlg-close" id="vp-cancel" title="取消">✕</button>
+            <button class="whale-dlg-close" id="vp-cancel" title="${T("取消")}">✕</button>
           </div>
         </div>
         <div class="whale-vpick-body">
-          <div class="whale-vpick-label">一级 · 单词本</div>
+          <div class="whale-vpick-label">${t("一级 · 单词本")}</div>
           <select class="b3-select whale-vpick-book" id="vp-book">
             ${books.map((b) => `<option value="${b.id}" ${b.id === defaultBook.id ? "selected" : ""}>${this.escapeHtml(b.name)}</option>`).join("")}
           </select>
-          <div class="whale-vpick-label">二级 · 子类</div>
+          <div class="whale-vpick-label">${T("二级 · 子类")}</div>
           <div class="whale-vpick-themes" id="vp-themes">
             ${this.renderVpickThemeChips(defaultBook.id, defaultBook.themes[0]?.id)}
           </div>
-          <div class="whale-vpick-hint">单词将加入所选子类；子类可在侧边栏词库「＋」或右键主题管理。</div>
+          <div class="whale-vpick-hint">${t("单词将加入所选子类；子类可在侧边栏词库「＋」或右键主题管理。")}</div>
         </div>
         <div class="whale-dlg-foot">
           <span class="whale-dlg-spacer"></span>
-          <button class="whale-dlg-btn" id="vp-cancel2">取消</button>
-          <button class="whale-dlg-btn whale-dlg-btn--primary" id="vp-ok">加入</button>
+          <button class="whale-dlg-btn" id="vp-cancel2">${T("取消")}</button>
+          <button class="whale-dlg-btn whale-dlg-btn--primary" id="vp-ok">${T("加入")}</button>
         </div>
       `;
       document.body.appendChild(ov);
@@ -9603,7 +9931,7 @@ export default class RewordPlugin extends Plugin {
 
       // 确认
       ov.querySelector("#vp-ok")?.addEventListener("click", () => {
-        if (!pickedThemeId) { showMessage("请选择一个子类", 1500, "info"); return; }
+        if (!pickedThemeId) { showMessage(T("请选择一个子类"), 1500, "info"); return; }
         done({ bookId: pickedBookId, themeId: pickedThemeId });
       });
     });
@@ -9649,7 +9977,7 @@ export default class RewordPlugin extends Plugin {
   /** 渲染二级子类 chips（供级联弹窗复用） */
   private renderVpickThemeChips(bookId: string, activeThemeId?: string): string {
     const book = this.vocabStore.getBook(bookId);
-    if (!book || book.themes.length === 0) return `<div class="whale-vpick-empty">暂无子类，请先在词库新建</div>`;
+    if (!book || book.themes.length === 0) return `<div class="whale-vpick-empty">${t("暂无子类，请先在词库新建")}</div>`;
     return book.themes
       .map((t) => `<button type="button" class="whale-vpick-theme ${t.id === activeThemeId ? "active" : ""}" data-theme-id="${t.id}">${this.escapeHtml(t.name)}</button>`)
       .join("");
@@ -9658,35 +9986,35 @@ export default class RewordPlugin extends Plugin {
   /** 添加选中文本到词库 */
   private async addSelectedWord() {
     if (!this.isReady) {
-      showMessage("RE word 尚未就绪", 3000, "error");
+      showMessage(T("RE word 尚未就绪"), 3000, "error");
       return;
     }
 
     // 获取选中文本
     const selection = window.getSelection()?.toString()?.trim();
     if (!selection) {
-      showMessage("请先选中一个单词", 3000, "info");
+      showMessage(T("请先选中一个单词"), 3000, "info");
       return;
     }
 
     const word = selection.toLowerCase().trim();
     // 简单词性检查：只接受英文单词
     if (!/^[a-z]+(?:[-'][a-z]+)*$/i.test(word)) {
-      showMessage(`"${word}" 不像是一个有效的英文单词`, 3000, "info");
+      showMessage(T('"{word}" 不像是一个有效的英文单词', { word }), 3000, "info");
       return;
     }
 
     if (this.vocabStore.hasWord(word)) {
-      showMessage(`"${word}" 已在词库中`, 3000, "info");
+      showMessage(t("「{w}」已在词库中", { w: word }), 3000, "info");
       return;
     }
 
     try {
       const meta = this.extractWordMeta(word);
       const r = await this.vocabStore.addWord(word, meta);
-      showMessage(r.added ? `已添加 "${word}" 到词库` : `"${word}" 已在词库中`, 3000, "success" as any);
+      showMessage(r.added ? t("已添加「{w}」到词库", { w: word }) : t("「{w}」已在词库中", { w: word }), 3000, "success" as any);
     } catch (err) {
-      showMessage(`添加失败: ${err}`, 3000, "error");
+      showMessage(T("添加失败: {err}", { err: String(err) }), 3000, "error");
     }
   }
 
@@ -9835,10 +10163,10 @@ export default class RewordPlugin extends Plugin {
   /** 筛选计数 → 反馈文案（无筛除返回空串） */
   private importFilterNote(r: { zhCount: number; noDictCount: number; dupCount: number }): string {
     const parts: string[] = [];
-    if (r.zhCount) parts.push(`${r.zhCount} 个中文词汇`);
-    if (r.noDictCount) parts.push(`${r.noDictCount} 个词典未收录`);
-    if (r.dupCount) parts.push(`${r.dupCount} 个重复`);
-    return parts.length ? `已自动筛除 ${parts.join("、")}` : "";
+    if (r.zhCount) parts.push(`${T("{n} 个中文词汇", { n: r.zhCount })}`);
+    if (r.noDictCount) parts.push(`${T("{n} 个词典未收录", { n: r.noDictCount })}`);
+    if (r.dupCount) parts.push(`${T("{n} 个重复", { n: r.dupCount })}`);
+    return parts.length ? `${T("已自动筛除 {list}", { list: parts.join("、") })}` : "";
   }
 
   /**
@@ -9848,16 +10176,16 @@ export default class RewordPlugin extends Plugin {
    */
   openVocabExtractDialog(text: string): void {
     if (!text || !text.trim()) {
-      showMessage("未识别到可加入词库的文本", 2200, "info" as any);
+      showMessage(t("未识别到可加入词库的文本"), 2200, "info" as any);
       return;
     }
     if (!this.isReady) {
-      showMessage("RE word 尚未就绪", 2200, "error" as any);
+      showMessage(T("RE word 尚未就绪"), 2200, "error" as any);
       return;
     }
     const { en, zh } = this.tokenizeText(text);
     if (en.length === 0 && zh.length === 0) {
-      showMessage("未从选区识别到英文/中文单词", 3000, "info" as any);
+      showMessage(T("未从选区识别到英文/中文单词"), 3000, "info" as any);
       return;
     }
     // 无 blockId 时不展示「来源块」行，视觉与其它无来源路径一致
@@ -9868,12 +10196,12 @@ export default class RewordPlugin extends Plugin {
   private extractWordsFromSelection(anchor?: HTMLElement) {
     const text = this.getSelectionTextPrecise();
     if (!text) {
-      showMessage("请先框选文档内容", 3000, "info");
+      showMessage(T("请先框选文档内容"), 3000, "info");
       return;
     }
     const { en, zh } = this.tokenizeText(text);
     if (en.length === 0 && zh.length === 0) {
-      showMessage("未从选区内识别到单词（英文或中文）", 3000, "info");
+      showMessage(T("未从选区内识别到单词（英文或中文）"), 3000, "info");
       return;
     }
     const blockId = this.getSelectionBlockId();
@@ -9883,7 +10211,7 @@ export default class RewordPlugin extends Plugin {
   /** 提取预览对话框：列出识别到的单词（可勾选），选择目标单词本与二级子类后批量加入 */
   private showExtractDialog(enWords: string[], zhWords: string[], blockId?: string) {
     if (!this.isReady) {
-      showMessage("RE word 尚未就绪", 3000, "error");
+      showMessage(T("RE word 尚未就绪"), 3000, "error");
       return;
     }
     // 2026-08-27 智能筛选：中文词不入库（仅保留有效英文单词）；词典查无释义的词剔除；去重
@@ -9891,7 +10219,7 @@ export default class RewordPlugin extends Plugin {
     const fr = this.filterImportWords(enWords, (w) => w);
     if (fr.valid.length === 0) {
       const note = this.importFilterNote({ zhCount: zhAll + fr.zhCount, noDictCount: fr.noDictCount, dupCount: fr.dupCount });
-      showMessage(`没有可导入的有效单词${note ? `（${note}）` : ""}`, 3500, "info");
+      showMessage(T("没有可导入的有效单词") + (note ? T("（{note}）", { note }) : ""), 3500, "info");
       return;
     }
     enWords = fr.valid;
@@ -9899,7 +10227,7 @@ export default class RewordPlugin extends Plugin {
     const filterTotal = zhAll + fr.zhCount + fr.noDictCount + fr.dupCount;
     if (filterTotal > 0) {
       showMessage(
-        `${this.importFilterNote({ zhCount: zhAll + fr.zhCount, noDictCount: fr.noDictCount, dupCount: fr.dupCount })}，保留有效单词 ${fr.valid.length} 个`,
+        `${this.importFilterNote({ zhCount: zhAll + fr.zhCount, noDictCount: fr.noDictCount, dupCount: fr.dupCount })}，${T("保留有效单词 {n} 个", { n: fr.valid.length })}`,
         3000,
         "info"
       );
@@ -9927,7 +10255,7 @@ export default class RewordPlugin extends Plugin {
     const renderThemeChipsHtml = (bookId: string, activeId?: string): string => {
       const book = this.vocabStore.getBook(bookId);
       if (!book || book.themes.length === 0) {
-        return `<span class="hiword-ex-themes-empty">暂无子类</span>`;
+        return `<span class="hiword-ex-themes-empty">${T("暂无子类")}</span>`;
       }
       return book.themes
         .map(
@@ -9940,27 +10268,27 @@ export default class RewordPlugin extends Plugin {
     const initialThemeId = activeBook?.themes[0]?.id ?? "";
 
     const dialog = new Dialog({
-      title: "提取单词到词库",
+      title: t("提取单词到词库"),
       width: responsiveDialogSize(580, "width"),
       height: "72vh",
       content: `
         <div class="hiword-ex-dialog">
           <div class="hiword-ex-bar">
-            <span class="hiword-ex-count">共识别 <b>${total}</b> 个词（英文 ${enWords.length} · 中文 ${zhWords.length}）</span>
-            <span class="hiword-ex-book-wrap">目标单词本
+            <span class="hiword-ex-count">${T("共识别")} <b>${total}</b> 个词（英文 ${enWords.length} · 中文 ${zhWords.length}）</span>
+            <span class="hiword-ex-book-wrap">${t("目标单词本")}
               <select class="b3-select hiword-ex-book" id="hiword-ex-book">${bookOptions}</select>
             </span>
             <span class="hiword-ex-themes-wrap">子类
               <span class="hiword-ex-themes" id="hiword-ex-themes">${renderThemeChipsHtml(initialBookId, initialThemeId)}</span>
             </span>
-            <button class="hiword-ex-toggle" id="hiword-ex-toggle">全不选</button>
+            <button class="hiword-ex-toggle" id="hiword-ex-toggle">${T("全不选")}</button>
           </div>
-          ${enWords.length ? `<div class="hiword-ex-section"><div class="hiword-ex-sec-title">英文</div><div class="hiword-ex-chips">${renderChips(enWords, "en")}</div></div>` : ""}
-          ${zhWords.length ? `<div class="hiword-ex-section"><div class="hiword-ex-sec-title">中文</div><div class="hiword-ex-chips">${renderChips(zhWords, "zh")}</div></div>` : ""}
-          ${blockId ? `<div class="hiword-ex-src">来源块：<code>${this.escapeHtml(blockId)}</code></div>` : ""}
+          ${enWords.length ? `<div class="hiword-ex-section"><div class="hiword-ex-sec-title">${T("英文")}</div><div class="hiword-ex-chips">${renderChips(enWords, "en")}</div></div>` : ""}
+          ${zhWords.length ? `<div class="hiword-ex-section"><div class="hiword-ex-sec-title">${T("中文")}</div><div class="hiword-ex-chips">${renderChips(zhWords, "zh")}</div></div>` : ""}
+          ${blockId ? `<div class="hiword-ex-src">${T("来源块：")}<code>${this.escapeHtml(blockId)}</code></div>` : ""}
           <div class="hiword-ex-footer">
-            <button class="hiword-ex-cancel" id="hiword-ex-cancel">取消</button>
-            <button class="hiword-ex-confirm b3-button b3-button--text" id="hiword-ex-confirm">添加到词库</button>
+            <button class="hiword-ex-cancel" id="hiword-ex-cancel">${T("取消")}</button>
+            <button class="hiword-ex-confirm b3-button b3-button--text" id="hiword-ex-confirm">${t("添加到词库")}</button>
           </div>
         </div>
       `,
@@ -10016,7 +10344,7 @@ export default class RewordPlugin extends Plugin {
       const themeId = pickedThemeId;
       const chosen = checks.filter((c) => c.checked).map((c) => c.dataset.word!);
       if (chosen.length === 0) {
-        showMessage("请至少勾选一个单词", 2000, "info");
+        showMessage(T("请至少勾选一个单词"), 2000, "info");
         return;
       }
       let added = 0;
@@ -10027,11 +10355,11 @@ export default class RewordPlugin extends Plugin {
         if (r.added) added++;
         else skipped++;
       }
-      const bookName = this.vocabStore.getBook(bookId)?.name ?? "词库";
-      const themeName = this.vocabStore.getTheme(bookId, themeId)?.name ?? "未分类";
+      const bookName = this.vocabStore.getBook(bookId)?.name ?? t("词库");
+      const themeName = this.vocabStore.getTheme(bookId, themeId)?.name ?? t("未分类");
       dialog.destroy();
       showMessage(
-        `已添加 ${added} 个单词到「${bookName}」/「${themeName}」${skipped ? `，${skipped} 个已存在` : ""}`,
+        t("已添加 {a} 个单词到「{b}」/「{c}」{s}", { a: added, b: bookName, c: themeName, s: skipped ? t("，{n} 个已存在", { n: skipped }) : "" }),
         3000,
         "success" as any
       );
@@ -10081,14 +10409,14 @@ export default class RewordPlugin extends Plugin {
         text = (await getBlockKramdown(blockId)) || "";
       } catch (err) {
         getLogger().warn("[REword] 拖入导入失败:" + String(err));
-        showMessage("读取块内容失败", 3000, "error");
+        showMessage(T("读取块内容失败"), 3000, "error");
         return;
       }
     } else {
       text = this.resolveDragFallbackText(e) || "";
     }
     if (!text.trim()) {
-      showMessage("未识别到思源块，请直接拖入文档或块", 3000, "info");
+      showMessage(T("未识别到思源块，请直接拖入文档或块"), 3000, "info");
       return;
     }
     // 2026-08-27 优化词典释义：结构化单词表（word pos 释义）优先走单词表导入弹窗，
@@ -10148,20 +10476,20 @@ export default class RewordPlugin extends Plugin {
    */
   private showVocabImportDialog() {
     if (!this.isReady) {
-      showMessage("RE word 尚未就绪", 3000, "error");
+      showMessage(T("RE word 尚未就绪"), 3000, "error");
       return;
     }
     const dialog = new Dialog({
-      title: "导入单词到词库",
+      title: t("导入单词到词库"),
       width: responsiveDialogSize(520, "width"),
       height: "60vh",
       content: `
         <div class="hiword-imp-dialog">
-          <p class="hiword-imp-hint">把思源文档或文本块的内容粘贴到下方，点击「识别单词」自动提取其中的英文/中文词；随后在弹出的对话框里为它们选择 <b>一级单词本</b> 与 <b>二级分类</b>，即可批量入库。也可以直接把思源块拖到左侧词库面板。</p>
-          <textarea class="hiword-imp-text" id="hiword-imp-text" placeholder="在此粘贴文本 / 文本块内容…"></textarea>
+          <p class="hiword-imp-hint">${t("把思源文档或文本块的内容粘贴到下方，点击「识别单词」自动提取其中的英文/中文词；随后在弹出的对话框里为它们选择")} <b>${t("一级单词本")}</b> ${t("与")} <b>${t("二级分类")}</b>${t("，即可批量入库。也可以直接把思源块拖到左侧词库面板。")}</p>
+          <textarea class="hiword-imp-text" id="hiword-imp-text" placeholder="${T("在此粘贴文本 / 文本块内容…")}"></textarea>
           <div class="hiword-imp-footer">
-            <button class="hiword-imp-cancel" id="hiword-imp-cancel">取消</button>
-            <button class="b3-button b3-button--text hiword-imp-confirm" id="hiword-imp-confirm">识别单词</button>
+            <button class="hiword-imp-cancel" id="hiword-imp-cancel">${T("取消")}</button>
+            <button class="b3-button b3-button--text hiword-imp-confirm" id="hiword-imp-confirm">${T("识别单词")}</button>
           </div>
         </div>`,
     });
@@ -10171,7 +10499,7 @@ export default class RewordPlugin extends Plugin {
     root.querySelector("#hiword-imp-confirm")?.addEventListener("click", () => {
       const text = (textEl.value || "").trim();
       if (!text) {
-        showMessage("请先粘贴要导入的文本", 2000, "info");
+        showMessage(T("请先粘贴要导入的文本"), 2000, "info");
         return;
       }
       // 2026-08-27 优化词典释义：优先识别「结构化单词表」（word pos 释义），
@@ -10184,7 +10512,7 @@ export default class RewordPlugin extends Plugin {
       }
       const { en, zh } = this.tokenizeText(text);
       if (en.length === 0 && zh.length === 0) {
-        showMessage("未从文本中识别到英文/中文单词", 3000, "info");
+        showMessage(T("未从文本中识别到英文/中文单词"), 3000, "info");
         return;
       }
       dialog.destroy();
@@ -10199,19 +10527,19 @@ export default class RewordPlugin extends Plugin {
    */
   private showWordListImportDialog(entries: ParsedWordListEntry[]) {
     if (!this.isReady) {
-      showMessage("RE word 尚未就绪", 3000, "error");
+      showMessage(T("RE word 尚未就绪"), 3000, "error");
       return;
     }
     // 2026-08-27 智能筛选：中文词 / 词典查无释义的词条直接剔除（不写入词库），并反馈筛选结果
     const fr = this.filterImportWords(entries, (e) => e.word);
     if (fr.valid.length === 0) {
       const note = this.importFilterNote(fr);
-      showMessage(`没有可导入的有效单词${note ? `（${note}）` : ""}`, 3500, "info");
+      showMessage(T("没有可导入的有效单词") + (note ? T("（{note}）", { note }) : ""), 3500, "info");
       return;
     }
     entries = fr.valid;
     if (fr.zhCount + fr.noDictCount + fr.dupCount > 0) {
-      showMessage(`${this.importFilterNote(fr)}，保留有效词条 ${fr.valid.length} 个`, 3000, "info");
+      showMessage(T("{v1}，保留有效词条 {v2} 个", { v1: this.importFilterNote(fr), v2: fr.valid.length }), 3000, "info");
     }
     const books = this.vocabStore.getBooks().filter((b) => b.id !== ALL_BOOK_ID);
     const activeBook = this.vocabStore.getActiveBook();
@@ -10223,7 +10551,7 @@ export default class RewordPlugin extends Plugin {
       .join("");
     const renderThemes = (bookId: string, activeId?: string): string => {
       const book = this.vocabStore.getBook(bookId);
-      if (!book || book.themes.length === 0) return `<span class="hiword-ex-themes-empty">暂无子类</span>`;
+      if (!book || book.themes.length === 0) return `<span class="hiword-ex-themes-empty">${T("暂无子类")}</span>`;
       return book.themes
         .map(
           (t) =>
@@ -10247,25 +10575,25 @@ export default class RewordPlugin extends Plugin {
       .join("");
 
     const dialog = new Dialog({
-      title: "导入单词表到词库",
+      title: t("导入单词表到词库"),
       width: responsiveDialogSize(560, "width"),
       height: "72vh",
       content: `
         <div class="hiword-wl-dialog">
-          <p class="hiword-imp-hint">检测到 <b>${entries.length}</b> 个结构化词条（单词 + 词性 + 释义）。勾选要导入的，选择目标单词本与子类；导入后你整理的释义将作为<b>首选释义</b>（查词卡 ⭐ 置顶，复习卡也用你的释义）。</p>
+          <p class="hiword-imp-hint">${t("检测到")} <b>${entries.length}</b> ${t("个结构化词条（单词 + 词性 + 释义）。勾选要导入的，选择目标单词本与子类；导入后你整理的释义将作为")}<b>${t("首选释义")}</b>${t("（查词卡 ⭐ 置顶，复习卡也用你的释义）。")}</p>
           <div class="hiword-wl-bar">
-            <span class="hiword-ex-book-wrap">单词本
+            <span class="hiword-ex-book-wrap">${t("单词本")}
               <select class="b3-select hiword-ex-book" id="hiword-wl-book">${bookOptions}</select>
             </span>
             <span class="hiword-ex-themes-wrap">子类
               <span class="hiword-ex-themes" id="hiword-wl-themes">${renderThemes(initialBookId, initialThemeId)}</span>
             </span>
-            <button class="hiword-ex-toggle" id="hiword-wl-toggle">全不选</button>
+            <button class="hiword-ex-toggle" id="hiword-wl-toggle">${T("全不选")}</button>
           </div>
           <div class="hiword-wl-list" id="hiword-wl-list">${rows}</div>
           <div class="hiword-wl-footer">
             <span class="hiword-wl-count" id="hiword-wl-count">已选 ${entries.length} / ${entries.length}</span>
-            <button class="hiword-wl-cancel" id="hiword-wl-cancel">取消</button>
+            <button class="hiword-wl-cancel" id="hiword-wl-cancel">${T("取消")}</button>
             <button class="b3-button b3-button--text hiword-wl-confirm" id="hiword-wl-confirm">导入 ${entries.length} 个词</button>
           </div>
         </div>`,
@@ -10282,8 +10610,8 @@ export default class RewordPlugin extends Plugin {
 
     const updateCount = () => {
       const sel = checks.filter((c) => c.checked).length;
-      countEl.textContent = `已选 ${sel} / ${entries.length}`;
-      confirmBtn.textContent = `导入 ${sel} 个词`;
+      countEl.textContent = `${T("已选 {sel} / {n}", { sel, n: entries.length })}`;
+      confirmBtn.textContent = `${T("导入 {n} 个词", { n: sel })}`;
     };
 
     const bindThemes = (bookId: string, activeId?: string) => {
@@ -10318,16 +10646,16 @@ export default class RewordPlugin extends Plugin {
     root.querySelector("#hiword-wl-confirm")?.addEventListener("click", async () => {
       const chosenIdx = checks.filter((c) => c.checked).map((c) => Number(c.dataset.i));
       if (chosenIdx.length === 0) {
-        showMessage("请至少勾选一个单词", 2000, "info");
+        showMessage(T("请至少勾选一个单词"), 2000, "info");
         return;
       }
       const chosen = chosenIdx.map((i) => entries[i]);
       const r = await this.collectWords(chosen, pickedBookId, pickedThemeId);
-      const bookName = this.vocabStore.getBook(pickedBookId)?.name ?? "词库";
-      const themeName = this.vocabStore.getTheme(pickedBookId, pickedThemeId)?.name ?? "未分类";
+      const bookName = this.vocabStore.getBook(pickedBookId)?.name ?? t("词库");
+      const themeName = this.vocabStore.getTheme(pickedBookId, pickedThemeId)?.name ?? t("未分类");
       dialog.destroy();
       showMessage(
-        `已导入 ${r.added} 个单词到「${bookName}」/「${themeName}」${r.skipped ? `，${r.skipped} 个已存在` : ""}（你的释义已置为首选 ⭐）`,
+        t("已导入 {a} 个单词到「{b}」/「{c}」{s}（你的释义已置为首选 ⭐）", { a: r.added, b: bookName, c: themeName, s: r.skipped ? t("，{n} 个已存在", { n: r.skipped }) : "" }),
         3500,
         "success" as any
       );
@@ -10339,18 +10667,359 @@ export default class RewordPlugin extends Plugin {
   }
 
   /** 从单词库挑选单词，批量加入复习（置为活跃 + 立即可复习） */
+  // ============ 2026-09-11 复习面板重构：数据统计 Tab + 添加单词书（书源绑定） ============
+
+  /**
+   * 数据统计小 Tab：总览卡 + 近 7 天复习量柱状图 + 星级分布 + 易忘词 Top。
+   * 数据口径：全词库 lastReview 逐日归组 + mastery/lapse 字段，与学习 Tab 指标零重复。
+   */
+  private buildReviewStatsHtml(): string {
+    if (!this.vocabStore) return `<div class="hiword-empty">${t("插件尚未就绪")}</div>`;
+    const now = Date.now();
+    const DAY = 86_400_000;
+    const all = this.vocabStore.getAllWords();
+    const m = this.computeReviewMetrics();
+
+    // 已复习过的词按本地日期归组（连续天数 + 近 7 天柱状共用）
+    const daySet = new Set<string>();
+    const dayCount = new Map<string, number>();
+    for (const w of all) {
+      if (!w.lastReview) continue;
+      const tt = Date.parse(w.lastReview);
+      if (Number.isNaN(tt)) continue;
+      const key = localDateKey(tt);
+      daySet.add(key);
+      dayCount.set(key, (dayCount.get(key) ?? 0) + 1);
+    }
+    // 连续天数：今天有复习从今天数，否则从昨天数（今天还没学不打断连续）
+    let streak = 0;
+    const sod = new Date(now);
+    sod.setHours(0, 0, 0, 0);
+    let cursor = daySet.has(localDateKey(sod.getTime())) ? sod.getTime() : sod.getTime() - DAY;
+    while (daySet.has(localDateKey(cursor))) {
+      streak++;
+      cursor -= DAY;
+    }
+
+    // 近 7 天柱状图
+    const weekNames = [t("周日"), t("周一"), t("周二"), t("周三"), t("周四"), t("周五"), t("周六")];
+    const barData: { label: string; count: number; today: boolean }[] = [];
+    let weekMax = 1;
+    for (let i = 6; i >= 0; i--) {
+      const dayStart = sod.getTime() - i * DAY;
+      const count = dayCount.get(localDateKey(dayStart)) ?? 0;
+      weekMax = Math.max(weekMax, count);
+      barData.push({ label: i === 0 ? t("今天") : weekNames[new Date(dayStart).getDay()], count, today: i === 0 });
+    }
+    const bars = barData
+      .map((b) => {
+        const h = Math.max(b.count ? 8 : 2, Math.round((b.count / weekMax) * 100));
+        return `<div class="hiword-rp-st-bar"><i class="${b.today ? "hiword-rp-st-bar--today" : ""}" style="height:${h}%"></i><span>${this.escapeHtml(b.label)}</span><em>${b.count || ""}</em></div>`;
+      })
+      .join("");
+
+    // 星级分布（mastery 1~5 精确分档；未评级词不计入分布）
+    const sc = countByMastery(all);
+    const bandRows: { label: string; n: number }[] = [1, 2, 3, 4, 5].map((n) => ({
+      label: `★${n}`,
+      n: sc[n as keyof typeof sc] ?? 0,
+    }));
+    const graded = bandRows.reduce((a, b) => a + b.n, 0);
+    const total = Math.max(1, graded);
+    const starRows = bandRows
+      .map(
+        (r) => `<div class="hiword-rp-st-srsrow">
+          <span class="hiword-rp-st-srstag">${r.label}</span>
+          <span class="hiword-rp-st-track"><i style="width:${Math.round((r.n / total) * 100)}%"></i></span>
+          <span class="hiword-rp-st-v">${r.n}</span>
+        </div>`
+      )
+      .join("");
+
+    // 易忘词 Top10（lapse 降序），可一键定向复习
+    const forgetful = [...all]
+      .filter((w) => (w.lapse ?? 0) > 0)
+      .sort((a, b) => (b.lapse ?? 0) - (a.lapse ?? 0))
+      .slice(0, 10);
+    const forgetRows = forgetful.length === 0
+      ? `<div class="hiword-empty">${t("还没有遗忘记录，继续保持！")}</div>`
+      : forgetful
+          .map(
+            (w) => `<div class="hiword-rp-st-forgot">
+              <span class="hiword-rp-st-fw">${this.escapeHtml(w.word)}</span>
+              <span class="hiword-rp-st-fm">${this.escapeHtml((w.meaning || "").replace(/\s+/g, " ").slice(0, 24))}</span>
+              <span class="hiword-rp-st-flapse">${T("忘 {n} 次", { n: w.lapse ?? 0 })}</span>
+              <button class="hiword-rp-st-focus b3-button b3-button--small" data-action="st-focus" data-word="${this.escapeAttr(w.word)}">${t("定向复习")}</button>
+            </div>`
+          )
+          .join("");
+
+    // 标熟词数：mastery 满级（5 级）口径，与学习 Tab「标熟词」一致
+    const ripeCount = all.filter((w) => w.mastery >= MASTERY_MAX).length;
+
+    return `
+      <div class="hiword-rp-stats">
+        <div class="hiword-rp-st-cards">
+          <div class="hiword-rp-metric"><div class="hiword-rp-metric-val">${m.weekReviewed}</div><div class="hiword-rp-metric-label">${t("本周已复习")}</div></div>
+          <div class="hiword-rp-metric"><div class="hiword-rp-metric-val">${m.retention}%</div><div class="hiword-rp-metric-label">${t("估计保留率")}</div></div>
+          <div class="hiword-rp-metric"><div class="hiword-rp-metric-val">${streak}</div><div class="hiword-rp-metric-label">${t("连续天数")}</div></div>
+          <div class="hiword-rp-metric"><div class="hiword-rp-metric-val">${ripeCount}</div><div class="hiword-rp-metric-label">${t("标熟词数")}</div></div>
+        </div>
+        <div class="hiword-rp-st-grid">
+          <div class="hiword-rp-st-block">
+            <h4>${t("近 7 天复习量")}</h4>
+            <div class="hiword-rp-st-bars">${bars}</div>
+          </div>
+          <div class="hiword-rp-st-block">
+            <h4>${t("星级分布（熟练度 mastery）")}</h4>
+            <div class="hiword-rp-st-srs">${starRows}</div>
+          </div>
+        </div>
+        <div class="hiword-rp-st-block">
+          <h4>${t("易忘词 Top（按遗忘次数排序）")}</h4>
+          <div class="hiword-rp-st-forgotlist">${forgetRows}</div>
+        </div>
+        <div class="hiword-rp-st-note">${t("统计口径：复习事件历史 + 遗忘曲线校准数据 · 与学习 Tab 指标零重复")}</div>
+      </div>`;
+  }
+
+  /**
+   * 执行书源释放计划（写库侧）：release 词 due=now 立即可复习；defer 词统一延期 due，
+   * 防止"空 due = 立即可复习"绕过每日配额。返回本次实际释放数。
+   */
+  private async applySourceRelease(src: ReviewSource): Promise<number> {
+    if (!this.vocabStore) return 0;
+    const books = this.vocabStore.getAllBooks();
+    const plan = computeRelease(src, books);
+    if (plan.missing || plan.skippedDraft || plan.release.length === 0) return 0;
+    const nowIso = new Date().toISOString();
+    for (const w of plan.release) {
+      await this.vocabStore.reactivateWord(w.word);
+      await this.vocabStore.updateReviewStats(w.word, { due: nowIso });
+    }
+    for (const d of plan.defer) {
+      await this.vocabStore.updateReviewStats(d.word, { due: d.due });
+    }
+    const released = [...new Set([...(src.releasedWords ?? []), ...plan.release.map((w) => w.word)])];
+    await this.reviewSourceStore.update(src.id, { releasedWords: released, lastReleaseDate: localDateKey() });
+    getLogger().info(`[REword][review-source] 书源「${src.targetLabel}」释放 ${plan.release.length} 词，延期 ${plan.defer.length} 词`);
+    return plan.release.length;
+  }
+
+  /** 书源每日释放钩子：词库就绪 / 打开复习面板时调用；一天一批（computeRelease 内部幂等）。 */
+  private async releaseDueSources(): Promise<void> {
+    if (!this.vocabStore || !this.isReady) return;
+    for (const src of this.reviewSourceStore.list()) {
+      try {
+        await this.applySourceRelease(src);
+      } catch (e) {
+        getLogger().warn("[REword][review-source] 书源释放失败（不影响其余功能）:", { source: src.targetLabel, error: e });
+      }
+    }
+  }
+
+  /**
+   * 「添加单词书」弹层（书源绑定模式，对齐 review-demo）：
+   * 左侧书树（已校验书 + 主题），右侧预览（词数 / 星级分布 / 抽样词），
+   * 参数区：每日新词上限 stepper + 信任书源开关；底部保留「手动挑词」入口。
+   */
+  private showAddBookDialog() {
+    if (!this.isReady || !this.vocabStore) {
+      showMessage(t("RE word 尚未就绪"), 3000, "error");
+      return;
+    }
+    const allBooks = this.vocabStore.getAllBooks().filter((b) => b.id !== ALL_BOOK_ID);
+    const reviewable = allBooks.filter((b) => b.status !== "draft");
+    if (reviewable.length === 0 && allBooks.length === 0) {
+      showMessage(t("词库还没有单词本，先在词库中收集或导入一些单词吧"), 3000, "info");
+      return;
+    }
+    const boundKeys = new Set(this.reviewSourceStore.list().map((s) => `${s.kind}:${s.targetId}`));
+
+    // 选择状态（默认第一本已校验书，没有则第一本）
+    let selKind: "book" | "theme" = "book";
+    let selTargetId = (reviewable[0] ?? allBooks[0]).id;
+    let selLabel = (reviewable[0] ?? allBooks[0]).name;
+    let limit = 10;
+    let trust = false;
+
+    const treeRow = (kind: "book" | "theme", id: string, label: string, cls: string, extra = "") =>
+      `<div class="hiword-ab-tree ${cls}${selKind === kind && selTargetId === id ? " hiword-ab-tree--on" : ""}" data-ab-kind="${kind}" data-ab-target="${this.escapeAttr(id)}" data-ab-label="${this.escapeAttr(label)}">${extra}</div>`;
+
+    const treeHtml = allBooks
+      .map((b) => {
+        const draftTag = b.status === "draft" ? `<span class="hiword-ab-drafttag">${t("草稿")}</span>` : "";
+        const rows = [
+          treeRow("book", b.id, b.name, "hiword-ab-tree--book", `<span class="hiword-ab-tw">▾</span>📖 ${this.escapeHtml(b.name)}${draftTag}<span class="hiword-ab-c">${b.themes.reduce((n, x) => n + x.words.length, 0)}</span>`),
+        ];
+        for (const th of b.themes) {
+          rows.push(treeRow("theme", th.id, `${b.name} / ${th.name}`, "hiword-ab-tree--theme", `<span class="hiword-ab-tw"></span>${this.escapeHtml(th.name)}<span class="hiword-ab-c">${th.words.length}</span>`));
+        }
+        return rows.join("");
+      })
+      .join("");
+
+    const dialog = new Dialog({
+      title: t("添加单词书（绑定复习书源）"),
+      width: responsiveDialogSize(640, "width"),
+      height: "76vh",
+      content: `
+        <div class="hiword-ab-dialog">
+          <div class="hiword-ab-body">
+            <div class="hiword-ab-side">${treeHtml}</div>
+            <div class="hiword-ab-main">
+              <div class="hiword-ab-pvhead">
+                <span class="hiword-ab-pvname" id="hiword-ab-pvname"></span>
+                <span class="hiword-ab-pvmeta" id="hiword-ab-pvmeta"></span>
+              </div>
+              <div class="hiword-ab-pvstars" id="hiword-ab-pvstars"></div>
+              <div class="hiword-ab-pvwords" id="hiword-ab-pvwords"></div>
+              <div class="hiword-ab-optrow">
+                <span>${t("每日新词上限")}</span>
+                <span class="hiword-ab-stepper">
+                  <button type="button" id="hiword-ab-dec">−</button>
+                  <span class="hiword-ab-sv" id="hiword-ab-limit">10</span>
+                  <button type="button" id="hiword-ab-inc">＋</button>
+                </span>
+                <span class="hiword-ab-ophint">${t("避免整本同时到期挤爆复习队列")}</span>
+              </div>
+              <label class="hiword-ab-ck" id="hiword-ab-trust">
+                <span class="hiword-ab-box"></span>
+                <span>${t("信任此书源，跳过草稿校验")}</span>
+                <span class="hiword-ab-ckhint">${t("自整理词书可勾选；文档拖入的词书建议先校验")}</span>
+              </label>
+            </div>
+          </div>
+          <div class="hiword-ab-foot">
+            <button class="b3-button b3-button--text" id="hiword-ab-manual">${t("手动挑词")}</button>
+            <span style="flex:1"></span>
+            <button class="b3-button" id="hiword-ab-cancel">${T("取消")}</button>
+            <button class="b3-button hiword-ab-confirm" id="hiword-ab-confirm">${t("添加到复习队列")}</button>
+          </div>
+        </div>
+      `,
+    });
+
+    const root = dialog.element;
+    const pvName = root.querySelector("#hiword-ab-pvname") as HTMLElement;
+    const pvMeta = root.querySelector("#hiword-ab-pvmeta") as HTMLElement;
+    const pvStars = root.querySelector("#hiword-ab-pvstars") as HTMLElement;
+    const pvWords = root.querySelector("#hiword-ab-pvwords") as HTMLElement;
+    const limitEl = root.querySelector("#hiword-ab-limit") as HTMLElement;
+    const trustEl = root.querySelector("#hiword-ab-trust") as HTMLElement;
+    const confirmBtn = root.querySelector("#hiword-ab-confirm") as HTMLButtonElement;
+
+    const renderPreview = () => {
+      const books = this.vocabStore!.getAllBooks();
+      const sum = summarizeSource({ kind: selKind, targetId: selTargetId }, books);
+      const words = resolveSourceWords({ kind: selKind, targetId: selTargetId }, books);
+      pvName.textContent = selLabel;
+      const bound = boundKeys.has(`${selKind}:${selTargetId}`);
+      pvMeta.textContent = bound
+        ? t("已绑定书源 · 共 {total} 词 · 队列中 {active} 词", { total: sum.total, active: sum.activeCount })
+        : t("共 {total} 词 · 队列中 {active} 词 · 新词待释放 {fresh} 词", { total: sum.total, active: sum.activeCount, fresh: Math.max(0, sum.total - sum.activeCount) });
+      if (sum.missing) {
+        confirmBtn.disabled = true;
+        pvStars.innerHTML = `<div class="hiword-empty">${t("该书源指向的词书已不存在")}</div>`;
+        pvWords.innerHTML = "";
+        return;
+      }
+      confirmBtn.disabled = false;
+      if (sum.draft && !trust) {
+        pvStars.innerHTML = `<div class="hiword-ab-drafthint">${t("⚠ 该词书仍是草稿：校验后才会释放进队列，或勾选下方「信任此书源」")}</div>`;
+      } else {
+        pvStars.innerHTML = "";
+      }
+      // 星级分布（mastery 1~5 精确分档；未评级词不计入）
+      const sc = countByMastery(words);
+      const totalW = Math.max(1, [1, 2, 3, 4, 5].reduce((a, n) => a + (sc[n as keyof typeof sc] ?? 0), 0));
+      const bandRows: { label: string; n: number }[] = [1, 2, 3, 4, 5].map((n) => ({
+        label: `★${n}`,
+        n: sc[n as keyof typeof sc] ?? 0,
+      }));
+      pvStars.insertAdjacentHTML(
+        "beforeend",
+        bandRows
+          .map(
+            (r) => `<div class="hiword-ab-mrow"><span class="hiword-ab-mtag">${r.label}</span><span class="hiword-ab-mtrack"><i style="width:${Math.round((r.n / totalW) * 100)}%"></i></span><span class="hiword-ab-mv">${r.n}</span></div>`
+          )
+          .join("")
+      );
+      pvWords.innerHTML = words
+        .slice(0, 5)
+        .map((w) => `<span class="hiword-ab-pvword">${this.escapeHtml(w.word)}</span>`)
+        .join("") + (words.length > 5 ? `<span class="hiword-ab-pvword hiword-ab-pvword--more">…</span>` : "");
+    };
+
+    // 书树点击：切换选中 + 预览
+    root.querySelectorAll<HTMLElement>(".hiword-ab-tree").forEach((row) => {
+      row.addEventListener("click", () => {
+        root.querySelectorAll(".hiword-ab-tree").forEach((x) => x.classList.remove("hiword-ab-tree--on"));
+        row.classList.add("hiword-ab-tree--on");
+        selKind = (row.dataset.abKind as "book" | "theme") ?? "book";
+        selTargetId = row.dataset.abTarget ?? "";
+        selLabel = row.dataset.abLabel ?? selTargetId;
+        renderPreview();
+      });
+    });
+    // 配额 stepper（5~50，步进 5，与 DAILY_NEW_LIMIT 边界一致）
+    const renderLimit = () => { limitEl.textContent = String(limit); };
+    root.querySelector("#hiword-ab-dec")?.addEventListener("click", () => { limit = Math.max(5, limit - 5); renderLimit(); });
+    root.querySelector("#hiword-ab-inc")?.addEventListener("click", () => { limit = Math.min(50, limit + 5); renderLimit(); });
+    // 信任书源开关
+    trustEl.addEventListener("click", () => {
+      trust = !trust;
+      trustEl.classList.toggle("hiword-ab-ck--on", trust);
+      renderPreview();
+    });
+    // 手动挑词（保留原「从单词库添加」能力）
+    root.querySelector("#hiword-ab-manual")?.addEventListener("click", () => {
+      dialog.destroy();
+      this.showAddFromVocabDialog();
+    });
+    root.querySelector("#hiword-ab-cancel")?.addEventListener("click", () => dialog.destroy());
+    // 确认：addSource 去重 → 首批释放 → 刷新
+    confirmBtn.addEventListener("click", async () => {
+      try {
+        const src = await this.reviewSourceStore.add({
+          kind: selKind,
+          targetId: selTargetId,
+          targetLabel: selLabel,
+          dailyNewLimit: limit,
+          trustSource: trust,
+        });
+        const n = await this.applySourceRelease(src);
+        dialog.destroy();
+        showMessage(
+          n > 0
+            ? t("已绑定书源「{name}」· 首批 {n} 词已入队，其余按每日 {limit} 词释放", { name: selLabel, n, limit: src.dailyNewLimit })
+            : t("已绑定书源「{name}」· 新词将按每日 {limit} 词逐步释放", { name: selLabel, limit: src.dailyNewLimit }),
+          3400,
+          "success" as any
+        );
+        if (this.dockElement) this.renderReviewPanel(this.dockElement);
+      } catch (e) {
+        getLogger().warn("[REword][review-source] 绑定书源失败:", { error: e });
+        showMessage(t("绑定书源失败，请重试"), 3000, "error");
+      }
+    });
+
+    renderLimit();
+    renderPreview();
+  }
+
   private showAddFromVocabDialog() {
     if (!this.isReady || !this.vocabStore) {
-      showMessage("RE word 尚未就绪", 3000, "error");
+      showMessage(t("RE word 尚未就绪"), 3000, "error");
       return;
     }
     const words = this.vocabStore.getAllWords();
     if (words.length === 0) {
-      showMessage("词库还没有单词，先添加一些再来复习吧", 3000, "info");
+      showMessage(t("词库还没有单词，先添加一些再来复习吧"), 3000, "info");
       return;
     }
 
-    const statusText = (s: string) => (s === "archived" ? "已归档" : s === "ignored" ? "已忽略" : "学习中");
+    const statusText = (s: string) => (s === "archived" ? t("已归档") : s === "ignored" ? t("已忽略") : t("学习中"));
     const rowHtml = (w: WordRecord) => {
       const meaning = (w.meaning || "").replace(/\s+/g, " ").slice(0, 36);
       return `<label class="hiword-av-row" data-word="${this.escapeAttr(w.word)}">
@@ -10362,22 +11031,22 @@ export default class RewordPlugin extends Plugin {
     };
 
     const dialog = new Dialog({
-      title: "从单词库加入复习",
+      title: t("从单词库加入复习"),
       width: responsiveDialogSize(480, "width"),
       height: "74vh",
       content: `
         <div class="hiword-av-dialog">
           <div class="hiword-av-bar">
-            <input class="b3-text-field hiword-av-search" id="hiword-av-search" placeholder="搜索单词…">
+            <input class="b3-text-field hiword-av-search" id="hiword-av-search" placeholder="${T("搜索单词…")}">
             <span class="hiword-av-count" id="hiword-av-count"></span>
-            <button class="hiword-av-toggle" id="hiword-av-toggle">全选</button>
+            <button class="hiword-av-toggle" id="hiword-av-toggle">${T("全选")}</button>
           </div>
           <div class="hiword-av-list" id="hiword-av-list">
             ${words.map(rowHtml).join("")}
           </div>
           <div class="hiword-av-footer">
-            <button class="hiword-av-cancel" id="hiword-av-cancel">取消</button>
-            <button class="b3-button b3-button--text hiword-av-confirm" id="hiword-av-confirm">加入复习</button>
+            <button class="hiword-av-cancel" id="hiword-av-cancel">${T("取消")}</button>
+            <button class="b3-button b3-button--text hiword-av-confirm" id="hiword-av-confirm">${T("加入复习")}</button>
           </div>
         </div>
       `,
@@ -10392,7 +11061,7 @@ export default class RewordPlugin extends Plugin {
     const updateCount = () => {
       const total = list.querySelectorAll(".hiword-av-check").length;
       const sel = list.querySelectorAll(".hiword-av-check:checked").length;
-      countEl.textContent = `已选 ${sel} / ${total}`;
+      countEl.textContent = t("已选 {sel} / {total}", { sel, total });
     };
     search?.addEventListener("input", () => {
       const q = search.value.trim().toLowerCase();
@@ -10414,7 +11083,7 @@ export default class RewordPlugin extends Plugin {
       visible.forEach((r) => {
         (r.querySelector(".hiword-av-check") as HTMLInputElement).checked = !allOn;
       });
-      toggleBtn.textContent = allOn ? "全选" : "全不选";
+      toggleBtn.textContent = allOn ? t("全选") : t("全不选");
       updateCount();
     });
     root.querySelector("#hiword-av-cancel")?.addEventListener("click", () => dialog.destroy());
@@ -10423,7 +11092,7 @@ export default class RewordPlugin extends Plugin {
         (c) => c.dataset.word!
       );
       if (chosen.length === 0) {
-        showMessage("请至少勾选一个单词", 2000, "info");
+        showMessage(t("请至少勾选一个单词"), 2000, "info");
         return;
       }
       const nowIso = new Date().toISOString();
@@ -10434,7 +11103,7 @@ export default class RewordPlugin extends Plugin {
         n++;
       }
       dialog.destroy();
-      showMessage(`已将 ${n} 个单词加入复习（立即可复习）`, 3200, "success" as any);
+      showMessage(t("已将 {n} 个单词加入复习（立即可复习）", { n }), 3200, "success" as any);
       if (this.dockElement) this.renderReviewPanel(this.dockElement);
     });
     updateCount();
@@ -10539,22 +11208,22 @@ export default class RewordPlugin extends Plugin {
     // 2026-08-17：选区落在批注编辑器内时直接忽略（防在批注编辑区误建批注）
     const selAnchor = window.getSelection()?.anchorNode as Node | null;
     if (selAnchor && selAnchor.parentElement?.closest?.("#whale-dlg-editor, .whale-ann-inline-editor")) {
-      showMessage("批注编辑区内不可再创建批注", 2000, "info");
+      showMessage(T("批注编辑区内不可再创建批注"), 2000, "info");
       return;
     }
     if (!this.isReady) {
-      showMessage("RE word 尚未就绪", 3000, "error");
+      showMessage(T("RE word 尚未就绪"), 3000, "error");
       return;
     }
     const selected = this.getSelectionTextPrecise()?.trim();
     if (!selected) {
-      showMessage("请先框选要批注的内容", 2500, "info");
+      showMessage(T("请先框选要批注的内容"), 2500, "info");
       return;
     }
 
     const blockId = this.getSelectionBlockId();
     if (!blockId) {
-      showMessage("无法定位选中内容所在的块", 3000, "error");
+      showMessage(T("无法定位选中内容所在的块"), 3000, "error");
       return;
     }
 
@@ -10576,7 +11245,7 @@ export default class RewordPlugin extends Plugin {
       return;
     }
     // 兜底：whaleManager 未就绪（初始化失败）时给出明确提示，不再回退旧版 textarea 对话框
-    showMessage("批注管理器未就绪，请重载插件后重试", 3000, "error");
+    showMessage(T("批注管理器未就绪，请重载插件后重试"), 3000, "error");
   }
 
 
@@ -10895,7 +11564,9 @@ export default class RewordPlugin extends Plugin {
       const kw = (contentEl.querySelector("#whale-search-input") as HTMLInputElement | null)?.value || "";
       this.whaleSearchKw = kw; // 保持搜索态
       this.whaleLimits[section] += 100;
-      if (this.dockElement) this.renderAnnotationsPanel(this.dockElement);
+      // 2026-09-11 组合栏退役：批注面板可能承载在主区页签 / 独立 Dock
+      const panelEl = this.getFeatureElement("annotations");
+      if (panelEl) this.renderAnnotationsPanel(panelEl);
       const ni = contentEl.querySelector("#whale-search-input") as HTMLInputElement | null;
       if (ni && kw) ni.value = kw;
     });
@@ -11107,9 +11778,10 @@ export default class RewordPlugin extends Plugin {
       localStorage.removeItem("hiword-annotation-sort-doc");
       localStorage.removeItem("hiword-annotation-sort-styles");
     } catch (__swallowErr) { logSwallow(__swallowErr, "index.ts · resetWhaleFilters", "debug"); }
-    // 重渲染（清空搜索框）
-    if (this.dockElement) {
-      const contentEl = this.dockElement.querySelector("#hiword-dock-content") as HTMLElement | null;
+    // 重渲染（清空搜索框；批注面板可能承载在主区页签 / 独立 Dock）
+    const panelEl = this.getFeatureElement("annotations");
+    if (panelEl) {
+      const contentEl = panelEl.querySelector("#hiword-dock-content") as HTMLElement | null;
       if (contentEl) {
         const items = this.annotationStore.getAll();
         this.applyWhalePanelHTML(contentEl, renderWhalePanel(
@@ -11118,8 +11790,8 @@ export default class RewordPlugin extends Plugin {
           this.whaleSortMode, this.whaleSortTimeDir, this.whaleSortDoc, this.whaleSortStyles,
           this.getAnnotationDocInfos(items), false, this.whaleGroupMode, this.whaleLimits
         ));
-        this.bindWhaleSearch(contentEl, items, this.dockElement);
-        this.bindWhaleTabs(contentEl, items, this.dockElement);
+        this.bindWhaleSearch(contentEl, items, panelEl);
+        this.bindWhaleTabs(contentEl, items, panelEl);
         this.bindWhaleCardActions(contentEl);
       }
     }
@@ -11144,7 +11816,7 @@ export default class RewordPlugin extends Plugin {
       { color: "#06b6d4", style: "highlight", label: "金句" },
     ];
     pop.innerHTML = `
-      <div class="hiword-style-filter-head">🎨 勾选样式（${this.whaleSortStyles.length} / ${presets.length}）</div>
+      <div class="hiword-style-filter-head">${T("🎨 勾选样式（{a} / {b}）", { a: this.whaleSortStyles.length, b: presets.length })}</div>
       <div class="hiword-style-filter-grid">
         ${presets.map((p) => {
           const key = `${p.color}|${p.style}`;
@@ -11156,8 +11828,8 @@ export default class RewordPlugin extends Plugin {
         }).join("")}
       </div>
       <div class="hiword-style-filter-foot">
-        <button class="hiword-style-filter-clear" data-style-clear>清空</button>
-        <button class="hiword-style-filter-done" data-style-done>完成</button>
+        <button class="hiword-style-filter-clear" data-style-clear>${T("清空")}</button>
+        <button class="hiword-style-filter-done" data-style-done>${T("完成")}</button>
       </div>
     `;
     document.body.appendChild(pop);
@@ -11182,25 +11854,26 @@ export default class RewordPlugin extends Plugin {
         else this.whaleSortStyles.push(key);
         // 重新渲染 popover head 计数
         const head = pop.querySelector(".hiword-style-filter-head");
-        if (head) head.textContent = `🎨 勾选样式（${this.whaleSortStyles.length} / ${presets.length}）`;
+        if (head) head.textContent = `${T("🎨 勾选样式（{a} / {b}）", { a: this.whaleSortStyles.length, b: presets.length })}`;
         btn.classList.toggle("active");
-        // 实时写 localStorage 并刷新批注面板
+        // 实时写 localStorage 并刷新批注面板（可能承载在主区页签 / 独立 Dock）
         try { localStorage.setItem("hiword-annotation-sort-styles", JSON.stringify(this.whaleSortStyles)); } catch {}
-        if (this.dockElement) {
-          const kw = (this.dockElement.querySelector("#whale-search-input") as HTMLInputElement)?.value || "";
+        const panelEl = this.getFeatureElement("annotations");
+        if (panelEl) {
+          const kw = (panelEl.querySelector("#whale-search-input") as HTMLInputElement)?.value || "";
           const items = this.annotationStore.getAll();
-          const ce = this.dockElement.querySelector("#hiword-dock-content") as HTMLElement | null;
+          const ce = panelEl.querySelector("#hiword-dock-content") as HTMLElement | null;
           if (ce) this.applyWhalePanelHTML(ce, renderWhalePanel(
             items, this.currentLabel, kw,
             this.annotationLabelStore.colorMap(), this.annotationLabelStore.getAll(), this.whaleTagsCollapsed,
             this.whaleSortMode, this.whaleSortTimeDir, this.whaleSortDoc, this.whaleSortStyles,
             this.getAnnotationDocInfos(items), false, this.whaleGroupMode, this.whaleLimits
           ));
-          this.bindWhaleSearch(this.dockElement, items, this.dockElement);
-          this.bindWhaleTabs(this.dockElement, items, this.dockElement);
-          this.bindWhaleCardActions(this.dockElement);
+          this.bindWhaleSearch(panelEl, items, panelEl);
+          this.bindWhaleTabs(panelEl, items, panelEl);
+          this.bindWhaleCardActions(panelEl);
           if (kw) {
-            const ni = this.dockElement.querySelector("#whale-search-input") as HTMLInputElement;
+            const ni = panelEl.querySelector("#whale-search-input") as HTMLInputElement;
             if (ni) ni.value = kw;
           }
         }
@@ -11309,7 +11982,7 @@ export default class RewordPlugin extends Plugin {
         await this.deleteAnnotation(id, this.dockElement ?? contentEl);
       } catch (e: any) {
         getLogger().error("[REword] 删除批注异常", { data: { id }, error: e });
-        showMessage(`删除失败：${e?.message || e}`, 3000, "error");
+        showMessage(T("删除失败：{v1}", { v1: e?.message || e }), 3000, "error");
       }
     };
     contentEl.querySelectorAll(".whale-card-btn[data-action='delete']").forEach((btn) => {
@@ -11334,14 +12007,14 @@ export default class RewordPlugin extends Plugin {
     // 清空全部批注（二次确认，不可恢复）
     contentEl.querySelector("#whale-clear-all")?.addEventListener("click", async () => {
       if (this.annotationStore.size === 0) {
-        showMessage("批注为空", 2000, "info" as any);
+        showMessage(T("批注为空"), 2000, "info" as any);
         return;
       }
       if (await confirmDelete("确定清空全部批注？此操作不可恢复")) {
         await this.annotationStore.clearAll();
         this.renderAnnotationsPanel(this.dockElement ?? contentEl);
         this.refreshAnnotationMarkers();
-        showMessage("已清空全部批注", 2000, "success" as any);
+        showMessage(T("已清空全部批注"), 2000, "success" as any);
       }
     });
     // 重置所有筛选条件（含搜索框清空）
@@ -11396,12 +12069,12 @@ export default class RewordPlugin extends Plugin {
     unobserveHost(noteEl.querySelector(".whale-notes-protyle") as HTMLElement | null);
     const app = (window as any).siyuan?.ws?.app;
     if (!app) {
-      showMessage("思源编辑器不可用，无法内联编辑", 3000, "error");
+      showMessage(T("思源编辑器不可用，无法内联编辑"), 3000, "error");
       return;
     }
     // 2026-08-18（D6/D8）：申请全局编辑会话，面板/弹窗/浮层同一时刻仅一个编辑会话
     if (!requestEditSession("panel")) {
-      showMessage("已在别处编辑，请先完成当前编辑", 2500, "info");
+      showMessage(T("已在别处编辑，请先完成当前编辑"), 2500, "info");
       return;
     }
     markEditing(ann.id);
@@ -11415,17 +12088,17 @@ export default class RewordPlugin extends Plugin {
     if (hasBlockTable(ann.note || "")) {
       const hint = document.createElement("div");
       hint.className = "ann-table-edit-hint";
-      hint.textContent = "表格支持单元格文字编辑；增删行列请在文档中编辑。";
+      hint.textContent = T("表格支持单元格文字编辑；增删行列请在文档中编辑。");
       host.insertAdjacentElement("beforebegin", hint);
     }
 
     const bar = document.createElement("div");
     bar.className = "whale-ann-inline-actions";
     bar.innerHTML = `
-      <button type="button" class="b3-button b3-button--small b3-button--outline" data-act="cancel">取消</button>
+      <button type="button" class="b3-button b3-button--small b3-button--outline" data-act="cancel">${T("取消")}</button>
       <span class="whale-footer-spacer"></span>
-      <button type="button" class="b3-button b3-button--small b3-button--outline" data-act="style" title="颜色/线段/标签">样式</button>
-      <button type="button" class="b3-button b3-button--small b3-button--emphasize" data-act="save">保存</button>
+      <button type="button" class="b3-button b3-button--small b3-button--outline" data-act="style" title="${T("颜色/线段/标签")}">${T("样式")}</button>
+      <button type="button" class="b3-button b3-button--small b3-button--emphasize" data-act="save">${T("保存")}</button>
     `;
     host.insertAdjacentElement("afterend", bar);
 
@@ -11480,18 +12153,18 @@ export default class RewordPlugin extends Plugin {
     if (!this.inlineEditor) return;
     const md = this.inlineEditor.read() || "";
     if (!md || !md.replace(/<[^>]*>/g, "").trim()) {
-      showMessage("批注内容不能为空", 2500, "info");
+      showMessage(T("批注内容不能为空"), 2500, "info");
       this.inlineEditor.focus();
       return;
     }
     try {
       await this.annotationStore.upsert({ ...ann, note: md });
-      showMessage("批注已更新", 2000, "success" as any);
+      showMessage(T("批注已更新"), 2000, "success" as any);
       this.cancelInlineEdit(false);   // 保存后由下方整表重渲染重新挂载预览
       this.renderAnnotationsPanel(this.dockElement ?? contentEl);
       this.refreshAnnotationMarkers();
     } catch (e: any) {
-      showMessage(`保存失败：${e?.message || e}`, 3000, "error");
+      showMessage(T("保存失败：{v1}", { v1: e?.message || e }), 3000, "error");
     }
   }
 
@@ -11605,10 +12278,10 @@ export default class RewordPlugin extends Plugin {
       border: "1px solid var(--b3-border-color, rgba(0,0,0,.08))",
     } as any);
     const msg = document.createElement("span");
-    msg.textContent = "批注已删除";
+    msg.textContent = T("批注已删除");
     const btn = document.createElement("button");
     btn.type = "button";
-    btn.textContent = "撤销";
+    btn.textContent = T("撤销");
     Object.assign(btn.style, {
       border: "none", background: "var(--b3-theme-primary, #4285f4)", color: "#fff",
       borderRadius: "6px", padding: "4px 12px", cursor: "pointer", fontSize: "13px",
@@ -11678,7 +12351,7 @@ export default class RewordPlugin extends Plugin {
       if (!menu || typeof menu.addItem !== "function") return;
       menu.addItem({
         icon: "iconREword",
-        label: "📤 发送到 AI 分析（REword）",
+        label: t("📤 发送到 AI 分析（REword）"),
         click: () => { this.showAiPanel(); },
       });
     } catch (err) {
@@ -11703,9 +12376,10 @@ export default class RewordPlugin extends Plugin {
         detail?.elements?.[0]?.dataset?.nodeId ||
         "";
       if (!docId) return;
+      if (SKELETON_ONLY) return; // 2026-09-10 骨架模式：精读入口已屏蔽（见 ai/ai-skeleton.ts）
       menu.addItem({
         icon: "iconREword",
-        label: "📖 AI 精读此文档（REword）",
+        label: t("📖 AI 精读此文档（REword）"),
         click: () => { void this.sendDocToAi(docId); },
       });
     } catch (err) {
@@ -11729,9 +12403,10 @@ export default class RewordPlugin extends Plugin {
         protyle?.block?.rootID ||
         "";
       if (!docId) return;
+      if (SKELETON_ONLY) return; // 2026-09-10 骨架模式：精读入口已屏蔽（见 ai/ai-skeleton.ts）
       menu.addItem({
         icon: "iconREword",
-        label: "📖 AI 精读此文档（REword）",
+        label: t("📖 AI 精读此文档（REword）"),
         click: () => { void this.sendDocToAi(docId); },
       });
     } catch (err) {
@@ -11880,32 +12555,24 @@ export default class RewordPlugin extends Plugin {
    */
   private focusAnnotationCardInDock(annId: string): void {
     if (!annId) return;
-    // 1) 展开承载批注的 Dock（如果折叠）
-    this.focusFeatureDock("annotations");
-    // 2) 取批注承载的 Dock 元素（组合栏 / 独立 Dock）
-    const dockEl = this.getFeatureElement("annotations");
-    if (!dockEl) return;
-    // 若批注仍在组合栏且当前非激活，切到批注 Tab
-    const annTab = dockEl.querySelector('.hiword-dock-tab[data-tab="annotations"]') as HTMLElement | null;
-    if (annTab && !annTab.classList.contains("active")) {
-      annTab.click(); // 复用现有 tab 切换逻辑（会触发 renderAnnotationsPanel）
-    } else if (!annTab) {
-      // 独立 Dock：确保已渲染
+    // 打开/聚焦批注承载界面（主区页签或独立 Dock，withFeatureTab 统一路由并等元素就绪）
+    void withFeatureTab(this, "annotations", (dockEl) => {
+      // 确保已渲染
       this.renderAnnotationsPanel(dockEl);
-    }
-    // 3) 滚动 + 高亮目标条目（卡片或笔记化条目）
-    // 下一帧等 DOM 完成
-    requestAnimationFrame(() => {
-      const card = dockEl.querySelector(
-        `.whale-card[data-id="${CSS.escape(annId)}"], .whale-notes-item[data-id="${CSS.escape(annId)}"]`
-      ) as HTMLElement | null;
-      if (!card) return;
-      card.scrollIntoView({ behavior: "smooth", block: "center" });
-      // 触发高亮动画（CSS 中定义 --flash，2s 后自动消失）
-      card.classList.remove("whale-card--flash", "whale-notes-item--flash"); // 重置以便重复触发
-      void card.offsetWidth; // 强制 reflow
-      card.classList.add("whale-card--flash", "whale-notes-item--flash");
-      setTimeout(() => card.classList.remove("whale-card--flash", "whale-notes-item--flash"), 2200);
+      // 滚动 + 高亮目标条目（卡片或笔记化条目）
+      // 下一帧等 DOM 完成
+      requestAnimationFrame(() => {
+        const card = dockEl.querySelector(
+          `.whale-card[data-id="${CSS.escape(annId)}"], .whale-notes-item[data-id="${CSS.escape(annId)}"]`
+        ) as HTMLElement | null;
+        if (!card) return;
+        card.scrollIntoView({ behavior: "smooth", block: "center" });
+        // 触发高亮动画（CSS 中定义 --flash，2s 后自动消失）
+        card.classList.remove("whale-card--flash", "whale-notes-item--flash"); // 重置以便重复触发
+        void card.offsetWidth; // 强制 reflow
+        card.classList.add("whale-card--flash", "whale-notes-item--flash");
+        setTimeout(() => card.classList.remove("whale-card--flash", "whale-notes-item--flash"), 2200);
+      });
     });
   }
 
@@ -11985,7 +12652,7 @@ export default class RewordPlugin extends Plugin {
       await this.readerDock?.tabController?.focusAnnotation(bookId, cfi);
     } catch (e) {
       getLogger().warn("[REword] 跳转到阅读批注失败", { data: { bookId, cfi }, error: e });
-      showMessage("跳转到阅读批注失败", 2000, "error" as any);
+      showMessage(T("跳转到阅读批注失败"), 2000, "error" as any);
     }
   }
 
@@ -12066,30 +12733,30 @@ export default class RewordPlugin extends Plugin {
     pop.innerHTML = `
       <div class="hiword-ann-pop-head">
         <span class="hiword-ann-pop-dot" style="background:${color}"></span>
-        <span class="hiword-ann-pop-style" style="color:${color}" title="标注样式">${styleIcon[ann.style || "solid"] || "━"}</span>
+        <span class="hiword-ann-pop-style" style="color:${color}" title="${T("标注样式")}">${styleIcon[ann.style || "solid"] || "━"}</span>
         <span class="hiword-ann-pop-time">${dateStr}</span>
-        <button class="hiword-ann-pop-close" title="关闭">✕</button>
+        <button class="hiword-ann-pop-close" title="${T("关闭")}">✕</button>
       </div>
-      ${sourceText ? `<div class="hiword-ann-pop-sentence" data-act="locate-editor" title="点击定位到原文">${esc(sourceText)}</div>` : ""}
+      ${sourceText ? `<div class="hiword-ann-pop-sentence" data-act="locate-editor" title="${T("点击定位到原文")}">${esc(sourceText)}</div>` : ""}
       ${
         isPure
-          ? `${sourceText ? `<div class="hiword-ann-pop-sentence" data-act="locate-editor" title="点击定位到原文">${esc(sourceText)}</div>` : ""}
-             <div class="hiword-ann-pop-note hiword-ann-pop-pure-hint">纯标注 · 无文字内容，可改样式/色或升级为批注</div>${styleRowHtml}${colorRowHtml}`
+          ? `${sourceText ? `<div class="hiword-ann-pop-sentence" data-act="locate-editor" title="${T("点击定位到原文")}">${esc(sourceText)}</div>` : ""}
+             <div class="hiword-ann-pop-note hiword-ann-pop-pure-hint">${T("纯标注 · 无文字内容，可改样式/色或升级为批注")}</div>${styleRowHtml}${colorRowHtml}`
           : `<div class="hiword-ann-pop-note b3-typography">${
               ann.note
                 ? `<div class="hiword-ann-pop-protyle"></div><div class="hiword-ann-pop-fallback">${noteFallback}</div>`
-                : (sourceText ? "" : '<span class="hiword-ann-pop-empty">纯标注 · 无文字内容</span>')
+                : (sourceText ? "" : '<span class="hiword-ann-pop-empty">${T("纯标注 · 无文字内容")}</span>')
             }</div>${tagChips ? `<div class="hiword-ann-pop-tags">${tagChips}</div>` : ""}`
       }
       <div class="hiword-ann-pop-actions">
         ${
           isPure
-            ? `<button class="hiword-ann-pop-btn" data-act="upgrade" title="添加批注内容，升级为批注">批注</button>
-               <button class="hiword-ann-pop-btn hiword-ann-pop-btn--danger" data-act="delete">删除</button>`
-            : `<button class="hiword-ann-pop-btn" data-act="edit">编辑</button>
-               <button class="hiword-ann-pop-btn" data-act="locate" title="在侧边栏批注面板中查看">面板</button>
-               <button class="hiword-ann-pop-btn" data-act="copy" title="复制原文">复制</button>
-               <button class="hiword-ann-pop-btn hiword-ann-pop-btn--danger" data-act="delete">删除</button>`
+            ? `<button class="hiword-ann-pop-btn" data-act="upgrade" title="${T("添加批注内容，升级为批注")}">${T("批注")}</button>
+               <button class="hiword-ann-pop-btn hiword-ann-pop-btn--danger" data-act="delete">${T("删除")}</button>`
+            : `<button class="hiword-ann-pop-btn" data-act="edit">${T("编辑")}</button>
+               <button class="hiword-ann-pop-btn" data-act="locate" title="${T("在侧边栏批注面板中查看")}">${T("面板")}</button>
+               <button class="hiword-ann-pop-btn" data-act="copy" title="${T("复制原文")}">${T("复制")}</button>
+               <button class="hiword-ann-pop-btn hiword-ann-pop-btn--danger" data-act="delete">${T("删除")}</button>`
         }
       </div>
     `;
@@ -12189,7 +12856,7 @@ export default class RewordPlugin extends Plugin {
           await this.deleteAnnotation(ann.id, this.dockElement ?? document.body);
         } catch (e: any) {
           getLogger().error("[REword] 浮层删除批注异常", { data: { id: ann.id }, error: e });
-          showMessage(`删除失败：${e?.message || e}`, 3000, "error");
+          showMessage(T("删除失败：{v1}", { v1: e?.message || e }), 3000, "error");
         }
       });
       return;
@@ -12216,7 +12883,7 @@ export default class RewordPlugin extends Plugin {
     pop.querySelector('[data-act="copy"]')?.addEventListener("click", () => {
       const text = sourceText;
       if (!text) return;
-      const done = () => showMessage("已复制原文", 1600, "info" as any);
+      const done = () => showMessage(T("已复制原文"), 1600, "info" as any);
       try {
         if (navigator.clipboard?.writeText) {
           navigator.clipboard.writeText(text).then(done, () => fallbackCopy(text, done));
@@ -12235,7 +12902,7 @@ export default class RewordPlugin extends Plugin {
         await this.deleteAnnotation(ann.id, this.dockElement ?? document.body);
       } catch (e: any) {
         getLogger().error("[REword] 浮层删除批注异常", { data: { id: ann.id }, error: e });
-        showMessage(`删除失败：${e?.message || e}`, 3000, "error");
+        showMessage(T("删除失败：{v1}", { v1: e?.message || e }), 3000, "error");
       }
     });
 
@@ -12258,7 +12925,7 @@ export default class RewordPlugin extends Plugin {
   /** 显示词库列表对话框 */
   private showVocabDialog() {
     if (!this.isReady) {
-      showMessage("RE word 尚未就绪", 3000, "error");
+      showMessage(T("RE word 尚未就绪"), 3000, "error");
       return;
     }
 
@@ -12266,43 +12933,43 @@ export default class RewordPlugin extends Plugin {
     const books = this.vocabStore.getBooks().filter((b) => b.id !== ALL_BOOK_ID);
 
     const dialog = new Dialog({
-      title: `RE word 词库（共 ${words.length} 词）`,
+      title: t("RE word 词库（共 {n} 词）", { n: words.length }),
       width: responsiveDialogSize(760, "width"),
       height: "560px",
       content: `
         <div class="hiword-vocab-dialog">
           <div class="hiword-vocab-toolbar">
             <select class="b3-select" id="hiword-filter-book">
-              <option value="">全部单词本</option>
+              <option value="">${t("全部单词本")}</option>
               ${books.map((b) => `<option value="${b.id}">${this.escapeHtml(b.name)}</option>`).join("")}
             </select>
-            <input class="b3-text-field" id="hiword-search" placeholder="搜索单词..." />
+            <input class="b3-text-field" id="hiword-search" placeholder="${T("搜索单词...")}" />
             <select class="b3-select" id="hiword-filter-status">
-              <option value="">全部状态</option>
-              <option value="active">活跃</option>
-              <option value="archived">已归档</option>
-              <option value="ignored">忽略</option>
+              <option value="">${T("全部状态")}</option>
+              <option value="active">${T("活跃")}</option>
+              <option value="archived">${T("已归档")}</option>
+              <option value="ignored">${T("忽略")}</option>
             </select>
             <select class="b3-select" id="hiword-filter-mastery">
-              <option value="">全部星级</option>
-              <option value="0">0★ 新词</option>
+              <option value="">${T("全部星级")}</option>
+              <option value="0">${T("0★ 新词")}</option>
               <option value="1">1★</option>
               <option value="2">2★</option>
               <option value="3">3★</option>
               <option value="4">4★</option>
-              <option value="5">5★ 已掌握</option>
+              <option value="5">${T("5★ 已掌握")}</option>
             </select>
-            <button class="b3-button b3-button--outline" id="hiword-export">导出 CSV</button>
-            <button class="b3-button b3-button--outline hiword-dialog-batchdel-btn" id="hiword-batchdel-dialog" title="勾选多个单词卡后批量删除">🗑 批量删除</button>
+            <button class="b3-button b3-button--outline" id="hiword-export">${T("导出 CSV")}</button>
+            <button class="b3-button b3-button--outline hiword-dialog-batchdel-btn" id="hiword-batchdel-dialog" title="${T("勾选多个单词卡后批量删除")}">${T("🗑 批量删除")}</button>
           </div>
           <div class="hiword-vocab-list" id="hiword-list">
             ${this.renderWordList(words, false)}
           </div>
           <div class="hiword-dialog-batchdel-bar" id="hiword-dialog-batchdel-bar" style="display:none;">
-            <span class="hiword-dialog-batchdel-count" id="hiword-dialog-batchdel-count">已选 0</span>
-            <button class="b3-button b3-button--small b3-button--outline" id="hiword-batchdel-all">全选</button>
-            <button class="b3-button b3-button--small hiword-dialog-batchdel-ok" id="hiword-batchdel-ok">删除选中</button>
-            <button class="b3-button b3-button--small" id="hiword-batchdel-cancel">退出</button>
+            <span class="hiword-dialog-batchdel-count" id="hiword-dialog-batchdel-count">${T("已选 0")}</span>
+            <button class="b3-button b3-button--small b3-button--outline" id="hiword-batchdel-all">${T("全选")}</button>
+            <button class="b3-button b3-button--small hiword-dialog-batchdel-ok" id="hiword-batchdel-ok">${T("删除选中")}</button>
+            <button class="b3-button b3-button--small" id="hiword-batchdel-cancel">${T("退出")}</button>
           </div>
         </div>
       `,
@@ -12324,7 +12991,7 @@ export default class RewordPlugin extends Plugin {
   /** 渲染单词列表 HTML（对话框用，5 星掌握度；withSelect 进入批量删除多选态） */
   private renderWordList(words: WordRecord[], withSelect = false): string {
     if (words.length === 0) {
-      return `<div class="hiword-empty">词库为空，查词时点 ★ 即可收藏</div>`;
+      return `<div class="hiword-empty">${t("词库为空，查词时点 ★ 即可收藏")}</div>`;
     }
 
     return words
@@ -12341,8 +13008,8 @@ export default class RewordPlugin extends Plugin {
           <div class="hiword-word-meta">
             ${this.renderMasteryStars(w.word, w.mastery)}
             <span class="hiword-status hiword-status-${w.status}">${w.status}</span>
-            <button class="b3-button b3-button--small" data-action="tts" data-word="${this.escapeAttr(w.word)}">朗读</button>
-            <button class="b3-button b3-button--small" data-action="remove" data-word="${this.escapeAttr(w.word)}">移除</button>
+            <button class="b3-button b3-button--small" data-action="tts" data-word="${this.escapeAttr(w.word)}">${T("朗读")}</button>
+            <button class="b3-button b3-button--small" data-action="remove" data-word="${this.escapeAttr(w.word)}">${T("移除")}</button>
           </div>
         </div>`
       )
@@ -12415,7 +13082,7 @@ export default class RewordPlugin extends Plugin {
         renderList();
       } else if (action === "remove" && word) {
         await this.vocabStore.removeWord(word);
-        showMessage("已移除", 2000, "info");
+        showMessage(T("已移除"), 2000, "info");
         renderList();
       }
     });
@@ -12425,7 +13092,7 @@ export default class RewordPlugin extends Plugin {
       const checks = listContainer ? Array.from(listContainer.querySelectorAll<HTMLInputElement>(".hiword-word-check")) : [];
       const total = checks.length;
       const sel = checks.filter((c) => c.checked).length;
-      if (batchCountEl) batchCountEl.textContent = `已选 ${sel} / ${total}`;
+      if (batchCountEl) batchCountEl.textContent = `${T("已选 {sel} / {n}", { sel, n: total })}`;
       if (batchOkBtn) batchOkBtn.disabled = sel === 0;
     };
     const bindChecks = () => {
@@ -12440,7 +13107,7 @@ export default class RewordPlugin extends Plugin {
       if (batchBar) batchBar.style.display = dialogBatchMode ? "flex" : "none";
       batchDelBtn.classList.toggle("b3-button--primary", dialogBatchMode);
       if (dialogBatchMode) bindChecks();
-      else if (batchAllBtn) batchAllBtn.textContent = "全选";
+      else if (batchAllBtn) batchAllBtn.textContent = T("全选");
     });
     batchAllBtn?.addEventListener("click", () => {
       const checks = listContainer ? Array.from(listContainer.querySelectorAll<HTMLInputElement>(".hiword-word-check")) : [];
@@ -12454,7 +13121,7 @@ export default class RewordPlugin extends Plugin {
         ? Array.from(listContainer.querySelectorAll<HTMLInputElement>(".hiword-word-check:checked")).map((c) => c.dataset.word || "").filter(Boolean)
         : [];
       if (words.length === 0) return;
-      const ok = await confirmDelete(`确定删除选中的 ${words.length} 个单词？\n此操作不可撤销。`);
+      const ok = await confirmDelete(`${T("确定删除选中的 {n} 个单词？", { n: words.length })}\n${T("此操作不可撤销。")}`);
       if (!ok) return;
       let done = 0;
       for (const w of words) {
@@ -12463,15 +13130,15 @@ export default class RewordPlugin extends Plugin {
       dialogBatchMode = false;
       if (batchBar) batchBar.style.display = "none";
       batchDelBtn?.classList.remove("b3-button--primary");
-      if (batchAllBtn) batchAllBtn.textContent = "全选";
+      if (batchAllBtn) batchAllBtn.textContent = T("全选");
       renderList();
-      showMessage(`已删除 ${done} 个单词`, 2500, "success" as any);
+      showMessage(T("已删除 {done} 个单词", { done }), 2500, "success" as any);
     });
     batchCancelBtn?.addEventListener("click", () => {
       dialogBatchMode = false;
       if (batchBar) batchBar.style.display = "none";
       batchDelBtn?.classList.remove("b3-button--primary");
-      if (batchAllBtn) batchAllBtn.textContent = "全选";
+      if (batchAllBtn) batchAllBtn.textContent = T("全选");
       renderList();
     });
 
@@ -12612,7 +13279,7 @@ export default class RewordPlugin extends Plugin {
     if (this._listReadIndex >= this._listReadWords.length) {
       // 读完了
       this.stopListReading();
-      showMessage("列表朗读完成", 2000, "success" as any);
+      showMessage(T("列表朗读完成"), 2000, "success" as any);
       return;
     }
 
@@ -12659,7 +13326,7 @@ export default class RewordPlugin extends Plugin {
       if (readStopBtn) readStopBtn.style.display = "";
       if (readProg) readProg.style.display = "";
     } else {
-      if (readAllBtn) { readAllBtn.style.display = ""; readAllBtn.textContent = "▶ 朗读列表"; }
+      if (readAllBtn) { readAllBtn.style.display = ""; readAllBtn.textContent = T("▶ 朗读列表"); }
       if (readStopBtn) readStopBtn.style.display = "none";
       if (readProg) { readProg.style.display = ""; readProg.textContent = ""; }
     }
@@ -12717,7 +13384,7 @@ export default class RewordPlugin extends Plugin {
   private exportAnnotationsMD() {
     const items = this.annotationStore.getAll();
     if (items.length === 0) {
-      showMessage("批注为空", 2000, "info" as any);
+      showMessage(T("批注为空"), 2000, "info" as any);
       return;
     }
     const labelNameMap: Record<string, string> = {};
@@ -12726,19 +13393,66 @@ export default class RewordPlugin extends Plugin {
     }
     const md = buildAnnotationsMarkdown(items, labelNameMap, new Date());
     downloadTextFile(md, `reword-annotations-${new Date().toISOString().slice(0, 10)}.md`, "text/markdown");
-    showMessage(`已导出 ${items.length} 条批注`, 2000, "success" as any);
+    showMessage(t("已导出 {n} 条批注", { n: items.length }), 2000, "success" as any);
   }
 
   /** 导出词库为 CSV */
   private exportVocabCSV() {
     const words = this.vocabStore.getAllWords();
     if (words.length === 0) {
-      showMessage("词库为空", 2000, "info");
+      showMessage(t("词库为空"), 2000, "info");
       return;
     }
     const csv = buildVocabCsv(words);
     downloadTextFile(csv, "reword-vocabulary.csv", "text/csv");
-    showMessage(`已导出 ${words.length} 个单词`, 2000, "success" as any);
+    showMessage(t("已导出 {n} 个单词", { n: words.length }), 2000, "success" as any);
+  }
+
+  // ====================================================================
+  // 2026-09-11 新增：词库/复习面板对「草稿/已校验」状态机的视觉化
+  // --------------------------------------------------------------------
+  // - 草稿本（status='draft'）不参与复习调度
+  // - 词库面板顶部展示草稿本提示 banner，引导用户校验
+  // - 复习面板顶部展示草稿本提示 + 第 5 张「草稿待校验」指标卡
+  // - book select option 加状态角标前缀（✓ 已校验 / 🟡 草稿）
+  // 设计：不动主渲染逻辑（renderVocabPanel/renderReviewPanel），仅 prepend/append
+  // ====================================================================
+
+  /** 2026-09-11 新增：草稿本列表（排除 ALL_BOOK_ID） */
+  private getDraftBooks() {
+    return this.vocabStore.getBooks().filter(
+      b => b.id !== ALL_BOOK_ID && (b as { status?: string }).status === "draft"
+    );
+  }
+
+  /** 2026-09-11 新增：渲染词库面板顶部的草稿本提示 banner */
+  private renderVocabDraftBanner(): string {
+    const drafts = this.getDraftBooks();
+    if (drafts.length === 0) return "";
+    const names = drafts.slice(0, 3).map(d => this.escapeHtml(d.name)).join("、");
+    const more = drafts.length > 3 ? ` ${T("等 {n} 本", { n: drafts.length })}` : "";
+    return `<div class="hiword-vb-draft-banner" data-action="open-drafts">
+      <span class="hiword-vb-draft-icon">🟡</span>
+      <span class="hiword-vb-draft-text"><b>${drafts.length}</b> 本草稿词书待校验：${names}${more}（不参与复习）</span>
+      <button class="hiword-vb-draft-goto" data-action="goto-drafts">${T("去校验 →")}</button>
+    </div>`;
+  }
+
+  /** 2026-09-11 新增：渲染复习面板顶部的草稿本提示条 */
+  private renderReviewDraftNotice(): string {
+    const drafts = this.getDraftBooks();
+    if (drafts.length === 0) return "";
+    return `<div class="hiword-rp-draft-notice" data-action="goto-drafts">
+      <span class="hiword-rp-draft-icon">⚠</span>
+      <span class="hiword-rp-draft-text"><b>${drafts.length}</b> ${T("本草稿词书待校验（不参与复习调度）")}</span>
+      <button class="hiword-rp-draft-goto" data-action="goto-drafts">${T("去校验 →")}</button>
+    </div>`;
+  }
+
+  /** 2026-09-11 新增：book select option 前缀角标（✓ 已校验 / 🟡 草稿） */
+  private vocabBookStatusPrefix(book: { status?: string; id: string }): string {
+    if (book.id === ALL_BOOK_ID) return "";
+    return book.status === "draft" ? "🟡 " : "✓ ";
   }
 }
 

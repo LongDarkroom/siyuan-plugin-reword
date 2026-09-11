@@ -8,6 +8,7 @@
  * searchDocuments / listDocuments / getDocumentContent），仅做薄封装，
  * 对齐 AiHost 所需的返回类型。
  */
+import { t } from "../i18n/index.ts";
 
 import {
   searchDocuments,
@@ -41,7 +42,7 @@ export async function searchDocs(
   const docs = kw ? await searchDocuments(kw, limit) : await listDocuments(limit);
   return docs.map((d) => ({
     id: d.id,
-    title: d.name || "(无标题)",
+    title: d.name || t("(无标题)"),
     hpath: d.hpath || undefined,
     updated: d.updated,
   }));
@@ -71,8 +72,8 @@ export async function getDocText(docId: string, maxLen = 12000): Promise<string>
     const fallback = await getDocumentContent(docId, true);
     if (!fallback) {
       throw new Error(
-        `文档正文读取失败:docId=${docId} 长度=${docId.length};` +
-        `exportMdContent 异常=${(e as Error)?.message || e};SQL 兜底也为空`
+        `${t("文档正文读取失败")}:docId=${docId} 长度=${docId.length};` +
+        `exportMdContent 异常=${(e as Error)?.message || e};${t("SQL 兜底也为空")}`
       );
     }
     raw = fallback;
@@ -83,7 +84,7 @@ export async function getDocText(docId: string, maxLen = 12000): Promise<string>
     if (fallback) raw = fallback;
   }
   if (!raw.trim()) {
-    throw new Error(`文档正文为空:docId=${docId} 长度=${docId.length}（该 ID 可能不是文档根块）`);
+    throw new Error(`${t("文档正文为空")}:docId=${docId} 长度=${docId.length}（该 ID 可能不是文档根块）`);
   }
-  return raw.length > maxLen ? raw.slice(0, maxLen) + "\n…（已截断）" : raw;
+  return raw.length > maxLen ? raw.slice(0, maxLen) + t("\n…（已截断）") : raw;
 }

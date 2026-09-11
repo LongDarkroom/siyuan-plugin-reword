@@ -1,3 +1,4 @@
+import { t } from "../i18n/index.ts";
 import { logSwallow } from "../core/safe.ts";
 /**
  * 微阅风格 —— 侧边栏批注汇总面板渲染器
@@ -48,12 +49,12 @@ function timeAgo(iso?: string): string {
   if (!iso) return "";
   const diff = Date.now() - new Date(iso).getTime();
   const min = Math.floor(diff / 60000);
-  if (min < 1) return "刚刚";
-  if (min < 60) return `${min}分钟前`;
+  if (min < 1) return t("刚刚");
+  if (min < 60) return t("{n} 分钟前", { n: min });
   const hr = Math.floor(min / 60);
-  if (hr < 24) return `${hr}小时前`;
+  if (hr < 24) return t("{n} 小时前", { n: hr });
   const day = Math.floor(hr / 24);
-  if (day < 30) return `${day}天前`;
+  if (day < 30) return t("{n} 天前", { n: day });
   return shortDate(iso);
 }
 
@@ -277,9 +278,9 @@ export function renderWhalePanel(
 
   // 当前选中样式/文档的提示文本（按钮副标）
   const docFilterLabel = sortDoc
-    ? docInfos.find(d => d.id === sortDoc)?.name || "未知文档"
+    ? docInfos.find(d => d.id === sortDoc)?.name || t("未知文档")
     : "";
-  const styleFilterLabel = sortStyles.length > 0 ? `${sortStyles.length} 种` : "";
+  const styleFilterLabel = sortStyles.length > 0 ? t("{n} 种", { n: sortStyles.length }) : "";
 
   // 2026-08-17：labels id → name 映射（卡片标签徽章显示真实标签名）
   const labelNameMap: Record<string, string> = {};
@@ -295,19 +296,19 @@ export function renderWhalePanel(
     sortTimeDir === "asc";
   const filterChips: string[] = [];
   if (activeLabel !== "all" && activeLabelName) {
-    filterChips.push(`<button type="button" class="whale-filter-chip" data-filter-clear="label" title="清除标签筛选">#${esc(activeLabelName)} <span class="whale-filter-chip-x">×</span></button>`);
+    filterChips.push(`<button type="button" class="whale-filter-chip" data-filter-clear="label" title="${t("清除标签筛选")}">#${esc(activeLabelName)} <span class="whale-filter-chip-x">×</span></button>`);
   }
   if (searchKeyword.trim()) {
-    filterChips.push(`<button type="button" class="whale-filter-chip" data-filter-clear="search" title="清除搜索">搜索:${esc(searchKeyword.trim())} <span class="whale-filter-chip-x">×</span></button>`);
+    filterChips.push(`<button type="button" class="whale-filter-chip" data-filter-clear="search" title="${t("清除搜索")}">${t("搜索")}:${esc(searchKeyword.trim())} <span class="whale-filter-chip-x">×</span></button>`);
   }
   if (sortDoc) {
-    filterChips.push(`<button type="button" class="whale-filter-chip" data-filter-clear="doc" title="清除文档筛选">文档:${esc(docFilterLabel)} <span class="whale-filter-chip-x">×</span></button>`);
+    filterChips.push(`<button type="button" class="whale-filter-chip" data-filter-clear="doc" title="${t("清除文档筛选")}">${t("文档")}:${esc(docFilterLabel)} <span class="whale-filter-chip-x">×</span></button>`);
   }
   if (sortStyles.length > 0) {
-    filterChips.push(`<button type="button" class="whale-filter-chip" data-filter-clear="style" title="清除样式筛选">样式:${sortStyles.length}种 <span class="whale-filter-chip-x">×</span></button>`);
+    filterChips.push(`<button type="button" class="whale-filter-chip" data-filter-clear="style" title="${t("清除样式筛选")}">${t("样式")}:${sortStyles.length}${t("种")} <span class="whale-filter-chip-x">×</span></button>`);
   }
   if (sortTimeDir === "asc") {
-    filterChips.push(`<button type="button" class="whale-filter-chip" data-filter-clear="time" title="恢复从新到旧">旧→新 <span class="whale-filter-chip-x">×</span></button>`);
+    filterChips.push(`<button type="button" class="whale-filter-chip" data-filter-clear="time" title="${t("恢复从新到旧")}">${t("旧→新")} <span class="whale-filter-chip-x">×</span></button>`);
   }
   const breadcrumbHtml = filterChips.length > 0
     ? `<div class="whale-filter-breadcrumb" id="whale-filter-breadcrumb">${filterChips.join("")}</div>`
@@ -317,11 +318,11 @@ export function renderWhalePanel(
     <div class="whale-panel">
       <!-- 头部：标题 + 统计 + 分组切换（2026-08-17：时间/文档，默认时间） -->
       <div class="whale-panel-head">
-        <span class="whale-panel-title">微阅批注汇总</span>
-        <span class="whale-panel-count ${hasFilter ? "whale-panel-count--active" : ""}" title="${hasFilter ? "有筛选条件生效" : ""}">${filtered.length}/${items.length}</span>
-        <span class="whale-panel-head-group" title="列表分组方式">
-          <button type="button" class="whale-group-btn ${groupMode === "time" ? "active" : ""}" data-group-action="time">时间</button>
-          <button type="button" class="whale-group-btn ${groupMode === "doc" ? "active" : ""}" data-group-action="doc">文档</button>
+        <span class="whale-panel-title">${t("微阅批注汇总")}</span>
+        <span class="whale-panel-count ${hasFilter ? "whale-panel-count--active" : ""}" title="${hasFilter ? t("有筛选条件生效") : ""}">${filtered.length}/${items.length}</span>
+        <span class="whale-panel-head-group" title="${t("列表分组方式")}">
+          <button type="button" class="whale-group-btn ${groupMode === "time" ? "active" : ""}" data-group-action="time">${t("时间")}</button>
+          <button type="button" class="whale-group-btn ${groupMode === "doc" ? "active" : ""}" data-group-action="doc">${t("文档")}</button>
         </span>
       </div>
 
@@ -332,22 +333,22 @@ export function renderWhalePanel(
         </svg>
         <input class="whale-search-input"
                id="whale-search-input"
-               placeholder="搜索批注内容…"
+               placeholder="${t("搜索批注内容…")}"
                value="${escAttr(searchKeyword)}"
                autocomplete="off" />
-        ${searchKeyword ? `<button class="whale-search-clear" id="whale-search-clear" title="清除搜索">✕</button>` : ""}
+        ${searchKeyword ? `<button class="whale-search-clear" id="whale-search-clear" title="${t("清除搜索")}">✕</button>` : ""}
       </div>
 
       <!-- 标签筛选 chips（2026-08-14 改造：基于 labelStore + "全部" + "⚙ 管理"；2026-08-15 加收起/展开） -->
       <div class="whale-panel-tabs-wrap ${tagsCollapsed ? 'whale-panel-tabs-wrap--collapsed' : ''}">
         <button type="button" class="whale-tags-collapse-btn" id="whale-tags-collapse-btn"
-                aria-expanded="${tagsCollapsed ? 'false' : 'true'}" title="收起/展开标签筛选">
-          ${tagsCollapsed ? '🏷️ 标签 ▸ 展开' : '🏷️ 标签 ▾ 收起'}
+                aria-expanded="${tagsCollapsed ? 'false' : 'true'}" title="${t("收起/展开标签筛选")}">
+          ${tagsCollapsed ? t('🏷️ 标签 ▸ 展开') : t('🏷️ 标签 ▾ 收起')}
         </button>
         <div class="whale-panel-tabs" id="whale-panel-tabs">
-          <button class="whale-tab ${activeLabel === "all" ? 'whale-tab--active' : ''}" data-cat="all" title="全部批注">
+          <button class="whale-tab ${activeLabel === "all" ? 'whale-tab--active' : ''}" data-cat="all" title="${t("全部批注")}">
             <span class="whale-tab-icon">📋</span>
-            <span class="whale-tab-label">全部</span>
+            <span class="whale-tab-label">${t("全部")}</span>
             <span class="whale-tab-count">${labelCounts["all"] || 0}</span>
           </button>
           ${labels.map((l) => `
@@ -360,7 +361,7 @@ export function renderWhalePanel(
               <span class="whale-tab-count">${labelCounts[l.id] || 0}</span>
             </button>
           `).join("")}
-          <button class="whale-tab whale-tab--manage" data-action="whale-manage-labels" title="管理标签（增删改 + 颜色）">⚙ 管理</button>
+          <button class="whale-tab whale-tab--manage" data-action="whale-manage-labels" title="${t("管理标签（增删改 + 颜色）")}">⚙ ${t("管理")}</button>
         </div>
       </div>
 
@@ -368,23 +369,23 @@ export function renderWhalePanel(
 
       <!-- 排序 / 筛选切换（2026-08-15 改造：3 维度，时间可切换方向）-->
       <div class="whale-panel-sort">
-        <button class="whale-sort-btn ${sortMode === "time" ? "active" : ""}" data-sort-action="time" title="按时间排序${sortMode === "time" ? "（点击切换方向）" : ""}">
-          时间${sortMode === "time" ? (sortTimeDir === "desc" ? "↓" : "↑") : "↓"}
+        <button class="whale-sort-btn ${sortMode === "time" ? "active" : ""}" data-sort-action="time" title="${t("按时间排序")}${sortMode === "time" ? t("（点击切换方向）") : ""}">
+          ${t("时间")}${sortMode === "time" ? (sortTimeDir === "desc" ? "↓" : "↑") : "↓"}
         </button>
-        <button class="whale-sort-btn ${sortMode === "doc" ? "active" : ""}" data-sort-action="doc" title="按文档筛选${sortDoc ? '（当前：' + docFilterLabel + '）' : ''}">
-          📄 文档${docFilterLabel ? ' · ' + docFilterLabel : ''}
+        <button class="whale-sort-btn ${sortMode === "doc" ? "active" : ""}" data-sort-action="doc" title="${t("按文档筛选")}${sortDoc ? t('（当前：{x}）', { x: docFilterLabel }) : ''}">
+          ${t("📄 文档")}${docFilterLabel ? ' · ' + docFilterLabel : ''}
         </button>
-        <button class="whale-sort-btn ${sortMode === "style" ? "active" : ""}" data-sort-action="style" title="按样式筛选${sortStyles.length ? '（当前：' + styleFilterLabel + '）' : ''}">
-          🎨 样式${styleFilterLabel ? ' · ' + styleFilterLabel : ''}
+        <button class="whale-sort-btn ${sortMode === "style" ? "active" : ""}" data-sort-action="style" title="${t("按样式筛选")}${sortStyles.length ? t('（当前：{x}）', { x: styleFilterLabel }) : ''}">
+          ${t("🎨 样式")}${styleFilterLabel ? ' · ' + styleFilterLabel : ''}
         </button>
       </div>
 
       <!-- 文档下拉（仅文档模式显示，2026-08-15 新增） -->
       ${sortMode === "doc" ? `
         <div class="whale-doc-filter" id="whale-doc-filter">
-          <button class="whale-doc-filter-btn ${!sortDoc ? "active" : ""}" data-doc-id="">全部文档 (${items.length})</button>
+          <button class="whale-doc-filter-btn ${!sortDoc ? "active" : ""}" data-doc-id="">${t("全部文档")} (${items.length})</button>
           ${docInfos.map((d) => `<button class="whale-doc-filter-btn ${sortDoc === d.id ? "active" : ""}" data-doc-id="${escAttr(d.id)}" title="${escAttr(d.name)}">${esc(d.name)} (${d.count})</button>`).join("")}
-          ${sortDoc ? `<button class="whale-doc-filter-clear" data-doc-clear title="清除文档筛选">清除</button>` : ""}
+          ${sortDoc ? `<button class="whale-doc-filter-clear" data-doc-clear title="${t("清除文档筛选")}">${t("清除")}</button>` : ""}
         </div>
       ` : ""}
 
@@ -392,8 +393,8 @@ export function renderWhalePanel(
       ${sortMode === "style" ? `
         <div class="whale-style-filter-hint" id="whale-style-filter-hint">
           ${sortStyles.length > 0
-            ? `已选 ${sortStyles.length} 种样式 · ${filtered.length} 条匹配`
-            : `未选样式（显示全部 ${filtered.length} 条）`}
+            ? t("已选 {n} 种样式 · {m} 条匹配", { n: sortStyles.length, m: filtered.length })
+            : t("未选样式（显示全部 {n} 条）", { n: filtered.length })}
         </div>
       ` : ""}
 
@@ -407,29 +408,29 @@ export function renderWhalePanel(
           </div>
         ` : `
           <section class="whale-section" data-section="doc">
-            <div class="whale-section-head" data-toggle="section"><span class="whale-section-toggle">▾</span>文档批注<span class="whale-section-count">${docItems.length}</span></div>
+            <div class="whale-section-head" data-toggle="section"><span class="whale-section-toggle">▾</span>${t("文档批注")}<span class="whale-section-count">${docItems.length}</span></div>
             <div class="whale-section-body">
               ${docItems.length === 0
-                ? `<div class="whale-section-empty">暂无文档批注</div>`
+                ? `<div class="whale-section-empty">${t("暂无文档批注")}</div>`
                 : renderWhaleNoteList(docItems, groupMode, labelMap, labelNameMap, docInfos, limits?.doc, "doc")}
             </div>
           </section>
           <section class="whale-section" data-section="reading">
-            <div class="whale-section-head" data-toggle="section"><span class="whale-section-toggle">▾</span>阅读批注<span class="whale-section-count">${readingItems.length}</span></div>
+            <div class="whale-section-head" data-toggle="section"><span class="whale-section-toggle">▾</span>${t("阅读批注")}<span class="whale-section-count">${readingItems.length}</span></div>
             <div class="whale-section-body">
               ${readingItems.length === 0 ? `
-                <div class="whale-section-empty">暂无阅读批注</div>
+                <div class="whale-section-empty">${t("暂无阅读批注")}</div>
               ` : `
                 <div class="whale-subsection">
-                  <div class="whale-subsection-head">高亮（无批注内容）<span class="whale-subsection-count">${readingHighlights.length}</span></div>
+                  <div class="whale-subsection-head">${t("高亮（无批注内容）")}<span class="whale-subsection-count">${readingHighlights.length}</span></div>
                   ${readingHighlights.length === 0
-                    ? `<div class="whale-section-empty">暂无纯高亮</div>`
+                    ? `<div class="whale-section-empty">${t("暂无纯高亮")}</div>`
                     : renderWhaleNoteList(readingHighlights, groupMode, labelMap, labelNameMap, docInfos, limits?.readingHl, "readingHl")}
                 </div>
                 <div class="whale-subsection">
-                  <div class="whale-subsection-head">批注（带内容）<span class="whale-subsection-count">${readingNotes.length}</span></div>
+                  <div class="whale-subsection-head">${t("批注（带内容）")}<span class="whale-subsection-count">${readingNotes.length}</span></div>
                   ${readingNotes.length === 0
-                    ? `<div class="whale-section-empty">暂无带内容批注</div>`
+                    ? `<div class="whale-section-empty">${t("暂无带内容批注")}</div>`
                     : renderWhaleNoteList(readingNotes, groupMode, labelMap, labelNameMap, docInfos, limits?.readingNote, "readingNote")}
                 </div>
               `}
@@ -440,11 +441,11 @@ export function renderWhalePanel(
 
       <!-- 底部工具栏 -->
       <div class="whale-panel-footer">
-        <button class="whale-footer-btn" id="whale-export" title="导出批注为 Markdown 文件">📤 导出</button>
-        <button class="whale-footer-btn whale-footer-btn--danger" id="whale-clear-all" title="清空全部批注（不可恢复）">🗑 清空全部</button>
-        ${hasFilter ? `<button class="whale-footer-btn" id="whale-filter-reset" title="重置所有筛选条件">🔄 重置筛选</button>` : ""}
+        <button class="whale-footer-btn" id="whale-export" title="${t("导出批注为 Markdown 文件")}">📤 ${t("导出")}</button>
+        <button class="whale-footer-btn whale-footer-btn--danger" id="whale-clear-all" title="${t("清空全部批注（不可恢复）")}">🗑 ${t("清空全部")}</button>
+        ${hasFilter ? `<button class="whale-footer-btn" id="whale-filter-reset" title="${t("重置所有筛选条件")}">🔄 ${t("重置筛选")}</button>` : ""}
         <span class="whale-footer-spacer"></span>
-        <span class="whale-footer-hint">Alt+⌘/Ctrl+C 快速批注</span>
+        <span class="whale-footer-hint">${t("Alt+⌘/Ctrl+C 快速批注")}</span>
       </div>
     </div>
   `;
@@ -463,16 +464,16 @@ export type WhaleListLimits = Partial<Record<WhaleSection, number>>;
 
 /** 时间分组标签：今天 / 昨天 / N 天前 / 具体日期 */
 function groupLabelTime(iso?: string): string {
-  if (!iso) return "更早";
+  if (!iso) return t("更早");
   const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return "更早";
+  if (Number.isNaN(d.getTime())) return t("更早");
   const now = new Date();
   const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
   const startOfDay = new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
   const diffDay = Math.round((startOfToday - startOfDay) / 86400000);
-  if (diffDay <= 0) return "今天";
-  if (diffDay === 1) return "昨天";
-  if (diffDay < 7) return `${diffDay} 天前`;
+  if (diffDay <= 0) return t("今天");
+  if (diffDay === 1) return t("昨天");
+  if (diffDay < 7) return t("{n} 天前", { n: diffDay });
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 }
 
@@ -500,7 +501,7 @@ export function renderWhaleNoteList(
     let label: string;
     if (groupMode === "doc") {
       key = a.docId || "__none__";
-      label = docNameMap[a.docId || ""] || (a.docId ? a.docId.slice(0, 8) : "未分类");
+      label = docNameMap[a.docId || ""] || (a.docId ? a.docId.slice(0, 8) : t("未分类"));
     } else {
       key = groupLabelTime(a.createdAt);
       label = key;
@@ -531,7 +532,7 @@ export function renderWhaleNoteList(
   }
 
   const moreBtn = hasLimit && section
-    ? `<button type="button" class="whale-load-more" data-action="whale-load-more" data-section="${escAttr(section)}">加载更多（剩余 ${items.length - (limit as number)} 条）</button>`
+    ? `<button type="button" class="whale-load-more" data-action="whale-load-more" data-section="${escAttr(section)}">${t("加载更多（剩余 {n} 条）", { n: items.length - (limit as number) })}</button>`
     : "";
 
   return rendered.join("") + moreBtn;
@@ -584,26 +585,26 @@ function renderWhaleNoteItem(
     })()
   );
   const tableBadge = noteHasTable
-    ? `<button type="button" class="whale-notes-table-badge" data-action="expand-table" data-ann-id="${escAttr(a.id)}" title="展开查看表格">⊞ 表格</button>`
+    ? `<button type="button" class="whale-notes-table-badge" data-action="expand-table" data-ann-id="${escAttr(a.id)}" title="${t("展开查看表格")}">⊞ ${t("表格")}</button>`
     : "";
   // 元信息行：有 note → 显示「原文：xxx」可点击定位；纯标注 → 显示时间
   const metaLeft = isEmptyNote
     ? `<span class="whale-notes-time" title="${escAttr(fullDate)}">${dateStr}</span>${originMark}${tableBadge}`
-    : `<span class="whale-notes-source" data-action="jump" title="点击定位到原文">原文：${esc(sourceText)}</span>${tagBadges}${originMark}${tableBadge}`;
+    : `<span class="whale-notes-source" data-action="jump" title="${t("点击定位到原文")}">${t("原文：")}${esc(sourceText)}</span>${tagBadges}${originMark}${tableBadge}`;
 
   return `
     <div class="whale-notes-item" data-id="${escAttr(a.id)}" data-block="${escAttr(a.blockId)}" data-doc="${escAttr(a.docId)}"
          data-book="${escAttr(a.bookId || "")}" data-cfi="${escAttr(a.cfi || "")}"
          style="--ann-color:${escAttr(annColor)}" data-ann-style="${escAttr(annStyle)}">
-      <span class="whale-notes-accent" title="标注样式" style="color:${escAttr(annColor)}">${styleGlyph}</span>
+      <span class="whale-notes-accent" title="${t("标注样式")}" style="color:${escAttr(annColor)}">${styleGlyph}</span>
       <div class="whale-notes-main">
         ${bodyHtml}
         <div class="whale-notes-meta">
           ${metaLeft}
           <span class="whale-footer-spacer"></span>
           <span class="whale-notes-acts">
-            <button type="button" class="whale-notes-act" data-action="edit" title="编辑批注">编辑</button>
-            <button type="button" class="whale-notes-act whale-notes-act--danger" data-action="delete" title="删除批注">删除</button>
+            <button type="button" class="whale-notes-act" data-action="edit" title="${t("编辑批注")}">${t("编辑")}</button>
+            <button type="button" class="whale-notes-act whale-notes-act--danger" data-action="delete" title="${t("删除批注")}">${t("删除")}</button>
           </span>
         </div>
       </div>
@@ -618,12 +619,12 @@ function renderWhaleNoteItem(
  * 展示各种下划线样式在示例文字上的效果。
  */
 export function renderStylePreview(): string {
-  const sampleText = "重要的文本内容示例";
+  const sampleText = t("重要的文本内容示例");
   const colors = ["#facc15", "#22c55e", "#06b6d4", "#ec4899", "#8b5cf6"];
   const styles = [
-    { key: "highlight", css: "highlight", label: "高亮" },
-    { key: "solid", css: "solid", label: "直线段" },
-    { key: "wavy", css: "wavy", label: "波浪线" },
+    { key: "highlight", css: "highlight", label: t("高亮") },
+    { key: "solid", css: "solid", label: t("直线段") },
+    { key: "wavy", css: "wavy", label: t("波浪线") },
   ];
 
   const rows = styles.map(s => `
@@ -661,14 +662,14 @@ export function renderStylePreview(): string {
  */
 export function renderStyleMatrixPicker(selectedColor?: string, selectedStyle?: string): string {
   const colors = [
-    { name: "黄", value: "#facc15" }, { name: "绿", value: "#22c55e" },
-    { name: "青", value: "#06b6d4" }, { name: "粉", value: "#ec4899" },
-    { name: "紫", value: "#8b5cf6" },
+    { name: t("黄"), value: "#facc15" }, { name: t("绿"), value: "#22c55e" },
+    { name: t("青"), value: "#06b6d4" }, { name: t("粉"), value: "#ec4899" },
+    { name: t("紫"), value: "#8b5cf6" },
   ];
   const lineStyles = [
-    { key: "highlight", icon: "▮", label: "高亮" },
-    { key: "solid", icon: "━", label: "直线" },
-    { key: "wavy", icon: "﹏", label: "波浪" },
+    { key: "highlight", icon: "▮", label: t("高亮") },
+    { key: "solid", icon: "━", label: t("直线") },
+    { key: "wavy", icon: "﹏", label: t("波浪") },
   ];
 
   return `
@@ -707,28 +708,28 @@ export function renderStyleMatrixPicker(selectedColor?: string, selectedStyle?: 
 export function renderLabelManagementDialog(labels: { id: string; name: string; color: string }[]): string {
   const rows = labels.map((l) => `
     <div class="hiword-vb-label-mgmt-row" data-id="${escAttr(l.id)}">
-      <span class="hiword-vb-label-mgmt-swatch" style="background:${l.color}" data-action="label-cycle-color" title="点击循环更换颜色"></span>
+      <span class="hiword-vb-label-mgmt-swatch" style="background:${l.color}" data-action="label-cycle-color" title="${t("点击循环更换颜色")}"></span>
       <span class="hiword-vb-label-mgmt-name" data-action="label-rename">${esc(l.name)}</span>
       <input type="text" class="hiword-vb-label-mgmt-input" style="display:none;" value="${escAttr(l.name)}" data-action="label-rename-input" />
       <span class="hiword-vb-label-mgmt-id" title="${l.id}">#${l.id.slice(-6)}</span>
-      <button type="button" class="hiword-vb-label-mgmt-del" data-action="label-delete" title="删除标签（仅删定义，已标注数据保留）">✕</button>
+      <button type="button" class="hiword-vb-label-mgmt-del" data-action="label-delete" title="${t("删除标签（仅删定义，已标注数据保留）")}">✕</button>
     </div>
   `).join("");
 
   return `
     <div class="hiword-vb-label-mgmt">
       <div class="hiword-vb-section-tag whale-card-tag-primary">
-        <span class="whale-card-section-icon">🏷️</span><span>管理标签</span>
+        <span class="whale-card-section-icon">🏷️</span><span>${t("管理标签")}</span>
         <span class="hiword-vb-label-mgmt-count">${labels.length}</span>
       </div>
-      <p class="hiword-vb-label-mgmt-hint">删除标签仅移除定义，已批注/已打词的标签引用会保留（显示灰色 #id 后缀）。</p>
+      <p class="hiword-vb-label-mgmt-hint">${t("删除标签仅移除定义，已批注/已打词的标签引用会保留（显示灰色 #id 后缀）。")}</p>
       <div class="hiword-vb-label-mgmt-list" id="hiword-vb-label-mgmt-list">
-        ${rows || `<div class="hiword-vb-label-empty-hint">还没有标签，先在批注弹窗用「＋ 新建标签」创建。</div>`}
+        ${rows || `<div class="hiword-vb-label-empty-hint">${t("还没有标签，先在批注弹窗用「＋ 新建标签」创建。")}</div>`}
       </div>
       <div class="hiword-vb-label-mgmt-new">
         <span class="whale-card-section-icon">➕</span>
-        <input type="text" id="hiword-vb-label-mgmt-new-input" class="b3-text-field" placeholder="新建标签名称（如 口语 / 作文素材）" />
-        <button type="button" class="b3-button b3-button--small b3-button--outline" id="hiword-vb-label-mgmt-new-btn">创建</button>
+        <input type="text" id="hiword-vb-label-mgmt-new-input" class="b3-text-field" placeholder="${t("新建标签名称（如 口语 / 作文素材）")}" />
+        <button type="button" class="b3-button b3-button--small b3-button--outline" id="hiword-vb-label-mgmt-new-btn">${t("创建")}</button>
       </div>
     </div>
   `;

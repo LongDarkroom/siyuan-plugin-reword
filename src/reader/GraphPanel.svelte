@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { t } from "../i18n/index.ts";
   /**
    * 阅读知识图谱面板（C · 图谱 / 画布联动）
    * 使用 portal 挂载到 body，获得完整视口以展示力导向图。
@@ -113,16 +114,16 @@
     if (!selected) return;
     const book = store.get(selected.id);
     if (!book) {
-      showToast("找不到这本书，可能已被移除");
+      showToast(t("找不到这本书，可能已被移除"));
       return;
     }
     sending = true;
     try {
       const anns = getAnnotationStore().getByBook(book.id);
       await exportBookCanvasDoc(book, anns);
-      showToast(`已生成画布文档：《${book.title}》（${anns.length} 条标注）`);
+      showToast(t("已生成画布文档：《{title}》（{n} 条标注）", { title: book.title, n: anns.length }));
     } catch (e: any) {
-      showToast("生成失败：" + (e?.message || String(e)));
+      showToast(t("生成失败：") + (e?.message || String(e)));
     } finally {
       sending = false;
     }
@@ -139,22 +140,22 @@
 <div class="edit-mask" use:portal on:click|self={close}>
   <div class="edit-panel graph-panel">
     <header class="panel-header">
-      <h2 class="panel-title">阅读知识图谱</h2>
-      <button class="panel-close" on:click={close} aria-label="关闭">×</button>
+      <h2 class="panel-title">{t("阅读知识图谱")}</h2>
+      <button class="panel-close" on:click={close} aria-label={t("关闭")}>×</button>
     </header>
 
     {#if !graph || graph.nodes.length === 0}
       <div class="graph-empty">
         <div class="graph-empty-icon">🕸️</div>
-        <div class="graph-empty-title">书架里还没有书</div>
-        <div class="graph-empty-hint">导入几本书并添加相同标签 / 丛书后，这里会自动连成关系图</div>
+        <div class="graph-empty-title">{t("书架里还没有书")}</div>
+        <div class="graph-empty-hint">{t("导入几本书并添加相同标签 / 丛书后，这里会自动连成关系图")}</div>
       </div>
     {:else}
       <div class="graph-legend">
-        <span class="legend-item"><span class="dot unread"></span>想读</span>
-        <span class="legend-item"><span class="dot reading"></span>在读</span>
-        <span class="legend-item"><span class="dot finished"></span>读完</span>
-        <span class="legend-hint">节点大小 = 标注数 · 连线 = 共享标签 / 丛书</span>
+        <span class="legend-item"><span class="dot unread"></span>{t("想读")}</span>
+        <span class="legend-item"><span class="dot reading"></span>{t("在读")}</span>
+        <span class="legend-item"><span class="dot finished"></span>{t("读完")}</span>
+        <span class="legend-hint">{t("节点大小 = 标注数 · 连线 = 共享标签 / 丛书")}</span>
       </div>
 
       <div class="graph-stage">
@@ -164,7 +165,7 @@
           height="100%"
           preserveAspectRatio="xMidYMid meet"
           role="img"
-          aria-label="阅读知识图谱"
+          aria-label={t("阅读知识图谱")}
         >
           <defs>
             <filter id="node-shadow" x="-50%" y="-50%" width="200%" height="200%">
@@ -230,7 +231,7 @@
 
       {#if !hasEdges}
         <div class="graph-note">
-          当前书籍没有共享标签或丛书；给两本以上的书加上相同标签 / 丛书即可连线。
+          {t("当前书籍没有共享标签或丛书；给两本以上的书加上相同标签 / 丛书即可连线。")}
         </div>
       {/if}
 
@@ -240,20 +241,20 @@
             <div class="graph-detail-title" title={selected.title}>{selected.title}</div>
             <div class="graph-detail-meta">
               <span class="graph-chip" style="background:{STATUS_FILL[selected.status] || '#9aa0a6'}">
-                {STATUS_LABEL[selected.status] || "想读"}
+                {t(STATUS_LABEL[selected.status] || "想读")}
               </span>
-              <span class="graph-detail-count">{selected.annCount} 条标注</span>
+              <span class="graph-detail-count">{selected.annCount} {t("条标注")}</span>
             </div>
           </div>
           <div class="graph-detail-actions">
-            <button class="graph-btn primary" on:click={openSelected}>打开本书</button>
+            <button class="graph-btn primary" on:click={openSelected}>{t("打开本书")}</button>
             <button class="graph-btn" class:busy={sending} disabled={sending} on:click={sendToCanvas}>
-              {sending ? "生成中…" : "发送到画布"}
+              {sending ? t("生成中…") : t("发送到画布")}
             </button>
           </div>
         </div>
       {:else}
-        <div class="graph-hint">点击节点查看详情，并把它导出为思源画布文档</div>
+        <div class="graph-hint">{t("点击节点查看详情，并把它导出为思源画布文档")}</div>
       {/if}
     {/if}
 

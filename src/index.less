@@ -3095,36 +3095,57 @@ body.hiword-dragging {
   line-height: 1.6;
 }
 
-/* 掌握度星（5 点，空心→实心）
+/* 掌握度圆圈（5 点，空心→实心）
    结构：DOM 顺序 5→1，配合 row-reverse 使视觉顺序为 1→5。
-   data-level 表示“点击后填充到第几颗”。 */
+   data-level 表示“点击后填充到第几颗”。
+   2026-09-11 v4：★ 字符改为纯 CSS 圆圈——空心=中性灰描边，
+   实心分级变色：1-4 级主题色，第 5 级（标熟）成功色。 */
 .hiword-stars {
   display: inline-flex;
   flex-direction: row-reverse;
-  gap: 1px;
-  font-size: 15px;
+  gap: 4px;
   line-height: 1;
   cursor: pointer;
   user-select: none;
   -webkit-user-select: none;
 }
 .hiword-star {
-  color: var(--b3-theme-on-surface-light, var(--b3-theme-on-surface-light, #c0c4cc));
-  transition: color 0.1s, transform 0.1s;
+  display: inline-block;
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+  box-sizing: border-box;
+  border: 1.5px solid var(--b3-border-color, #c0c4cc);
+  background: transparent;
+  transition: background 0.12s, border-color 0.12s, transform 0.12s;
 }
 .hiword-star.filled {
-  color: var(--b3-theme-primary, var(--hw-gold));
+  background: var(--b3-theme-primary, #4f7cff);
+  border-color: var(--b3-theme-primary, #4f7cff);
 }
-/* 悬浮预览：移到某点 → 其及视觉左侧（data-level 更小）全部变实心 */
+/* 第 5 级（标熟）：实心为成功色 */
+.hiword-star.hiword-star--ripe.filled {
+  background: var(--b3-theme-success, #23b373);
+  border-color: var(--b3-theme-success, #23b373);
+}
+/* 悬浮预览：移到某点 → 其及视觉左侧（data-level 更小）全部点亮 */
 .hiword-stars:hover .hiword-star {
-  color: var(--b3-theme-on-surface-light, var(--b3-theme-on-surface-light, #c0c4cc));
+  background: transparent;
+  border-color: var(--b3-border-color, #c0c4cc);
 }
 .hiword-stars .hiword-star:hover {
-  color: var(--b3-theme-primary, var(--hw-gold));
+  background: var(--b3-theme-primary, #4f7cff);
+  border-color: var(--b3-theme-primary, #4f7cff);
   transform: scale(1.18);
 }
 .hiword-stars .hiword-star:hover ~ .hiword-star {
-  color: var(--b3-theme-primary, var(--hw-gold));
+  background: var(--b3-theme-primary, #4f7cff);
+  border-color: var(--b3-theme-primary, #4f7cff);
+}
+/* 悬停预览到第 5 颗（标熟位）时，预览色为成功色 */
+.hiword-stars .hiword-star--ripe:hover {
+  background: var(--b3-theme-success, #23b373);
+  border-color: var(--b3-theme-success, #23b373);
 }
 
 /* 词典卡片内的收藏星按钮（☆/★） */
@@ -4170,6 +4191,47 @@ body.hiword-dragging {
   .hiword-up-nav-icon { transform: scale(1.06); }
 }
 
+/* ---- 界面语言切换（2026-09-10 P2：常驻导航顶部，不属于任何 page）---- */
+.hiword-up-langbox {
+  padding: 0 2px 10px;
+  margin: 0 0 8px;
+  border-bottom: 1px solid color-mix(in srgb, var(--b3-theme-on-surface) 8%, transparent);
+}
+.hiword-up-langbox-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--b3-theme-on-surface-light, #777);
+  margin-bottom: 7px;
+  user-select: none;
+}
+.hiword-up-langbox-row { display: flex; gap: 6px; }
+.hiword-up-langbtn {
+  flex: 1;
+  padding: 5px 6px;
+  font-size: 12.5px;
+  line-height: 1.4;
+  text-align: center;
+  border-radius: 8px;
+  cursor: pointer;
+  color: var(--b3-theme-on-surface-light, #555);
+  background: var(--b3-theme-background);
+  border: 1px solid color-mix(in srgb, var(--b3-theme-on-surface) 12%, transparent);
+  transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+}
+.hiword-up-langbtn:hover {
+  color: var(--b3-theme-on-surface, #333);
+  border-color: color-mix(in srgb, var(--b3-theme-primary) 40%, transparent);
+}
+.hiword-up-langbtn.is-active {
+  background: color-mix(in srgb, var(--b3-theme-primary) 14%, transparent);
+  border-color: color-mix(in srgb, var(--b3-theme-primary) 42%, transparent);
+  color: var(--b3-theme-primary);
+  font-weight: 600;
+}
+
 /* ---- 右侧内容区 ---- */
 .hiword-up-main {
   flex: 1;
@@ -5007,16 +5069,18 @@ body.hiword-dragging {
   transform: translateY(-0.5px);
 }
 .hiword-ai-btn:active { transform: scale(0.97) translateY(0); }
+/* 2026-09-10 P3：主按钮改为纯色扁平，对齐对话 UI demo 的两级按钮体系
+   （实心主色 = 主操作；描边透明底 = 次操作）。去掉渐变与亮度滤镜，
+   避免与思源原生按钮风格打架，也让「主/次」两级一眼可分。 */
 .hiword-ai-btn--primary {
-  background: linear-gradient(135deg, var(--b3-theme-primary, var(--b3-theme-primary)) 0%, color-mix(in srgb, var(--b3-theme-primary, var(--b3-theme-primary)) 78%, #000) 100%);
+  background: var(--b3-theme-primary, #4f6ef7);
   color: #fff;
-  border-color: transparent;
+  border-color: var(--b3-theme-primary, #4f6ef7);
 }
 .hiword-ai-btn--primary:hover {
-  background: color-mix(in srgb, var(--b3-theme-primary, var(--b3-theme-primary)) 82%, #000);
-  border-color: color-mix(in srgb, var(--b3-theme-primary, var(--b3-theme-primary)) 82%, #000);
+  background: color-mix(in srgb, var(--b3-theme-primary, #4f6ef7) 88%, #000);
+  border-color: color-mix(in srgb, var(--b3-theme-primary, #4f6ef7) 88%, #000);
   color: #fff;
-  filter: brightness(1.05);
 }
 .hiword-ai-btn--ghost {
   border-color: transparent;
@@ -5162,6 +5226,105 @@ body.hiword-dragging {
   border-color: var(--b3-theme-primary, #4f6ef7);
 }
 
+/* ---- 2026-09-10 骨架模式：被屏蔽元素统一隐藏（当前已全恢复，规则保留备用） ----
+   标记由 src/ai/ai-skeleton.ts 的 shieldAttr() 写入。
+   现状：SKELETON_ONLY = false → shieldAttr() 返回空串，无元素带 data-shield，
+   本规则当前不命中任何节点（保留是为了随时能再收敛，不必重建机制）。
+   重新收敛：把 SKELETON_ONLY 改回 true（全收敛），或给单个元素加回 data-shield（单项）。
+   限定在面板作用域内，不影响思源原生 UI。 */
+.hiword-ai-panel [data-shield] {
+  display: none !important;
+}
+
+/* ---- 2026-09-10 透明化：「本次注入什么」胶囊 + 逐段明细 ----
+   常驻在模式条右侧，回答「我这次发出去到底带没带提示词」。 */
+.hiword-ai-inject {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+  max-width: 62%;
+  padding: 1px 9px;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  background: var(--b3-theme-primary-light, rgba(79, 110, 247, 0.12));
+  color: var(--b3-theme-primary, #4f6ef7);
+  font-family: inherit;
+  font-size: 11px;
+  line-height: 17px;
+  cursor: pointer;
+  transition: all 0.18s ease;
+}
+.hiword-ai-inject:hover {
+  border-color: var(--b3-theme-primary, #4f6ef7);
+}
+.hiword-ai-inject-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  flex: none;
+}
+.hiword-ai-inject-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* 零注入态（当前恒有底线指令，此处仅作防御性保留） */
+.hiword-ai-inject--idle {
+  background: var(--b3-theme-surface-lighter, rgba(0, 0, 0, 0.05));
+  color: var(--b3-theme-on-surface-light, #888);
+}
+.hiword-ai-inject-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--b3-theme-divider);
+  background: var(--b3-theme-background);
+  font-size: 11.5px;
+  flex-shrink: 0;
+}
+/* 上面的 display:flex 会盖掉 [hidden] 的 UA 样式，需显式还原 */
+.hiword-ai-inject-list[hidden] {
+  display: none;
+}
+.hiword-ai-inject-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  line-height: 1.7;
+}
+.hiword-ai-inject-row-label {
+  flex: none;
+  font-weight: 500;
+  color: var(--b3-theme-on-background);
+}
+.hiword-ai-inject-row-src {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--b3-theme-on-surface-light, #888);
+}
+.hiword-ai-inject-row-chars {
+  flex: none;
+  color: var(--b3-theme-on-surface-light, #888);
+}
+.hiword-ai-inject-row-state { flex: none; }
+.hiword-ai-inject-row--active .hiword-ai-inject-row-state {
+  color: var(--b3-theme-primary, #4f6ef7);
+}
+.hiword-ai-inject-row--suppressed .hiword-ai-inject-row-state,
+.hiword-ai-inject-row--off .hiword-ai-inject-row-state {
+  color: var(--b3-theme-on-surface-light, #888);
+}
+.hiword-ai-inject-row--suppressed .hiword-ai-inject-row-label,
+.hiword-ai-inject-row--off .hiword-ai-inject-row-label {
+  text-decoration: line-through;
+  opacity: 0.75;
+}
+
 /* ---- 2026-09-03 新增：上翻时浮出的「↓ 有新内容」 ----
    sticky bottom：贴在滚动视口底部，随滚动保持可见。
    ★ 不用负 margin-top 去「省高度」——在 flex 列布局里那会把最后一条消息底部
@@ -5213,24 +5376,25 @@ body.hiword-dragging {
 }
 
 /* 消息头像 */
+/* 2026-09-10 UI 改版：头像去掉渐变 + 投影，改纯色扁平。
+   渐变圆 + 投影在对话流里过于抢眼，且与对话 UI demo / Copilot 的扁平克制风格不一致。 */
 .hiword-ai-msg-avatar {
   flex-shrink: 0;
-  width: 30px;
-  height: 30px;
+  width: 28px;
+  height: 28px;
   border-radius: 50%;
-  background: linear-gradient(135deg, var(--b3-theme-primary, var(--b3-theme-primary)), color-mix(in srgb, var(--b3-theme-primary, var(--b3-theme-primary)) 68%, #000));
+  background: var(--b3-theme-primary, #4f6ef7);
   color: #fff;
   font-size: 11px;
-  font-weight: 700;
+  font-weight: 600;
   display: flex;
   align-items: center;
   justify-content: center;
   line-height: 1;
   user-select: none;
-  box-shadow: 0 2px 6px rgba(0,0,0,.12);
 }
 .hiword-ai-msg-avatar--error {
-  background: linear-gradient(135deg, var(--b3-card-error-color, var(--b3-theme-error)), color-mix(in srgb, var(--b3-card-error-color, var(--b3-theme-error)) 70%, #000));
+  background: var(--b3-card-error-color, var(--b3-theme-error, #d23f31));
 }
 
 /* 消息体 */
@@ -5250,18 +5414,55 @@ body.hiword-dragging {
   box-sizing: border-box;
 }
 
+/* ---- 2026-09-10 UI 改版：AI 回复 = 内容卡片 ----
+   2026-09-10 晚二次调整（文档化）：用户反馈卡片 1px 全环 + hover 主题色环 +
+   左上缺角圆角的组合是「聊天气泡风格」，要求改成思源文档的阅读观感——
+   · 边框弱化：1px 环降到 35% 透明度，去掉 hover 变主题色（文档不因悬停变框）；
+   · 圆角统一 10px（去掉左右分流的水滴缺角，那是气泡的标志性特征）；
+   · 标题层级 / 引用块与代码块柔和底色已在此前改版就位，段落间距与正文字号保持不动。 */
+.hiword-ai-msg--result .hiword-ai-msg-content {
+  /* flex:1 + min-width:0 —— 卡片恒占满剩余宽度（对齐 demo 的 .card{width:100%}），
+     同时让内部代码块在窄面板里横向滚动而不是把卡片撑破 */
+  flex: 1;
+  min-width: 0;
+  background: var(--b3-theme-background, #fff);
+  border-radius: 10px;
+  padding: 16px 18px 34px 18px;
+  box-shadow: 0 0 0 1px
+    color-mix(in srgb, var(--b3-border-color, rgba(128, 128, 128, 0.2)) 35%, transparent);
+}
+/* 生成等待态用与结果卡同款外观，避免「等待时无边界、首个 token 到达后突然长出边框」的跳动。
+   等待态沿用 .hiword-ai-msg-body 容器（首个 token 时整体切换为 --result 的 .hiword-ai-msg-content）。 */
+.hiword-ai-msg--loading .hiword-ai-msg-body {
+  background: var(--b3-theme-background, #fff);
+  border-radius: 10px;
+  padding: 16px 18px;
+  box-shadow: 0 0 0 1px
+    color-mix(in srgb, var(--b3-border-color, rgba(128, 128, 128, 0.2)) 35%, transparent);
+}
+
 /* 用户消息气泡（靠右对齐） */
 .hiword-ai-msg--user {
   flex-direction: row-reverse;
   .hiword-ai-msg-content {
-    background: var(--b3-theme-background, #ffffff);
+    /* 2026-09-10 UI 改版：用户消息 = 主题浅色气泡。
+       此前是「白底 + 描边」，与 AI 卡片几乎同色，左右分流看不出来。
+       现改为主题浅色底 + 右下角收小 + 右对齐，与 AI 卡片的左上角收小对称。
+       注：旧实现遗留自「深蓝底气泡」方案，里面的 #fff / rgba(255,255,255,*) 在浅色主题下
+       会造成「白字配白底」（用户消息里的标题不可见）——本次一并改为跟随主题色。 */
+    background: var(--b3-theme-primary-light,
+      color-mix(in srgb, var(--b3-theme-primary) 12%, var(--b3-theme-background, #fff)));
     color: var(--b3-theme-on-background);
-    padding: 10px 14px 36px 14px;
-    border-radius: 12px;
-    border-bottom-right-radius: 4px;
-    border: 1px solid var(--b3-theme-surface-lighter, #e0e4ea);
+    /* 2026-09-10 气泡优化：① 去掉恒占的 34px 底部内边距（那是给 AI 卡片悬浮工具栏留的，
+       用户气泡工具栏改悬浮在气泡外侧下方，不需要占位）——短消息（如「你好」）不再出现
+       下半截大空白；② width:fit-content 让气泡按内容收缩，只受 max-width 约束，
+       防御 kramdown 块级子元素把气泡撑成整行宽块。 */
+    padding: 10px 14px;
+    width: fit-content;
+    border-radius: 14px 14px 4px 14px;
+    max-width: 84%;
     /* 用户消息中的 kramdown 样式覆盖 */
-    strong { font-weight: 700; }
+    strong { font-weight: 600; }
     em { font-style: italic; }
     .hiword-kd-mark {
       background: color-mix(in srgb, var(--b3-theme-primary, var(--b3-theme-primary)) 12%, transparent);
@@ -5294,7 +5495,10 @@ body.hiword-dragging {
 }
 .hiword-kd-code {
   background: var(--b3-theme-background-hover);
-  color: var(--b3-theme-primary-light, #8ab4f8);
+  /* 2026-09-10：原值 --b3-theme-primary-light 是「主题色掺白」的**浅色**，
+     作文字色在浅色主题下几乎不可见（疑似照搬行内代码的深色主题取值）。
+     改用前景色，与 b3-typography 路径（.hiword-ai-msg-content code）一致。 */
+  color: var(--b3-theme-on-background);
   padding: 1px 5px;
   border-radius: 3px;
   font-family: "SF Mono", "Fira Code", "Consolas", monospace;
@@ -5302,22 +5506,33 @@ body.hiword-dragging {
 }
 
 /* ---- Kramdown 块级元素（标题/列表/引用/代码块） ---- */
-.hiword-kd-h1 { margin: 12px 0 6px; font-size: 17px; font-weight: 700; line-height: 1.3; color: var(--b3-theme-primary); }
-.hiword-kd-h2 { margin: 10px 0 5px; font-size: 15px; font-weight: 700; line-height: 1.35; color: var(--b3-theme-primary); }
-.hiword-kd-h3 { margin: 8px 0 4px; font-size: 13.5px; font-weight: 600; line-height: 1.4; color: var(--b3-theme-warning); }
-.hiword-kd-h4 { margin: 6px 0 3px; font-size: 12.5px; font-weight: 600; line-height: 1.4; }
+/* 2026-09-10：与 .hiword-ai-msg-content.b3-typography 的标题层级对齐。
+   改前 h3 用 --b3-theme-warning（警告色），在同一份回答里与 h1/h2 的主题色打架，
+   扫读时抓不住结构；h5/h6 此前完全无样式。现统一「标题=主题色」并补齐 h5/h6。 */
+.hiword-kd-h1 { margin: 14px 0 6px; font-size: 17px; font-weight: 600; line-height: 1.35; color: var(--b3-theme-primary); }
+.hiword-kd-h2 { margin: 12px 0 6px; font-size: 15.5px; font-weight: 600; line-height: 1.35; color: var(--b3-theme-primary); }
+.hiword-kd-h3 { margin: 10px 0 5px; font-size: 14.5px; font-weight: 600; line-height: 1.4; color: var(--b3-theme-primary); }
+.hiword-kd-h4 { margin: 8px 0 4px; font-size: 13.5px; font-weight: 600; line-height: 1.4; color: var(--b3-theme-on-background); }
+.hiword-kd-h5 { margin: 6px 0 3px; font-size: 13px; font-weight: 600; line-height: 1.4; color: var(--b3-theme-on-surface); }
+.hiword-kd-h6 { margin: 6px 0 3px; font-size: 13px; font-weight: 600; line-height: 1.4; color: var(--b3-theme-on-surface); }
 .hiword-kd-p { margin: 3px 0; }
+/* 空段落不占位：输入首尾的空行经 kramdown 渲染会产出空 <p>，把短消息气泡撑出一截空白 */
+.hiword-kd-p:empty { display: none; }
 .hiword-kd-ul { margin: 5px 0; padding-left: 18px; list-style-type: disc; }
 .hiword-kd-ol { margin: 5px 0; padding-left: 18px; list-style-type: decimal; }
 .hiword-kd-ul li, .hiword-kd-ol li { margin: 2px 0; line-height: 1.6; }
 .hiword-kd-bq {
-  margin: 6px 0; padding: 6px 10px;
-  border-left: 3px solid var(--b3-theme-primary, var(--hw-accent));
+  margin: 10px 0; padding: 8px 14px;
+  /* 2026-09-10：--hw-accent / --hw-border 是本文件 :root（见 17/21 行）定义的
+     b3 变量**本地别名**，与本行写法语义等价。此处直接写 b3 原变量，少一层间接，
+     与 .hiword-ai-msg-content.b3-typography 路径的引用方式保持一致。 */
+  border-left: 3px solid var(--b3-theme-primary);
   /* 跟随思源主题表面色，避免在深色主题下出现刺眼黑底或在浅色主题下出现突兀硬编码色 */
   background: var(--b3-theme-surface, #f7f8f9);
-  border-radius: 0 4px 4px 0;
-  font-style: italic;
-  opacity: 0.9;
+  border-radius: 0 8px 8px 0;
+  color: var(--b3-theme-on-surface);
+  /* 去掉 font-style:italic + opacity:0.9：中文没有真斜体，浏览器渲染的是倾斜伪斜体，
+     引用块里大段中文会明显发虚；且与 b3-typography 路径（不做斜体/降透明度）观感不一致。 */
 }
 .hiword-kd-pre {
   margin: 6px 0; padding: 8px 10px;
@@ -5333,43 +5548,45 @@ body.hiword-dragging {
   color: var(--b3-theme-on-surface, #1f2329);
 }
 .hiword-kd-hr {
-  border: none; border-top: 1px solid var(--hw-border, rgba(128,128,128,0.25));
-  margin: 8px 0;
+  border: none; border-top: 1px solid var(--b3-border-color, rgba(128, 128, 128, 0.25));
+  margin: 14px 0;
 }
 
-/* 用户消息气泡中的块级元素覆盖（深蓝底色上可读） */
+/* 用户消息气泡中的块级元素覆盖（2026-09-10：改跟随主题色。
+   旧实现写死 #fff / rgba(255,255,255,*)，依赖早已不存在的深蓝底 ——
+   在浅色主题下表现为「白字配白底」，用户消息里的标题完全看不见。 */
 .hiword-ai-msg--user .hiword-ai-msg-content {
-  .hiword-kd-h1, .hiword-kd-h2, .hiword-kd-h3, .hiword-kd-h4 { color: #fff; opacity: 0.95; }
-  .hiword-kd-ul, .hiword-kd-ol { color: rgba(255,255,255,0.9); }
+  .hiword-kd-h1, .hiword-kd-h2, .hiword-kd-h3, .hiword-kd-h4 { color: var(--b3-theme-primary); }
+  .hiword-kd-ul, .hiword-kd-ol { color: var(--b3-theme-on-background); }
   .hiword-kd-bq {
-    border-left-color: rgba(255,255,255,0.45);
-    background: rgba(255,255,255,0.08);
-    color: rgba(255,255,255,0.88);
+    border-left-color: color-mix(in srgb, var(--b3-theme-primary) 45%, transparent);
+    background: color-mix(in srgb, var(--b3-theme-background, #fff) 55%, transparent);
+    color: var(--b3-theme-on-surface);
   }
-  .hiword-kd-pre { background: rgba(255,255,255,0.14); }
-  .hiword-kd-codeblock { color: var(--b3-theme-primary-lighter, rgba(80,120,255,.12)); }
-  .hiword-kd-hr { border-top-color: rgba(255,255,255,0.18); }
+  .hiword-kd-pre { background: color-mix(in srgb, var(--b3-theme-background, #fff) 62%, transparent); }
+  .hiword-kd-codeblock { color: var(--b3-theme-on-background); }
+  .hiword-kd-hr { border-top-color: var(--b3-border-color, rgba(128, 128, 128, 0.25)); }
 
-  /* 用户消息气泡内的块引用折叠卡片 */
+  /* 用户消息气泡内的块引用折叠卡片（2026-09-10：改跟随主题色，同上） */
   .hiword-ref-card {
     display: inline-flex;
     align-items: center;
     gap: 5px;
-    background: rgba(255,255,255,0.09);
-    border: 1px solid rgba(255,255,255,0.18);
+    background: color-mix(in srgb, var(--b3-theme-background, #fff) 55%, transparent);
+    border: 1px solid var(--b3-border-color, rgba(128, 128, 128, 0.25));
     border-radius: 6px;
     padding: 4px 8px;
     margin: 2px 0;
     font-size: 12px;
     line-height: 1.5;
     cursor: pointer;
-    color: rgba(255,255,255,0.85);
+    color: var(--b3-theme-on-background);
     transition: background 0.15s, border-color 0.15s;
     max-width: 100%;
 
     &:hover {
-      background: rgba(255,255,255,0.14);
-      border-color: rgba(255,255,255,0.28);
+      background: var(--b3-theme-background, #fff);
+      border-color: color-mix(in srgb, var(--b3-theme-primary) 40%, transparent);
     }
 
     &__icon {
@@ -5407,17 +5624,21 @@ body.hiword-dragging {
         display: block;
         margin-top: 4px;
         padding-top: 4px;
-        border-top: 1px dashed rgba(255,255,255,0.18);
+        /* 2026-09-10：改跟随主题色（旧值写死白系，浅色主题下白字配白底不可见） */
+        border-top: 1px dashed var(--b3-border-color, rgba(128, 128, 128, 0.25));
         font-size: 11.5px;
         line-height: 1.55;
-        color: rgba(255,255,255,0.7);
+        color: var(--b3-theme-on-surface);
         white-space: pre-wrap;
         word-break: break-word;
         max-height: 120px;
         overflow-y: auto;
 
         &::-webkit-scrollbar { width: 4px; }
-        &::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.2); border-radius: 2px; }
+        &::-webkit-scrollbar-thumb {
+          background: color-mix(in srgb, var(--b3-theme-on-background) 22%, transparent);
+          border-radius: 2px;
+        }
       }
     }
 
@@ -5616,47 +5837,56 @@ body.hiword-dragging {
   }
 }
 
-/* 代码块工具条（P2-C）：语言标签 + 复制按钮，悬停代码块时浮现 */
+/* 代码块工具条（P2-C，2026-09-10 改版）：语言标签 + 复制按钮。
+   改前是「悬停才浮现的右上角浮标」——不悬停就完全看不见有复制功能。
+   现改为**顶部常驻条**，对齐对话 UI demo 的 .code-hd 与 Copilot 的 .code-block-toolbar。
+   ★ 用 position:sticky 而非 absolute：pre 是横向滚动容器，
+     absolute 的条会随代码横向滚走，sticky(top+left) 才能始终钉在可视区左上角。 */
 .hiword-ai-msg-content pre {
   position: relative;
 }
 .hiword-ai-code-toolbar {
-  position: absolute;
-  top: 6px;
-  right: 8px;
+  position: sticky;
+  top: 0;
+  left: 0;
+  z-index: 2;
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding: 2px 6px;
-  border-radius: 6px;
-  background: color-mix(in srgb, var(--b3-theme-surface, #fff) 82%, transparent);
-  border: 1px solid var(--b3-border-color, rgba(0, 0, 0, 0.12));
-  font-size: 11px;
+  justify-content: space-between;
+  gap: 8px;
+  /* 负外边距抵消 pre 的内边距（.b3-typography pre 为 10px 12px），让条贴住代码块边缘 */
+  margin: -10px -12px 8px;
+  padding: 6px 12px;
+  background: var(--b3-theme-surface,
+    color-mix(in srgb, var(--b3-theme-on-background) 5%, transparent));
+  border-bottom: 1px solid var(--b3-border-color, rgba(128, 128, 128, 0.2));
+  font-size: 11.5px;
   line-height: 1.4;
-  opacity: 0;
-  transition: opacity 0.15s ease;
-  z-index: 2;
   pointer-events: auto;
 }
-.hiword-ai-msg-content pre:hover .hiword-ai-code-toolbar {
-  opacity: 1;
-}
 .hiword-ai-code-lang {
-  color: var(--b3-theme-on-surface, #888);
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
+  font-family: var(--b3-font-family-code, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);
+  font-weight: 500;
+  color: var(--b3-theme-on-surface);
+  text-transform: lowercase;
+  letter-spacing: 0.02em;
+  user-select: none;
 }
 .hiword-ai-code-copy {
   cursor: pointer;
-  border: none;
+  border: 1px solid var(--b3-border-color, rgba(128, 128, 128, 0.25));
   background: transparent;
-  color: var(--b3-theme-primary, #4a8af4);
-  padding: 1px 4px;
-  border-radius: 4px;
-  font-size: 11px;
+  color: var(--b3-theme-on-surface);
+  padding: 1px 9px;
+  border-radius: 6px;
+  font-size: 11.5px;
+  font-family: inherit;
+  transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
 }
 .hiword-ai-code-copy:hover {
-  background: color-mix(in srgb, var(--b3-theme-primary, #4a8af4) 12%, transparent);
+  background: var(--b3-list-hover, color-mix(in srgb, var(--b3-theme-on-background) 8%, transparent));
+  color: var(--b3-theme-primary);
+  border-color: var(--b3-theme-primary);
 }
 
 /* 骨架屏（P2-6）：生成等待态的占位脉冲，首 token 到达后被结果气泡整体替换 */
@@ -6060,6 +6290,15 @@ body.hiword-dragging {
       div[data-type="NodeParagraph"] + div[data-type="NodeParagraph"] {
         margin-top: 8px !important;
       }
+
+      /* 2026-09-10：输入框实时 Markdown 块的显示。
+         输入框挂的是思源原生 Protyle（lite 模式，与 Copilot 输入框同配置），
+         输入「- 」「1. 」「> 」「# 」后由内核即时把段落转成列表/引用/标题块——
+         转换能力是内核行为，无需插件实现。上面的「直接子块清零」只重置顶层容器
+         （如 .list）的外边距；列表项圆点/缩进、引用条、标题字号由思源原生
+         .li / .protyle-action / h 样式负责渲染。这里只补最小间距，保持输入框内紧凑。 */
+      .li { margin: 2px 0; }
+      [data-type="NodeBlockquote"] { margin: 4px 0; }
     }
   }
 
@@ -6652,11 +6891,15 @@ body.hiword-dragging {
 }
 
 /* thinking 折叠面板（默认收起，可收起的「思考框」） */
+/* 2026-09-10 UI 改版：思考折叠改中性表面色（原先是主色描边 + 主色淡底，
+   和正文抢注意力）。对齐对话 UI demo 的 details.think 与 Copilot 的
+   .ai-message__thinking —— 都是「surface 底 + 常规描边」，让思考过程退到背景里。 */
 .hiword-ai-think {
-  border: 1px solid color-mix(in srgb, var(--b3-theme-primary) 32%, var(--b3-theme-divider));
-  border-radius: 8px;
-  margin-bottom: 10px;
-  background: color-mix(in srgb, var(--b3-theme-primary) 5%, transparent);
+  border: 1px solid var(--b3-border-color, rgba(128, 128, 128, 0.2));
+  border-radius: 10px;
+  margin-bottom: 14px;
+  background: var(--b3-theme-surface,
+    color-mix(in srgb, var(--b3-theme-on-background) 4%, transparent));
   overflow: hidden;
 }
 
@@ -6721,30 +6964,31 @@ body.hiword-dragging {
   transform: rotate(90deg);
 }
 .hiword-ai-think-sum:hover {
-  background: color-mix(in srgb, var(--b3-theme-primary) 9%, transparent);
+  background: var(--b3-list-hover, color-mix(in srgb, var(--b3-theme-on-background) 6%, transparent));
 }
 .hiword-ai-think-body {
-  padding: 0 12px 10px;
+  padding: 8px 12px 10px;
   font-size: 12.5px;
   line-height: 1.7;
-  color: var(--b3-theme-on-surface-light, #999);
+  color: var(--b3-theme-on-surface);
   white-space: normal;
-  border-top: 1px dashed color-mix(in srgb, var(--b3-theme-primary) 18%, transparent);
-  padding-top: 8px;
+  border-top: 1px solid var(--b3-border-color, rgba(128, 128, 128, 0.2));
 }
 
 /* 流式 thinking 实时显示（生成期间嵌入 loading 消息，打字机效果） */
+/* 流式思考：与折叠态同款中性表面色，保证「展开前/展开后」观感连续 */
 .hiword-ai-live-think {
   margin-top: 8px;
-  padding: 8px 10px;
-  border-radius: 8px;
+  padding: 8px 12px;
+  border-radius: 10px;
   font-size: 12.5px;
   line-height: 1.7;
-  color: var(--b3-theme-on-surface-light, #999);
-  background: color-mix(in srgb, var(--b3-theme-primary) 6%, transparent);
-  border: 1px dashed color-mix(in srgb, var(--b3-theme-primary) 25%, transparent);
+  color: var(--b3-theme-on-surface);
+  background: var(--b3-theme-surface,
+    color-mix(in srgb, var(--b3-theme-on-background) 4%, transparent));
+  border: 1px solid var(--b3-border-color, rgba(128, 128, 128, 0.2));
   white-space: normal; word-break: break-word;
-  max-height: 200px; overflow-y: auto;
+  max-height: 240px; overflow-y: auto;
   animation: hiword-live-think-fadein 0.3s ease-out;
 }
 .hiword-ai-live-think::after {
@@ -6942,14 +7186,130 @@ body.hiword-dragging {
    颜色交回原文（继承正文色），深色下靠字重/字型区分即可。 */
 .hiword-ai-chat.b3-typography,
 .hiword-ai-md.b3-typography,
+/* ---- 2026-09-10 UI 改版：AI 输出的 Markdown 排版层级 ----
+   改前的问题：① 标题色分散（h1/h2 主题色、h3/h4 **警告色**），扫读时抓不住结构；
+   ② 段落 / 列表 / 引用 / 表格沿用思源默认，长回答没有呼吸感、层级糊在一起。
+   改后统一为「标题=主题色 · 正文=前景色 · 辅助=次要色」，标题字号收敛为三级。
+   规范来源：对话 UI demo 的 .card 排版 + Copilot 的 b3-typography 变量用法
+   （两者都用 --b3-* 变量，故亮/暗主题自动跟随，不需要维护两套配色）。 */
 .hiword-ai-msg-content.b3-typography {
-  h1, h2 { color: var(--b3-theme-primary); }
-  h3, h4 { color: var(--b3-theme-warning); }
-  h5, h6 { color: var(--b3-theme-on-surface); }
-  strong { font-weight: 600; }
-  em { font-style: italic; }
-  a { color: var(--b3-theme-primary); }
-  blockquote { color: var(--b3-theme-on-surface); }
+  > :first-child { margin-top: 0; }
+  > :last-child { margin-bottom: 0; }
+
+  h1, h2, h3 { color: var(--b3-theme-primary); font-weight: 600; line-height: 1.35; }
+  h1 { font-size: 17px; margin: 20px 0 8px; }
+  h2 { font-size: 15.5px; margin: 18px 0 8px; }
+  h3 { font-size: 14.5px; margin: 16px 0 6px; }
+  h4 { font-size: 13.5px; margin: 14px 0 6px; font-weight: 600; color: var(--b3-theme-on-background); }
+  h5, h6 { font-size: 13px; margin: 12px 0 4px; font-weight: 600; color: var(--b3-theme-on-surface); }
+
+  p { margin: 9px 0; }
+  ul, ol { margin: 9px 0; padding-left: 22px; }
+  li { margin: 4px 0; }
+  li > p { margin: 4px 0; }
+
+  strong, b { font-weight: 600; }
+  em, i { font-style: italic; }
+  /* 链接：常显下划线在中英混排长回答里很吵，改为 hover 才显现 */
+  a { color: var(--b3-theme-primary); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+
+  /* 行内代码：与代码块区分开，用 surface-lighter 底而非描边 */
+  code {
+    font-family: var(--b3-font-family-code, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);
+    font-size: 0.92em;
+    padding: 1.5px 5px;
+    border-radius: 4px;
+    background: var(--b3-theme-surface-lighter,
+      color-mix(in srgb, var(--b3-theme-on-background) 8%, transparent));
+    color: var(--b3-theme-on-background);
+  }
+
+  blockquote {
+    margin: 10px 0;
+    padding: 8px 14px;
+    border-left: 3px solid var(--b3-theme-primary);
+    background: var(--b3-theme-surface,
+      color-mix(in srgb, var(--b3-theme-on-background) 4%, transparent));
+    border-radius: 0 8px 8px 0;
+    color: var(--b3-theme-on-surface);
+  }
+
+  /* 表格改 display:block + width:max-content：
+     内容卡片是 flex:1/min-width:0，普通 table 在列多时会把卡片撑破（面板出现横向滚动条），
+     而 width:100% 又会把单元格压成竖条。max-content + max-width:100% + overflow-x:auto
+     让窄表按内容宽度自然排布、宽表在自身内部横向滚动，卡片宽度始终稳定。 */
+  table {
+    display: block;
+    width: max-content;
+    max-width: 100%;
+    overflow-x: auto;
+    border-collapse: collapse;
+    margin: 10px 0;
+    font-size: 0.95em;
+  }
+  th, td {
+    border: 1px solid var(--b3-border-color, rgba(128, 128, 128, 0.25));
+    padding: 7px 11px;
+    text-align: left;
+  }
+  th {
+    font-weight: 600;
+    background: var(--b3-theme-surface,
+      color-mix(in srgb, var(--b3-theme-on-background) 5%, transparent));
+  }
+  tbody tr:nth-child(even) td {
+    background: var(--b3-theme-surface,
+      color-mix(in srgb, var(--b3-theme-on-background) 3%, transparent));
+  }
+
+  hr {
+    border: none;
+    border-top: 1px solid var(--b3-border-color, rgba(128, 128, 128, 0.25));
+    margin: 14px 0;
+  }
+
+  /* 图片：b3-typography 在插件容器内不约束宽度，AI 回答带图时会溢出内容卡片 */
+  img {
+    max-width: 100%;
+    height: auto;
+    border-radius: 6px;
+    vertical-align: middle;
+  }
+
+  /* 嵌套列表收紧：默认 ul/ol 的 9px 上下边距在多级列表里会层层叠加，层级散开 */
+  li > ul,
+  li > ol { margin: 4px 0; }
+
+  /* 任务列表（AI 常输出 - [ ] 形式的步骤）：去掉圆点标记，checkbox 与文字基线对齐。
+     :has() 用于「只命中任务项」，Chromium 105+ 支持；不支持时退化为带圆点的普通列表，不影响可读。 */
+  li:has(> input[type="checkbox"]) { list-style: none; margin-left: -18px; }
+  li > input[type="checkbox"] {
+    margin-right: 6px;
+    vertical-align: -1px;
+    accent-color: var(--b3-theme-primary);
+  }
+
+  /* 键盘键 / 定义列表 / 上下标：面板内此前无样式，落到 b3-typography 缺省观感 */
+  kbd {
+    display: inline-block;
+    padding: 1px 6px;
+    border: 1px solid var(--b3-border-color, rgba(128, 128, 128, 0.3));
+    border-bottom-width: 2px;
+    border-radius: 4px;
+    background: var(--b3-theme-surface-lighter,
+      color-mix(in srgb, var(--b3-theme-on-background) 6%, transparent));
+    font-family: var(--b3-font-family-code, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);
+    font-size: 0.85em;
+    line-height: 1.5;
+  }
+  dl { margin: 9px 0; }
+  dt { font-weight: 600; margin-top: 6px; }
+  dd { margin: 2px 0 6px 18px; color: var(--b3-theme-on-surface); }
+  sup, sub { font-size: 0.75em; line-height: 0; }
+
+  /* 脚注上标：Lute 渲染为 sup > a，默认带方括号，收窄一点避免撑高行距 */
+  .footnotes { margin-top: 14px; padding-top: 8px; border-top: 1px solid var(--b3-border-color, rgba(128, 128, 128, 0.2)); font-size: 0.92em; color: var(--b3-theme-on-surface); }
 }
 .hiword-ai-chat.b3-typography > :first-child,
 .hiword-ai-md.b3-typography > :first-child { margin-top: 0; }
@@ -6959,12 +7319,13 @@ body.hiword-dragging {
 .hiword-ai-chat.b3-typography pre,
 .hiword-ai-md.b3-typography pre {
   margin: 6px 0;
-  border-radius: 6px;
+  border-radius: 8px;
   padding: 10px 12px;
-  /* 跟随思源主题表面色，避免硬编码浅色/深色在不同主题下不协调 */
+  /* 跟随思源主题表面色，避免硬编码浅色/深色在不同主题下不协调。
+     2026-09-10 文档化：去掉 1px 描边——surface 底色已足以区分代码块，
+     边线属于「边框线条」弱化范围。 */
   background: var(--b3-theme-surface, #f5f6f7);
   color: var(--b3-theme-on-surface, #1f2329);
-  border: 1px solid var(--b3-border-color, #e3e5e8);
   overflow-x: auto;
 }
 .hiword-ai-msg-content.b3-typography pre code,
@@ -7020,29 +7381,9 @@ body.hiword-dragging {
   border-color: color-mix(in srgb, var(--b3-theme-primary) 28%, transparent);
 }
 
-/* 整条消息「复制全部」按钮：悬浮于消息右上角，hover 消息时显现 */
-.hiword-ai-msg--result .hiword-ai-msg-content { position: relative; }
-.hiword-ai-msg-copy {
-  position: absolute;
-  top: 2px;
-  right: 2px;
-  z-index: 5;
-  opacity: 0;
-  padding: 2px 8px;
-  border: 1px solid var(--b3-theme-divider);
-  border-radius: 4px;
-  background: var(--b3-theme-surface);
-  color: var(--b3-theme-on-surface-light, #aaa);
-  font-size: 11px;
-  cursor: pointer;
-  transition: opacity 0.12s, background 0.12s, color 0.12s, border-color 0.12s;
-}
-.hiword-ai-msg--result .hiword-ai-msg-content:hover > .hiword-ai-msg-copy { opacity: 1; }
-.hiword-ai-msg-copy:hover {
-  background: var(--b3-theme-primary, var(--b3-theme-primary));
-  color: #fff;
-  border-color: var(--b3-theme-primary, var(--b3-theme-primary));
-}
+/* 「复制全部」悬浮按钮已于 2026-09-10 删除（用户指令：与底部工具栏的复制功能重复），
+   模板 ai-panel.ts、事件 ai-msg-actions.ts 同步移除。内容卡片的 position:relative
+   由基础样式（.hiword-ai-msg-content）提供，此处不再重复。 */
 
 /* 消息下方工具栏：默认隐藏，hover 整条消息时显现 */
 .hiword-ai-msg-toolbar {
@@ -7066,6 +7407,10 @@ body.hiword-dragging {
 .hiword-ai-msg--user .hiword-ai-msg-toolbar {
   left: auto;
   right: 10px;
+  /* 2026-09-10 气泡优化：用户气泡已不再预留 34px 底部空间（padding 改为正常 10px），
+     工具栏随之移到气泡外侧下方悬浮；不 hover 时 opacity:0 + visibility:hidden，
+     不占布局空间，也不会挡住气泡内容。消息间距 12px 可容纳其高度。 */
+  bottom: -28px;
 }
 .hiword-ai-msg--result .hiword-ai-msg-toolbar {
   left: 8px;
@@ -7099,12 +7444,13 @@ body.hiword-dragging {
   justify-content: center;
   pointer-events: none;
 }
-/* 2026-09-03：原为单字母 M / T，不悬停完全看不出含义。改为 MD / TXT 自解释缩写。 */
-.hiword-ai-msg-tool-icon--md,
-.hiword-ai-msg-tool-icon--txt {
-  font-size: 10px;
-  font-weight: 700;
-  letter-spacing: -0.3px;
+/* 2026-09-10：五个图标统一为单色 SVG（feather 风格，见 ai-dialogs.ts TOOLBAR_ICONS）。
+   演进：单字母 M/T → MD/TXT 自解释缩写 → 文字徽章 → 单色 SVG（本轮）。
+   stroke 用 currentColor：按钮 hover 变主题色时图标自动跟随，无需额外状态样式。 */
+.hiword-ai-msg-tool-icon svg {
+  width: 16px;
+  height: 16px;
+  display: block;
 }
 
 /* AI 消息就地编辑器 */
@@ -11990,26 +12336,47 @@ body.hiword-resizing {
 .hiword-rp-metric-val { font-size: 22px; font-weight: 700; line-height: 1.1; }
 .hiword-rp-metric-label { font-size: 11px; color: var(--b3-theme-on-surface-light, #999); margin-top: 4px; }
 
-.hiword-rp-actions { display: flex; gap: 8px; margin-bottom: 10px; }
-.hiword-rp-start { flex: 1; background: var(--b3-theme-primary, #4f7cff); color: #fff; border: none; }
-.hiword-start:hover { filter: brightness(1.05); }
-.hiword-rp-settings { flex: 0 0 auto; }
-
-.hiword-rp-filters { display: flex; gap: 6px; margin-bottom: 8px; flex-wrap: wrap; }
-.hiword-rp-filter {
-  font-size: 12px;
-  padding: 3px 10px;
-  border-radius: 999px;
-  border: 1px solid var(--b3-border-color, #e5e5e5);
-  background: transparent;
-  color: var(--b3-theme-on-surface, #555);
-  cursor: pointer;
+/* 2026-09-11 v4：今日到期行动条（替代 5 卡指标区与操作行） */
+.hiword-rp-duebar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 10px;
+  padding: 11px 14px;
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--b3-theme-primary, #4f7cff) 8%, var(--b3-theme-surface, #fff));
+  border: 1px solid color-mix(in srgb, var(--b3-theme-primary, #4f7cff) 22%, var(--b3-border-color, #e5e5e5));
 }
-.hiword-rp-filter.active {
+.hiword-rp-duebar-ic {
+  width: 32px;
+  height: 32px;
+  border-radius: 9px;
+  background: var(--b3-theme-surface, #fff);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 15px;
+  flex-shrink: 0;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+}
+.hiword-rp-duebar-txt {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  font-size: 11px;
+  color: var(--b3-theme-on-surface-light, #999);
+}
+.hiword-rp-duebar-txt b { color: var(--b3-theme-on-surface, #555); font-size: 13px; }
+.hiword-rp-start {
+  flex: none;
   background: var(--b3-theme-primary, #4f7cff);
   color: #fff;
-  border-color: var(--b3-theme-primary, #4f7cff);
+  border: none;
 }
+.hiword-rp-start:hover { filter: brightness(1.05); }
+.hiword-rp-settings { flex: 0 0 auto; }
 
 .hiword-rp-list {
   display: flex;
@@ -12017,62 +12384,181 @@ body.hiword-resizing {
   gap: 4px;
   overflow-y: auto;
 }
+/* 2026-09-11 v4 词卡：喇叭 + 大字单词 + 熟练度圆圈 + 到期徽章
+   交互：左拉手势滑出操作区（右键菜单另见 .hiword-rp-ctx） */
 .hiword-rp-row {
-  display: grid;
-  grid-template-columns: auto 1fr auto auto auto auto;
+  display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 6px 8px;
-  border-radius: 8px;
+  gap: 0;
+  padding: 12px 14px;
+  border-radius: 12px;
   background: var(--b3-theme-surface, #fff);
   border: 1px solid var(--b3-border-color, #eee);
   font-size: 12px;
   cursor: pointer;
-  transition: background 0.12s, border-color 0.12s;
+  transition: background 0.12s, border-color 0.12s, box-shadow 0.12s;
+  position: relative;
+  overflow: hidden;
 }
-.hiword-rp-row:hover { background: var(--b3-theme-surface-hover, #f2f4f8); border-color: var(--b3-theme-primary, #4f7cff); }
-.hiword-rp-word { font-weight: 600; color: var(--b3-theme-on-background, #333); }
-.hiword-rp-tag {
-  font-size: 10px;
-  padding: 1px 6px;
-  border-radius: 999px;
+.hiword-rp-row:hover {
+  background: var(--hw-rp-hover);
+  border-color: color-mix(in srgb, var(--b3-theme-primary, #4f7cff) 40%, var(--b3-border-color, #eee));
 }
-.hiword-rp-tag--arc { background: rgba(46, 204, 113, 0.15); color: #2ecc71; }
-.hiword-rp-tag--ig { background: rgba(153, 153, 153, 0.18); color: #888; }
-.hiword-rp-due { color: var(--b3-theme-on-surface-light, #999); }
-.hiword-rp-iv { color: var(--b3-theme-on-surface-light, #999); }
-.hiword-rp-ret { font-weight: 600; color: var(--b3-theme-primary, #4f7cff); min-width: 34px; text-align: right; }
-.hiword-rp-ret--new { color: var(--b3-theme-on-surface-light, #999); font-weight: 500; }
-.hiword-rp-row.hiword-rp-row--expanded { background: var(--b3-theme-surface-hover, #f2f4f8); }
-.hiword-rp-toggle {
-  border: none; background: transparent; cursor: pointer;
-  color: var(--b3-theme-on-surface-light, #999); font-size: 12px; line-height: 1;
-  width: 18px; height: 22px; padding: 0; transition: transform 0.12s;
+.hiword-rp-row--expanded { background: var(--hw-rp-hover); }
+.hiword-rp-row--dragging { user-select: none; -webkit-user-select: none; }
+.hiword-rp-row--dragging .hiword-rp-body,
+.hiword-rp-row--dragging .hiword-rp-ops { transition: none; }
+/* 行主体（喇叭 + 信息 + 圆圈/徽章）：左拉时整体左移 */
+.hiword-rp-body {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex: 1;
+  min-width: 0;
+  transform: translateX(var(--rp-drag, 0px));
+  transition: transform 0.2s cubic-bezier(0.2, 0.8, 0.3, 1);
 }
-.hiword-rp-row--expanded .hiword-rp-toggle { transform: rotate(90deg); }
-.hiword-rp-main { display: flex; flex-direction: column; gap: 2px; min-width: 0; cursor: pointer; }
-.hiword-rp-line1 { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.hiword-rp-speak {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  border: none;
+  background: var(--hw-rp-sub);
+  color: var(--b3-theme-primary, #4f7cff);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  transition: all 0.15s;
+}
+.hiword-rp-speak svg { width: 14px; height: 14px; }
+.hiword-rp-speak:hover { background: color-mix(in srgb, var(--b3-theme-primary, #4f7cff) 14%, transparent); }
+.hiword-rp-main { display: flex; flex-direction: column; gap: 3px; min-width: 0; cursor: pointer; }
+.hiword-rp-line1 { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.hiword-rp-word { font-size: 16.5px; font-weight: 650; color: var(--b3-theme-on-background, #333); letter-spacing: -0.01em; }
+.hiword-rp-phon { font-size: 11.5px; color: var(--hw-rp-mut); }
 .hiword-rp-line2 {
-  font-size: 12px; color: var(--b3-theme-on-surface-light, #999);
-  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%;
+  font-size: 12px;
+  color: var(--hw-rp-mut);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
 }
 .hiword-rp-detail { margin-top: 2px; }
 .hiword-rp-detail-meaning {
-  font-size: 12px; color: var(--b3-theme-on-surface, #555); line-height: 1.5;
-  white-space: pre-wrap; word-break: break-word;
+  font-size: 12px;
+  color: var(--b3-theme-on-surface, #555);
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 .hiword-rp-pos {
-  font-size: 10px; font-weight: 600; padding: 1px 7px; border-radius: 999px;
-  background: rgba(79, 124, 255, 0.12); color: var(--b3-theme-primary, #4f7cff);
+  font-size: 10px;
+  font-weight: 600;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--b3-theme-primary, #4f7cff) 12%, transparent);
+  color: var(--b3-theme-primary, #4f7cff);
   white-space: nowrap;
 }
 .hiword-rp-pos--unknown { background: rgba(153, 153, 153, 0.16); color: #999; }
-.hiword-rp-open {
-  border: none; background: var(--b3-theme-surface-hover, #f2f4f8); cursor: pointer;
-  font-size: 12px; line-height: 1; width: 24px; height: 24px; border-radius: 6px;
-  color: var(--b3-theme-on-surface-light, #999);
+.hiword-rp-side {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 6px;
+  flex-shrink: 0;
 }
-.hiword-rp-open:hover { background: var(--b3-theme-primary, #4f7cff); color: #fff; }
+/* 到期徽章三态 */
+.hiword-rp-badge {
+  font-size: 10.5px;
+  border-radius: 6px;
+  padding: 2px 8px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.hiword-rp-badge--overdue {
+  background: color-mix(in srgb, var(--b3-theme-error, #e5484d) 10%, transparent);
+  color: var(--b3-theme-error, #e5484d);
+}
+.hiword-rp-badge--today {
+  background: color-mix(in srgb, var(--b3-theme-primary, #4f7cff) 10%, transparent);
+  color: var(--b3-theme-primary, #4f7cff);
+}
+.hiword-rp-badge--later {
+  background: var(--hw-rp-sub);
+  color: var(--hw-rp-mut);
+  font-weight: 500;
+}
+/* 滑出操作区：默认藏在右侧外，左拉手势后露出 */
+.hiword-rp-ops {
+  position: absolute;
+  right: 0;
+  top: 0;
+  bottom: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 12px;
+  background: linear-gradient(270deg, var(--hw-rp-sub), var(--b3-theme-background, #fff));
+  border-left: 1px solid var(--b3-border-color, #eee);
+  transform: translateX(calc(100% + var(--rp-drag, 0px)));
+  transition: transform 0.2s cubic-bezier(0.2, 0.8, 0.3, 1);
+  z-index: 3;
+}
+.hiword-rp-ops-btn {
+  height: 26px;
+  border-radius: 99px;
+  border: 1px solid var(--b3-border-color, #e5e5e5);
+  background: var(--b3-theme-background, #fff);
+  color: var(--b3-theme-on-surface, #555);
+  cursor: pointer;
+  font-size: 11.5px;
+  padding: 0 12px;
+  font-family: inherit;
+  white-space: nowrap;
+  transition: all 0.12s;
+}
+.hiword-rp-ops-btn:hover { border-color: var(--b3-theme-primary, #4f7cff); color: var(--b3-theme-primary, #4f7cff); }
+.hiword-rp-ops-btn--danger { color: var(--b3-theme-error, #e5484d); border-color: color-mix(in srgb, var(--b3-theme-error, #e5484d) 30%, var(--b3-border-color, #e5e5e5)); }
+.hiword-rp-ops-btn--danger:hover {
+  background: color-mix(in srgb, var(--b3-theme-error, #e5484d) 10%, transparent);
+  border-color: var(--b3-theme-error, #e5484d);
+  color: var(--b3-theme-error, #e5484d);
+}
+
+/* 右键菜单（复习词卡，b3 风格） */
+.hiword-rp-ctx {
+  position: fixed;
+  z-index: 300;
+  min-width: 128px;
+  background: var(--b3-theme-background, #fff);
+  border: 1px solid var(--b3-border-color, #e5e5e5);
+  border-radius: 10px;
+  padding: 5px;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.16);
+  font-family: inherit;
+}
+.hiword-rp-ctx[hidden] { display: none; }
+.hiword-rp-ctx-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  font-size: 12.5px;
+  color: var(--b3-theme-on-surface, #555);
+  padding: 8px 12px;
+  border-radius: 7px;
+  font-family: inherit;
+  transition: background 0.12s;
+}
+.hiword-rp-ctx-item:hover { background: var(--hw-rp-sub); color: var(--b3-theme-on-background, #333); }
+.hiword-rp-ctx-item--danger { color: var(--b3-theme-error, #e5484d); }
+.hiword-rp-ctx-item--danger:hover { background: color-mix(in srgb, var(--b3-theme-error, #e5484d) 10%, transparent); }
 .hiword-rp-done-banner {
   margin: 0 0 10px;
   padding: 8px 12px;
@@ -12090,7 +12576,7 @@ body.hiword-resizing {
   border: 1px dashed var(--b3-border-color, #e0e0e0);
   border-radius: 8px;
   font-size: 12px;
-  color: var(--b3-theme-on-surface-light, #999);
+  color: var(--hw-rp-mut);
   background: color-mix(in srgb, var(--b3-theme-surface) 70%, transparent);
   text-align: center;
   transition: border-color 0.15s, color 0.15s, background 0.15s;
@@ -12105,6 +12591,390 @@ body.hiword-resizing {
   border-color: var(--b3-theme-primary, #4f7cff);
   color: var(--b3-theme-primary, #4f7cff);
   background: color-mix(in srgb, var(--b3-theme-primary, #4f7cff) 12%, transparent);
+}
+
+/* —— 复习面板主题派生变量：仅依赖思源核心变量（background/on-surface/border-color），深色主题自动适配 —— */
+:root {
+  --hw-rp-sub: color-mix(in srgb, var(--b3-theme-on-surface, #555) 7%, var(--b3-theme-background, #fff));
+  --hw-rp-hover: color-mix(in srgb, var(--b3-theme-on-surface, #555) 10%, var(--b3-theme-background, #fff));
+  --hw-rp-mut: color-mix(in srgb, var(--b3-theme-on-surface, #555) 60%, transparent);
+}
+
+/* ===== 2026-09-11 复习面板重构：双小 Tab + 星级筛选 + 词卡星级 + 数据统计 ===== */
+/* 面板内小 Tab（学习记忆 / 数据统计） */
+.hiword-rp-subtabs {
+  display: flex;
+  gap: 16px;
+  padding: 0 2px 8px;
+  border-bottom: 1px solid var(--b3-border-color, #eee);
+  margin-bottom: 10px;
+}
+.hiword-rp-subtab {
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  font-size: 13px;
+  color: var(--hw-rp-mut);
+  padding: 4px 2px 7px;
+  position: relative;
+  transition: color 0.15s;
+}
+.hiword-rp-subtab:hover { color: var(--b3-theme-on-surface, #555); }
+.hiword-rp-subtab--on {
+  color: var(--b3-theme-primary, #4f7cff);
+  font-weight: 600;
+}
+.hiword-rp-subtab--on::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: -1px;
+  height: 2px;
+  background: var(--b3-theme-primary, #4f7cff);
+  border-radius: 2px;
+}
+/* 面板内 pane：非激活隐藏；激活淡入 */
+.hiword-rp-pane { display: none; }
+.hiword-rp-pane--on {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+  animation: hiword-rp-fade 0.22s ease;
+}
+@keyframes hiword-rp-fade {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: none; }
+}
+/* 学习 pane 内的列表撑满（pane 成为 flex 容器后重新声明） */
+.hiword-rp-pane--on > .hiword-rp-list { flex: 1 1 auto; min-height: 0; }
+
+/* 四状态 Tab（全部/待学习/已学习/标熟词）——b3 segmented 风格 */
+.hiword-rp-state-tabs {
+  display: flex;
+  gap: 2px;
+  background: var(--hw-rp-sub);
+  border-radius: 10px;
+  padding: 3px;
+  margin-bottom: 10px;
+}
+.hiword-rp-stab {
+  flex: 1;
+  appearance: none;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  font-size: 12.5px;
+  color: var(--b3-theme-on-surface, #555);
+  padding: 7px 6px;
+  border-radius: 8px;
+  font-family: inherit;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  transition: all 0.18s;
+  font-weight: 500;
+  white-space: nowrap;
+}
+.hiword-rp-stab:hover { color: var(--b3-theme-on-background, #333); }
+.hiword-rp-stab--on {
+  background: var(--b3-theme-background, #fff);
+  color: var(--b3-theme-on-background, #333);
+  font-weight: 650;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.1);
+}
+.hiword-rp-stab--on .hiword-rp-stab-n { color: var(--b3-theme-primary, #4f7cff); font-weight: 700; }
+.hiword-rp-stab-n {
+  font-size: 10.5px;
+  background: var(--b3-theme-background, #fff);
+  color: var(--hw-rp-mut);
+  border-radius: 99px;
+  padding: 1px 7px;
+  font-variant-numeric: tabular-nums;
+}
+/* 列表工具行：计数 + 按钮 + 搜索 */
+.hiword-rp-list-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+  flex-wrap: wrap;
+}
+.hiword-rp-count {
+  font-size: 12.5px;
+  color: var(--hw-rp-mut);
+  white-space: nowrap;
+}
+.hiword-rp-count b { color: var(--b3-theme-primary, #4f7cff); font-weight: 700; }
+.hiword-rp-qsearch {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: var(--hw-rp-sub);
+  border: 1px solid transparent;
+  border-radius: 9px;
+  padding: 6px 10px;
+  width: 160px;
+  transition: all 0.2s;
+}
+.hiword-rp-qsearch:focus-within {
+  background: var(--b3-theme-background, #fff);
+  border-color: var(--b3-theme-primary, #4f7cff);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--b3-theme-primary, #4f7cff) 14%, transparent);
+}
+.hiword-rp-qsearch svg { width: 13px; height: 13px; color: var(--hw-rp-mut); flex-shrink: 0; }
+.hiword-rp-qsearch input {
+  border: none;
+  outline: none;
+  background: transparent;
+  font-size: 12px;
+  width: 100%;
+  color: var(--b3-theme-on-background, #333);
+  font-family: inherit;
+}
+.hiword-rp-qsearch input::placeholder { color: var(--hw-rp-mut); }
+
+/* ===== 数据统计 pane ===== */
+.hiword-rp-stats {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  overflow-y: auto;
+  min-height: 0;
+  flex: 1 1 auto;
+}
+.hiword-rp-st-cards {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 8px;
+}
+.hiword-rp-st-grid {
+  display: grid;
+  grid-template-columns: 1.2fr 1fr;
+  gap: 8px;
+}
+@media (max-width: 520px) {
+  .hiword-rp-st-grid { grid-template-columns: 1fr; }
+  .hiword-rp-st-cards { grid-template-columns: repeat(2, 1fr); }
+}
+.hiword-rp-st-block {
+  background: var(--b3-theme-background, #fff);
+  border: 1px solid var(--b3-border-color, #eee);
+  border-radius: 10px;
+  padding: 12px 14px;
+}
+.hiword-rp-st-block h4 {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--hw-rp-mut);
+  margin: 0 0 10px;
+}
+/* 近 7 天柱状图 */
+.hiword-rp-st-bars {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+  height: 96px;
+}
+.hiword-rp-st-bar {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 3px;
+  height: 100%;
+  min-width: 0;
+}
+.hiword-rp-st-bar i {
+  display: block;
+  width: 100%;
+  max-width: 26px;
+  background: var(--b3-theme-primary, #4f7cff);
+  opacity: 0.75;
+  border-radius: 4px 4px 2px 2px;
+  transition: height 0.4s cubic-bezier(0.22, 0.8, 0.3, 1);
+}
+.hiword-rp-st-bar i.hiword-rp-st-bar--today { opacity: 1; }
+.hiword-rp-st-bar span { font-size: 10px; color: var(--hw-rp-mut); white-space: nowrap; }
+.hiword-rp-st-bar em { font-size: 10px; font-style: normal; color: var(--b3-theme-on-surface, #555); min-height: 13px; font-variant-numeric: tabular-nums; }
+/* 星级分布横条 */
+.hiword-rp-st-srs { display: flex; flex-direction: column; gap: 8px; }
+.hiword-rp-st-srsrow { display: flex; align-items: center; gap: 8px; font-size: 12px; }
+.hiword-rp-st-srstag { width: 72px; flex-shrink: 0; text-align: right; color: var(--hw-rp-mut); white-space: nowrap; }
+.hiword-rp-st-track {
+  flex: 1;
+  height: 14px;
+  background: var(--hw-rp-sub);
+  border-radius: 99px;
+  overflow: hidden;
+}
+.hiword-rp-st-track i {
+  display: block;
+  height: 100%;
+  background: linear-gradient(90deg, color-mix(in srgb, var(--b3-theme-primary, #4f7cff) 55%, #fff), var(--b3-theme-primary, #4f7cff));
+  border-radius: 99px;
+}
+.hiword-rp-st-v { width: 30px; flex-shrink: 0; color: var(--b3-theme-on-surface, #555); font-variant-numeric: tabular-nums; }
+/* 易忘词 Top */
+.hiword-rp-st-forgotlist { display: flex; flex-direction: column; }
+.hiword-rp-st-forgot {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 2px;
+  border-bottom: 1px dashed var(--b3-border-color, #eee);
+  font-size: 12px;
+}
+.hiword-rp-st-forgot:last-child { border-bottom: none; }
+.hiword-rp-st-fw { font-weight: 600; color: var(--b3-theme-on-background, #333); }
+.hiword-rp-st-fm {
+  flex: 1;
+  min-width: 0;
+  color: var(--hw-rp-mut);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.hiword-rp-st-flapse {
+  flex-shrink: 0;
+  font-size: 11px;
+  color: var(--b3-theme-error, #e5484d);
+  background: color-mix(in srgb, var(--b3-theme-error, #e5484d) 10%, transparent);
+  border-radius: 5px;
+  padding: 1px 7px;
+}
+.hiword-rp-st-focus { flex-shrink: 0; }
+.hiword-rp-st-note {
+  font-size: 11px;
+  color: var(--hw-rp-mut);
+  text-align: center;
+}
+
+/* ===== 添加单词书弹层（书源绑定）===== */
+.hiword-ab-dialog { display: flex; flex-direction: column; height: 100%; box-sizing: border-box; }
+.hiword-ab-body { flex: 1 1 auto; display: flex; min-height: 0; }
+.hiword-ab-side {
+  width: 216px;
+  flex-shrink: 0;
+  border-right: 1px solid var(--b3-border-color, #eee);
+  padding: 10px 8px;
+  overflow-y: auto;
+  background: var(--b3-theme-background-light, #fafafa);
+}
+.hiword-ab-tree {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 10px;
+  border-radius: 7px;
+  font-size: 13px;
+  color: var(--b3-theme-on-surface, #555);
+  cursor: pointer;
+  transition: background 0.12s;
+  white-space: nowrap;
+  overflow: hidden;
+}
+.hiword-ab-tree:hover { background: var(--hw-rp-sub); }
+.hiword-ab-tree--on {
+  background: color-mix(in srgb, var(--b3-theme-primary, #4f7cff) 12%, transparent);
+  color: var(--b3-theme-primary, #4f7cff);
+  font-weight: 600;
+}
+.hiword-ab-tree--theme { margin-left: 20px; font-size: 12.5px; }
+.hiword-ab-tw { font-size: 9px; color: var(--hw-rp-mut); width: 9px; flex-shrink: 0; }
+.hiword-ab-c { margin-left: auto; font-size: 11px; color: var(--hw-rp-mut); font-variant-numeric: tabular-nums; }
+.hiword-ab-drafttag {
+  font-size: 10px;
+  color: var(--b3-theme-warning, #d9822b);
+  background: color-mix(in srgb, var(--b3-theme-warning, #d9822b) 12%, transparent);
+  border-radius: 5px;
+  padding: 1px 6px;
+  margin-left: 4px;
+}
+.hiword-ab-main { flex: 1 1 auto; padding: 14px 18px; display: flex; flex-direction: column; gap: 12px; min-width: 0; overflow-y: auto; }
+.hiword-ab-pvhead { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+.hiword-ab-pvname { font-size: 15px; font-weight: 600; color: var(--b3-theme-on-background, #333); }
+.hiword-ab-pvmeta { font-size: 12px; color: var(--hw-rp-mut); }
+.hiword-ab-pvstars {
+  background: var(--hw-rp-sub);
+  border-radius: 8px;
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.hiword-ab-drafthint { font-size: 12px; color: var(--b3-theme-warning, #d9822b); }
+.hiword-ab-mrow { display: flex; align-items: center; gap: 8px; font-size: 11.5px; color: var(--hw-rp-mut); }
+.hiword-ab-mtag { width: 68px; flex-shrink: 0; text-align: right; white-space: nowrap; }
+.hiword-ab-mtrack { flex: 1; height: 10px; background: var(--b3-border-color, #e9e9ee); border-radius: 99px; overflow: hidden; }
+.hiword-ab-mtrack i { display: block; height: 100%; background: color-mix(in srgb, var(--b3-theme-primary, #4f7cff) 65%, #fff); border-radius: 99px; }
+.hiword-ab-mv { width: 22px; text-align: right; font-variant-numeric: tabular-nums; }
+.hiword-ab-pvwords { display: flex; flex-wrap: wrap; gap: 6px; }
+.hiword-ab-pvword {
+  font-size: 12px;
+  background: var(--hw-rp-sub);
+  border: 1px solid var(--b3-border-color, #e4e4e8);
+  border-radius: 6px;
+  padding: 3px 10px;
+  color: var(--b3-theme-on-surface, #555);
+}
+.hiword-ab-pvword--more { border-style: dashed; color: var(--hw-rp-mut); }
+.hiword-ab-optrow { display: flex; align-items: center; gap: 10px; font-size: 13px; color: var(--b3-theme-on-surface, #555); flex-wrap: wrap; }
+.hiword-ab-stepper { display: inline-flex; align-items: center; border: 1px solid var(--b3-border-color, #e4e4e8); border-radius: 7px; overflow: hidden; }
+.hiword-ab-stepper button {
+  width: 28px;
+  height: 30px;
+  border: none;
+  background: var(--hw-rp-sub);
+  cursor: pointer;
+  font-size: 15px;
+  color: var(--b3-theme-on-surface, #555);
+}
+.hiword-ab-stepper button:hover { background: var(--hw-rp-sub); }
+.hiword-ab-sv { width: 40px; text-align: center; font-size: 13px; font-variant-numeric: tabular-nums; }
+.hiword-ab-ophint { font-size: 11.5px; color: var(--hw-rp-mut); }
+.hiword-ab-ck { display: flex; align-items: center; gap: 8px; cursor: pointer; font-size: 13px; color: var(--b3-theme-on-surface, #555); flex-wrap: wrap; }
+.hiword-ab-box {
+  width: 15px;
+  height: 15px;
+  border: 1.5px solid var(--b3-border-color, #c8c8cf);
+  border-radius: 4px;
+  background: var(--b3-theme-background, #fff);
+  transition: all 0.15s;
+  flex-shrink: 0;
+}
+.hiword-ab-ck--on .hiword-ab-box { background: var(--b3-theme-primary, #4f7cff); border-color: var(--b3-theme-primary, #4f7cff); position: relative; }
+.hiword-ab-ck--on .hiword-ab-box::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  margin: auto;
+  width: 7px;
+  height: 4px;
+  border-left: 1.8px solid #fff;
+  border-bottom: 1.8px solid #fff;
+  transform: rotate(-45deg);
+}
+.hiword-ab-ckhint { font-size: 11.5px; color: var(--hw-rp-mut); }
+.hiword-ab-foot {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 18px;
+  border-top: 1px solid var(--b3-border-color, #eee);
+  background: var(--b3-theme-background-light, #fafafa);
+}
+.hiword-ab-confirm {
+  background: var(--b3-theme-primary, #4f7cff);
+  color: #fff;
+  border: none;
+}
+.hiword-ab-confirm:hover { filter: brightness(1.06); }
+@media (max-width: 560px) {
+  .hiword-ab-side { display: none; }
 }
 
 /* 词库面板拖放高亮（作用于持久内容容器，与复习面板一致） */
@@ -12301,7 +13171,7 @@ body.hiword-resizing {
   cursor: pointer;
   transition: background 0.12s;
 }
-.hiword-av-row:hover { background: var(--b3-theme-surface-hover, #f2f4f8); }
+.hiword-av-row:hover { background: var(--hw-rp-hover); }
 .hiword-av-check { width: 15px; height: 15px; accent-color: var(--b3-theme-primary, #4f7cff); }
 .hiword-av-word { font-weight: 600; color: var(--b3-theme-on-background, #333); }
 .hiword-av-meaning {
@@ -13175,3 +14045,159 @@ body.hiword-resizing {
 .rw-section-title { font-size: 13px; font-weight: 600; color: var(--b3-theme-on-background, #333); }
 .rw-section-hint { font-size: 11px; color: var(--b3-font-color-gray, rgba(0, 0, 0, .45)); line-height: 1.4; margin-top: 2px; }
 .rw-section-body { display: flex; flex-direction: column; gap: 6px; }
+
+/* ---- 2026-09-10 界面语言选择弹窗（src/i18n/lang-picker.ts）----
+   首次启动选择默认语言 / 设置里手动切换，共用同一套结构。
+   按钮用等分 flex + 大点击区：首次弹窗是用户看到的第一眼，要一眼看懂。 */
+.hiword-lang-pick { padding: 4px 2px 2px; }
+.hiword-lang-pick-desc {
+  margin: 0 0 16px;
+  font-size: 13px;
+  line-height: 1.7;
+  color: var(--b3-theme-on-surface, var(--b3-theme-on-background, #333));
+}
+.hiword-lang-pick-row { display: flex; gap: 12px; }
+.hiword-lang-btn {
+  flex: 1;
+  padding: 14px 0;
+  font-size: 15px;
+  font-family: inherit;
+  /* 跟随思源主题：surface 底 + 常规描边，深色/浅色主题都不刺眼 */
+  background: var(--b3-theme-surface, #f7f8f9);
+  color: var(--b3-theme-on-surface, var(--b3-theme-on-background, #333));
+  border: 1px solid var(--b3-border-color, rgba(128, 128, 128, 0.25));
+  border-radius: 8px;
+  cursor: pointer;
+  transition: border-color 0.15s ease, color 0.15s ease, background 0.15s ease;
+}
+.hiword-lang-btn:hover {
+  border-color: var(--b3-theme-primary, #4285f4);
+  color: var(--b3-theme-primary, #4285f4);
+}
+/* 当前语言（手动切换弹窗里）用主题色环 + 浅底标出，不用重色块抢注意力 */
+.hiword-lang-btn.is-active {
+  border-color: var(--b3-theme-primary, #4285f4);
+  color: var(--b3-theme-primary, #4285f4);
+  background: color-mix(in srgb, var(--b3-theme-primary, #4285f4) 8%, transparent);
+}
+
+/* =====================================================================
+ * 2026-09-11 词库/复习面板：草稿 vs 已校验 视觉化
+ * ---------------------------------------------------------------------
+ * 草稿本不参与复习；用 amber 系配色与已完成/已校验做明显区分
+ * =====================================================================*/
+
+/* 词库面板顶部草稿本提示 banner（amber 浅底） */
+.hiword-vb-draft-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--b3-theme-warning-background, #fffbeb);
+  border: 1px solid var(--b3-theme-warning, #f59e0b);
+  border-left: 3px solid var(--b3-theme-warning, #f59e0b);
+  border-radius: 8px;
+  padding: 8px 12px;
+  margin: 8px 12px 0;
+  font-size: 12.5px;
+  color: var(--b3-theme-on-surface, #333);
+  cursor: default;
+}
+.hiword-vb-draft-banner .hiword-vb-draft-icon {
+  font-size: 14px;
+  flex-shrink: 0;
+}
+.hiword-vb-draft-banner .hiword-vb-draft-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.hiword-vb-draft-banner .hiword-vb-draft-goto {
+  flex-shrink: 0;
+  background: transparent;
+  border: 1px solid var(--b3-theme-warning, #f59e0b);
+  color: var(--b3-theme-warning, #f59e0b);
+  border-radius: 4px;
+  padding: 2px 8px;
+  font-size: 12px;
+  cursor: pointer;
+  font-family: inherit;
+  transition: all 0.15s ease;
+}
+.hiword-vb-draft-banner .hiword-vb-draft-goto:hover {
+  background: var(--b3-theme-warning, #f59e0b);
+  color: #fff;
+}
+
+/* 草稿本 select option 半透明（仅做视觉弱化，无强警示） */
+.hiword-vb-book option.hiword-vb-book-draft {
+  color: var(--b3-theme-on-surface-light, #999);
+  font-style: italic;
+}
+
+/* 复习面板顶部草稿本提示条（amber 警示色） */
+.hiword-rp-draft-notice {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--b3-theme-warning-background, #fffbeb);
+  border: 1px solid var(--b3-theme-warning, #f59e0b);
+  border-left: 3px solid var(--b3-theme-warning, #f59e0b);
+  border-radius: 8px;
+  padding: 8px 12px;
+  margin-bottom: 12px;
+  font-size: 12.5px;
+  color: var(--b3-theme-on-surface, #333);
+  cursor: default;
+}
+.hiword-rp-draft-notice .hiword-rp-draft-icon {
+  font-size: 14px;
+  flex-shrink: 0;
+}
+.hiword-rp-draft-notice .hiword-rp-draft-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.hiword-rp-draft-notice .hiword-rp-draft-goto {
+  flex-shrink: 0;
+  background: transparent;
+  border: 1px solid var(--b3-theme-warning, #f59e0b);
+  color: var(--b3-theme-warning, #f59e0b);
+  border-radius: 4px;
+  padding: 2px 8px;
+  font-size: 12px;
+  cursor: pointer;
+  font-family: inherit;
+  transition: all 0.15s ease;
+}
+.hiword-rp-draft-notice .hiword-rp-draft-goto:hover {
+  background: var(--b3-theme-warning, #f59e0b);
+  color: #fff;
+}
+
+/* 复习面板 metrics 网格：自适应列数（容纳 5 张卡） */
+.hiword-rp-metrics {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(80px, 1fr));
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+/* 第 5 张「草稿待校验」指标卡（amber 主题色） */
+.hiword-rp-metric--draft {
+  background: var(--b3-theme-warning-background, #fffbeb);
+  border-color: var(--b3-theme-warning, #f59e0b);
+  cursor: pointer;
+  transition: transform 0.15s ease, box-shadow 0.15s ease;
+}
+.hiword-rp-metric--draft:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 2px 8px rgba(245, 158, 11, 0.2);
+}
+.hiword-rp-metric--draft .hiword-rp-metric-val {
+  color: var(--b3-theme-warning, #f59e0b);
+}

@@ -134,7 +134,8 @@ test("[B4] onQuickAnnotate 用 lastStyle + lastColor 一键创建高亮", () => 
 test("[B5] onQuickAnnotate 缺少选区时给出提示而非静默失败", () => {
   const b = bodyOf(viewSrc, "async function onQuickAnnotate");
   assert.ok(b, "应存在 onQuickAnnotate");
-  assert.match(b, /if \(!cfi \|\| !text\) \{ toast\("请先选中文本"\); return; \}/, "无选区应提示");
+  // 2026-09-11 i18n：提示文案改为 t("请先选中文本") 包裹，断言放宽为「两种形态都接受」。
+  assert.match(b, /if \(!cfi \|\| !text\) \{ toast\((?:t\()?"请先选中文本"\)+\); return; \}/, "无选区应提示");
 });
 
 /* ================= C. 两段式「标注」按钮 ================= */

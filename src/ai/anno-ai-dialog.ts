@@ -1,4 +1,5 @@
 import { logSwallow } from "../core/safe.ts";
+import { t } from "../i18n/index.ts";
 /**
  * REword · 微阅批注 AI 助手小弹窗（2026-08-22）
  * ------------------------------------------------------------------
@@ -112,14 +113,14 @@ export function renderAnnoAiDialogHtml(
 ): string {
   const noKeyWarn = opts.hasApiKey
     ? ""
-    : `<div class="hiword-anno-ai-nokey">未配置 AI 服务（API Key/BaseUrl 为空）<button type="button" class="hiword-anno-ai-open-settings" id="hiword-anno-ai-open-settings">去设置</button></div>`;
+    : `<div class="hiword-anno-ai-nokey">${t("未配置 AI 服务（API Key/BaseUrl 为空）")}<button type="button" class="hiword-anno-ai-open-settings" id="hiword-anno-ai-open-settings">${t("去设置")}</button></div>`;
 
   return `
     <div class="hiword-anno-ai-dialog">
       <div class="hiword-anno-ai-head" data-drag-handle>
-        <span class="hiword-anno-ai-title">🤖 微阅批注助手</span>
-        <button class="hiword-anno-ai-close" id="hiword-anno-ai-close" title="关闭">✕</button>
-        <button class="hiword-anno-ai-settings" id="hiword-anno-ai-settings" title="填回批注设置">⚙</button>
+        <span class="hiword-anno-ai-title">🤖 ${t("微阅批注助手")}</span>
+        <button class="hiword-anno-ai-close" id="hiword-anno-ai-close" title="${t("关闭")}">✕</button>
+        <button class="hiword-anno-ai-settings" id="hiword-anno-ai-settings" title="${t("填回批注设置")}">⚙</button>
       </div>
       <div class="hiword-anno-ai-no-key-wrap">${noKeyWarn}</div>
 
@@ -127,20 +128,20 @@ export function renderAnnoAiDialogHtml(
       <div class="hiword-anno-ai-reply" id="hiword-anno-ai-reply"></div>
 
       <!-- 中：chevron 手柄(可点击+可拖拽) -->
-      <div class="hiword-anno-ai-resizer" id="hiword-anno-ai-resizer" data-tooltip="点击收起输入区 / 拖动调整高度">
-        <button class="hiword-anno-ai-resizer-toggle" id="hiword-anno-ai-resizer-toggle" aria-label="收起输入区" type="button">▾</button>
+      <div class="hiword-anno-ai-resizer" id="hiword-anno-ai-resizer" data-tooltip="${t("点击收起输入区 / 拖动调整高度")}">
+        <button class="hiword-anno-ai-resizer-toggle" id="hiword-anno-ai-resizer-toggle" aria-label="${t("收起输入区")}" type="button">▾</button>
       </div>
 
       <!-- 下：输入区(可整体收起) -->
       <div class="hiword-anno-ai-footer" id="hiword-anno-ai-footer">
         <textarea class="hiword-anno-ai-textarea" id="hiword-anno-ai-input" rows="3"
-          placeholder="附加问题（可空，回车发送 / 流式中回车取消）"></textarea>
+          placeholder="${t("附加问题（可空，回车发送 / 流式中回车取消）")}"></textarea>
       </div>
 
       <!-- 选区菜单(默认隐藏，reply 容器内选词时显示) -->
       <div class="hiword-anno-ai-selmenu" id="hiword-anno-ai-selmenu" style="display:none" role="menu">
-        <button type="button" data-fill="all">全部填入</button>
-        <button type="button" data-fill="selection">选取填入</button>
+        <button type="button" data-fill="all">${t("全部填入")}</button>
+        <button type="button" data-fill="selection">${t("选取填入")}</button>
       </div>
 
       <!-- 2026-08-22 新增：弹窗 8 向 resize 手柄(4 边 + 4 角) -->
@@ -155,8 +156,8 @@ export function renderAnnoAiDialogHtml(
 
       <!-- 2026-08-22 新增：填回批注设置菜单(默认隐藏) -->
       <div class="hiword-anno-ai-settings-menu" id="hiword-anno-ai-settings-menu" style="display:none" role="menu">
-        <button type="button" data-fill="all">填入全部回复</button>
-        <button type="button" data-fill="selection">填入选中部分</button>
+        <button type="button" data-fill="all">${t("填入全部回复")}</button>
+        <button type="button" data-fill="selection">${t("填入选中部分")}</button>
       </div>
     </div>
   `;
@@ -215,7 +216,7 @@ export function applyAnnoAiCollapsedState(
     dialog.classList.add("hiword-anno-ai-dialog--collapsed");
     footer.style.maxHeight = "0";
     footer.style.minHeight = "0";
-    toggle.setAttribute("aria-label", "展开输入区");
+    toggle.setAttribute("aria-label", t("展开输入区"));
     toggle.textContent = "▴";
   } else {
     dialog.classList.remove("hiword-anno-ai-dialog--collapsed");
@@ -225,7 +226,7 @@ export function applyAnnoAiCollapsedState(
       footer.style.maxHeight = "";
     }
     footer.style.minHeight = "";
-    toggle.setAttribute("aria-label", "收起输入区");
+    toggle.setAttribute("aria-label", t("收起输入区"));
     toggle.textContent = "▾";
   }
   try {
@@ -755,7 +756,7 @@ export function openAnnoAiDialog(opts: AnnoAiDialogOptions): void {
     if (isStreaming) return;
     const settings = opts.getAiSettings();
     if (!settings.apiKey) {
-      opts.showMessage("未配置 API Key,请先在 AI 设置中填写", "error");
+      opts.showMessage(t("未配置 API Key,请先在 AI 设置中填写"), "error");
       return;
     }
     const input = root.querySelector("#hiword-anno-ai-input") as HTMLTextAreaElement | null;
@@ -816,13 +817,13 @@ export function openAnnoAiDialog(opts: AnnoAiDialogOptions): void {
       // 流式结束：补一次完整渲染（确保末尾 token 完整）
       scheduleRender();
       if (result.aborted) {
-        opts.showMessage("已停止生成", "info");
+        opts.showMessage(t("已停止生成"), "info");
       } else if (!result.ok) {
-        opts.showMessage(`AI 生成失败: ${result.error || "未知错误"}`, "error");
+        opts.showMessage(`${t("AI 生成失败: ")}${result.error || t("未知错误")}`, "error");
       }
     } catch (e: any) {
       getLogger().error("[REword-AnnoAI] 流式调用失败:", e);
-      opts.showMessage(`AI 生成失败: ${e?.message || e}`, "error");
+      opts.showMessage(`${t("AI 生成失败: ")}${e?.message || e}`, "error");
     } finally {
       isStreaming = false;
       abortController = null;

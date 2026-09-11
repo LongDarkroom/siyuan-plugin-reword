@@ -20,6 +20,8 @@
   import OpdsSearchPanel from "./OpdsSearchPanel.svelte";
   import GraphPanel from "./GraphPanel.svelte";
   import BookshelfContextMenu, { type MenuItem } from "./bookshelf-context-menu.svelte";
+  // 2026-09-11 多语言：中文原文即 key；t 被局部变量遮蔽的作用域改用别名 T
+  import { t, t as T } from "../i18n/index";
 
   export let store: BookshelfStore;
   export let onOpen: (bookId: string) => void;
@@ -90,31 +92,37 @@
   let dropGroupId = "";
 
   const STATUS_LABEL: Record<BookStatus, string> = {
-    unread: "想读",
-    reading: "在读",
-    finished: "读完",
+    unread: t("想读"),
+    reading: t("在读"),
+    finished: t("读完"),
   };
 
   /** 状态文本，坏数据兜底防止标签空白 */
   function statusLabel(s: BookStatus | undefined): string {
-    return STATUS_LABEL[s ?? "unread"] ?? "想读";
+    return STATUS_LABEL[s ?? "unread"] ?? t("想读");
   }
 
   /** 状态循环顺序（卡片角标点击 + 侧栏智能分组共用） */
   const STATUS_ORDER: BookStatus[] = ["unread", "reading", "finished"];
 
   const SORT_OPTIONS: { key: BookSortKey; label: string }[] = [
-    { key: "lastRead", label: "最近阅读" },
-    { key: "addedAt", label: "添加时间" },
-    { key: "title", label: "书名" },
-    { key: "author", label: "作者" },
-    { key: "progress", label: "阅读进度" },
-    { key: "readingTime", label: "阅读时长" },
-    { key: "rating", label: "评分" },
-    { key: "size", label: "文件大小" },
+    { key: "lastRead", label: t("最近阅读") },
+    { key: "addedAt", label: t("添加时间") },
+    { key: "title", label: t("书名") },
+    { key: "author", label: t("作者") },
+    { key: "progress", label: t("阅读进度") },
+    { key: "readingTime", label: t("阅读时长") },
+    { key: "rating", label: t("评分") },
+    { key: "size", label: t("文件大小") },
     // [2026-08-29] P2:按颜色排序(色相 HSL 顺序:红→橙→黄→绿→蓝→紫→灰)
-    { key: "color", label: "颜色" },
+    { key: "color", label: t("颜色") },
   ];
+
+  /** 颜色 token → 已本地化色名（BOOK_COLORS.label 是中文显示名，命中不到回退空串） */
+  function colorLabel(token: BookColor | undefined): string {
+    const hit = BOOK_COLORS.find((x) => x.token === token);
+    return hit ? t(hit.label) : "";
+  }
 
   /** 侧栏分面数据：依赖 books 变化重算（单一 helper，避免多个 $: 各自失效） */
   function computeFacets(_b: BookMeta[]) {
@@ -392,14 +400,14 @@
     continueReadTitle = cid ? store.get(cid)?.title ?? "" : "";
   }
 
-  function fmtDate(t: number | undefined): string {
-    if (!t) return "";
-    const d = new Date(t);
-    return `${d.getMonth() + 1}月${d.getDate()}日`;
+  function fmtDate(ms: number | undefined): string {
+    if (!ms) return "";
+    const d = new Date(ms);
+    return t("{m}月{d}日", { m: d.getMonth() + 1, d: d.getDate() });
   }
 
   function fmtPct(frac: number | undefined): string {
-    if (typeof frac !== "number" || !isFinite(frac)) return "未读";
+    if (typeof frac !== "number" || !isFinite(frac)) return t("未读");
     return `${Math.min(100, Math.round(frac * 100))}%`;
   }
 
@@ -423,7 +431,7 @@
     for (const f of list) {
       currentName = f.name;
       if (!isSupportedBookFile(f.name)) {
-        fails.push({ name: f.name, reason: "不支持的文件类型", file: f });
+        fails.push({ name: f.name, reason: t("不支持的文件类型"), file: f });
         importDone++;
         continue;
       }
@@ -443,12 +451,13 @@
     await refresh();
     const ok = importTotal - importSkipped - fails.length;
     const parts: string[] = [];
-    if (ok > 0) parts.push(`导入 ${ok} 本`);
-    if (importSkipped > 0) parts.push(`跳过重复 ${importSkipped} 本`);
+    const sep = t("，");
+    if (ok > 0) parts.push(t("导入 {n} 本", { n: ok }));
+    if (importSkipped > 0) parts.push(t("跳过重复 {n} 本", { n: importSkipped }));
     if (fails.length) {
-      showToast(`${parts.join("，")}，失败 ${fails.length} 本`);
+      showToast(parts.join(sep) + t("，失败 {n} 本", { n: fails.length }));
     } else if (parts.length) {
-      showToast(parts.join("，"));
+      showToast(parts.join(sep));
     }
   }
 
@@ -532,10 +541,10 @@
     });
     editTarget = null;
     if (ok) {
-      showToast("已保存");
+      showToast(t("已保存"));
       await refresh();
     } else {
-      showToast("保存失败");
+      showToast(t("保存失败"));
     }
   }
 
@@ -567,7 +576,7 @@
     const f = coverInput?.files?.[0];
     if (!f || !editTarget) return;
     if (!/^image\//.test(f.type)) {
-      showToast("请选择图片文件");
+      showToast(t("请选择图片文件"));
       coverInput.value = "";
       return;
     }
@@ -576,16 +585,16 @@
     try {
       const path = await store.replaceCover(editTarget.id, f, ext);
       if (path) {
-        showToast("封面已替换");
+        showToast(t("封面已替换"));
         await refresh();
         // 弹窗内立即看到新封面
         const fresh = store.get(editTarget.id);
         if (fresh) editTarget = fresh;
       } else {
-        showToast("封面替换失败");
+        showToast(t("封面替换失败"));
       }
     } catch {
-      showToast("封面替换失败");
+      showToast(t("封面替换失败"));
     }
     coverBusy = false;
     coverInput.value = "";
@@ -603,7 +612,7 @@
     const next = STATUS_ORDER[(STATUS_ORDER.indexOf(cur) + 1) % STATUS_ORDER.length];
     await store.setStatus(b.id, next);
     await refresh();
-    showToast(`已标记为「${STATUS_LABEL[next]}」`);
+    showToast(t("已标记为「{s}」", { s: STATUS_LABEL[next] }));
   }
 
   /* ---- 分组管理 ---- */
@@ -614,7 +623,7 @@
     const g = await store.createGroup(n);
     newGroupName = "";
     await refresh();
-    if (g) showToast(`已创建分组「${g.name}」`);
+    if (g) showToast(t("已创建分组「{name}」", { name: g.name }));
   }
 
   async function startRenameGroup(g: BookGroup) {
@@ -643,14 +652,14 @@
     return [
       {
         icon: b.progress?.fraction ? "📖" : "▶",
-        label: b.progress?.fraction ? "续读" : "开始阅读",
+        label: b.progress?.fraction ? t("续读") : t("开始阅读"),
         onClick: () => onOpen(b.id),
       },
       { divider: true },
-      { icon: "✎", label: "编辑信息", onClick: () => openEdit(b) },
+      { icon: "✎", label: t("编辑信息"), onClick: () => openEdit(b) },
       {
         icon: "🏷",
-        label: "设置标签…",
+        label: t("设置标签…"),
         children: facets.tags.length
           ? [
               ...facets.tags.map((t) => ({
@@ -663,7 +672,7 @@
               })),
               { divider: true },
               {
-                label: "打开标签管理…",
+                label: t("打开标签管理…"),
                 onClick: () => {
                   editTarget = b;
                   editTags = [...(b.tags ?? [])];
@@ -671,11 +680,11 @@
                 },
               },
             ]
-          : [{ label: "(打开编辑弹窗管理标签)", onClick: () => openEdit(b) }],
+          : [{ label: t("(打开编辑弹窗管理标签)"), onClick: () => openEdit(b) }],
       },
       {
         icon: "📁",
-        label: "移到分组…",
+        label: t("移到分组…"),
         children: [
           ...facets.groups.map((g) => ({
             label: g.name,
@@ -684,25 +693,25 @@
           })),
           { divider: true },
           {
-            label: "(移出分组)",
+            label: t("(移出分组)"),
             active: !b.groupId,
             onClick: () => setGroup(b.id, undefined),
           },
           { divider: true },
           {
-            label: "管理分组…",
+            label: t("管理分组…"),
             onClick: () => (groupDialogOpen = true),
           },
         ],
       },
       {
         icon: b.favorite ? "★" : "☆",
-        label: b.favorite ? "取消收藏" : "收藏",
+        label: b.favorite ? t("取消收藏") : t("收藏"),
         onClick: () => toggleFav(b),
       },
       {
         icon: "⏱",
-        label: "状态",
+        label: t("状态"),
         children: (["unread", "reading", "finished"] as BookStatus[]).map((s) => ({
           label: STATUS_LABEL[s],
           active: (b.status ?? "unread") === s,
@@ -711,7 +720,7 @@
       },
       {
         icon: "★",
-        label: "评分",
+        label: t("评分"),
         children: [
           ...[1, 2, 3, 4, 5].map((n) => ({
             label: `${"★".repeat(n)}${"☆".repeat(5 - n)}`,
@@ -719,26 +728,26 @@
             onClick: () => setRating(b.id, n),
           })),
           { divider: true },
-          { label: "清除评分", active: !b.rating, onClick: () => setRating(b.id, 0) },
+          { label: t("清除评分"), active: !b.rating, onClick: () => setRating(b.id, 0) },
         ],
       },
       {
         icon: "●",
-        label: "颜色",
+        label: t("颜色"),
         children: [
           ...BOOK_COLORS.map((c) => ({
-            label: c.label,
+            label: t(c.label),
             active: b.color === c.token,
             onClick: () => setBookColor(b.id, c.token === b.color ? undefined : c.token),
           })),
           { divider: true },
-          { label: "移除颜色", active: !b.color, onClick: () => setBookColor(b.id, undefined) },
+          { label: t("移除颜色"), active: !b.color, onClick: () => setBookColor(b.id, undefined) },
         ],
       },
       { divider: true },
       {
         icon: "🖼",
-        label: "替换封面…",
+        label: t("替换封面…"),
         onClick: () => {
           editTarget = b;
           coverInput?.click();
@@ -746,18 +755,18 @@
       },
       {
         icon: "📋",
-        label: "复制书名",
+        label: t("复制书名"),
         onClick: () => {
           try {
             navigator.clipboard?.writeText(b.title);
-            showToast("已复制书名");
+            showToast(t("已复制书名"));
           } catch {
-            showToast("复制失败");
+            showToast(t("复制失败"));
           }
         },
       },
       { divider: true },
-      { icon: "🗑", label: "从书架移除…", danger: true, onClick: () => openRemove(b) },
+      { icon: "🗑", label: t("从书架移除…"), danger: true, onClick: () => openRemove(b) },
     ];
   }
 
@@ -765,24 +774,24 @@
   function buildGroupMenu(g: BookGroup): MenuItem[] {
     const count = store.groupCount(g.id);
     return [
-      { icon: "✎", label: "重命名", onClick: () => startRenameGroup(g) },
+      { icon: "✎", label: t("重命名"), onClick: () => startRenameGroup(g) },
       {
         icon: "●",
-        label: "颜色",
+        label: t("颜色"),
         children: [
           ...BOOK_COLORS.map((c) => ({
-            label: c.label,
+            label: t(c.label),
             active: g.color === c.token,
             onClick: () => setGroupColor(g.id, c.token === g.color ? undefined : c.token),
           })),
           { divider: true },
-          { label: "移除颜色", active: !g.color, onClick: () => setGroupColor(g.id, undefined) },
+          { label: t("移除颜色"), active: !g.color, onClick: () => setGroupColor(g.id, undefined) },
         ],
       },
       { divider: true },
       {
         icon: "📂",
-        label: "在主区域打开",
+        label: t("在主区域打开"),
         onClick: () => {
           filterGroup = g.id;
           favoriteOnly = false;
@@ -790,23 +799,23 @@
       },
       {
         icon: "📋",
-        label: "复制组名",
+        label: t("复制组名"),
         onClick: () => {
           try {
             navigator.clipboard?.writeText(g.name);
-            showToast("已复制组名");
+            showToast(t("已复制组名"));
           } catch {
-            showToast("复制失败");
+            showToast(t("复制失败"));
           }
         },
       },
       { divider: true },
       {
         icon: "🗑",
-        label: "删除分组",
+        label: t("删除分组"),
         danger: true,
         onClick: () => {
-          if (confirm(`确定删除分组「${g.name}」?\n组内 ${count} 本书将回到「未分组」`)) {
+          if (confirm(t("确定删除分组「{name}」?\n组内 {n} 本书将回到「未分组」", { name: g.name, n: count }))) {
             deleteGroup(g);
           }
         },
@@ -818,37 +827,37 @@
   async function setBookColor(id: string, color: BookColor | undefined) {
     await store.setColor(id, color);
     await refresh();
-    showToast(color ? `已设为${BOOK_COLORS.find((c) => c.token === color)?.label}` : "已移除颜色");
+    showToast(color ? t("已设为{color}", { color: colorLabel(color) }) : t("已移除颜色"));
   }
   async function setGroupColor(id: string, color: BookColor | undefined) {
     await store.setGroupColor(id, color);
     await refresh();
-    showToast(color ? `分组已设为${BOOK_COLORS.find((c) => c.token === color)?.label}` : "分组颜色已移除");
+    showToast(color ? t("分组已设为{color}", { color: colorLabel(color) }) : t("分组颜色已移除"));
   }
   async function setStatus(id: string, s: BookStatus) {
     await store.setStatus(id, s);
     await refresh();
-    showToast(`已标记为「${STATUS_LABEL[s]}」`);
+    showToast(t("已标记为「{s}」", { s: STATUS_LABEL[s] }));
   }
   async function setRating(id: string, n: number) {
     await store.setRating(id, n);
     await refresh();
-    showToast(n > 0 ? `已评 ${n} 星` : "已清除评分");
+    showToast(n > 0 ? t("已评 {n} 星", { n }) : t("已清除评分"));
   }
   async function setGroup(id: string, gid: string | undefined) {
     await store.setGroup(id, gid);
     await refresh();
-    showToast(gid ? "已移入分组" : "已移出分组");
+    showToast(gid ? t("已移入分组") : t("已移出分组"));
   }
   async function addTag(id: string, t: string) {
     await store.addTag(id, t);
     await refresh();
-    showToast(`已添加标签「${t}」`);
+    showToast(T("已添加标签「{tag}」", { tag: t }));
   }
   async function removeTag(id: string, t: string) {
     await store.removeTag(id, t);
     await refresh();
-    showToast(`已移除标签「${t}」`);
+    showToast(T("已移除标签「{tag}」", { tag: t }));
   }
 
   async function commitRenameGroup() {
@@ -863,10 +872,10 @@
     renamingGroupId = "";
     renamingGroupName = "";
     if (ok) {
-      showToast(`已重命名为「${name}」`);
+      showToast(t("已重命名为「{name}」", { name }));
       await refresh();
     } else {
-      showToast("重命名失败");
+      showToast(t("重命名失败"));
     }
   }
 
@@ -874,7 +883,7 @@
     await store.deleteGroup(g.id);
     if (filterGroup === g.id) filterGroup = "all";
     await refresh();
-    showToast(`已删除分组「${g.name}」（书籍保留）`);
+    showToast(t("已删除分组「{name}」（书籍保留）", { name: g.name }));
   }
 
   /* ---- 批量选择 ---- */
@@ -902,7 +911,7 @@
     const n = await store.batchSetStatus(selectedIds, v);
     (e.target as HTMLSelectElement).value = "";
     await refresh();
-    showToast(`已将 ${n} 本标记为「${STATUS_LABEL[v]}」`);
+    showToast(t("已将 {n} 本标记为「{s}」", { n, s: STATUS_LABEL[v] }));
   }
 
   async function batchGroup(e: Event) {
@@ -911,7 +920,7 @@
     const n = await store.batchSetGroup(selectedIds, v === "__none__" ? undefined : v);
     (e.target as HTMLSelectElement).value = "";
     await refresh();
-    showToast(v === "__none__" ? `已将 ${n} 本移出分组` : `已将 ${n} 本移入分组`);
+    showToast(v === "__none__" ? t("已将 {n} 本移出分组", { n }) : t("已将 {n} 本移入分组", { n }));
   }
 
   /** [2026-08-29] P2:批量设色 */
@@ -923,8 +932,8 @@
     const n = await store.batchSetColor(selectedIds, color);
     (e.target as HTMLSelectElement).value = "";
     await refresh();
-    if (n === 0) showToast("所选书已是该颜色");
-    else showToast(color ? `已将 ${n} 本设为${BOOK_COLORS.find((c) => c.token === color)?.label}` : `已移除 ${n} 本颜色`);
+    if (n === 0) showToast(t("所选书已是该颜色"));
+    else showToast(color ? t("已将 {n} 本设为{color}", { n, color: colorLabel(color) }) : t("已移除 {n} 本颜色", { n }));
   }
 
   /** [2026-08-29] P2:批量评分 */
@@ -936,7 +945,7 @@
     const n = await store.batchSetRating(selectedIds, v);
     (e.target as HTMLSelectElement).value = "";
     await refresh();
-    showToast(v > 0 ? `已将 ${n} 本评为 ${v} 星` : `已清除 ${n} 本评分`);
+    showToast(v > 0 ? t("已将 {n} 本评为 {v} 星", { n, v }) : t("已清除 {n} 本评分", { n }));
   }
 
   /** [2026-08-29] P2:批量收藏 */
@@ -946,7 +955,7 @@
     const n = await store.batchSetFavorite(selectedIds, v === "1");
     (e.target as HTMLSelectElement).value = "";
     await refresh();
-    showToast(v === "1" ? `已收藏 ${n} 本` : `已取消收藏 ${n} 本`);
+    showToast(v === "1" ? t("已收藏 {n} 本", { n }) : t("已取消收藏 {n} 本", { n }));
   }
 
   async function commitBatchTag() {
@@ -956,7 +965,7 @@
     batchTagOpen = false;
     batchTagName = "";
     await refresh();
-    showToast(`已为 ${n} 本添加标签「${t}」`);
+    showToast(T("已为 {n} 本添加标签「{tag}」", { n, tag: t }));
   }
 
   async function confirmBatchRemove() {
@@ -967,9 +976,9 @@
       selectedIds = [];
       selectMode = false;
       await refresh();
-      showToast(removeWithFile ? `已删除 ${n} 本及源文件` : `已移除 ${n} 本（源文件保留）`);
+      showToast(removeWithFile ? t("已删除 {n} 本及源文件", { n }) : t("已移除 {n} 本（源文件保留）", { n }));
     } catch {
-      showToast("批量删除失败");
+      showToast(t("批量删除失败"));
     }
     removeWithFile = false;
   }
@@ -1007,7 +1016,7 @@
     if (!ids.length) return;
     const n = await store.batchSetGroup(ids, gid === "__none__" ? undefined : gid);
     await refresh();
-    showToast(gid === "__none__" ? `已移出分组 ${n} 本` : `已移入分组 ${n} 本`);
+    showToast(gid === "__none__" ? t("已移出分组 {n} 本", { n }) : t("已移入分组 {n} 本", { n }));
   }
 
   function openRemove(b: BookMeta) {
@@ -1021,10 +1030,10 @@
     removeTarget = null;
     try {
       await store.removeBook(b.id, { deleteFile: removeWithFile });
-      showToast(removeWithFile ? `已删除《${b.title}》及源文件` : `已从书架移除《${b.title}》（源文件保留）`);
+      showToast(removeWithFile ? t("已删除《{title}》及源文件", { title: b.title }) : t("已从书架移除《{title}》（源文件保留）", { title: b.title }));
       await refresh();
     } catch {
-      showToast("删除失败");
+      showToast(t("删除失败"));
     }
   }
 
@@ -1166,41 +1175,41 @@
     <button
       class="shelf-icon-btn"
       class:active={sidebarOpen}
-      title={sidebarOpen ? "收起分组栏" : "展开分组栏"}
+      title={sidebarOpen ? t("收起分组栏") : t("展开分组栏")}
       on:click={toggleSidebar}
     >☰</button>
-    <span class="bookshelf-title">书架</span>
+    <span class="bookshelf-title">{t("书架")}</span>
     <span class="bookshelf-count">
-      {#if hasFilter}{visible.length} / {books.length} 本{:else}{books.length} 本{/if}
+      {#if hasFilter}{t("{a} / {b} 本", { a: visible.length, b: books.length })}{:else}{t("{n} 本", { n: books.length })}{/if}
     </span>
     <span class="bookshelf-spacer"></span>
     <!-- [2026-08-29] P2:续读最近一本(顶栏总入口) -->
     {#if continueReadId}
       <button
         class="shelf-icon-btn primary"
-        title="继续读 · {continueReadTitle}"
+        title={t("继续读 · {title}", { title: continueReadTitle })}
         on:click={() => continueReadId && onOpen(continueReadId)}
-      >▶ 续读</button>
+      >▶ {t("续读")}</button>
     {/if}
     <button
       class="shelf-icon-btn"
       class:active={selectMode}
-      title={selectMode ? "退出多选" : "多选"}
+      title={selectMode ? t("退出多选") : t("多选")}
       on:click={toggleSelectMode}
     >☑</button>
     <button
       class="shelf-icon-btn"
-      title="阅读统计"
+      title={t("阅读统计")}
       on:click={() => (showStats = true)}
     >📊</button>
     <button
       class="shelf-icon-btn"
-      title="在线书源（OPDS）"
+      title={t("在线书源（OPDS）")}
       on:click={() => (showOpds = true)}
     >🌐</button>
     <button
       class="shelf-icon-btn"
-      title="阅读知识图谱"
+      title={t("阅读知识图谱")}
       on:click={() => (showGraph = true)}
     >🕸️</button>
     <button
@@ -1208,7 +1217,7 @@
       disabled={importing}
       on:click={() => fileInput?.click()}
     >
-      {importing ? "导入中…" : "+ 导入"}
+      {importing ? t("导入中…") : t("+ 导入")}
     </button>
     <input
       bind:this={fileInput}
@@ -1227,82 +1236,82 @@
       <input
         class="shelf-search-input"
         type="text"
-        placeholder="搜索书名 / 作者 / 标签 / 丛书"
+        placeholder={t("搜索书名 / 作者 / 标签 / 丛书")}
         bind:value={keyword}
       />
       {#if keyword}
-        <button class="shelf-search-clear" title="清空" on:click={() => (keyword = "")}>✕</button>
+        <button class="shelf-search-clear" title={t("清空")} on:click={() => (keyword = "")}>✕</button>
       {/if}
     </div>
-    <select class="shelf-select" title="排序方式" value={sortKey} on:change={onSortKeyChange}>
+    <select class="shelf-select" title={t("排序方式")} value={sortKey} on:change={onSortKeyChange}>
       {#each SORT_OPTIONS as o}
         <option value={o.key}>{o.label}</option>
       {/each}
     </select>
     <button
       class="shelf-icon-btn"
-      title={sortDir === "desc" ? "当前：降序（点击切升序）" : "当前：升序（点击切降序）"}
+      title={sortDir === "desc" ? t("当前：降序（点击切升序）") : t("当前：升序（点击切降序）")}
       on:click={toggleSortDir}
     >{sortDir === "desc" ? "↓" : "↑"}</button>
     <div class="shelf-view-toggle">
       <button
         class="shelf-icon-btn"
         class:active={viewMode === "grid"}
-        title="封面网格"
+        title={t("封面网格")}
         on:click={() => setViewMode("grid")}
       >▦</button>
       <button
         class="shelf-icon-btn"
         class:active={viewMode === "list"}
-        title="列表"
+        title={t("列表")}
         on:click={() => setViewMode("list")}
       >☰</button>
     </div>
     {#if hasFilter}
-      <button class="shelf-clear-filter" title="清除全部筛选" on:click={clearFilters}>清除筛选</button>
+      <button class="shelf-clear-filter" title={t("清除全部筛选")} on:click={clearFilters}>{t("清除筛选")}</button>
     {/if}
   </div>
 
   {#if selectMode}
     <div class="shelf-batch-bar">
-      <span class="shelf-batch-count">已选 {selectedIds.length} 本</span>
-      <button class="shelf-batch-btn" on:click={selectAllVisible}>全选当前</button>
-      <button class="shelf-batch-btn" on:click={clearSelection}>清空</button>
+      <span class="shelf-batch-count">{t("已选 {n} 本", { n: selectedIds.length })}</span>
+      <button class="shelf-batch-btn" on:click={selectAllVisible}>{t("全选当前")}</button>
+      <button class="shelf-batch-btn" on:click={clearSelection}>{t("清空")}</button>
       <span class="bookshelf-spacer"></span>
       <select class="shelf-select" disabled={!selectedIds.length} on:change={batchStatus}>
-        <option value="">设为状态…</option>
-        <option value="unread">想读</option>
-        <option value="reading">在读</option>
-        <option value="finished">读完</option>
+        <option value="">{t("设为状态…")}</option>
+        <option value="unread">{t("想读")}</option>
+        <option value="reading">{t("在读")}</option>
+        <option value="finished">{t("读完")}</option>
       </select>
       <select class="shelf-select" disabled={!selectedIds.length} on:change={batchGroup}>
-        <option value="">移入分组…</option>
+        <option value="">{t("移入分组…")}</option>
         {#each facets.groups as g}
           <option value={g.id}>{g.name}</option>
         {/each}
-        <option value="__none__">（移出分组）</option>
+        <option value="__none__">{t("（移出分组）")}</option>
       </select>
       <!-- [2026-08-29] P2:批量设色(7 色 token) -->
       <select class="shelf-select" disabled={!selectedIds.length} on:change={batchColor}>
-        <option value="">设颜色…</option>
+        <option value="">{t("设颜色…")}</option>
         {#each BOOK_COLORS as c}
-          <option value={c.token}>{c.label}</option>
+          <option value={c.token}>{t(c.label)}</option>
         {/each}
-        <option value="__none__">（移除颜色）</option>
+        <option value="__none__">{t("（移除颜色）")}</option>
       </select>
       <!-- [2026-08-29] P2:批量评分 -->
       <select class="shelf-select" disabled={!selectedIds.length} on:change={batchRating}>
-        <option value="">设评分…</option>
+        <option value="">{t("设评分…")}</option>
         {#each [1, 2, 3, 4, 5] as n}
-          <option value={n}>{n} 星</option>
+          <option value={n}>{t("{n} 星", { n })}</option>
         {/each}
-        <option value={0}>（清除）</option>
+        <option value={0}>{t("（清除）")}</option>
       </select>
       <!-- [2026-08-29] P2:批量收藏 -->
       <select class="shelf-select" disabled={!selectedIds.length} on:change={batchFavorite}>
-        <option value="">收藏…</option>
-        <option value="1">★ 收藏</option>
-        <option value="0">（取消）</option>
+        <option value="">{t("收藏…")}</option>
+        <option value="1">{t("★ 收藏")}</option>
+        <option value="0">{t("（取消）")}</option>
       </select>
       <button
         class="shelf-batch-btn"
@@ -1310,7 +1319,7 @@
         on:click={() => {
           batchTagName = "";
           batchTagOpen = true;
-        }}>加标签</button
+        }}>{t("加标签")}</button
       >
       <button
         class="shelf-batch-btn danger"
@@ -1318,7 +1327,7 @@
         on:click={() => {
           removeWithFile = false;
           batchRemoveOpen = true;
-        }}>删除</button
+        }}>{t("删除")}</button
       >
     </div>
   {/if}
@@ -1331,8 +1340,8 @@
     <div class="bookshelf-dropzone">
       <div class="bookshelf-dropzone-inner">
         <div class="bookshelf-dropzone-icon">📥</div>
-        <div>松开导入书籍</div>
-        <div class="bookshelf-dropzone-hint">支持 EPUB / MOBI / AZW3 / FB2 / CBZ / PDF / TXT / Markdown</div>
+        <div>{t("松开导入书籍")}</div>
+        <div class="bookshelf-dropzone-hint">{t("支持 EPUB / MOBI / AZW3 / FB2 / CBZ / PDF / TXT / Markdown")}</div>
       </div>
     </div>
   {/if}
@@ -1340,7 +1349,7 @@
   {#if importing}
     <div class="import-progress">
       <div class="import-progress-text">
-        <span>导入中 {importDone}/{importTotal}</span>
+        <span>{t("导入中 {a}/{b}", { a: importDone, b: importTotal })}</span>
         <span class="import-progress-name">{currentName}</span>
       </div>
       <div class="import-progress-track">
@@ -1366,11 +1375,11 @@
             class:active={filterGroup === "all" && !favoriteOnly && filterStatus === "all" && !filterTag}
             on:click={() => pickScope("all")}
           >
-            <span class="shelf-sb-label">📚 全部</span>
+            <span class="shelf-sb-label">{t("📚 全部")}</span>
             <span class="shelf-sb-num">{books.length}</span>
           </button>
           <button class="shelf-sb-item" class:active={favoriteOnly} on:click={() => pickScope("favorite")}>
-            <span class="shelf-sb-label">★ 收藏</span>
+            <span class="shelf-sb-label">{t("★ 收藏")}</span>
             <span class="shelf-sb-num">{facets.favorites}</span>
           </button>
           <button
@@ -1382,7 +1391,7 @@
             on:dragleave={() => onGroupDragLeave("__none__")}
             on:drop={(e) => onGroupDrop(e, "__none__")}
           >
-            <span class="shelf-sb-label">📂 未分组</span>
+            <span class="shelf-sb-label">{t("📂 未分组")}</span>
             <span class="shelf-sb-num">{facets.ungrouped}</span>
           </button>
         </div>
@@ -1390,7 +1399,7 @@
         <div class="shelf-sb-block">
           <button class="shelf-sb-title toggle" on:click={() => toggleBlock("status")}>
             <span class="shelf-sb-caret" class:closed={collapsed.status}>▾</span>
-            <span class="shelf-sb-title-text">阅读状态</span>
+            <span class="shelf-sb-title-text">{t("阅读状态")}</span>
           </button>
           {#if !collapsed.status}
             {#each STATUS_ORDER as s}
@@ -1408,11 +1417,11 @@
 
         <div class="shelf-sb-block">
           <div class="shelf-sb-title">
-            <button class="shelf-sb-toggle" on:click={() => toggleBlock("groups")} title="折叠/展开">
+            <button class="shelf-sb-toggle" on:click={() => toggleBlock("groups")} title={t("折叠/展开")}>
               <span class="shelf-sb-caret" class:closed={collapsed.groups}>▾</span>
             </button>
-            <span class="shelf-sb-title-text" on:click={() => toggleBlock("groups")}>我的分组</span>
-            <button class="shelf-sb-add" title="管理分组" on:click|stopPropagation={() => (groupDialogOpen = true)}>＋</button>
+            <span class="shelf-sb-title-text" on:click={() => toggleBlock("groups")}>{t("我的分组")}</span>
+            <button class="shelf-sb-add" title={t("管理分组")} on:click|stopPropagation={() => (groupDialogOpen = true)}>＋</button>
           </div>
           {#if !collapsed.groups}
             {#each facets.groups as g (g.id)}
@@ -1422,7 +1431,7 @@
                 class:dropping={dropGroupId === g.id}
                 role="button"
                 tabindex="0"
-                title="点击筛选 · 双击重命名 · 拖书归组 · 右键更多"
+                title={t("点击筛选 · 双击重命名 · 拖书归组 · 右键更多")}
                 on:click={() => {
                   if (renamingGroupId !== g.id) pickGroup(g.id);
                 }}
@@ -1459,13 +1468,13 @@
                     class="group-op"
                     on:click|stopPropagation={() => commitRenameGroup()}
                     on:mousedown|preventDefault={() => (renameBlurCommit = true)}
-                  >确定</button>
+                  >{t("确定")}</button>
                   <button
                     type="button"
                     class="group-op"
                     on:click|stopPropagation={() => { renamingGroupId = ""; renamingGroupName = ""; }}
                     on:mousedown|preventDefault={() => (renameBlurCommit = false)}
-                  >取消</button>
+                  >{t("取消")}</button>
                 {:else}
                   <!-- [2026-08-29] P2:分组色点(无色时透明占位) -->
                   <span
@@ -1479,19 +1488,19 @@
                   <button
                     type="button"
                     class="shelf-sb-edit"
-                    title="重命名(双击组名也行)"
+                    title={t("重命名(双击组名也行)")}
                     on:click|stopPropagation={() => startRenameGroup(g)}
                   >✎</button>
                   <button
                     type="button"
                     class="shelf-sb-colorbtn"
-                    title="分组颜色"
+                    title={t("分组颜色")}
                     on:click|stopPropagation={() => openGroupColorDialog(g.id)}
                   >●</button>
                 {/if}
               </div>
             {:else}
-              <div class="shelf-sb-hint">还没有分组，点 ＋ 新建</div>
+              <div class="shelf-sb-hint">{t("还没有分组，点 ＋ 新建")}</div>
             {/each}
           {/if}
         </div>
@@ -1500,7 +1509,7 @@
           <div class="shelf-sb-block">
             <button class="shelf-sb-title toggle" on:click={() => toggleBlock("tags")}>
               <span class="shelf-sb-caret" class:closed={collapsed.tags}>▾</span>
-              <span class="shelf-sb-title-text">标签</span>
+              <span class="shelf-sb-title-text">{t("标签")}</span>
             </button>
             {#if !collapsed.tags}
               <div class="shelf-sb-tags">
@@ -1519,7 +1528,7 @@
           <div class="shelf-sb-block">
             <button class="shelf-sb-title toggle" on:click={() => toggleBlock("colors")}>
               <span class="shelf-sb-caret" class:closed={collapsed.colors}>▾</span>
-              <span class="shelf-sb-title-text">颜色</span>
+              <span class="shelf-sb-title-text">{t("颜色")}</span>
             </button>
             {#if !collapsed.colors}
               <div class="shelf-sb-swatches">
@@ -1529,7 +1538,7 @@
                     class="shelf-sb-swatch"
                     class:on={filterColor === c.color}
                     style="--swatch-color: {BOOK_COLORS.find((x) => x.token === c.color)?.hex}"
-                    title="{BOOK_COLORS.find((x) => x.token === c.color)?.label} · {c.count} 本"
+                    title={`${colorLabel(c.color)} · ${t("{n} 本", { n: c.count })}`}
                     on:click={() => pickColor(c.color)}
                   >
                     <span class="shelf-sb-swatch-num">{c.count}</span>
@@ -1545,7 +1554,7 @@
           <div class="shelf-sb-block">
             <button class="shelf-sb-title toggle" on:click={() => toggleBlock("series")}>
               <span class="shelf-sb-caret" class:closed={collapsed.series}>▾</span>
-              <span class="shelf-sb-title-text">丛书</span>
+              <span class="shelf-sb-title-text">{t("丛书")}</span>
             </button>
             {#if !collapsed.series}
               <div class="shelf-sb-tags">
@@ -1563,7 +1572,7 @@
           <div class="shelf-sb-block">
             <button class="shelf-sb-title toggle" on:click={() => toggleBlock("formats")}>
               <span class="shelf-sb-caret" class:closed={collapsed.formats}>▾</span>
-              <span class="shelf-sb-title-text">格式</span>
+              <span class="shelf-sb-title-text">{t("格式")}</span>
             </button>
             {#if !collapsed.formats}
               <div class="shelf-sb-tags">
@@ -1586,16 +1595,16 @@
     <div class="shelf-main">
       {#if books.length === 0}
         <div class="bookshelf-empty">
-          <div class="bookshelf-empty-title">书架是空的</div>
-          <div class="bookshelf-empty-hint">支持 EPUB / MOBI / AZW3 / FB2 / CBZ / PDF / TXT / Markdown</div>
-          <div class="bookshelf-empty-hint">直接拖拽文件到这里，或点击下方按钮</div>
-          <button class="bookshelf-import-btn" on:click={() => fileInput?.click()}>导入第一本书</button>
+          <div class="bookshelf-empty-title">{t("书架是空的")}</div>
+          <div class="bookshelf-empty-hint">{t("支持 EPUB / MOBI / AZW3 / FB2 / CBZ / PDF / TXT / Markdown")}</div>
+          <div class="bookshelf-empty-hint">{t("直接拖拽文件到这里，或点击下方按钮")}</div>
+          <button class="bookshelf-import-btn" on:click={() => fileInput?.click()}>{t("导入第一本书")}</button>
         </div>
       {:else if visible.length === 0}
         <div class="bookshelf-empty">
-          <div class="bookshelf-empty-title">没有匹配的书籍</div>
-          <div class="bookshelf-empty-hint">试着换个关键词，或清除筛选条件</div>
-          <button class="bookshelf-import-btn" on:click={clearFilters}>清除筛选</button>
+          <div class="bookshelf-empty-title">{t("没有匹配的书籍")}</div>
+          <div class="bookshelf-empty-hint">{t("试着换个关键词，或清除筛选条件")}</div>
+          <button class="bookshelf-import-btn" on:click={clearFilters}>{t("清除筛选")}</button>
         </div>
       {:else if viewMode === "grid"}
         <div class="bookshelf-grid">
@@ -1623,7 +1632,7 @@
                   <button
                     class="book-sel"
                     class:on={selectedIds.includes(book.id)}
-                    title="选择"
+                    title={t("选择")}
                     on:click|stopPropagation={() => toggleSelect(book.id)}
                   >{selectedIds.includes(book.id) ? "✓" : ""}</button>
                 {/if}
@@ -1632,20 +1641,20 @@
                   <span
                     class="book-color-dot"
                     style="--swatch-color: {BOOK_COLORS.find((c) => c.token === book.color)?.hex}"
-                    title="颜色: {BOOK_COLORS.find((c) => c.token === book.color)?.label}"
+                    title={t("颜色: {c}", { c: colorLabel(book.color) })}
                   ></span>
                 {/if}
                 <button
                   class="book-fav"
                   class:on={book.favorite}
-                  title={book.favorite ? "取消收藏" : "收藏"}
+                  title={book.favorite ? t("取消收藏") : t("收藏")}
                   on:click|stopPropagation={() => toggleFav(book)}
                 >{book.favorite ? "★" : "☆"}</button>
                 <button
                   class="book-status"
                   class:reading={(book.status ?? "unread") === "reading"}
                   class:done={book.status === "finished"}
-                  title="点击切换阅读状态"
+                  title={t("点击切换阅读状态")}
                   on:click|stopPropagation={() => cycleStatus(book)}
                 >{statusLabel(book.status)}</button>
                 <!-- 2026-08-29 优化：操作按钮收纳到封面悬停层，卡片信息更简洁 -->
@@ -1656,20 +1665,20 @@
                 >
                   <button
                     class="book-overlay-primary"
-                    title={book.progress?.fraction ? "继续阅读" : "开始阅读"}
+                    title={book.progress?.fraction ? t("继续阅读") : t("开始阅读")}
                     on:click|stopPropagation={() => onOpen(book.id)}
                   >
-                    {book.progress?.fraction ? "续读" : "开始"}
+                    {book.progress?.fraction ? t("续读") : t("开始")}
                   </button>
                   <div class="book-overlay-tools">
                     <button
                       class="book-icon-btn"
-                      title="编辑书籍信息"
+                      title={t("编辑书籍信息")}
                       on:click|stopPropagation={() => openEdit(book)}
                     >✎</button>
                     <button
                       class="book-icon-btn danger"
-                      title="从书架删除"
+                      title={t("从书架删除")}
                       on:click|stopPropagation={() => openRemove(book)}
                     >🗑</button>
                   </div>
@@ -1679,7 +1688,7 @@
                 <div class="book-name" title={book.title}>{book.title}</div>
                 <div class="book-author-row">
                   <span class="book-author" title={book.author || ""}>
-                    {book.author ? book.author : "未知作者"}
+                    {book.author ? book.author : t("未知作者")}
                   </span>
                   <span class="book-progress">{fmtPct(book.progress?.fraction)}</span>
                 </div>
@@ -1704,7 +1713,7 @@
                 <button
                   class="row-sel"
                   class:on={selectedIds.includes(book.id)}
-                  title="选择"
+                  title={t("选择")}
                   on:click={() => toggleSelect(book.id)}
                 >{selectedIds.includes(book.id) ? "✓" : ""}</button>
               {/if}
@@ -1723,24 +1732,24 @@
                     <span
                       class="row-color-dot"
                       style="--swatch-color: {BOOK_COLORS.find((c) => c.token === book.color)?.hex}"
-                      title="颜色: {BOOK_COLORS.find((c) => c.token === book.color)?.label}"
+                      title={t("颜色: {c}", { c: colorLabel(book.color) })}
                     ></span>
                   {/if}
                   <button
                     class="row-status-chip"
                     class:reading={(book.status ?? "unread") === "reading"}
                     class:done={book.status === "finished"}
-                    title="点击切换阅读状态"
+                    title={t("点击切换阅读状态")}
                     on:click={() => cycleStatus(book)}
                   >{statusLabel(book.status)}</button>
-                  {#if book.favorite}<span class="row-fav" title="收藏">★</span>{/if}
+                  {#if book.favorite}<span class="row-fav" title={t("收藏")}>★</span>{/if}
                 </div>
                 <div class="row-sub">
                   <!-- [2026-08-29] P2:组 chip(放最前) -->
                   {#if book.groupId}
                     {@const g = facets.groups.find((x) => x.id === book.groupId)}
                     {#if g}
-                      <span class="row-group-chip" title="分组">
+                      <span class="row-group-chip" title={t("分组")}>
                         {#if g.color}<span
                           class="row-group-dot"
                           style="--swatch-color: {BOOK_COLORS.find((c) => c.token === g.color)?.hex}"
@@ -1749,7 +1758,7 @@
                       <span class="row-dot">·</span>
                     {/if}
                   {/if}
-                  <span class="row-author" title={book.author || ""}>{book.author || "未知作者"}</span>
+                  <span class="row-author" title={book.author || ""}>{book.author || t("未知作者")}</span>
                   <span class="row-dot">·</span>
                   <span>{book.format.toUpperCase()}</span>
                   <span class="row-dot">·</span>
@@ -1774,11 +1783,11 @@
               </div>
               <div class="row-actions">
                 <button class="row-btn primary" on:click={() => onOpen(book.id)}>
-                  {book.progress?.fraction ? "续读" : "开始"}
+                  {book.progress?.fraction ? t("续读") : t("开始")}
                 </button>
                 <div class="row-actions-extra" aria-hidden="true">
-                  <button class="row-icon-btn" title="编辑" on:click={() => openEdit(book)}>✎</button>
-                  <button class="row-icon-btn danger" title="删除" on:click={() => openRemove(book)}>🗑</button>
+                  <button class="row-icon-btn" title={t("编辑")} on:click={() => openEdit(book)}>✎</button>
+                  <button class="row-icon-btn danger" title={t("删除")} on:click={() => openRemove(book)}>🗑</button>
                 </div>
               </div>
             </div>
@@ -1791,7 +1800,7 @@
   {#if fails.length}
     <div class="import-fail-mask">
       <div class="import-fail-panel">
-        <div class="import-fail-title">导入失败 {fails.length} 本</div>
+        <div class="import-fail-title">{t("导入失败 {n} 本", { n: fails.length })}</div>
         <div class="import-fail-list">
           {#each fails as f}
             <div class="import-fail-item">
@@ -1801,8 +1810,8 @@
           {/each}
         </div>
         <div class="import-fail-actions">
-          <button class="bookshelf-import-btn" on:click={retryFails}>重试失败项</button>
-          <button class="import-fail-close" on:click={() => (fails = [])}>关闭</button>
+          <button class="bookshelf-import-btn" on:click={retryFails}>{t("重试失败项")}</button>
+          <button class="import-fail-close" on:click={() => (fails = [])}>{t("关闭")}</button>
         </div>
       </div>
     </div>
@@ -1811,15 +1820,15 @@
   {#if removeTarget}
     <div class="edit-mask" on:click|self={() => (removeTarget = null)}>
       <div class="edit-panel">
-        <div class="edit-title">从书架移除</div>
-        <div class="remove-desc">确定将《{removeTarget.title}》从书架移除？</div>
+        <div class="edit-title">{t("从书架移除")}</div>
+        <div class="remove-desc">{t("确定将《{title}》从书架移除？", { title: removeTarget.title })}</div>
         <label class="remove-check">
           <input type="checkbox" bind:checked={removeWithFile} />
-          <span>同时删除插件目录中的源文件（不可恢复）</span>
+          <span>{t("同时删除插件目录中的源文件（不可恢复）")}</span>
         </label>
         <div class="edit-actions">
-          <button class="bookshelf-import-btn remove-danger" on:click={confirmRemove}>移除</button>
-          <button class="import-fail-close" on:click={() => (removeTarget = null)}>取消</button>
+          <button class="bookshelf-import-btn remove-danger" on:click={confirmRemove}>{t("移除")}</button>
+          <button class="import-fail-close" on:click={() => (removeTarget = null)}>{t("取消")}</button>
         </div>
       </div>
     </div>
@@ -1828,15 +1837,15 @@
   {#if batchRemoveOpen}
     <div class="edit-mask" on:click|self={() => (batchRemoveOpen = false)}>
       <div class="edit-panel">
-        <div class="edit-title">批量移除</div>
-        <div class="remove-desc">确定将选中的 {selectedIds.length} 本从书架移除？</div>
+        <div class="edit-title">{t("批量移除")}</div>
+        <div class="remove-desc">{t("确定将选中的 {n} 本从书架移除？", { n: selectedIds.length })}</div>
         <label class="remove-check">
           <input type="checkbox" bind:checked={removeWithFile} />
-          <span>同时删除插件目录中的源文件（不可恢复）</span>
+          <span>{t("同时删除插件目录中的源文件（不可恢复）")}</span>
         </label>
         <div class="edit-actions">
-          <button class="bookshelf-import-btn remove-danger" on:click={confirmBatchRemove}>移除</button>
-          <button class="import-fail-close" on:click={() => (batchRemoveOpen = false)}>取消</button>
+          <button class="bookshelf-import-btn remove-danger" on:click={confirmBatchRemove}>{t("移除")}</button>
+          <button class="import-fail-close" on:click={() => (batchRemoveOpen = false)}>{t("取消")}</button>
         </div>
       </div>
     </div>
@@ -1845,14 +1854,14 @@
   {#if batchTagOpen}
     <div class="edit-mask" on:click|self={() => (batchTagOpen = false)}>
       <div class="edit-panel">
-        <div class="edit-title">为 {selectedIds.length} 本添加标签</div>
+        <div class="edit-title">{t("为 {n} 本添加标签", { n: selectedIds.length })}</div>
         <label class="edit-field">
-          <span>标签名</span>
-          <input bind:value={batchTagName} placeholder="如：精读 / 待复习" />
+          <span>{t("标签名")}</span>
+          <input bind:value={batchTagName} placeholder={t("如：精读 / 待复习")} />
         </label>
         {#if facets.tags.length}
           <div class="edit-field">
-            <span>已有标签（点击填入）</span>
+            <span>{t("已有标签（点击填入）")}</span>
             <div class="shelf-sb-tags">
               {#each facets.tags as t (t.tag)}
                 <button class="shelf-tag-chip" on:click={() => (batchTagName = t.tag)}>{t.tag}</button>
@@ -1861,8 +1870,8 @@
           </div>
         {/if}
         <div class="edit-actions">
-          <button class="bookshelf-import-btn" on:click={commitBatchTag}>添加</button>
-          <button class="import-fail-close" on:click={() => (batchTagOpen = false)}>取消</button>
+          <button class="bookshelf-import-btn" on:click={commitBatchTag}>{t("添加")}</button>
+          <button class="import-fail-close" on:click={() => (batchTagOpen = false)}>{t("取消")}</button>
         </div>
       </div>
     </div>
@@ -1871,10 +1880,10 @@
   {#if groupDialogOpen}
     <div class="edit-mask" on:click|self={() => (groupDialogOpen = false)}>
       <div class="edit-panel">
-        <div class="edit-title">管理分组</div>
+        <div class="edit-title">{t("管理分组")}</div>
         <div class="group-new">
-          <input bind:value={newGroupName} placeholder="新分组名称" on:keydown={(e) => e.key === "Enter" && createGroup()} />
-          <button class="bookshelf-import-btn" on:click={createGroup}>新建</button>
+          <input bind:value={newGroupName} placeholder={t("新分组名称")} on:keydown={(e) => e.key === "Enter" && createGroup()} />
+          <button class="bookshelf-import-btn" on:click={createGroup}>{t("新建")}</button>
         </div>
         <div class="group-list">
           {#each facets.groups as g (g.id)}
@@ -1885,8 +1894,8 @@
                   bind:value={renamingGroupName}
                   on:keydown={(e) => e.key === "Enter" && commitRenameGroup()}
                 />
-                <button class="group-op" on:click={commitRenameGroup}>确定</button>
-                <button class="group-op" on:click={() => (renamingGroupId = "")}>取消</button>
+                <button class="group-op" on:click={commitRenameGroup}>{t("确定")}</button>
+                <button class="group-op" on:click={() => (renamingGroupId = "")}>{t("取消")}</button>
               {:else}
                 <!-- [2026-08-29] P2:分组色点(点击展开 7 色 swatch) -->
                 <button
@@ -1894,13 +1903,13 @@
                   class="group-color-dot"
                   class:has={!!g.color}
                   style="--swatch-color: {g.color ? BOOK_COLORS.find((c) => c.token === g.color)?.hex : 'transparent'}"
-                  title="分组颜色"
+                  title={t("分组颜色")}
                   on:click={() => toggleGroupColorPicker(g.id)}
                 ></button>
                 <span class="group-name">📁 {g.name}</span>
-                <span class="group-count">{g.count} 本</span>
-                <button class="group-op" on:click={() => startRenameGroup(g)}>重命名</button>
-                <button class="group-op danger" on:click={() => deleteGroup(g)}>删除</button>
+                <span class="group-count">{t("{n} 本", { n: g.count })}</span>
+                <button class="group-op" on:click={() => startRenameGroup(g)}>{t("重命名")}</button>
+                <button class="group-op danger" on:click={() => deleteGroup(g)}>{t("删除")}</button>
                 {#if groupColorPickerId === g.id}
                   <div class="group-color-pop">
                     {#each BOOK_COLORS as c}
@@ -1909,7 +1918,7 @@
                         class="shelf-swatch"
                         class:on={g.color === c.token}
                         style="--swatch-color: {c.hex}"
-                        title={c.label}
+                        title={t(c.label)}
                         on:click={async () => {
                           await store.setGroupColor(g.id, c.token === g.color ? undefined : c.token);
                           groupColorPickerId = "";
@@ -1931,11 +1940,11 @@
               {/if}
             </div>
           {:else}
-            <div class="shelf-sb-hint">还没有分组</div>
+            <div class="shelf-sb-hint">{t("还没有分组")}</div>
           {/each}
         </div>
         <div class="edit-actions">
-          <button class="import-fail-close" on:click={() => (groupDialogOpen = false)}>关闭</button>
+          <button class="import-fail-close" on:click={() => (groupDialogOpen = false)}>{t("关闭")}</button>
         </div>
       </div>
     </div>
@@ -1944,7 +1953,7 @@
   {#if editTarget}
     <div class="edit-mask" on:click|self={() => (editTarget = null)}>
       <div class="edit-panel wide">
-        <div class="edit-title">编辑书籍信息</div>
+        <div class="edit-title">{t("编辑书籍信息")}</div>
         <div class="edit-scroll">
           <div class="edit-cover-row">
             <div class="edit-cover-preview">
@@ -1956,31 +1965,31 @@
             </div>
             <div class="edit-cover-ops">
               <button class="book-btn" disabled={coverBusy} on:click={() => coverInput?.click()}>
-                {coverBusy ? "上传中…" : "替换封面"}
+                {coverBusy ? t("上传中…") : t("替换封面")}
               </button>
-              <div class="edit-hint">支持 JPG / PNG / WebP，建议 3:4 竖版</div>
+              <div class="edit-hint">{t("支持 JPG / PNG / WebP，建议 3:4 竖版")}</div>
               <label class="edit-inline-check">
                 <input type="checkbox" bind:checked={editFavorite} />
-                <span>★ 收藏</span>
+                <span>{t("★ 收藏")}</span>
               </label>
             </div>
           </div>
 
           <label class="edit-field">
-            <span>书名</span>
-            <input bind:value={editTitle} placeholder="书名" />
+            <span>{t("书名")}</span>
+            <input bind:value={editTitle} placeholder={t("书名")} />
           </label>
           <label class="edit-field">
-            <span>作者</span>
-            <input bind:value={editAuthor} placeholder="作者" />
+            <span>{t("作者")}</span>
+            <input bind:value={editAuthor} placeholder={t("作者")} />
           </label>
           <label class="edit-field">
-            <span>丛书 / 系列</span>
-            <input bind:value={editSeries} placeholder="如：哈利·波特" />
+            <span>{t("丛书 / 系列")}</span>
+            <input bind:value={editSeries} placeholder={t("如：哈利·波特")} />
           </label>
 
           <div class="edit-field">
-            <span>阅读状态</span>
+            <span>{t("阅读状态")}</span>
             <div class="edit-seg">
               {#each STATUS_ORDER as s}
                 <button class="edit-seg-btn" class:on={editStatus === s} on:click={() => (editStatus = s)}>
@@ -1991,26 +2000,26 @@
           </div>
 
           <div class="edit-field">
-            <span>评分</span>
+            <span>{t("评分")}</span>
             <div class="edit-stars">
               {#each [1, 2, 3, 4, 5] as n}
                 <button
                   class="edit-star"
                   class:on={editRating >= n}
-                  title="{n} 星"
+                  title={t("{n} 星", { n })}
                   on:click={() => (editRating = editRating === n ? 0 : n)}
                 >★</button>
               {/each}
               {#if editRating}
-                <button class="edit-star-clear" on:click={() => (editRating = 0)}>清除</button>
+                <button class="edit-star-clear" on:click={() => (editRating = 0)}>{t("清除")}</button>
               {/if}
             </div>
           </div>
 
           <div class="edit-field">
-            <span>分组</span>
+            <span>{t("分组")}</span>
             <select class="shelf-select" bind:value={editGroupId}>
-              <option value="">（未分组）</option>
+              <option value="">{t("（未分组）")}</option>
               {#each facets.groups as g (g.id)}
                 <option value={g.id}>{g.name}</option>
               {/each}
@@ -2018,18 +2027,18 @@
           </div>
 
           <div class="edit-field">
-            <span>标签（回车或逗号添加）</span>
+            <span>{t("标签（回车或逗号添加）")}</span>
             <div class="edit-tag-box">
               {#each editTags as t}
                 <span class="edit-tag-chip">
                   {t}
-                  <button class="edit-tag-del" title="移除" on:click={() => dropEditTag(t)}>✕</button>
+                  <button class="edit-tag-del" title={T("移除")} on:click={() => dropEditTag(t)}>✕</button>
                 </span>
               {/each}
               <input
                 class="edit-tag-input"
                 bind:value={editTagInput}
-                placeholder={editTags.length ? "" : "输入标签…"}
+                placeholder={editTags.length ? "" : t("输入标签…")}
                 on:keydown={onEditTagKey}
                 on:blur={addEditTag}
               />
@@ -2050,7 +2059,7 @@
 
           <!-- [2026-08-29] P2:macOS 风格 7 色 swatch -->
           <div class="edit-field">
-            <span>颜色</span>
+            <span>{t("颜色")}</span>
             <div class="shelf-swatch-row">
               {#each BOOK_COLORS as c}
                 <button
@@ -2058,8 +2067,8 @@
                   class="shelf-swatch"
                   class:on={editColor === c.token}
                   style="--swatch-color: {c.hex}"
-                  title={c.label}
-                  aria-label={c.label}
+                  title={t(c.label)}
+                  aria-label={t(c.label)}
                   on:click={() => (editColor = editColor === c.token ? undefined : c.token)}
                 ></button>
               {/each}
@@ -2069,14 +2078,14 @@
                 type="button"
                 class="shelf-swatch-clear"
                 on:click={() => (editColor = undefined)}
-              >✕ 移除颜色</button>
+              >✕ {t("移除颜色")}</button>
             {/if}
           </div>
         </div>
 
         <div class="edit-actions">
-          <button class="bookshelf-import-btn" on:click={saveEdit}>保存</button>
-          <button class="import-fail-close" on:click={() => (editTarget = null)}>取消</button>
+          <button class="bookshelf-import-btn" on:click={saveEdit}>{t("保存")}</button>
+          <button class="import-fail-close" on:click={() => (editTarget = null)}>{t("取消")}</button>
         </div>
       </div>
     </div>

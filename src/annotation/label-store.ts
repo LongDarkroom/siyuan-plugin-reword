@@ -10,6 +10,7 @@
  * 本模块不依赖 SiYuan SDK，可在 Node 下直接单测。
  */
 
+import { t } from "../i18n/index.ts";
 import { getLogger } from "../core/logger.ts";
 
 /** 一个分类标签 */
@@ -120,7 +121,7 @@ export class LabelStore {
   /** 新增标签：去重（同名忽略大小写）→ 自动取色；返回最终对象 */
   add(name: string): AnnotationLabel {
     const n = (name || "").trim();
-    if (!n) throw new Error("标签名称不能为空");
+    if (!n) throw new Error(t("标签名称不能为空"));
     // 去重：同名（忽略大小写）返回已有
     for (const l of this.labels.values()) {
       if (l.name.toLowerCase() === n.toLowerCase()) return l;

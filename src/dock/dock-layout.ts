@@ -17,7 +17,9 @@ import { responsiveDialogSize } from "../core/responsive.ts";
 import { destroyAllPreviews } from "../annotation/ann-preview.ts";
 import { clearLaunchMarker } from "../reader/reader-tab.ts";
 import { READER_FEATURE_ID } from "../reader/reader-dock.ts";
+import { openFeatureTab } from "./feature-tab.ts";
 import { SLOT_LABELS, type DockableFeature, type DockSlot } from "./dock-manager.ts";
+import { t } from "../i18n/index.ts";
 
 export function initDockPanels(p: RewordPlugin) {
     // 2026-08-29 移动端适配 Phase 5：dock 初始宽度按屏幕尺寸折算
@@ -29,7 +31,6 @@ export function initDockPanels(p: RewordPlugin) {
       : isLargeMobile() ? 360 : 320;
     // ===== 组合 Dock（始终注册，承载 combined 功能的 Tab；保证 p.dockElement 有效）=====
     try {
-      const combinedIds = p.dockManager.getCombinedFeatureIds();
       const dockResult: any = p.addDock({
         config: {
           position: "RightBottom" as const,
@@ -41,7 +42,7 @@ export function initDockPanels(p: RewordPlugin) {
         type: "hiword-sidebar",
         init: (dock?: any) => {
           p.dockElement = dock.element;
-          renderCombinedDockShell(p, dock.element, combinedIds);
+          renderCombinedDockShell(p, dock.element);
         },
         update: () => { p.refreshActivePanel(); },
         destroy: () => { destroyAllPreviews(); p.dockElement = null; },
@@ -63,10 +64,36 @@ export function initDockPanels(p: RewordPlugin) {
     requestAnimationFrame(() => fixStandaloneDockIcons(p));
   }
 
+  /** 侧栏面板头部样式（一次注入；index.css 为 Svelte 编译产物不可手改，与 dashboard 同模式） */
+let sideStyleInjected = false;
+export function ensureDockSideStyles(): void {
+  if (sideStyleInjected || typeof document === "undefined") return;
+  const style = document.createElement("style");
+  style.id = "hiword-dock-sidehead-style";
+  style.textContent = `
+.hiword-dock-sidehead { display: flex; align-items: center; gap: 8px; padding: 5px 8px; border-bottom: 1px solid var(--b3-border-color); flex: none; }
+.hiword-dock-sidehead-title { font-size: 12px; font-weight: 600; color: var(--b3-theme-on-surface); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hiword-dock-title { font-size: 12px; font-weight: 600; color: var(--b3-theme-on-surface); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hiword-dock-back-btn { border: 1px solid var(--b3-border-color); background: var(--b3-theme-background); color: var(--b3-theme-on-surface); border-radius: 4px; padding: 1px 8px; font-size: 11px; cursor: pointer; flex: none; line-height: 18px; }
+.hiword-dock-back-btn:hover { border-color: var(--b3-theme-primary-lighter, rgba(53,117,240,.38)); color: var(--b3-theme-primary); background: var(--b3-theme-primary-lightest, rgba(53,117,240,.12)); }
+/* 组合栏 Tab 悬停浮现 ⧉（弹出为主区页签） */
+.hiword-tab-pop { display: none; margin-left: 2px; font-size: 11px; line-height: 1; padding: 2px 3px; border-radius: 4px; color: var(--b3-theme-on-surface); }
+.hiword-dock-tab:hover .hiword-tab-pop { display: inline-block; }
+.hiword-tab-pop:hover { color: var(--b3-theme-primary); background: var(--b3-theme-primary-lightest, rgba(53,117,240,.12)); }
+/* 组合栏 Tab 右键菜单 */
+.hiword-tab-ctx { position: fixed; z-index: 9999; min-width: 170px; background: var(--b3-theme-background); border: 1px solid var(--b3-border-color); border-radius: 6px; box-shadow: 0 6px 20px rgba(0,0,0,.14); padding: 4px; }
+.hiword-tab-ctx-item { font-size: 12.5px; padding: 6px 10px; border-radius: 4px; cursor: pointer; color: var(--b3-theme-on-background); }
+.hiword-tab-ctx-item:hover { background: var(--b3-list-hover, rgba(0,0,0,.05)); }
+`;
+  document.head.appendChild(style);
+  sideStyleInjected = true;
+}
+
   /** 注册一个功能的独立 Dock（幂等：已注册则跳过）。用于初始化与「拖出到角落」运行时扩展 */
 export function registerStandaloneDock(p: RewordPlugin, f: DockableFeature, slot: DockSlot, dockWidth = 320): void {
     if (p.standaloneElements.has(f.id)) return;
     if (slot === "combined" || slot === "hidden") return;
+    ensureDockSideStyles();
     const dockResult: any = p.addDock({
       config: {
         position: slot as any,
@@ -80,7 +107,20 @@ export function registerStandaloneDock(p: RewordPlugin, f: DockableFeature, slot
       type: "hiword-standalone-" + f.id,
       init: (dock?: any) => {
         p.standaloneElements.set(f.id, dock.element);
-        dock.element.innerHTML = `<div class="hiword-dock-panel"><div class="hiword-dock-content" id="hiword-dock-content"></div></div>`;
+        dock.element.innerHTML = `<div class="hiword-dock-panel">
+          <div class="hiword-dock-sidehead">
+            <span class="hiword-dock-sidehead-title">${t(f.title)}</span>
+            <button class="hiword-dock-back-btn" title="${t("回到组合栏")}">⇄ ${t("组合栏")}</button>
+          </div>
+          <div class="hiword-dock-content" id="hiword-dock-content"></div>
+        </div>`;
+        dock.element.querySelector(".hiword-dock-back-btn")?.addEventListener("click", () => {
+          void (async () => {
+            await p.dockManager.setSlot(f.id, "combined");
+            moveFeatureToSlot(p, f.id, "combined");
+            activateCombinedTab(p, f.id);
+          })();
+        });
         exposeDockContentDelegation(p, dock.element);
         p.renderFeatureInto(f.id, dock.element);
         p.applyFontSize();
@@ -94,19 +134,27 @@ export function registerStandaloneDock(p: RewordPlugin, f: DockableFeature, slot
     p.standaloneModels.set(f.id, (dockResult as any)?.model);
   }
 
-  /** 渲染组合栏外壳（Tab 栏 + 内容区 + 头部按钮），combined 功能作为 Tab 呈现 */
-export function renderCombinedDockShell(p: RewordPlugin, dockElement: HTMLElement, combinedIds: string[]) {
+  /**
+   * 渲染组合栏外壳（2026-09-11 v2 恢复 Tab 行）：组合栏是功能默认的「家」——
+   * Tab 行 = 工作台（第一）+ 其余 combined 功能；悬停 Tab 浮现 ⧉ 一键弹出为主区页签，
+   * 右键 Tab 走菜单兜底。主区页签（feature-tab.ts）是「放大镜」，⇄ 随时收回。
+   */
+export function renderCombinedDockShell(p: RewordPlugin, dockElement: HTMLElement) {
+    ensureDockSideStyles();
+    const combinedIds = p.dockManager.getFeatures()
+      .map((f) => f.id)
+      .filter((id) => p.dockManager.getSlot(id) === "combined");
     const tabsHtml = combinedIds.length
-      ? combinedIds.map((id, i) => `<button class="hiword-dock-tab${i === 0 ? " active" : ""}" data-tab="${id}">${featureTitle(p, id)}</button>`).join("")
-      : `<div class="hiword-dock-empty">所有功能已移至独立侧边栏</div>`;
+      ? combinedIds.map((id) => `<button class="hiword-dock-tab" data-tab="${id}">${featureTitle(p, id)}<span class="hiword-tab-pop" title="${t("弹出为主区页签")}">⧉</span></button>`).join("")
+      : "";
     dockElement.innerHTML = `
       <div class="hiword-dock-panel">
         <div class="hiword-dock-header">
           <div class="hiword-dock-tabs">${tabsHtml}</div>
           <div class="hiword-dock-header-actions">
-            <button class="hiword-dock-settings-btn" id="hiword-settings-btn" title="全局设置">⚙️</button>
-            <button class="hiword-dock-settings-btn" id="hiword-dock-layout-btn" title="面板布局管理（可拖拽功能到角落 / 组合栏）">📐</button>
-            <button class="hiword-dock-settings-btn" id="hiword-reload-btn" data-action="reload-plugin" title="重载插件">🔄</button>
+            <button class="hiword-dock-settings-btn" id="hiword-settings-btn" title="${t("全局设置")}">⚙️</button>
+            <button class="hiword-dock-settings-btn" id="hiword-dock-layout-btn" title="${t("面板布局管理（可拖拽功能到角落 / 组合栏）")}">📐</button>
+            <button class="hiword-dock-settings-btn" id="hiword-reload-btn" data-action="reload-plugin" title="${t("重载插件")}">🔄</button>
           </div>
         </div>
         <div class="hiword-dock-content" id="hiword-dock-content"></div>
@@ -114,6 +162,12 @@ export function renderCombinedDockShell(p: RewordPlugin, dockElement: HTMLElemen
 
     dockElement.querySelector(".hiword-dock-tabs")?.addEventListener("click", (e: Event) => {
       const target = e.target as HTMLElement;
+      if (target.classList.contains("hiword-tab-pop")) {
+        // ⭐ 悬停浮现的 ⧉：把该功能弹出为主区页签（组合栏 Tab 保留）
+        const tab = target.closest(".hiword-dock-tab") as HTMLElement | null;
+        if (tab?.dataset.tab) void openFeatureTab(p, tab.dataset.tab);
+        return;
+      }
       if (target.classList.contains("hiword-dock-tab")) {
         destroyAllPreviews();
         dockElement.querySelectorAll(".hiword-dock-tab").forEach((t: Element) => t.classList.remove("active"));
@@ -122,31 +176,76 @@ export function renderCombinedDockShell(p: RewordPlugin, dockElement: HTMLElemen
       }
     });
 
+    // 右键兜底菜单：弹出为主区页签 / 打开布局管理
+    dockElement.querySelector(".hiword-dock-tabs")?.addEventListener("contextmenu", (e: Event) => {
+      const tab = (e.target as HTMLElement).closest(".hiword-dock-tab") as HTMLElement | null;
+      if (!tab?.dataset.tab) return;
+      e.preventDefault();
+      showTabContextMenu(p, tab.dataset.tab, (e as MouseEvent).clientX, (e as MouseEvent).clientY);
+    });
+
     dockElement.querySelector("#hiword-settings-btn")?.addEventListener("click", () => p.openUnifiedSettings());
     dockElement.querySelector("#hiword-dock-layout-btn")?.addEventListener("click", () => openDockManagerPanel(p));
 
-    if (combinedIds.length > 0) p.renderFeatureInto(combinedIds[0], dockElement);
+    if (combinedIds.length > 0) {
+      const first = dockElement.querySelector(`.hiword-dock-tab[data-tab="${combinedIds[0]}"]`);
+      first?.classList.add("active");
+      p.renderFeatureInto(combinedIds[0], dockElement);
+    }
     exposeDockContentDelegation(p, dockElement);
     p.applyFontSize();
   }
 
-  /** 重新渲染组合栏 Tab（功能在组合栏 / 独立栏之间移动后调用） */
+  /** 组合栏 Tab 右键菜单（弹出为主区页签的兜底入口；点击任意处自动关闭） */
+function showTabContextMenu(p: RewordPlugin, id: string, x: number, y: number): void {
+    document.getElementById("hiword-tab-ctx")?.remove();
+    const menu = document.createElement("div");
+    menu.id = "hiword-tab-ctx";
+    menu.className = "hiword-tab-ctx";
+    menu.innerHTML = `
+      <div class="hiword-tab-ctx-item" data-act="pop">⧉ ${t("弹出为主区页签")}</div>
+      <div class="hiword-tab-ctx-item" data-act="layout">📐 ${t("面板布局管理")}</div>`;
+    document.body.appendChild(menu);
+    const rect = menu.getBoundingClientRect();
+    menu.style.left = Math.min(x, window.innerWidth - rect.width - 8) + "px";
+    menu.style.top = Math.min(y, window.innerHeight - rect.height - 8) + "px";
+    menu.addEventListener("click", (e: Event) => {
+      const act = (e.target as HTMLElement).closest(".hiword-tab-ctx-item") as HTMLElement | null;
+      if (!act) return;
+      if (act.dataset.act === "pop") void openFeatureTab(p, id);
+      else if (act.dataset.act === "layout") openDockManagerPanel(p);
+      menu.remove();
+    });
+    setTimeout(() => {
+      document.addEventListener("click", () => menu.remove(), { once: true });
+    }, 0);
+  }
+
+  /** 重绘组合栏外壳并恢复此前激活的 Tab（功能停靠关系变化后调用） */
 export function refreshCombinedDock(p: RewordPlugin): void {
     if (!p.dockElement) return;
-    const combinedIds = p.dockManager.getCombinedFeatureIds();
     const activeTab = p.dockElement.querySelector(".hiword-dock-tab.active") as HTMLElement | null;
     const activeId = activeTab?.dataset.tab ?? undefined;
-    renderCombinedDockShell(p, p.dockElement, combinedIds);
+    renderCombinedDockShell(p, p.dockElement);
     // 恢复此前激活的 Tab（若该功能仍在组合栏内），避免拖动功能时组合栏内容乱跳
-    if (activeId && combinedIds.includes(activeId)) {
-      const dockEl = p.dockElement;
-      const tab = dockEl.querySelector(`.hiword-dock-tab[data-tab="${activeId}"]`) as HTMLElement | null;
+    if (activeId && p.dockManager.getSlot(activeId) === "combined") {
+      const tab = p.dockElement.querySelector(`.hiword-dock-tab[data-tab="${activeId}"]`) as HTMLElement | null;
       if (tab) {
-        dockEl.querySelectorAll(".hiword-dock-tab").forEach((t: Element) => t.classList.remove("active"));
+        p.dockElement.querySelectorAll(".hiword-dock-tab").forEach((t: Element) => t.classList.remove("active"));
         tab.classList.add("active");
-        p.renderFeatureInto(activeId, dockEl);
+        p.renderFeatureInto(activeId, p.dockElement);
       }
     }
+  }
+
+  /** 组合栏内激活指定功能 Tab（从主区页签 / 独立面板收回后调用） */
+export function activateCombinedTab(p: RewordPlugin, id: string): void {
+    if (!p.dockElement) return;
+    const tab = p.dockElement.querySelector(`.hiword-dock-tab[data-tab="${id}"]`) as HTMLElement | null;
+    if (!tab) return;
+    p.dockElement.querySelectorAll(".hiword-dock-tab").forEach((t: Element) => t.classList.remove("active"));
+    tab.classList.add("active");
+    p.renderFeatureInto(id, p.dockElement);
   }
 
   /** 给某个 Dock 根元素绑定 #hiword-dock-content 的点击委托（词库/批注等交互） */
@@ -158,7 +257,11 @@ export function exposeDockContentDelegation(p: RewordPlugin, dockElement: HTMLEl
 
   /** 取功能显示名 */
 export function featureTitle(p: RewordPlugin, id: string): string {
-    return p.dockManager.getFeatures().find((f) => f.id === id)?.title ?? id;
+    // 2026-09-11：title 是 registerFeature 时求值缓存的中文原文（中文即 key）。
+    // 渲染时再查一次 t()：切语言后无需重载，tabbar / 停靠 toast 一经重渲染即换语言；
+    // t() 幂等（key 缺失回落原串），英文注册的 title 也不会被二次翻译。
+    const title = p.dockManager.getFeatures().find((f) => f.id === id)?.title ?? id;
+    return t(title);
   }
 
 
@@ -360,7 +463,7 @@ export function positionToSlot(p: RewordPlugin, position: string): DockSlot | nu
 
   /**
    * 运行时即时移动某功能 dock 到目标位置（无需重载思源）。
-   * - combined / hidden：隐藏独立 dock（若存在），并刷新组合栏 Tab 将其收纳为组合栏入口；
+   * - combined / hidden：关闭独立面板（若存在）并隐藏图标，刷新组合栏 Tab 收纳之（combined = 家）；
    * - Left/Right/Bottom：确保独立 dock 已注册（combined → 角落时按需创建），再用思源原生
    *   Dock.add() 跨栏迁移图标与面板（自动持久化）。
    * 返回 "moved" 表示即时生效；"reload-needed" 表示无法运行时完成。
@@ -369,7 +472,7 @@ export function moveFeatureToSlot(p: RewordPlugin, id: string, slot: DockSlot): 
     const f = p.dockManager.getFeatures().find((x) => x.id === id);
     if (!f) return "reload-needed";
     if (slot === "combined" || slot === "hidden") {
-      // 收入组合栏 / 隐藏：先关闭可能仍打开的独立面板，再隐藏图标，最后把功能作为 Tab 收纳进组合栏
+      // 收回组合栏 / 隐藏：先关闭可能仍打开的独立面板，再隐藏图标，最后刷新组合栏 Tab 将其收纳
       closeStandaloneDockPanel(p, id);
       setStandaloneDockVisible(p, id, false);
       refreshCombinedDock(p);
@@ -435,15 +538,14 @@ export function onLayoutReady(p: RewordPlugin) {
     }
   }
 
-  /** 聚焦某功能的承载 Dock（组合栏切 Tab / 独立 Dock 调 showDock） */
+  /** 聚焦某功能的承载界面（组合栏：展开 dock 并切到对应 Tab；独立 Dock：调 showDock） */
 export function focusFeatureDock(p: RewordPlugin, id: string) {
     const slot = p.dockManager.getSlot(id);
     if (slot !== "combined" && slot !== "hidden") {
       p.standaloneModels.get(id)?.showDock?.();
     } else {
       p.dockModel?.showDock?.();
-      const tab = p.dockElement?.querySelector(`.hiword-dock-tab[data-tab="${id}"]`) as HTMLElement | null;
-      tab?.click();
+      activateCombinedTab(p, id);
     }
   }
 
@@ -482,21 +584,21 @@ export function openDockManagerPanel(p: RewordPlugin) {
     const rows = features.map((f) => {
       const cur = p.dockManager.getSlot(f.id);
       const opts = SLOT_LABELS
-        .map((s) => `<option value="${s.value}"${s.value === cur ? " selected" : ""}>${s.label}</option>`)
+        .map((s) => `<option value="${s.value}"${s.value === cur ? " selected" : ""}>${t(s.label)}</option>`)
         .join("");
       return `<div class="hiword-dm-row" draggable="true" data-feature="${f.id}">
-        <span class="hiword-dm-drag" title="拖动到屏幕角落以停靠">⠿</span>
-        <span class="hiword-dm-name"><span class="hiword-dm-icon" data-feature="${f.id}"></span>${f.title}</span>
+        <span class="hiword-dm-drag" title="${t("拖动到屏幕角落以停靠")}">⠿</span>
+        <span class="hiword-dm-name"><span class="hiword-dm-icon" data-feature="${f.id}"></span>${t(f.title)}</span>
         <select class="hiword-dm-select b3-select" data-feature="${f.id}">${opts}</select>
       </div>`;
     }).join("");
     const dialog = new Dialog({
-      title: "面板布局管理",
+      title: t("面板布局管理"),
       content: `<div class="hiword-dm">
-        <div class="hiword-dm-tip">选择停靠位置<strong>即时生效</strong>，无需重载；也可直接<strong>拖动功能行到屏幕对应角落</strong>（主侧边栏 / 左上 / 左下 / 右上 / 右下 / 底部）。同侧多个面板在思源中为堆叠互斥，需同时查看请分到不同侧。</div>
+        <div class="hiword-dm-tip">${t("选择停靠位置")}<strong>${t("即时生效")}</strong>${t("，无需重载；也可直接")}<strong>${t("拖动功能行到屏幕对应角落")}</strong>${t("（组合栏 / 左上 / 左下 / 右上 / 右下 / 底部）。同侧多个面板在思源中为堆叠互斥，需同时查看请分到不同侧。")}</div>
         ${rows}
         <div class="hiword-dm-actions">
-          <button class="b3-button b3-button--outline hiword-dm-close" id="hiword-dm-close">关闭</button>
+          <button class="b3-button b3-button--outline hiword-dm-close" id="hiword-dm-close">${t("关闭")}</button>
         </div>
       </div>`,
       width: responsiveDialogSize(460, "width"),
@@ -517,8 +619,9 @@ export function openDockManagerPanel(p: RewordPlugin) {
         const fid = target.dataset.feature!;
         const slot = target.value as DockSlot;
         await p.dockManager.setSlot(fid, slot);
+        if (slot !== "combined" && slot !== "hidden") void p.dockManager.setLastSide(fid, slot);
         const res = moveFeatureToSlot(p, fid, slot);
-        showMessage(res === "moved" ? "布局已即时应用" : "需重载思源生效", 1800, "info" as any);
+        showMessage(res === "moved" ? t("布局已即时应用") : t("需重载思源生效"), 1800, "info" as any);
       });
     });
 
@@ -543,12 +646,12 @@ export function showDockDropZones(p: RewordPlugin) {
       overlay.id = "hiword-dock-zones";
       overlay.className = "hiword-dock-zones";
       overlay.innerHTML = `
-        <div class="hiword-dz hiword-dz-combined" data-slot="combined"><span>主侧边栏</span><em>组合栏总览</em></div>
-        <div class="hiword-dz hiword-dz-lt" data-slot="LeftTop"><span>左上</span></div>
-        <div class="hiword-dz hiword-dz-lb" data-slot="LeftBottom"><span>左下</span></div>
-        <div class="hiword-dz hiword-dz-rt" data-slot="RightTop"><span>右上</span></div>
-        <div class="hiword-dz hiword-dz-rb" data-slot="RightBottom"><span>右下</span></div>
-        <div class="hiword-dz hiword-dz-bottom" data-slot="Bottom"><span>底部</span></div>`;
+        <div class="hiword-dz hiword-dz-combined" data-slot="combined"><span>${t("主侧边栏")}</span><em>${t("组合栏总览")}</em></div>
+        <div class="hiword-dz hiword-dz-lt" data-slot="LeftTop"><span>${t("左上")}</span></div>
+        <div class="hiword-dz hiword-dz-lb" data-slot="LeftBottom"><span>${t("左下")}</span></div>
+        <div class="hiword-dz hiword-dz-rt" data-slot="RightTop"><span>${t("右上")}</span></div>
+        <div class="hiword-dz hiword-dz-rb" data-slot="RightBottom"><span>${t("右下")}</span></div>
+        <div class="hiword-dz hiword-dz-bottom" data-slot="Bottom"><span>${t("底部")}</span></div>`;
       document.body.appendChild(overlay);
       overlay.querySelectorAll<HTMLElement>(".hiword-dz").forEach((zone) => {
         zone.addEventListener("dragover", (e: DragEvent) => {
@@ -570,8 +673,8 @@ export function showDockDropZones(p: RewordPlugin) {
             if (sel) sel.value = slot;
             showMessage(
               res === "moved"
-                ? `${featureTitle(p, fid)} 已停靠到${slotLabel(p, slot)}`
-                : "需重载思源生效",
+                ? t("{f} 已停靠到{s}", { f: featureTitle(p, fid), s: slotLabel(p, slot) })
+                : t("需重载思源生效"),
               2000, "info" as any);
           }
         });
@@ -588,5 +691,5 @@ export function hideDockDropZones(p: RewordPlugin) {
 
   /** slot 的中文标签 */
 export function slotLabel(p: RewordPlugin, slot: DockSlot): string {
-    return SLOT_LABELS.find((s) => s.value === slot)?.label ?? slot;
+    return t(SLOT_LABELS.find((s) => s.value === slot)?.label ?? slot);
   }

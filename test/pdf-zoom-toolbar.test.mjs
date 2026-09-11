@@ -94,7 +94,8 @@ test("[布局] 缩放组 border-left 分隔，与其他工具栏按钮区分", (
 
 test("[回归] 工具栏其他按钮（搜索/设置/双语）保留", () => {
   // 现有的 reader-btn 应仍存在
-  assert.ok(/class="reader-btn[\s\S]*?title="搜索/.test(src), "搜索按钮保留");
-  assert.ok(/title="设置"/.test(src), "设置按钮保留");
+  // 2026-09-11 i18n：title 改为 title={t("…")} 模板插值，断言放宽为「两种形态都接受」。
+  assert.ok(/class="reader-btn[\s\S]*?title=(?:\{t\()?"搜索/.test(src), "搜索按钮保留");
+  assert.ok(/title=(?:\{t\()?"设置"/.test(src), "设置按钮保留");
   assert.ok(/toggleBilingual/.test(src), "双语按钮保留");
 });

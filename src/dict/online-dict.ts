@@ -30,6 +30,7 @@
  */
 
 import { defaultTransport, type PhoneticTransport } from "./online-phonetic.ts";
+import { t } from "../i18n/index.ts";
 
 /** 在线词典结果 */
 export interface OnlineDictResult {
@@ -553,7 +554,7 @@ export function renderOnlineDictCard(r: OnlineDictResult, inVocab: boolean): str
   // —— 词形行（并入简释义组；每个词形都是海词链接，点击递归查词）——
   const shapesHtml = r.inflections.length
     ? `<div class="hiword-dict-shapes">` +
-      `<span class="hiword-dict-shape-label">词形</span>` +
+      `<span class="hiword-dict-shape-label">${t("词形")}</span>` +
       r.inflections
         .map(
           (it) =>
@@ -625,10 +626,10 @@ export function renderOnlineDictCard(r: OnlineDictResult, inVocab: boolean): str
         `</div>`
     )
     .join("");
-  const meaningGroup = groupShell("释义", false, paneSet([
-    { id: `${uid}-p-detail`, label: "详尽释义", count: detail.reduce((n, g) => n + g.defs.length, 0), html: detailHtml },
-    { id: `${uid}-p-dual`, label: "双解释义", count: dual.reduce((n, g) => n + g.items.length, 0), html: dualHtml },
-    { id: `${uid}-p-en`, label: "英英释义", count: en.reduce((n, g) => n + g.defs.length, 0), html: enHtml },
+  const meaningGroup = groupShell(t("释义"), false, paneSet([
+    { id: `${uid}-p-detail`, label: t("详尽释义"), count: detail.reduce((n, g) => n + g.defs.length, 0), html: detailHtml },
+    { id: `${uid}-p-dual`, label: t("双解释义"), count: dual.reduce((n, g) => n + g.items.length, 0), html: dualHtml },
+    { id: `${uid}-p-en`, label: t("英英释义"), count: en.reduce((n, g) => n + g.defs.length, 0), html: enHtml },
   ]));
 
   // —— 组二：用例 ——
@@ -680,11 +681,11 @@ export function renderOnlineDictCard(r: OnlineDictResult, inVocab: boolean): str
         `</div>`
     )
     .join("");
-  const usageGroup = groupShell("用例", true, paneSet([
-    { id: `${uid}-p-ex`, label: "例句", count: examples.reduce((n, g) => n + g.items.length, 0), html: exHtml },
-    { id: `${uid}-p-ph`, label: "常用短语", count: phrases.length, html: phHtml },
-    { id: `${uid}-p-coll`, label: "词汇搭配", count: colls.reduce((n, g) => n + g.items.length, 0), html: collHtml },
-    { id: `${uid}-p-quote`, label: "经典引文", count: quotes.length, html: quoteHtml },
+  const usageGroup = groupShell(t("用例"), true, paneSet([
+    { id: `${uid}-p-ex`, label: t("例句"), count: examples.reduce((n, g) => n + g.items.length, 0), html: exHtml },
+    { id: `${uid}-p-ph`, label: t("常用短语"), count: phrases.length, html: phHtml },
+    { id: `${uid}-p-coll`, label: t("词汇搭配"), count: colls.reduce((n, g) => n + g.items.length, 0), html: collHtml },
+    { id: `${uid}-p-quote`, label: t("经典引文"), count: quotes.length, html: quoteHtml },
   ]));
 
   // —— 组三：相关 ——
@@ -699,7 +700,7 @@ export function renderOnlineDictCard(r: OnlineDictResult, inVocab: boolean): str
           .join("") +
         `</div>`
       : "";
-  const synHtml = synRow("近义：", synonyms) + synRow("反义：", antonyms);
+  const synHtml = synRow(t("近义："), synonyms) + synRow(t("反义："), antonyms);
   const nearHtml = nearWords.length
     ? `<div class="hiword-dict-syn-row">` +
       nearWords
@@ -707,29 +708,29 @@ export function renderOnlineDictCard(r: OnlineDictResult, inVocab: boolean): str
         .join("") +
       `</div>`
     : "";
-  const relGroup = groupShell("相关", true, paneSet([
-    { id: `${uid}-p-syn`, label: "近反义词", count: synonyms.length + antonyms.length, html: synHtml },
-    { id: `${uid}-p-near`, label: "临近单词", count: nearWords.length, html: nearHtml },
+  const relGroup = groupShell(t("相关"), true, paneSet([
+    { id: `${uid}-p-syn`, label: t("近反义词"), count: synonyms.length + antonyms.length, html: synHtml },
+    { id: `${uid}-p-near`, label: t("临近单词"), count: nearWords.length, html: nearHtml },
   ]));
 
   // 数据来源徽标（2026-09-07 切换至海词；保留 eudic 兼容）
-  const sourceLabel = r.source === "haici" ? "海词" : "欧路";
+  const sourceLabel = r.source === "haici" ? t("海词") : t("欧路");
 
   return (
     `<div class="hiword-dict-card hiword-dict-card--online-full" data-word="${esc(r.word)}" data-source="${esc(r.source)}">` +
-      `<div class="hiword-online-badge">🌐 在线词典（${sourceLabel}）</div>` +
+      `<div class="hiword-online-badge">🌐 ${t("在线词典")}（${sourceLabel}）</div>` +
       `<div class="hiword-dict-header">` +
         `<strong class="hiword-dict-word">${esc(r.word)}</strong>` +
         (r.phonetic ? `<em class="hiword-dict-phonetic">${esc(r.phonetic)}</em>` : "") +
         `<div class="hiword-dict-actions">` +
-          `<button class="hiword-dict-star ${inVocab ? "star-on" : ""}" data-action="vocab-star" data-word="${esc(r.word)}" title="${inVocab ? "移出词库" : "加入词库"}">${inVocab ? "★" : "☆"}</button>` +
-          `<button class="b3-button b3-button--small" data-action="tts" data-word="${esc(r.word)}">朗读</button>` +
+          `<button class="hiword-dict-star ${inVocab ? "star-on" : ""}" data-action="vocab-star" data-word="${esc(r.word)}" title="${inVocab ? t("移出词库") : t("加入词库")}">${inVocab ? "★" : "☆"}</button>` +
+          `<button class="b3-button b3-button--small" data-action="tts" data-word="${esc(r.word)}">${t("朗读")}</button>` +
         `</div>` +
       `</div>` +
       `<div class="hiword-dict-body">` +
         (sensesHtml
           ? `<ul class="hiword-dict-senses">${sensesHtml}</ul>`
-          : `<p class="hiword-online-empty">在线词典未返回释义</p>`) +
+          : `<p class="hiword-online-empty">${t("在线词典未返回释义")}</p>`) +
         shapesHtml +
         meaningGroup +
         usageGroup +
@@ -772,31 +773,31 @@ export function renderOnlineDictCardSimple(r: OnlineDictResult, opts: { showStar
     .filter((it) => it.label && it.form && it.form.toLowerCase() !== r.word.toLowerCase())
     .map((it) => `<span class="hiword-dict-infl-item">${esc(it.label)} ${esc(it.form)}</span>`);
   const inflHtml = inflParts.length
-    ? `<div class="hiword-dict-infl-line"><span class="hiword-dict-infl-title">形态变化</span>${inflParts.join('<span class="hiword-dict-infl-sep">·</span>')}</div>`
+    ? `<div class="hiword-dict-infl-line"><span class="hiword-dict-infl-title">${t("形态变化")}</span>${inflParts.join('<span class="hiword-dict-infl-sep">·</span>')}</div>`
     : "";
 
   const inVocab = opts.inVocab ?? false;
   const starBtn = opts.showStar === false
     ? ""
-    : `<button class="hiword-dict-star ${inVocab ? "star-on" : ""}" data-action="vocab-star" data-word="${esc(r.word)}" title="${inVocab ? "移出词库" : "加入词库"}">${inVocab ? "★" : "☆"}</button>`;
+    : `<button class="hiword-dict-star ${inVocab ? "star-on" : ""}" data-action="vocab-star" data-word="${esc(r.word)}" title="${inVocab ? t("移出词库") : t("加入词库")}">${inVocab ? "★" : "☆"}</button>`;
 
   return (
     `<div class="hiword-dict-card hiword-dict-card--simple" data-word="${esc(r.word)}" data-source="${esc(r.source)}">` +
-      `<div class="hiword-online-badge">🌐 在线词典（${r.source === "haici" ? "海词" : "欧路"}）</div>` +
+      `<div class="hiword-online-badge">🌐 ${t("在线词典")}（${r.source === "haici" ? t(t("海词")) : t(t("欧路"))}）</div>` +
       `<div class="hiword-dict-header">` +
         `<strong class="hiword-dict-word">${esc(r.word)}</strong>` +
         (r.phonetic ? `<em class="hiword-dict-phonetic">${esc(r.phonetic)}</em>` : "") +
         `<div class="hiword-dict-actions">` +
-          `<button class="hiword-dict-src-btn" data-action="dict-switch-offline" title="切换到离线词典">🌐</button>` +
-          `<button class="hiword-dict-side-btn" data-action="lookup-in-sidebar" data-word="${esc(r.word)}" title="在侧边栏查词典中查看详细释义">🔍</button>` +
+          `<button class="hiword-dict-src-btn" data-action="dict-switch-offline" title="${t("切换到离线词典")}">🌐</button>` +
+          `<button class="hiword-dict-side-btn" data-action="lookup-in-sidebar" data-word="${esc(r.word)}" title="${t("在侧边栏查词典中查看详细释义")}">🔍</button>` +
           starBtn +
-          `<button class="b3-button b3-button--small" data-action="tts" data-word="${esc(r.word)}">朗读</button>` +
+          `<button class="b3-button b3-button--small" data-action="tts" data-word="${esc(r.word)}">${t("朗读")}</button>` +
         `</div>` +
       `</div>` +
       `<div class="hiword-dict-body">` +
         (meaningsHtml
           ? `<ul class="hiword-dict-senses hiword-dict-senses--simple">${meaningsHtml}</ul>`
-          : `<p class="hiword-online-empty">在线词典未返回释义</p>`) +
+          : `<p class="hiword-online-empty">${t("在线词典未返回释义")}</p>`) +
         inflHtml +
       `</div>` +
     `</div>`

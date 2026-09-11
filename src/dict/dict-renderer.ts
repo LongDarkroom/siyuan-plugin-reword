@@ -10,6 +10,7 @@ import type { DictEntry } from "./dict-engine.ts";
 // 显式 .ts 扩展名：Node --experimental-strip-types 测试运行器不解析无扩展名导入（tsc/vite 用 bundler 解析不受影响）
 import { lookupWordMeta, getExtraPhonetic, hasExactHeadword } from "./dict-engine.ts";
 import { getWordInflections, type WordInflections } from "./inflect.ts";
+import { t } from "../i18n/index.ts";
 
 /** 解析后的结构化词条 */
 export interface ParsedEntry {
@@ -296,7 +297,7 @@ export function extractSenses(definition: string, max = 4): SenseItem[] {
       // 单义项下例句过多会撑爆卡片，封顶 6 条（详情/展开模式可见全部）
       const examplesCapped = examples.slice(0, 6);
 
-      let t = chunk
+      let txt = chunk
         .replace(/<span\s+class=["']?smb["'][^>]*>[\s\S]*?<\/span>/gi, "")
         .replace(/<span\s+class=["']?sma["'][^>]*>[\s\S]*?<\/span>/gi, "")
         .replace(/<span\s+class=["']?ea["'][^>]*>[\s\S]*?<\/span>/gi, "")
@@ -309,14 +310,14 @@ export function extractSenses(definition: string, max = 4): SenseItem[] {
         .replace(/&nbsp;/g, " ")
         .replace(/\s+/g, " ")
         .trim();
-      t = t.replace(/^\d+\.\s*/, "").trim();
+      txt = txt.replace(/^\d+\.\s*/, "").trim();
       // 过滤尾部派生词脏数据（如 "ex·pos·er n." 混入最后一条释义）
-      t = t.replace(/\s*[a-z]+(?:·[a-z]+)+\s+[nva]\.\s*$/, "").trim();
-      if (!t) continue;
+      txt = txt.replace(/\s*[a-z]+(?:·[a-z]+)+\s+[nva]\.\s*$/, "").trim();
+      if (!txt) continue;
       out.push({
         num: senses[i].num,
         brief: briefM ? clean(briefM[1]) : "",
-        zh: t,
+        zh: txt,
         example: examplesCapped[0]?.zh || "",
         exampleEn: examplesCapped[0]?.en || "", // 回退首条，兼容旧字段
         examples: examplesCapped, // 全部例句（renderSenseItem 优先渲染此数组）
@@ -369,9 +370,9 @@ function inheritNotePos(note: string): string | undefined {
 
 /** 去掉已自带的一层括号，避免渲染时再加一层变成 ((...)) */
 function stripWrappingParens(s: string): string {
-  const t = s.trim();
-  if (t.startsWith("(") && t.endsWith(")")) return t.slice(1, -1).trim();
-  return t;
+  const sft = s.trim();
+  if (sft.startsWith("(") && sft.endsWith(")")) return sft.slice(1, -1).trim();
+  return sft;
 }
 
 /** 渲染单条义项（简洁/详细/分组模式共用）。showPos=true 时显示行首词性小标签。
@@ -385,7 +386,7 @@ function renderSenseItem(
 ): string {
   const isPreferred = isPreferredSense(s, opts.preferredDefinitions);
   const star = isPreferred
-    ? '<span class="hiword-dict-sense-star" title="你的偏好释义">⭐</span>'
+    ? '<span class="hiword-dict-sense-star" title="' + t("你的偏好释义") + '">⭐</span>'
     : "";
   const preferredClass = isPreferred ? " hiword-dict-sense--preferred" : "";
   return (
@@ -403,7 +404,7 @@ function renderSenseItem(
         ? (() => {
             const [first, ...rest] = s.examples;
             let html =
-              `<blockquote class="hiword-dict-sense-ex-row" data-action="tts" data-text="${escapeAttr(first.en)}" title="点击朗读例句">` +
+              `<blockquote class="hiword-dict-sense-ex-row" data-action="tts" data-text="${escapeAttr(first.en)}" title="${t("点击朗读例句")}">` +
               `<span class="hiword-dict-sense-en">${escapeHtml(first.en)}<span class="hiword-tts-ico">🔊</span></span>` +
               (first.zh ? `<span class="hiword-dict-sense-ex-zh">${escapeHtml(first.zh)}</span>` : "") +
               "</blockquote>";
@@ -411,12 +412,12 @@ function renderSenseItem(
               html +=
                 `<div class="hiword-dict-sense-ex-more">` +
                 `<button type="button" class="hiword-dict-sense-ex-toggle b3-button b3-button--text b3-button--small" data-action="toggle-examples">` +
-                `<span class="hiword-dict-sense-ex-toggle-arrow">▾</span> 展开 ${rest.length} 条例句</button>` +
+                `<span class="hiword-dict-sense-ex-toggle-arrow">▾</span> ${t("展开 {n} 条例句", { n: rest.length })}</button>` +
                 `<div class="hiword-dict-sense-ex-rest" hidden>` +
                 rest
                   .map(
                     (ex) =>
-                      `<blockquote class="hiword-dict-sense-ex-row" data-action="tts" data-text="${escapeAttr(ex.en)}" title="点击朗读例句">` +
+                      `<blockquote class="hiword-dict-sense-ex-row" data-action="tts" data-text="${escapeAttr(ex.en)}" title="${t("点击朗读例句")}">` +
                       `<span class="hiword-dict-sense-en">${escapeHtml(ex.en)}<span class="hiword-tts-ico">🔊</span></span>` +
                       (ex.zh ? `<span class="hiword-dict-sense-ex-zh">${escapeHtml(ex.zh)}</span>` : "") +
                       "</blockquote>"
@@ -427,7 +428,7 @@ function renderSenseItem(
             return html;
           })()
         : s.exampleEn
-          ? `<blockquote class="hiword-dict-sense-ex-row" data-action="tts" data-text="${escapeAttr(s.exampleEn)}" title="点击朗读例句">` +
+          ? `<blockquote class="hiword-dict-sense-ex-row" data-action="tts" data-text="${escapeAttr(s.exampleEn)}" title="${t("点击朗读例句")}">` +
             `<span class="hiword-dict-sense-en">${escapeHtml(s.exampleEn)}<span class="hiword-tts-ico">🔊</span></span>` +
             (s.example ? `<span class="hiword-dict-sense-ex-zh">${escapeHtml(s.example)}</span>` : "") +
             "</blockquote>"
@@ -470,9 +471,9 @@ function renderSensesMoreWithOpts(
 ): string {
   return (
     // P2：改 b3-button--text 文本按钮（保留 data-action="toggle-senses"）
-    '<button type="button" class="b3-button b3-button--text b3-button--small hiword-dict-senses-toggle" data-action="toggle-senses" title="展开 / 收起全部义项">' +
+    '<button type="button" class="b3-button b3-button--text b3-button--small hiword-dict-senses-toggle" data-action="toggle-senses" title="' + t("展开 / 收起全部义项") + '">' +
       '<span class="hiword-dict-senses-toggle-arrow">▾</span>' +
-      '查看全部 ' + total + ' 个义项' +
+      t("查看全部 {n} 个义项", { n: total }) +
     "</button>" +
     '<div class="hiword-dict-senses-full" hidden>' + renderSensesList(definition, 99, opts) + "</div>"
   );
@@ -493,13 +494,14 @@ export function renderVocabDetailSenses(
   const groups = extractSensesByPos(definition, 99, 30, 400);
   if (!groups.length) return renderSensesList(definition, 8, opts);
 
+  const posNameMap = posLabels();
   const blocks = groups
     .map((g, i) => {
-      const posLabel = g.pos && POS_LABELS[g.pos] ? " <small>" + POS_LABELS[g.pos] + "</small>" : "";
+      const posLabel = g.pos && posNameMap[g.pos] ? " <small>" + posNameMap[g.pos] + "</small>" : "";
       // 默认展开：不加 hiword-vb-pos-collapsed，且带 hiword-vb-pos-open 高亮
       const chip =
         '<button type="button" class="hiword-vb-pos-chip hiword-vb-pos-toggle hiword-vb-pos-open"' +
-        ' data-action="toggle-pos" title="点击展开 / 收起该词性"><span class="hiword-vb-pos-arrow">▸</span>' +
+        ' data-action="toggle-pos" title="' + t("点击展开 / 收起该词性") + '"><span class="hiword-vb-pos-arrow">▸</span>' +
         escapeHtml(g.pos) + posLabel + "</button>";
       // P2：renderSenseItem 现为 <li>，需在 ul 内包裹（词性分组义项列表）
       const senseItems = '<ul class="hiword-vb-detail-senselist">' +
@@ -546,7 +548,7 @@ export function extractSensesByPos(
   for (const [pos, items] of groupMap) {
     groups.push({ pos: pos === "其他" ? "" : pos, items });
   }
-  const validPos = new Set(Object.keys(POS_LABELS));
+  const validPos = new Set(Object.keys(posLabels()));
   const filtered = groups.filter((g) => g.pos === "" || validPos.has(g.pos));
   const used = filtered.length ? filtered : groups;
   used.sort((a, b) => {
@@ -556,18 +558,21 @@ export function extractSensesByPos(
   return used.slice(0, maxGroups);
 }
 
-/** 词性显示名映射（简短化，支持大小写变体） */
-const POS_LABELS: Record<string, string> = {
-  "n.": "名词", "v.": "动词", "vt.": "及物动词", "vi.": "不及物动词",
-  "adj.": "形容词", "adv.": "副词", "prep.": "介词", "conj.": "连词",
-  "pron.": "代词", "art.": "冠词", "num.": "数词", "int.": "感叹词",
-  "phr.": "短语", "affix.": "词缀",
-  // 无尾点变体（ECD2 等词典可能返回 "N" / "V" / "ADJ"）
-  "n": "名词", "v": "动词", "vt": "及物动词", "vi": "不及物动词",
-  "adj": "形容词", "adv": "副词", "prep": "介词", "conj": "连词",
-  "pron": "代词", "art": "冠词", "num": "数词", "int": "感叹词",
-  "phr": "短语", "affix": "词缀",
-};
+/** 词性显示名映射（简短化，支持大小写变体）。
+ *  函数化延迟求值：模块加载早于 initI18n()，写成常量会在语言设置前求值。 */
+function posLabels(): Record<string, string> {
+  return {
+    "n.": t("名词"), "v.": t("动词"), "vt.": t("及物动词"), "vi.": t("不及物动词"),
+    "adj.": t("形容词"), "adv.": t("副词"), "prep.": t("介词"), "conj.": t("连词"),
+    "pron.": t("代词"), "art.": t("冠词"), "num.": t("数词"), "int.": t("感叹词"),
+    "phr.": t("短语"), "affix.": t("词缀"),
+    // 无尾点变体（ECD2 等词典可能返回 "N" / "V" / "ADJ"）
+    "n": t("名词"), "v": t("动词"), "vt": t("及物动词"), "vi": t("不及物动词"),
+    "adj": t("形容词"), "adv": t("副词"), "prep": t("介词"), "conj": t("连词"),
+    "pron": t("代词"), "art": t("冠词"), "num": t("数词"), "int": t("感叹词"),
+    "phr": t("短语"), "affix": t("词缀"),
+  };
+}
 
 /**
  * 词性 → 「图标字母 + 中文名」映射（图标+文字 词性标注）。
@@ -576,20 +581,20 @@ const POS_LABELS: Record<string, string> = {
 function posBadgeMeta(pos: string): { ico: string; zh: string } {
   const p = (pos || "").trim().toLowerCase().replace(/\.$/, "");
   switch (p) {
-    case "n": case "nc": case "nu": case "cn": case "un": return { ico: "N", zh: "名词" };
-    case "v": return { ico: "V", zh: "动词" };
-    case "vt": return { ico: "V", zh: "及物动词" };
-    case "vi": return { ico: "V", zh: "不及物动词" };
-    case "adj": return { ico: "ADJ", zh: "形容词" };
-    case "adv": return { ico: "ADV", zh: "副词" };
-    case "prep": return { ico: "PREP", zh: "介词" };
-    case "conj": return { ico: "CONJ", zh: "连词" };
-    case "pron": return { ico: "PRON", zh: "代词" };
-    case "art": return { ico: "ART", zh: "冠词" };
-    case "num": return { ico: "NUM", zh: "数词" };
-    case "int": return { ico: "INT", zh: "感叹词" };
-    case "phr": return { ico: "PHR", zh: "短语" };
-    case "affix": return { ico: "AFFIX", zh: "词缀" };
+    case "n": case "nc": case "nu": case "cn": case "un": return { ico: "N", zh: t("名词") };
+    case "v": return { ico: "V", zh: t("动词") };
+    case "vt": return { ico: "V", zh: t("及物动词") };
+    case "vi": return { ico: "V", zh: t("不及物动词") };
+    case "adj": return { ico: "ADJ", zh: t("形容词") };
+    case "adv": return { ico: "ADV", zh: t("副词") };
+    case "prep": return { ico: "PREP", zh: t("介词") };
+    case "conj": return { ico: "CONJ", zh: t("连词") };
+    case "pron": return { ico: "PRON", zh: t("代词") };
+    case "art": return { ico: "ART", zh: t("冠词") };
+    case "num": return { ico: "NUM", zh: t("数词") };
+    case "int": return { ico: "INT", zh: t("感叹词") };
+    case "phr": return { ico: "PHR", zh: t("短语") };
+    case "affix": return { ico: "AFFIX", zh: t("词缀") };
     default: return { ico: "·", zh: (pos || "").trim() };
   }
 }
@@ -617,7 +622,7 @@ function renderPosBadge(pos: string, opts?: { clickable?: boolean; title?: strin
 
 /**
  * 标准化词性标签：统一转小写 + 补尾点 + 映射到标准 key。
- * 处理 "N"/"n."/n"/"noun" 等各种变体，返回可用于 POS_LABELS 查找的 key。
+ * 处理 "N"/"n."/n"/"noun" 等各种变体，返回可用于 posLabels() 查找的 key。
  */
 function normalizePos(raw: string): string {
   if (!raw) return "";
@@ -853,9 +858,9 @@ export function renderVocabCompactCard(
       // 词性标注：图标+文字徽标；有更多义项时渲染为可点击 toggle 按钮，否则静态徽标
       const posChip = g.pos
         ? (hasMore
-          ? renderPosBadge(g.pos, { clickable: true, extraClass: openClass, title: "点击展开 / 收起该词性" })
+          ? renderPosBadge(g.pos, { clickable: true, extraClass: openClass, title: t("点击展开 / 收起该词性") })
           : renderPosBadge(g.pos))
-        : '<span class="hiword-vb-pos-chip hiword-vb-pos-fallback">释义</span>';
+        : '<span class="hiword-vb-pos-chip hiword-vb-pos-fallback">' + t("释义") + '</span>';
       // 展开区只放「第 2 条起」的义项，避免与摘要行重复
       const senseItemsHtml = g.items.slice(1).map((s) => {
         const numSpan = s.num ? '<span class="hiword-vb-sense-num">' + escapeHtml(s.num) + "</span>" : "";
@@ -877,14 +882,14 @@ export function renderVocabCompactCard(
     });
     groupsHtml = groupParts.join("");
   } else {
-    groupsHtml = '<div class="hiword-vb-empty-meaning">暂无释义</div>';
+    groupsHtml = '<div class="hiword-vb-empty-meaning">' + t("暂无释义") + '</div>';
   }
 
   const inflHtml = renderInflectionsBlock(inflections);
 
   const qcountBadge =
     typeof queryCount === "number" && queryCount > 0
-      ? '<span class="hiword-qcount" title="累计查询次数">' + escapeHtml(String(queryCount)) + " 次查询</span>"
+      ? '<span class="hiword-qcount" title="' + t("累计查询次数") + '">' + t("{n} 次查询", { n: escapeHtml(String(queryCount)) }) + "</span>"
       : "";
 
   return (
@@ -924,12 +929,12 @@ export function renderInflectionsBlock(infl?: WordInflections): string {
     const v = infl.verb;
     blocks.push(
       '<div class="hiword-vb-infl hiword-vb-infl-verb">' +
-        '<span class="hiword-vb-infl-label">动词变形</span>' +
-        '<span class="hiword-vb-infl-item"><b>过去式</b>' + renderInflLink(v.past) + "</span>" +
+        '<span class="hiword-vb-infl-label">' + t("动词变形") + '</span>' +
+        '<span class="hiword-vb-infl-item"><b>' + t("过去式") + '</b>' + renderInflLink(v.past) + "</span>" +
         '<span class="hiword-vb-infl-sep">·</span>' +
-        '<span class="hiword-vb-infl-item"><b>过去分词</b>' + renderInflLink(v.pastParticiple) + "</span>" +
+        '<span class="hiword-vb-infl-item"><b>' + t("过去分词") + '</b>' + renderInflLink(v.pastParticiple) + "</span>" +
         '<span class="hiword-vb-infl-sep">·</span>' +
-        '<span class="hiword-vb-infl-item"><b>现在进行时</b>' + renderInflLink(v.presentParticiple) + "</span>" +
+        '<span class="hiword-vb-infl-item"><b>' + t("现在进行时") + '</b>' + renderInflLink(v.presentParticiple) + "</span>" +
       "</div>"
     );
   }
@@ -937,10 +942,10 @@ export function renderInflectionsBlock(infl?: WordInflections): string {
     const a = infl.adjective;
     blocks.push(
       '<div class="hiword-vb-infl hiword-vb-infl-grad">' +
-        '<span class="hiword-vb-infl-label">形容词变形</span>' +
-        '<span class="hiword-vb-infl-item"><b>比较级</b>' + renderInflLink(a.comparative) + "</span>" +
+        '<span class="hiword-vb-infl-label">' + t("形容词变形") + '</span>' +
+        '<span class="hiword-vb-infl-item"><b>' + t("比较级") + '</b>' + renderInflLink(a.comparative) + "</span>" +
         '<span class="hiword-vb-infl-sep">·</span>' +
-        '<span class="hiword-vb-infl-item"><b>最高级</b>' + renderInflLink(a.superlative) + "</span>" +
+        '<span class="hiword-vb-infl-item"><b>' + t("最高级") + '</b>' + renderInflLink(a.superlative) + "</span>" +
       "</div>"
     );
   }
@@ -948,10 +953,10 @@ export function renderInflectionsBlock(infl?: WordInflections): string {
     const adv = infl.adverb;
     blocks.push(
       '<div class="hiword-vb-infl hiword-vb-infl-grad">' +
-        '<span class="hiword-vb-infl-label">副词变形</span>' +
-        '<span class="hiword-vb-infl-item"><b>比较级</b>' + renderInflLink(adv.comparative) + "</span>" +
+        '<span class="hiword-vb-infl-label">' + t("副词变形") + '</span>' +
+        '<span class="hiword-vb-infl-item"><b>' + t("比较级") + '</b>' + renderInflLink(adv.comparative) + "</span>" +
         '<span class="hiword-vb-infl-sep">·</span>' +
-        '<span class="hiword-vb-infl-item"><b>最高级</b>' + renderInflLink(adv.superlative) + "</span>" +
+        '<span class="hiword-vb-infl-item"><b>' + t("最高级") + '</b>' + renderInflLink(adv.superlative) + "</span>" +
       "</div>"
     );
   }
@@ -959,7 +964,7 @@ export function renderInflectionsBlock(infl?: WordInflections): string {
     const n = infl.noun;
     blocks.push(
       '<div class="hiword-vb-infl hiword-vb-infl-noun">' +
-        '<span class="hiword-vb-infl-label">名词复数</span>' +
+        '<span class="hiword-vb-infl-label">' + t("名词复数") + '</span>' +
         '<span class="hiword-vb-infl-item">' + renderInflLink(n.plural) + "</span>" +
       "</div>"
     );
@@ -1009,14 +1014,14 @@ export function renderVocabDetailCard(
         '<strong class="hiword-vb-detail-word">' + escapeHtml(entry.word) + "</strong>" +
         (entry.phonetic ? '<em class="hiword-vb-detail-phon">' + escapeHtml(entry.phonetic) + "</em>" : "") +
         posSummary +
-        (entry.matchType === "inflection" ? '<span class="hiword-vb-badge">变形还原</span>' : "") +
-        (entry.matchType === "similar" ? '<span class="hiword-vb-badge">相似词</span>' : "") +
+        (entry.matchType === "inflection" ? '<span class="hiword-vb-badge">' + t("变形还原") + '</span>' : "") +
+        (entry.matchType === "similar" ? '<span class="hiword-vb-badge">' + t("相似词") + '</span>' : "") +
       "</div>" +
       '<div class="hiword-vb-detail-cols">' +
         '<div class="hiword-vb-detail-col">' +
           '<div class="hiword-detail-section" data-section="sense">' +
-            '<button type="button" class="hiword-detail-sec-head" data-action="toggle-section" title="展开 / 收起释义">' +
-              '<span class="hiword-detail-sec-arrow">▾</span>单词意思 · 例句' +
+            '<button type="button" class="hiword-detail-sec-head" data-action="toggle-section" title="' + t("展开 / 收起释义") + '">' +
+              '<span class="hiword-detail-sec-arrow">▾</span>' + t("单词意思 · 例句") +
             "</button>" +
             "<div class=\"hiword-detail-sec-body\">" + meaningBody + "</div>" +
           "</div>" +
@@ -1044,7 +1049,7 @@ export function renderPhraseSection(phrases: PhraseItem[]): string {
             (p.zh ? '<span class="hiword-detail-phrase-zh">' + escapeHtml(p.zh) + "</span>" : "") +
           "</div>" +
           (p.exampleEn
-            ? '<blockquote class="hiword-detail-phrase-ex" data-action="tts" data-text="' + escapeAttr(p.exampleEn) + '" title="点击朗读例句">' +
+            ? '<blockquote class="hiword-detail-phrase-ex" data-action="tts" data-text="' + escapeAttr(p.exampleEn) + '" title="' + t("点击朗读例句") + '">' +
                 '<span class="hiword-detail-phrase-ex-en">' + escapeHtml(p.exampleEn) + '<span class="hiword-tts-ico">🔊</span></span>' +
                 (p.example ? '<span class="hiword-detail-phrase-ex-zh">' + escapeHtml(p.example) + "</span>" : "") +
               "</blockquote>"
@@ -1054,8 +1059,8 @@ export function renderPhraseSection(phrases: PhraseItem[]): string {
     .join("");
   return (
     '<div class="hiword-detail-section" data-section="phrase">' +
-      '<button type="button" class="hiword-detail-sec-head" data-action="toggle-section" title="展开 / 收起词组">' +
-        '<span class="hiword-detail-sec-arrow">▾</span>词组 · 短语<span class="hiword-detail-sec-count">' + phrases.length + "</span>" +
+      '<button type="button" class="hiword-detail-sec-head" data-action="toggle-section" title="' + t("展开 / 收起词组") + '">' +
+        '<span class="hiword-detail-sec-arrow">▾</span>' + t("词组 · 短语") + '<span class="hiword-detail-sec-count">' + phrases.length + "</span>" +
       "</button>" +
       "<div class=\"hiword-detail-sec-body\">" + items + "</div>" +
     "</div>"
@@ -1077,7 +1082,7 @@ export function renderPhraseEntryCard(definition: string): string {
         (p.zh ? '<span class="hiword-dict-phrase-entry-zh">' + escapeHtml(p.zh) + "</span>" : "") +
       "</div>" +
       (p.exampleEn
-        ? '<div class="hiword-dict-sense-ex-row" data-action="tts" data-text="' + escapeAttr(p.exampleEn) + '" title="点击朗读例句">' +
+        ? '<div class="hiword-dict-sense-ex-row" data-action="tts" data-text="' + escapeAttr(p.exampleEn) + '" title="' + t("点击朗读例句") + '">' +
             '<span class="hiword-dict-sense-en">' + escapeHtml(p.exampleEn) + '<span class="hiword-tts-ico">🔊</span></span>' +
             (p.example ? '<span class="hiword-dict-sense-ex-zh">' + escapeHtml(p.example) + "</span>" : "") +
           "</div>"
@@ -1294,14 +1299,14 @@ export function renderDictCard(
 ): string {
   const inVocab = opts.inVocab ?? false;
   const starBtn = opts.showStar
-    ? '<button class="hiword-dict-star ' + (inVocab ? "star-on" : "") + '" data-action="vocab-star" data-word="' + escapeAttr(entry.word) + '" title="' + (inVocab ? "移出词库" : "加入词库") + '">' + (inVocab ? "★" : "☆") + "</button>"
+    ? '<button class="hiword-dict-star ' + (inVocab ? "star-on" : "") + '" data-action="vocab-star" data-word="' + escapeAttr(entry.word) + '" title="' + (inVocab ? t("移出词库") : t("加入词库")) + '">' + (inVocab ? "★" : "☆") + "</button>"
     : "";
 
   let badge = "";
   if (entry.matchType === "inflection" && entry.originalWord) {
-    badge = '<div class="hiword-dict-badge hiword-dict-badge-inflection" title="原词「' + escapeAttr(entry.originalWord) + '」未收录，已还原为原形">' +
+    badge = '<div class="hiword-dict-badge hiword-dict-badge-inflection" title="' + t("原词「{w}」未收录，已还原为原形", { w: escapeAttr(entry.originalWord) }) + '">' +
       '<span class="hiword-dict-badge-icon">🔄</span>' +
-      '<span>变形还原：「' + escapeHtml(entry.originalWord) + "」→「" + escapeHtml(entry.word) + "」</span>" +
+      '<span>' + t("变形还原：「{from}」→「{to}」", { from: escapeHtml(entry.originalWord), to: escapeHtml(entry.word) }) + "</span>" +
     "</div>";
   } else if (entry.matchType === "similar" && entry.originalWord) {
     const candidateHtml = (entry.candidates || [])
@@ -1309,10 +1314,10 @@ export function renderDictCard(
       .slice(0, 4)
       .map((c) => '<span class="hiword-dict-candidate" data-action="lookup-candidate" data-word="' + escapeAttr(c) + '">' + escapeHtml(c) + "</span>")
       .join("");
-    badge = '<div class="hiword-dict-badge hiword-dict-badge-similar" title="原词「' + escapeAttr(entry.originalWord) + '」未收录，以下为相似词">' +
+    badge = '<div class="hiword-dict-badge hiword-dict-badge-similar" title="' + t("原词「{w}」未收录，以下为相似词", { w: escapeAttr(entry.originalWord) }) + '">' +
       '<span class="hiword-dict-badge-icon">📌</span>' +
-      '<span>此为相似单词（原词「' + escapeHtml(entry.originalWord) + "」未收录）</span>" +
-      (candidateHtml ? "<div class=\"hiword-dict-candidates\">其他候选：" + candidateHtml + "</div>" : "") +
+      '<span>' + t("此为相似单词（原词「{w}」未收录）", { w: escapeHtml(entry.originalWord) }) + "</span>" +
+      (candidateHtml ? "<div class=\"hiword-dict-candidates\">" + t("其他候选：") + candidateHtml + "</div>" : "") +
     "</div>";
   }
 
@@ -1348,7 +1353,7 @@ export function renderDictCard(
   const relatedWords = generateRelatedWords(entry.word, entry);
   const relatedHtml = relatedWords.length
     ? '<div class="hiword-dict-related">' +
-        '<div class="hiword-dict-related-title">🔗 相关词汇</div>' +
+        '<div class="hiword-dict-related-title">🔗 ' + t("相关词汇") + '</div>' +
         '<div class="hiword-dict-related-chips">' +
           relatedWords
             .map(
@@ -1366,7 +1371,7 @@ export function renderDictCard(
 
   const qcountBadge =
     typeof opts.queryCount === "number" && opts.queryCount > 0
-      ? '<span class="hiword-qcount" title="累计查询次数">' + escapeHtml(String(opts.queryCount)) + " 次查询</span>"
+      ? '<span class="hiword-qcount" title="' + t("累计查询次数") + '">' + t("{n} 次查询", { n: escapeHtml(String(opts.queryCount)) }) + "</span>"
       : "";
 
   return (
@@ -1379,14 +1384,14 @@ export function renderDictCard(
         qcountBadge +
         '<div class="hiword-dict-actions">' +
           starBtn +
-          '<button class="b3-button b3-button--small" data-action="tts" data-word="' + escapeAttr(entry.word) + '">朗读</button>' +
+          '<button class="b3-button b3-button--small" data-action="tts" data-word="' + escapeAttr(entry.word) + '">' + t("朗读") + '</button>' +
         "</div>" +
       "</div>" +
       "<div class=\"hiword-dict-body\">" +
         bodyHtml +
         '<div class="hiword-dict-full-wrap">' +
           '<input type="checkbox" class="hiword-dict-expand-toggle" id="hiword-expand-' + escapeAttr(entry.word) + '" />' +
-          '<label class="hiword-dict-expand-label" for="hiword-expand-' + escapeAttr(entry.word) + '">完整释义</label>' +
+          '<label class="hiword-dict-expand-label" for="hiword-expand-' + escapeAttr(entry.word) + '">' + t("完整释义") + '</label>' +
           '<div class="hiword-dict-full">' + entry.html + "</div>" +
         "</div>" +
         relatedHtml +
@@ -1409,7 +1414,7 @@ export function renderInflectionLine(word: string, posTags: string[], onlineInfl
       .filter((it) => it.label && it.form && it.form.toLowerCase() !== word.toLowerCase())
       .map((it) => `${escapeHtml(it.label)} ${escapeHtml(it.form)}`);
     return parts.length
-      ? `<div class="hiword-dict-infl-line"><span class="hiword-dict-infl-title">形态变化</span>${parts.map((p) => `<span class="hiword-dict-infl-item">${p}</span>`).join('<span class="hiword-dict-infl-sep">·</span>')}</div>`
+      ? `<div class="hiword-dict-infl-line"><span class="hiword-dict-infl-title">${t("形态变化")}</span>${parts.map((p) => `<span class="hiword-dict-infl-item">${p}</span>`).join('<span class="hiword-dict-infl-sep">·</span>')}</div>`
       : "";
   }
   // 离线源：按词性离线推导
@@ -1417,17 +1422,17 @@ export function renderInflectionLine(word: string, posTags: string[], onlineInfl
   const inf: WordInflections = getWordInflections(lw, posTags);
   const parts: string[] = [];
   if (inf.verb) {
-    if (inf.verb.past && inf.verb.past.toLowerCase() !== lw) parts.push(`过去式 ${escapeHtml(inf.verb.past)}`);
-    if (inf.verb.pastParticiple && inf.verb.pastParticiple.toLowerCase() !== lw) parts.push(`过去分词 ${escapeHtml(inf.verb.pastParticiple)}`);
-    if (inf.verb.presentParticiple && inf.verb.presentParticiple.toLowerCase() !== lw) parts.push(`现在分词 ${escapeHtml(inf.verb.presentParticiple)}`);
+    if (inf.verb.past && inf.verb.past.toLowerCase() !== lw) parts.push(`${t("过去式")} ${escapeHtml(inf.verb.past)}`);
+    if (inf.verb.pastParticiple && inf.verb.pastParticiple.toLowerCase() !== lw) parts.push(`${t("过去分词")} ${escapeHtml(inf.verb.pastParticiple)}`);
+    if (inf.verb.presentParticiple && inf.verb.presentParticiple.toLowerCase() !== lw) parts.push(`${t("现在分词")} ${escapeHtml(inf.verb.presentParticiple)}`);
   }
-  if (inf.noun?.plural && inf.noun.plural.toLowerCase() !== lw) parts.push(`复数 ${escapeHtml(inf.noun.plural)}`);
-  if (inf.adjective?.comparative && inf.adjective.comparative.toLowerCase() !== lw) parts.push(`比较级 ${escapeHtml(inf.adjective.comparative)}`);
-  if (inf.adjective?.superlative && inf.adjective.superlative.toLowerCase() !== lw) parts.push(`最高级 ${escapeHtml(inf.adjective.superlative)}`);
-  if (inf.adverb?.comparative && inf.adverb.comparative.toLowerCase() !== lw) parts.push(`比较级 ${escapeHtml(inf.adverb.comparative)}`);
-  if (inf.adverb?.superlative && inf.adverb.superlative.toLowerCase() !== lw) parts.push(`最高级 ${escapeHtml(inf.adverb.superlative)}`);
+  if (inf.noun?.plural && inf.noun.plural.toLowerCase() !== lw) parts.push(`${t("复数")} ${escapeHtml(inf.noun.plural)}`);
+  if (inf.adjective?.comparative && inf.adjective.comparative.toLowerCase() !== lw) parts.push(`${t("比较级")} ${escapeHtml(inf.adjective.comparative)}`);
+  if (inf.adjective?.superlative && inf.adjective.superlative.toLowerCase() !== lw) parts.push(`${t("最高级")} ${escapeHtml(inf.adjective.superlative)}`);
+  if (inf.adverb?.comparative && inf.adverb.comparative.toLowerCase() !== lw) parts.push(`${t("比较级")} ${escapeHtml(inf.adverb.comparative)}`);
+  if (inf.adverb?.superlative && inf.adverb.superlative.toLowerCase() !== lw) parts.push(`${t("最高级")} ${escapeHtml(inf.adverb.superlative)}`);
   return parts.length
-    ? `<div class="hiword-dict-infl-line"><span class="hiword-dict-infl-title">形态变化</span>${parts.map((p) => `<span class="hiword-dict-infl-item">${p}</span>`).join('<span class="hiword-dict-infl-sep">·</span>')}</div>`
+    ? `<div class="hiword-dict-infl-line"><span class="hiword-dict-infl-title">${t("形态变化")}</span>${parts.map((p) => `<span class="hiword-dict-infl-item">${p}</span>`).join('<span class="hiword-dict-infl-sep">·</span>')}</div>`
     : "";
 }
 
@@ -1447,11 +1452,11 @@ function renderSimpleCardShell(o: {
   switchTitle: string;
 }): string {
   const starBtn = o.showStar
-    ? '<button class="hiword-dict-star ' + (o.inVocab ? "star-on" : "") + '" data-action="vocab-star" data-word="' + escapeAttr(o.word) + '" title="' + (o.inVocab ? "移出词库" : "加入词库") + '">' + (o.inVocab ? "★" : "☆") + "</button>"
+    ? '<button class="hiword-dict-star ' + (o.inVocab ? "star-on" : "") + '" data-action="vocab-star" data-word="' + escapeAttr(o.word) + '" title="' + (o.inVocab ? t("移出词库") : t("加入词库")) + '">' + (o.inVocab ? "★" : "☆") + "</button>"
     : "";
   const qcountBadge =
     typeof o.queryCount === "number" && o.queryCount > 0
-      ? '<span class="hiword-qcount" title="累计查询次数">' + escapeHtml(String(o.queryCount)) + " 次查询</span>"
+      ? '<span class="hiword-qcount" title="' + t("累计查询次数") + '">' + t("{n} 次查询", { n: escapeHtml(String(o.queryCount)) }) + "</span>"
       : "";
   return (
     '<div class="hiword-dict-card hiword-dict-card--simple" data-word="' + escapeAttr(o.word) + '">' +
@@ -1462,9 +1467,9 @@ function renderSimpleCardShell(o: {
         qcountBadge +
         '<div class="hiword-dict-actions">' +
           `<button class="hiword-dict-src-btn" data-action="${o.switchAction}" title="${escapeAttr(o.switchTitle)}">🌐</button>` +
-          '<button class="hiword-dict-side-btn" data-action="lookup-in-sidebar" data-word="' + escapeAttr(o.word) + '" title="在侧边栏查词典中查看详细释义">🔍</button>' +
+          '<button class="hiword-dict-side-btn" data-action="lookup-in-sidebar" data-word="' + escapeAttr(o.word) + '" title="' + t("在侧边栏查词典中查看详细释义") + '">🔍</button>' +
           starBtn +
-          '<button class="b3-button b3-button--small" data-action="tts" data-word="' + escapeAttr(o.word) + '">朗读</button>' +
+          '<button class="b3-button b3-button--small" data-action="tts" data-word="' + escapeAttr(o.word) + '">' + t("朗读") + '</button>' +
         "</div>" +
       "</div>" +
       '<div class="hiword-dict-body">' + o.bodyHtml + "</div>" +
@@ -1483,9 +1488,9 @@ export function renderDictCardSimple(
 ): string {
   let badge = "";
   if (entry.matchType === "inflection" && entry.originalWord) {
-    badge = '<div class="hiword-dict-badge hiword-dict-badge-inflection" title="原词「' + escapeAttr(entry.originalWord) + '」未收录，已还原为原形">' +
+    badge = '<div class="hiword-dict-badge hiword-dict-badge-inflection" title="' + t("原词「{w}」未收录，已还原为原形", { w: escapeAttr(entry.originalWord) }) + '">' +
       '<span class="hiword-dict-badge-icon">🔄</span>' +
-      '<span>变形还原：「' + escapeHtml(entry.originalWord) + "」→「" + escapeHtml(entry.word) + "」</span>" +
+      '<span>' + t("变形还原：「{from}」→「{to}」", { from: escapeHtml(entry.originalWord), to: escapeHtml(entry.word) }) + "</span>" +
     "</div>";
   } else if (entry.matchType === "similar" && entry.originalWord) {
     const candidateHtml = (entry.candidates || [])
@@ -1493,10 +1498,10 @@ export function renderDictCardSimple(
       .slice(0, 4)
       .map((c) => '<span class="hiword-dict-candidate" data-action="lookup-candidate" data-word="' + escapeAttr(c) + '">' + escapeHtml(c) + "</span>")
       .join("");
-    badge = '<div class="hiword-dict-badge hiword-dict-badge-similar" title="原词「' + escapeAttr(entry.originalWord) + '」未收录，以下为相似词">' +
+    badge = '<div class="hiword-dict-badge hiword-dict-badge-similar" title="' + t("原词「{w}」未收录，以下为相似词", { w: escapeAttr(entry.originalWord) }) + '">' +
       '<span class="hiword-dict-badge-icon">📌</span>' +
-      '<span>此为相似单词（原词「' + escapeHtml(entry.originalWord) + "」未收录）</span>" +
-      (candidateHtml ? "<div class=\"hiword-dict-candidates\">其他候选：" + candidateHtml + "</div>" : "") +
+      '<span>' + t("此为相似单词（原词「{w}」未收录）", { w: escapeHtml(entry.originalWord) }) + "</span>" +
+      (candidateHtml ? "<div class=\"hiword-dict-candidates\">" + t("其他候选：") + candidateHtml + "</div>" : "") +
     "</div>";
   }
 
@@ -1525,7 +1530,7 @@ export function renderDictCardSimple(
     showStar: opts.showStar !== false,
     inVocab: opts.inVocab ?? false,
     switchAction: "dict-switch-online",
-    switchTitle: "切换到在线词典（词海）",
+    switchTitle: t("切换到在线词典（词海）"),
   });
 }
 
@@ -1535,8 +1540,8 @@ export function renderDictCardSimple(
 export function renderNotFound(word: string): string {  return (
     '<div class="hiword-dict-notfound">' +
       '<div class="hiword-dict-notfound-icon">📖</div>' +
-      '<p>未找到 "<strong>' + escapeHtml(word) + '</strong>" 的释义</p>' +
-      '<p class="hiword-dict-hint">请检查拼写，或尝试使用前缀搜索</p>' +
+      "<p>" + t('未找到 "{w}" 的释义', { w: "<strong>" + escapeHtml(word) + "</strong>" }) + "</p>" +
+      '<p class="hiword-dict-hint">' + t("请检查拼写，或尝试使用前缀搜索") + "</p>" +
     "</div>"
   );
 }
@@ -1553,8 +1558,8 @@ export function renderVocabSuggestionBox(
   if (!candidates || candidates.length === 0) {
     return (
       '<div class="hiword-vb-suggest hiword-vb-suggest-empty">' +
-        '<div class="hiword-vb-suggest-title">未收录「' + escapeHtml(originalWord) + '」，且无相近词</div>' +
-        '<div class="hiword-vb-suggest-tip">可到侧边栏「词典」输入单词<strong>原型</strong>查询，或导入更多词典</div>' +
+        '<div class="hiword-vb-suggest-title">' + t("未收录「{w}」，且无相近词", { w: escapeHtml(originalWord) }) + "</div>" +
+        '<div class="hiword-vb-suggest-tip">' + t("可到侧边栏「词典」输入单词{p}查询，或导入更多词典", { p: "<strong>" + t("原型") + "</strong>" }) + "</div>" +
       "</div>"
     );
   }
@@ -1567,7 +1572,7 @@ export function renderVocabSuggestionBox(
     .join("");
   return (
     '<div class="hiword-vb-suggest">' +
-      '<div class="hiword-vb-suggest-title">未找到「' + escapeHtml(originalWord) + '」，可能的拼写/原形：</div>' +
+      '<div class="hiword-vb-suggest-title">' + t("未找到「{w}」，可能的拼写/原形：", { w: escapeHtml(originalWord) }) + "</div>" +
       '<div class="hiword-vb-suggest-chips">' + chips + "</div>" +
     "</div>"
   );
@@ -1581,8 +1586,8 @@ export function renderDictSuggestions(word: string, candidates: string[]): strin
     return (
       '<div class="hiword-dict-notfound">' +
         '<div class="hiword-dict-notfound-icon">🔍</div>' +
-        '<p>未找到 "<strong>' + escapeHtml(word) + '</strong>" 的释义</p>' +
-        '<p class="hiword-dict-hint">词典中可能无此词。可在上方输入框手动输入单词<strong>原型</strong>查询，或导入更多词典</p>' +
+        "<p>" + t('未找到 "{w}" 的释义', { w: "<strong>" + escapeHtml(word) + "</strong>" }) + "</p>" +
+        '<p class="hiword-dict-hint">' + t("词典中可能无此词。可在上方输入框手动输入单词{p}查询，或导入更多词典", { p: "<strong>" + t("原型") + "</strong>" }) + "</p>" +
       "</div>"
     );
   }
@@ -1596,9 +1601,9 @@ export function renderDictSuggestions(word: string, candidates: string[]): strin
   return (
     '<div class="hiword-dict-notfound">' +
       '<div class="hiword-dict-notfound-icon">🔍</div>' +
-      '<p>未找到 "<strong>' + escapeHtml(word) + '"，相近的单词：</p>' +
+      "<p>" + t('未找到 "{w}"，相近的单词：', { w: "<strong>" + escapeHtml(word) + "</strong>" }) + "</p>" +
       '<div class="hiword-dict-candidates">' + chips + "</div>" +
-      '<p class="hiword-dict-hint">若都不是，请在上方输入框输入单词<strong>原型</strong>查询</p>' +
+      '<p class="hiword-dict-hint">' + t("若都不是，请在上方输入框输入单词{p}查询", { p: "<strong>" + t("原型") + "</strong>" }) + "</p>" +
     "</div>"
   );
 }
@@ -1610,7 +1615,7 @@ export function renderLoading(): string {
   return (
     '<div class="hiword-dict-loading">' +
       '<div class="hiword-dict-spinner"></div>' +
-      "<p>词典加载中...</p>" +
+      "<p>" + t("词典加载中...") + "</p>" +
     "</div>"
   );
 }
@@ -1621,9 +1626,9 @@ export function renderLoading(): string {
 export function renderInitRequired(): string {
   return (
     '<div class="hiword-dict-init-required">' +
-      "<p>词典数据尚未就绪</p>" +
-      '<p class="hiword-dict-hint">请先在「词典管理」中导入词典（支持 .mdx / StarDict 格式）</p>' +
-      '<button class="b3-button" id="hiword-dict-manage-btn">去导入词典</button>' +
+      "<p>" + t("词典数据尚未就绪") + "</p>" +
+      '<p class="hiword-dict-hint">' + t("请先在「词典管理」中导入词典（支持 .mdx / StarDict 格式）") + "</p>" +
+      '<button class="b3-button" id="hiword-dict-manage-btn">' + t("去导入词典") + "</button>" +
     "</div>"
   );
 }

@@ -135,7 +135,7 @@ export interface AiSettings {
   // ─────────────────────────────────────────────────────────────
 
   // —— 🟡 待接线：字段与 UI 已有，消费方缺失（多为把硬编码常量提升为开关）——
-  /** 发送快捷键：mod+enter（⌘/Ctrl+Enter，默认）｜ enter */
+  /** 发送快捷键：enter（Enter 发送，默认，2026-09-10 起）｜ mod+enter（⌘/Ctrl+Enter） */
   sendShortcut?: "mod+enter" | "enter";
   /** 精读结果每条句子下显示「批注到原文」按钮（AiHost.annotateSentences 已就绪，只差读取本开关） */
   annotateSentences?: boolean;
@@ -449,14 +449,23 @@ export const DEFAULT_AI_DEEPREAD_SYSTEM = `你是 REword 英语学习助手，�
 - 返回的句子与引文会与原文逐字比对，不符的条目会被标注；宁可省略，不可编造。`;
 
 /**
- * 对话模式系统提示词（2026-09-04 P0：止住跑题）。
+ * 对话模式系统提示词（2026-09-04 P0 引入，2026-09-10 起**不再注入**）。
  *
  * 背景：对话模式原先裸发 messages、不带 system，模型只看到「一段英文材料 + 一句中文要求」，
  * 于是把材料当创作素材，返回续写小说而不是翻译/讲解。
  * 本提示词照搬 Copilot 翻译 prompt 的四层防跑题结构（经实测有效）：
- *   ① 唯一任务声明   ② 明确禁止清单  ③ 输入标签化（运行时用 <user_input> 包裹，见 ai-orchestrator）
+ *   ① 唯一任务声明   ② 明确禁止清单  ③ 输入标签化（<user_input> 包裹）
  *   ④ 首尾重复的抗注入声明（用户消息里的指令一律降级为待处理材料）
- * 注意：不能复用 promptTemplate——那是精读 JSON 模板，套到对话上会要求模型输出 JSON。
+ *
+ * ⚠️ 2026-09-10 停用原因：②的禁令清单 + ③的标签化 + ④的「无论其如何表述都必须拒绝」
+ *    三者叠加，会让模型把用户的**正常提问**也判成「材料里夹带的指令」而直接拒答
+ *    （用户实测截图中模型的思考链原话：根据规则…被禁止…所以我应拒绝）。
+ *    界面写的是自由对话、实际 100% 被限定，且用户看不见——故整段退出对话链路。
+ *
+ * 现状：`ai-orchestrator.ts` 已不再引用它（导入已移除）。常量保留仅用于
+ * 「注入清单」胶囊把它标为 `off`，让「曾经限制、现在没有」这件事可见。
+ * ⚠️ 若要重新启用，别只在这里改——注入点在 `prepareChatMessages`，且必须同时
+ *    恢复 `<user_input>` 包裹才自洽，否则 ③/④ 会指向不存在的标签。
  */
 export const DEFAULT_AI_CHAT_SYSTEM = `你是 REword 英语学习助手，服务于用户在思源笔记中的英语学习对话。
 
@@ -591,7 +600,10 @@ export const DEFAULT_AI_SETTINGS: AiSettings = {
   trConcurrency: 2,
   // 2026-09-06 第 1 批：功能蓝图字段默认值（与上方接口注释一一对应）
   //   🟡 待接线
-  sendShortcut: "mod+enter",
+  // 2026-09-10 P3：默认发送键由「⌘/Ctrl+Enter」改为「Enter 发送」，
+  //   对齐对话面板的通用习惯（Enter 发送 / Shift+Enter 换行）。
+  //   注意：老用户落盘里仍是显式 "mod+enter"，需在设置里手动切换（未做自动迁移，避免覆盖用户选择）。
+  sendShortcut: "enter",
   annotateSentences: false,
   showThinking: true,
   streamThrottleMs: 100,
@@ -816,7 +828,7 @@ export function normalizeAiSettings(raw: any): AiSettings {
     //   三层同步是本批的硬要求：接口 + 默认 + normalize 缺一不可，
     //   否则 listNormalizeGaps() 会报缺口、测试会红。
     //   🟡 待接线
-    sendShortcut: enumOf(r.sendShortcut, ["mod+enter", "enter"] as const, "mod+enter"),
+    sendShortcut: enumOf(r.sendShortcut, ["mod+enter", "enter"] as const, "enter"),
     annotateSentences: bool(r.annotateSentences, false),
     showThinking: bool(r.showThinking, true),
     streamThrottleMs: Math.round(num(r.streamThrottleMs, 100, 0, 500)),

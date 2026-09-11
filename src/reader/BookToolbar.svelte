@@ -9,6 +9,7 @@
   摊平后每个字段都是独立 prop，父组件一改就同步。
 -->
 <script lang="ts">
+  import { t } from "../i18n/index.ts";
   export let bilingualOn = false;
   /** 预翻译进行中 */
   export let bilingualActive = false;
@@ -27,16 +28,16 @@
   class:reader-btn-active={bilingualOn}
   class:reader-btn-busy={bilingualActive}
   title={totalTokens != null
-    ? `双语对照 · AI Token: ${totalTokens}（输入 ${promptTokens} + 输出 ${completionTokens}）`
-    : "双语对照：在每段正文后注入译文（AI 翻译）"}
+    ? `${t("双语对照 · AI Token")}: ${totalTokens}（${t("输入")} ${promptTokens} + ${t("输出")} ${completionTokens}）`
+    : t("双语对照：在每段正文后注入译文（AI 翻译）")}
   on:click={onToggleBilingual}
->双语{bilingualActive ? ` ${bilingualDone}/${bilingualTotal}` : ""}{totalTokens != null && !bilingualActive ? ` · ${totalTokens}T` : ""}</button>
+>{t("双语")}{bilingualActive ? ` ${bilingualDone}/${bilingualTotal}` : ""}{totalTokens != null && !bilingualActive ? ` · ${totalTokens}T` : ""}</button>
 
 {#if onOpenBilingualSettings}
   <button
     class="reader-btn reader-bilingual-settings-btn"
-    title="双语翻译设置"
-    aria-label="双语翻译设置"
+    title={t("双语翻译设置")}
+    aria-label={t("双语翻译设置")}
     on:click={() => onOpenBilingualSettings?.()}
   >
     <!-- 2026-09-05：🌐 emoji → SVG 线性图标（与顶栏其他按钮风格一致，随主题色） -->

@@ -1,3 +1,4 @@
+import { t } from "../i18n/index.ts";
 import { logSwallow } from "../core/safe.ts";
 /**
  * REword · AI 结果渲染
@@ -451,13 +452,13 @@ export interface RenderDeepReadOptions {
 /** 渲染结构化结果 */
 export function renderDeepReadHtml(result: DeepReadResult, opts?: RenderDeepReadOptions): string {
   if (!result.ok && result.error) {
-    return `<div class="hiword-ai-error">⚠️ AI 精读失败：${escapeHtml(result.error)}</div>`;
+    return `<div class="hiword-ai-error">⚠️ ${t("AI 精读失败：{msg}", { msg: escapeHtml(result.error) })}</div>`;
   }
 
   if (!result.isJson) {
     // 兜底路径：同样把 thinking（如有）放在折叠面板里，避免 JSON 解析失败时思考过程丢失
     const think = renderThinking(result.thinking);
-    const body = result.raw ? renderWithLute(result.raw) : "（AI 未返回内容）";
+    const body = result.raw ? renderWithLute(result.raw) : t("（AI 未返回内容）");
     return `${think}<div class="hiword-ai-md b3-typography">${body}</div>`;
   }
 
@@ -469,10 +470,10 @@ export function renderDeepReadHtml(result: DeepReadResult, opts?: RenderDeepRead
 function renderChatHtml(result: DeepReadResult): string {
   const html: string[] = [];
   html.push(renderThinking(result.thinking));
-  const body = result.raw ? renderWithLute(result.raw) : "（AI 未返回内容）";
+  const body = result.raw ? renderWithLute(result.raw) : t("（AI 未返回内容）");
   html.push(`<div class="hiword-ai-chat b3-typography">${body}</div>`);
   if (result.model) {
-    html.push(`<div class="hiword-ai-model">模型：${escapeHtml(result.model)}</div>`);
+    html.push(`<div class="hiword-ai-model">${t("模型：")}${escapeHtml(result.model)}</div>`);
   }
   return html.join("");
 }
@@ -485,7 +486,7 @@ function renderThinking(thinking?: string): string {
   if (!thinking || !thinking.trim()) return "";
   return (
     `<details class="hiword-ai-think" open>` +
-      `<summary class="hiword-ai-think-sum">AI 思考过程（点击收起）</summary>` +
+      `<summary class="hiword-ai-think-sum">${t("AI 思考过程（点击收起）")}</summary>` +
       `<div class="hiword-ai-think-body">${renderMarkdown(thinking)}</div>` +
     `</details>`
   );
@@ -495,7 +496,7 @@ function renderThinking(thinking?: string): string {
 function renderMasteryStars(m: number): string {
   const filled = Math.max(0, Math.min(5, Math.round(m)));
   const stars = "★".repeat(filled) + "☆".repeat(5 - filled);
-  return `<span class="hiword-ai-word-mastery" title="模型自评熟悉度 ${filled}/5">${stars}</span>`;
+  return `<span class="hiword-ai-word-mastery" title="${t("模型自评熟悉度 {n}/5", { n: filled })}">${stars}</span>`;
 }
 
 /**
@@ -504,10 +505,10 @@ function renderMasteryStars(m: number): string {
  */
 function renderIssuesBar(issues: DeepReadIssue[]): string {
   const KIND_LABEL: Record<DeepReadIssue["kind"], string> = {
-    sentence: "句子",
-    word: "词",
-    quote: "引文",
-    translation: "翻译",
+    sentence: t("句子"),
+    word: t("词"),
+    quote: t("引文"),
+    translation: t("翻译"),
   };
   const items = issues
     .map(
@@ -517,7 +518,7 @@ function renderIssuesBar(issues: DeepReadIssue[]): string {
     .join("");
   return (
     `<details class="hiword-ai-issues">` +
-      `<summary class="hiword-ai-issues-sum">⚠️ 原文校验：${issues.length} 处不符（点击展开）</summary>` +
+      `<summary class="hiword-ai-issues-sum">${t("⚠️ 原文校验：{n} 处不符（点击展开）", { n: issues.length })}</summary>` +
       `<ul class="hiword-ai-issues-list">${items}</ul>` +
     `</details>`
   );
@@ -533,7 +534,7 @@ function renderCitation(text: string, result: DeepReadResult, opts?: RenderDeepR
   if (opts?.citation === false || !result.sourceBlockId) return safe;
   return (
     `<span class="hiword-ai-quote-jump" data-block-id="${escapeHtml(result.sourceBlockId)}" ` +
-      `title="点击跳转到原文块">「${safe}」↗</span>`
+      `title="${t("点击跳转到原文块")}">「${safe}」↗</span>`
   );
 }
 
@@ -553,8 +554,8 @@ function renderLearningHtml(result: DeepReadResult, opts?: RenderDeepReadOptions
     html.push(renderVocabBar(result.words));
     html.push(
       `<div class="hiword-ai-sec"><div class="hiword-ai-sec-head">` +
-        `<span class="hiword-ai-sec-title">生词解析</span>` +
-        `<span class="hiword-ai-sec-hint">勾选后从上方批量入库，或逐词「＋收藏」</span>` +
+        `<span class="hiword-ai-sec-title">${t("生词解析")}</span>` +
+        `<span class="hiword-ai-sec-hint">${t("勾选后从上方批量入库，或逐词「＋收藏」")}</span>` +
       `</div>`
     );
     html.push(`<div class="hiword-ai-word-table">`);
@@ -568,13 +569,13 @@ function renderLearningHtml(result: DeepReadResult, opts?: RenderDeepReadOptions
           (w.phonetic ? `<span class="hiword-ai-word-ph">${escapeHtml(w.phonetic)}</span>` : "") +
           (w.pos ? `<span class="hiword-ai-word-pos">${escapeHtml(w.pos)}</span>` : "") +
           (w.mastery != null ? renderMasteryStars(w.mastery) : "") +
-          `<span class="hiword-ai-word-m">${escapeHtml(w.meaning) || "（未提供释义）"}</span>` +
+          `<span class="hiword-ai-word-m">${escapeHtml(w.meaning) || t("（未提供释义）")}</span>` +
           (w.context
             ? `<span class="hiword-ai-word-ctx">${renderCitation(w.context, result, opts)}</span>`
             : "") +
           (defs && defs.length ? `<div class="hiword-ai-word-defs">` + defs.map((d) => `<div class="hiword-ai-word-def">${d.pos ? `<i>${escapeHtml(d.pos)}</i> ` : ""}${escapeHtml(d.def)}</div>`).join("") + `</div>` : "") +
           (exs && exs.length ? `<div class="hiword-ai-word-exs">` + exs.map((e) => `<div class="hiword-ai-word-ex">${escapeHtml(e.en)}${e.zh ? ` <span class="hiword-ai-word-ex-zh">${escapeHtml(e.zh)}</span>` : ""}</div>`).join("") + `</div>` : "") +
-          `<button class="hiword-ai-collect b3-button b3-button--small" data-word="${escapeHtml(w.word)}" data-meaning="${escapeHtml(w.meaning)}">＋收藏</button>` +
+          `<button class="hiword-ai-collect b3-button b3-button--small" data-word="${escapeHtml(w.word)}" data-meaning="${escapeHtml(w.meaning)}">${t("＋收藏")}</button>` +
         `</div>`
       );
     }
@@ -584,21 +585,21 @@ function renderLearningHtml(result: DeepReadResult, opts?: RenderDeepReadOptions
   if (result.sentences.length) {
     html.push(
       `<div class="hiword-ai-sec"><div class="hiword-ai-sec-head">` +
-        `<span class="hiword-ai-sec-title">逐句讲解</span>` +
-        `<span class="hiword-ai-sec-hint">可直接复制需要的句子</span>` +
+        `<span class="hiword-ai-sec-title">${t("逐句讲解")}</span>` +
+        `<span class="hiword-ai-sec-hint">${t("可直接复制需要的句子")}</span>` +
       `</div><div class="hiword-ai-sents">`
     );
     result.sentences.forEach((s, i) => {
       html.push(
         `<div class="hiword-ai-sent" data-sent-idx="${i}">` +
           `<div class="hiword-ai-sent-src">${escapeHtml(s.sentence)}</div>` +
-          (s.structure ? `<div class="hiword-ai-sent-st">结构：${escapeHtml(s.structure)}</div>` : "") +
-          (s.translation ? `<div class="hiword-ai-sent-tr">译：${escapeHtml(s.translation)}</div>` : "") +
+          (s.structure ? `<div class="hiword-ai-sent-st">${t("结构：")}${escapeHtml(s.structure)}</div>` : "") +
+          (s.translation ? `<div class="hiword-ai-sent-tr">${t("译：")}${escapeHtml(s.translation)}</div>` : "") +
           // 第 5 批：逐句批注按钮（data-sent-idx 供 bindResult 回查 DeepReadResult.sentences）
           (opts?.annotate
             ? `<div class="hiword-ai-sent-acts">` +
                 `<button class="hiword-ai-anno b3-button b3-button--small" data-sent-idx="${i}" ` +
-                  `title="把这句的结构与译文写入原文批注">批注到原文</button>` +
+                  `title="${t("把这句的结构与译文写入原文批注")}">${t("批注到原文")}</button>` +
               `</div>`
             : "") +
         `</div>`
@@ -609,7 +610,7 @@ function renderLearningHtml(result: DeepReadResult, opts?: RenderDeepReadOptions
 
   if (result.summary) {
     html.push(
-      `<div class="hiword-ai-sec"><div class="hiword-ai-sec-title">小结</div><div class="hiword-ai-summary">${escapeHtml(result.summary)}</div></div>`
+      `<div class="hiword-ai-sec"><div class="hiword-ai-sec-title">${t("小结")}</div><div class="hiword-ai-summary">${escapeHtml(result.summary)}</div></div>`
     );
   }
 
@@ -624,20 +625,20 @@ function renderLearningHtml(result: DeepReadResult, opts?: RenderDeepReadOptions
     const updated = result.savedWords.filter((s) => s.updated).length;
     const total = result.savedWords.length;
     const parts: string[] = [];
-    if (added) parts.push(`新加入词库 ${added} 个`);
-    if (updated) parts.push(`更新已有词 ${updated} 个`);
-    if (!added && !updated) parts.push(`已处理 ${total} 个词`);
+    if (added) parts.push(t("新加入词库 {n} 个", { n: added }));
+    if (updated) parts.push(t("更新已有词 {n} 个", { n: updated }));
+    if (!added && !updated) parts.push(t("已处理 {n} 个词", { n: total }));
     html.push(
-      `<div class="hiword-ai-saved">✅ 词库联动：本次精读自动${parts.join("，")}（已关联来源块，可在词库按来源回溯）</div>`
+      `<div class="hiword-ai-saved">✅ ${t("词库联动：本次精读自动{list}（已关联来源块，可在词库按来源回溯）", { list: parts.join(t("，")) })}</div>`
     );
   }
 
   if (!html.length) {
-    return `<div class="hiword-ai-empty">AI 未返回可渲染内容（可能文本无英文）。</div>`;
+    return `<div class="hiword-ai-empty">${t("AI 未返回可渲染内容（可能文本无英文）。")}</div>`;
   }
 
   if (result.model) {
-    html.push(`<div class="hiword-ai-model">模型：${escapeHtml(result.model)}</div>`);
+    html.push(`<div class="hiword-ai-model">${t("模型：")}${escapeHtml(result.model)}</div>`);
   }
 
   return html.join("");
@@ -651,19 +652,19 @@ function renderVocabBar(words: DeepReadResult["words"]): string {
   const n = words.length;
   const themes = ["未分类", "真题高频", "真题低频", "写作常用", "阅读高频"];
   const themeChips = themes
-    .map((t) => `<span class="hiword-ai-theme-chip" data-theme="${escapeHtml(t)}">${escapeHtml(t)}</span>`)
+    .map((th) => `<span class="hiword-ai-theme-chip" data-theme="${escapeHtml(th)}">${t(th)}</span>`)
     .join("");
   return (
     `<div class="hiword-ai-vocab-bar">` +
-      `<span class="hiword-ai-vocab-count">共识别 <b>${n}</b> 个词</span>` +
-      `<label class="hiword-ai-vocab-book">目标本` +
+      `<span class="hiword-ai-vocab-count">${t("共识别")} <b>${n}</b> ${t("个词")}</span>` +
+      `<label class="hiword-ai-vocab-book">${t("目标本")}` +
         `<select class="hiword-ai-vocab-book-sel" data-field="book">` +
-          `<option value="">（默认词库）</option>` +
+          `<option value="">${t("（默认词库）")}</option>` +
         `</select>` +
       `</label>` +
       `<span class="hiword-ai-vocab-themes">${themeChips}</span>` +
-      `<button class="hiword-ai-vocab-none" type="button" data-act="none">全不选</button>` +
-      `<button class="hiword-ai-vocab-add b3-button b3-button--small" type="button" data-act="add">添加到词库</button>` +
+      `<button class="hiword-ai-vocab-none" type="button" data-act="none">${t("全不选")}</button>` +
+      `<button class="hiword-ai-vocab-add b3-button b3-button--small" type="button" data-act="add">${t("添加到词库")}</button>` +
     `</div>`
   );
 }

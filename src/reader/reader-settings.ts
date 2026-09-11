@@ -1,4 +1,5 @@
 import { logSwallow } from "../core/safe.ts";
+import { t } from "../i18n/index.ts";
 
 /** 阅读设置全局单例（供非 Svelte 模块如 graph.ts / index.ts 读取绑定文档 ID） */
 let _globalSettingsStore: any = null;
@@ -348,12 +349,12 @@ export const READER_DEFAULT_SETTINGS: ReaderSettings = {
 };
 
 export const FONT_MODE_PRESETS: Record<ReaderFontMode, { label: string; hint: string }> = {
-  "follow-siyuan": { label: "跟随思源", hint: "使用思源笔记当前的字体（含字体插件/主题）" },
-  custom: { label: "自定义", hint: "使用导入的字体文件" },
-  system: { label: "系统默认", hint: "不注入字体，用阅读器内核默认" },
+  "follow-siyuan": { label: t("跟随思源"), hint: t("使用思源笔记当前的字体（含字体插件/主题）") },
+  custom: { label: t("自定义"), hint: t("使用导入的字体文件") },
+  system: { label: t("系统默认"), hint: t("不注入字体，用阅读器内核默认") },
   classified: {
-    label: "分类",
-    hint: "衬线 / 无衬线 / 等宽三条字体链分别设置（参考 Readest），代码块自动用等宽",
+    label: t("分类"),
+    hint: t("衬线 / 无衬线 / 等宽三条字体链分别设置（参考 Readest），代码块自动用等宽"),
   },
 };
 
@@ -362,8 +363,8 @@ export const DEFAULT_FONT_FAMILY_PRESETS: Record<
   ReaderDefaultFontFamily,
   { label: string; hint: string }
 > = {
-  serif: { label: "衬线字体", hint: "笔画末端有饰线，长文阅读更省力，适合小说/文学" },
-  "sans-serif": { label: "无衬线字体", hint: "笔画均匀简洁，小字号更清晰，适合技术/新闻" },
+  serif: { label: t("衬线字体"), hint: t("笔画末端有饰线，长文阅读更省力，适合小说/文学") },
+  "sans-serif": { label: t("无衬线字体"), hint: t("笔画均匀简洁，小字号更清晰，适合技术/新闻") },
 };
 
 /* ================= 分类字体候选池（2026-08-28，参考 Readest services/constants.ts） =================
@@ -435,43 +436,43 @@ export const CJK_FONT_PRESETS: string[] = [
 
 /** 笔记插入位置选项（用于设置面板 dropdown） */
 export const NOTE_INSERT_POSITION_PRESETS: Record<NoteInsertPosition, { label: string; hint: string }> = {
-  clipboard: { label: "剪贴板", hint: "复制到剪贴板，手动粘贴" },
-  currentDoc: { label: "当前文档", hint: "插入到思源笔记当前打开的文档末尾" },
-  notebook: { label: "笔记本", hint: "保存到设置中的笔记本（默认 /REword/阅读摘录）" },
+  clipboard: { label: t("剪贴板"), hint: t("复制到剪贴板，手动粘贴") },
+  currentDoc: { label: t("当前文档"), hint: t("插入到思源笔记当前打开的文档末尾") },
+  notebook: { label: t("笔记本"), hint: t("保存到设置中的笔记本（默认 /REword/阅读摘录）") },
 };
 
 /** 笔记模板预设 */
 export const NOTE_TEMPLATE_PRESETS: Record<NoteTemplatePreset, { label: string; template: string }> = {
   simple: {
-    label: "简洁",
+    label: t("简洁"),
     template: "> {{text}}\n\n——《{{bookTitle}}》{{chapter}}",
   },
   heading: {
-    label: "标题+引文",
+    label: t("标题+引文"),
     template: "## {{bookTitle}}\n\n> {{text}}\n\n——{{chapter}}\n\n{{note}}",
   },
   quote: {
-    label: "纯引文",
+    label: t("纯引文"),
     template: "> {{text}}\n\n—— 《{{bookTitle}}》 {{author}}",
   },
   custom: {
-    label: "自定义",
+    label: t("自定义"),
     template: "",
   },
 };
 
 /** 进度样式选项 */
 export const PROGRESS_STYLE_PRESETS: Record<ReaderProgressStyle, { label: string; hint: string }> = {
-  fraction: { label: "分数", hint: "如 5/100" },
-  page: { label: "页码", hint: "如 12" },
-  percent: { label: "百分比", hint: "如 5%" },
+  fraction: { label: t("分数"), hint: t("如 5/100") },
+  page: { label: t("页码"), hint: t("如 12") },
+  percent: { label: t("百分比"), hint: t("如 5%") },
 };
 
 /** 底部进度条「程序坞」唤出方式（2026-08-30） */
 export const BOTTOM_BAR_MODE_PRESETS: Record<ReaderBottomBarMode, { label: string; hint: string }> = {
-  dot: { label: "小圆点", hint: "底部中央常驻小圆点，点击展开进度条" },
-  hover: { label: "悬浮", hint: "平时收起，鼠标移至阅读器底部边框才平滑显现" },
-  both: { label: "两者", hint: "小圆点常驻 + 悬浮热区都能唤出" },
+  dot: { label: t("小圆点"), hint: t("底部中央常驻小圆点，点击展开进度条") },
+  hover: { label: t("悬浮"), hint: t("平时收起，鼠标移至阅读器底部边框才平滑显现") },
+  both: { label: t("两者"), hint: t("小圆点常驻 + 悬浮热区都能唤出") },
 };
 
 /**
@@ -497,30 +498,30 @@ export const READER_TYPO_PRESETS: Record<
     paragraphSpacing: number;
   }
 > = {
-  compact: { label: "紧凑", hint: "小边距小行距，适合手机小屏", lineHeight: 1.5, letterSpacing: 0, marginTopPx: 8, marginBottomPx: 8, marginLeftPx: 12, marginRightPx: 12, paragraphSpacing: 0.5 },
-  comfort: { label: "舒适", hint: "适中边距行距，通读最舒服", lineHeight: 1.7, letterSpacing: 0.2, marginTopPx: 16, marginBottomPx: 16, marginLeftPx: 18, marginRightPx: 18, paragraphSpacing: 0.8 },
-  spacious: { label: "舒展", hint: "大边距大行距，适合大屏长读", lineHeight: 1.9, letterSpacing: 0.4, marginTopPx: 28, marginBottomPx: 28, marginLeftPx: 30, marginRightPx: 30, paragraphSpacing: 1.2 },
-  picture: { label: "绘本", hint: "图文书友好，文图紧凑成块", lineHeight: 1.55, letterSpacing: 0, marginTopPx: 12, marginBottomPx: 12, marginLeftPx: 14, marginRightPx: 14, paragraphSpacing: 0.6 },
+  compact: { label: t("紧凑"), hint: t("小边距小行距，适合手机小屏"), lineHeight: 1.5, letterSpacing: 0, marginTopPx: 8, marginBottomPx: 8, marginLeftPx: 12, marginRightPx: 12, paragraphSpacing: 0.5 },
+  comfort: { label: t("舒适"), hint: t("适中边距行距，通读最舒服"), lineHeight: 1.7, letterSpacing: 0.2, marginTopPx: 16, marginBottomPx: 16, marginLeftPx: 18, marginRightPx: 18, paragraphSpacing: 0.8 },
+  spacious: { label: t("舒展"), hint: t("大边距大行距，适合大屏长读"), lineHeight: 1.9, letterSpacing: 0.4, marginTopPx: 28, marginBottomPx: 28, marginLeftPx: 30, marginRightPx: 30, paragraphSpacing: 1.2 },
+  picture: { label: t("绘本"), hint: t("图文书友好，文图紧凑成块"), lineHeight: 1.55, letterSpacing: 0, marginTopPx: 12, marginBottomPx: 12, marginLeftPx: 14, marginRightPx: 14, paragraphSpacing: 0.6 },
 };
 
 /** 8 款预设主题 + 自定义（参考 sireader 色板） */
 export const THEME_PRESETS: Record<ReaderTheme, { label: string; bg: string; fg: string; fg2: string }> = {
-  auto: { label: "跟随思源", bg: "#ffffff", fg: "#222222", fg2: "#888888" }, // 运行时由 resolveAutoTheme 覆盖
-  light: { label: "默认", bg: "#ffffff", fg: "#222222", fg2: "#888888" },
-  almond: { label: "杏仁黄", bg: "#f5ecdc", fg: "#4a3f2f", fg2: "#8f8370" },
-  autumn: { label: "秋叶褐", bg: "#f4e8d8", fg: "#5a4632", fg2: "#97856e" },
-  green: { label: "青草绿", bg: "#eef4e8", fg: "#2e4a2e", fg2: "#6d8468" },
-  blue: { label: "海天蓝", bg: "#e8f2f8", fg: "#1f3a4d", fg2: "#5f7f92" },
-  night: { label: "夜间", bg: "#23262e", fg: "#c8ccd4", fg2: "#7d828c" },
-  dark: { label: "暗黑", bg: "#121212", fg: "#d6d6d6", fg2: "#888888" },
-  gold: { label: "赤金", bg: "#241c10", fg: "#e6c977", fg2: "#9d8448" },
-  custom: { label: "自定义", bg: "#ffffff", fg: "#222222", fg2: "#888888" },
+  auto: { label: t("跟随思源"), bg: "#ffffff", fg: "#222222", fg2: "#888888" }, // 运行时由 resolveAutoTheme 覆盖
+  light: { label: t("默认"), bg: "#ffffff", fg: "#222222", fg2: "#888888" },
+  almond: { label: t("杏仁黄"), bg: "#f5ecdc", fg: "#4a3f2f", fg2: "#8f8370" },
+  autumn: { label: t("秋叶褐"), bg: "#f4e8d8", fg: "#5a4632", fg2: "#97856e" },
+  green: { label: t("青草绿"), bg: "#eef4e8", fg: "#2e4a2e", fg2: "#6d8468" },
+  blue: { label: t("海天蓝"), bg: "#e8f2f8", fg: "#1f3a4d", fg2: "#5f7f92" },
+  night: { label: t("夜间"), bg: "#23262e", fg: "#c8ccd4", fg2: "#7d828c" },
+  dark: { label: t("暗黑"), bg: "#121212", fg: "#d6d6d6", fg2: "#888888" },
+  gold: { label: t("赤金"), bg: "#241c10", fg: "#e6c977", fg2: "#9d8448" },
+  custom: { label: t("自定义"), bg: "#ffffff", fg: "#222222", fg2: "#888888" },
 };
 
 export const LINE_WIDTH_PRESETS: Record<ReaderLineWidth, { label: string; padding: string }> = {
-  narrow: { label: "窄", padding: "2em 3em" },
-  normal: { label: "标准", padding: "2em 1.5em" },
-  wide: { label: "宽", padding: "2em 0.6em" },
+  narrow: { label: t("窄"), padding: "2em 3em" },
+  normal: { label: t("标准"), padding: "2em 1.5em" },
+  wide: { label: t("宽"), padding: "2em 0.6em" },
 };
 
 /* ================= 2026-08-29 页面边距三档预设（替代失效的行宽 padding 控制） =================
@@ -537,10 +538,10 @@ export const LAYOUT_PRESETS: Record<
   ReaderLayoutPreset,
   { label: string; margins: { top: number; right: number; bottom: number; left: number } }
 > = {
-  fill: { label: "铺满", margins: { top: 4, right: 16, bottom: 8, left: 12 } },
-  normal: { label: "正常", margins: { top: 16, right: 24, bottom: 20, left: 20 } },
-  loose: { label: "宽松", margins: { top: 32, right: 56, bottom: 48, left: 48 } },
-  custom: { label: "自定义", margins: { top: 0, right: 0, bottom: 0, left: 0 } },
+  fill: { label: t("铺满"), margins: { top: 4, right: 16, bottom: 8, left: 12 } },
+  normal: { label: t("正常"), margins: { top: 16, right: 24, bottom: 20, left: 20 } },
+  loose: { label: t("宽松"), margins: { top: 32, right: 56, bottom: 48, left: 48 } },
+  custom: { label: t("自定义"), margins: { top: 0, right: 0, bottom: 0, left: 0 } },
 };
 
 /** 根据 4 边距反推当前落在哪个预设（都不匹配则「自定义」） */
@@ -560,14 +561,14 @@ export function detectLayoutPreset(layout: ReaderLayoutSettings): ReaderLayoutPr
 }
 
 export const FLOW_PRESETS: Record<ReaderFlow, { label: string }> = {
-  paginated: { label: "分页" },
-  scrolled: { label: "滚动" },
+  paginated: { label: t("分页") },
+  scrolled: { label: t("滚动") },
 };
 
 export const TURN_STYLE_PRESETS: Record<ReaderTurnStyle, { label: string }> = {
-  default: { label: "默认" },
-  slide: { label: "滑动" },
-  curl: { label: "卷页" },
+  default: { label: t("默认") },
+  slide: { label: t("滑动") },
+  curl: { label: t("卷页") },
 };
 
 const STORAGE_KEY = "hiword-reader-settings.json";

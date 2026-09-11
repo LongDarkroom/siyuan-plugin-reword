@@ -18,14 +18,9 @@ import { isSupportedBookFile } from "./book-adapters";
 
 export const READER_FEATURE_ID = "reader";
 
-export function createReaderFeature(iconId: string) {
-  return {
-    id: READER_FEATURE_ID,
-    title: "阅读器",
-    icon: iconId,
-    defaultSlot: "combined" as const,
-  };
-}
+// 2026-09-11 移除死代码 createReaderFeature()：零调用点。
+// reader feature 在 index.ts:843 的 dockFeatures 里内联定义（{ id: READER_FEATURE_ID, title: t("阅读器"), ... }），
+// 这里的同名工厂函数自 2026 年某次重构后即无人调用，其 title: "阅读器" 是死字符串（翻译也轮不到它）。
 
 export class ReaderDockController {
   private store: BookshelfStore;

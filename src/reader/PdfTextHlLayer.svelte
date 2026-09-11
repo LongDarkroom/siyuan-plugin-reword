@@ -19,6 +19,7 @@
   import { getAnnotationStore } from "../annotation/store-singleton";
   import { type PdfRect, DEFAULT_ANNOTATION_COLOR, WHALE_COLORS } from "../annotation/annotation-store.ts";
   import { dedupeNestedRects } from "./pdf-rect-util.ts";
+  import { t } from "../i18n/index.ts";
 
   /** 当前书籍 id（批注按 bookId 隔离） */
   export let bookId: string = "";
@@ -401,12 +402,12 @@
       <div class="pdf-rect-menu" style="left:{menuX}px;top:{menuY}px;" role="menu">
         <div class="pdf-rect-menu-colors">
           {#each WHALE_COLORS as c}
-            <button class="pdf-rect-menu-swatch" type="button" title={c.name} style="background:{c.value};"
+            <button class="pdf-rect-menu-swatch" type="button" title={t(c.name)} style="background:{c.value};"
               on:click={() => changeRectColor(c.value)}></button>
           {/each}
         </div>
-        <button class="pdf-rect-menu-item" type="button" on:click={copyMenuLink}>复制链接</button>
-        <button class="pdf-rect-menu-item pdf-rect-menu-del" type="button" on:click={deleteRectAnnotation}>删除</button>
+        <button class="pdf-rect-menu-item" type="button" on:click={copyMenuLink}>{t("复制链接")}</button>
+        <button class="pdf-rect-menu-item pdf-rect-menu-del" type="button" on:click={deleteRectAnnotation}>{t("删除")}</button>
       </div>
     {/if}
     <!-- 2026-09-09 撤销：删除后短期内的「撤销删除」菜单（位置沿用 menuX/menuY） -->

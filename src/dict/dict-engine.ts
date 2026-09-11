@@ -184,6 +184,7 @@ import { StarDict } from "./stardict.ts";
 import * as path from "path";
 import * as fs from "node:fs";
 import { getLogger } from "../core/logger.ts";
+import { t as T } from "../i18n/index.ts";
 
 /**
  * 首字母大写（用于词典大小写容错）
@@ -209,14 +210,13 @@ export async function initDict(
 
   try {
     if (typeof MDX !== "function") {
-      throw new Error("js-mdict MDX 未正确加载");
+      throw new Error(T("js-mdict MDX 未正确加载"));
     }
     // 纵深防御：路径无效或指向 SiYuan 程序目录时，抛清晰错误而非 js-mdict 的
     // "Invalid package …electron.asar"（令人困惑且无法定位是插件目录没找着）。
     if (!fsPath || /electron\.asar/i.test(fsPath)) {
       throw new Error(
-        "词典路径无效：无法定位插件目录或路径指向 SiYuan 程序目录(electron.asar)。" +
-        "请确认插件安装在工作空间 data/plugins/siyuan-plugin-reword/ 下且含 dict/ 目录。"
+        T("词典路径无效：无法定位插件目录或路径指向 SiYuan 程序目录(electron.asar)。请确认插件安装在工作空间 data/plugins/siyuan-plugin-reword/ 下且含 dict/ 目录。")
       );
     }
 
@@ -270,8 +270,7 @@ export async function initStarDict(
     // 纵深防御：路径无效或指向 SiYuan 程序目录时，抛清晰错误而非底层解析异常
     if (!ifoPath || /electron\.asar/i.test(ifoPath)) {
       throw new Error(
-        "词典路径无效：无法定位插件目录或路径指向 SiYuan 程序目录(electron.asar)。" +
-        "请确认插件安装在工作空间 data/plugins/siyuan-plugin-reword/ 下且含 dict/ 目录。"
+        T("词典路径无效：无法定位插件目录或路径指向 SiYuan 程序目录(electron.asar)。请确认插件安装在工作空间 data/plugins/siyuan-plugin-reword/ 下且含 dict/ 目录。")
       );
     }
     const sd = new StarDict(ifoPath, idxPath, dictPath);

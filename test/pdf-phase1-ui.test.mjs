@@ -141,8 +141,10 @@ test("[relocate] PDF 跳页时更新 pdfCurrentPage + activeHref", () => {
     "PDF 分支应调 extractPdfCurrentPage");
   assert.ok(/findNearestPdfOutlineHref\(/.test(m[0]), "PDF 分支应调 findNearestPdfOutlineHref");
   // PDF 标题联动(在整个文件内查找,可能在 relocate 外)
+  // 2026-09-11 i18n：标题改为 t("第 {page}/{pages} 页", …) 插值形态，
+  // 断言放宽为「两种形态都接受，且中文原文与语义仍在」。
   assert.ok(
-    /chapterLabel\s*=\s*pdfTotalPages\s*>\s*0\s*\?\s*`第\s*\$\{page\}\/\$\{pdfTotalPages\}\s*页`/.test(viewSrc),
+    /chapterLabel\s*=\s*pdfTotalPages\s*>\s*0\s*\?\s*(?:t\("第 \{page\}\/\{pages\} 页"|`第\s*\$\{page\}\/\$\{pdfTotalPages\}\s*页`)/.test(viewSrc),
     "PDF 标题应为「第 N/T 页」"
   );
   // 非 PDF 走 tocItem.href

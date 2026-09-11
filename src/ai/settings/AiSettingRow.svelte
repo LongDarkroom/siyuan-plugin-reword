@@ -12,6 +12,8 @@
   import RWSwitch from "../../ui/controls/RWSwitch.svelte";
   import RWSelect from "../../ui/controls/RWSelect.svelte";
   import type { SettingItem } from "./ai-settings-items.ts";
+  // 2026-09-10 多语言：中文原文即 key，渲染时查表替换（见 src/i18n/index.ts 文件头）
+  import { t } from "../../i18n/index.ts";
 
   export let item: SettingItem;
   export let value: any = undefined;
@@ -91,33 +93,33 @@
         {disabled}
         onChange={(v) => onChange(item.key, v)}
       />
-      <span class="ais-inline-title">{item.title}</span>
+      <span class="ais-inline-title">{t(item.title)}</span>
       {#if item.wired !== "yes"}
         <span class="ais-badge" data-wired={item.wired}>
-          {item.wired === "partial" ? "🟡 待接线" : "🔵 规划中"}
+          {item.wired === "partial" ? "🟡 " + t("待接线") : "🔵 " + t("规划中")}
         </span>
       {/if}
     </div>
-    {#if item.desc}<div class="hiword-ai-setting-desc">{item.desc}</div>{/if}
-    {#if item.todoNote}<div class="ais-note" data-wired={item.wired}>{item.todoNote}</div>{/if}
+    {#if item.desc}<div class="hiword-ai-setting-desc">{t(item.desc || "")}</div>{/if}
+    {#if item.todoNote}<div class="ais-note" data-wired={item.wired}>{t(item.todoNote || "")}</div>{/if}
 
   {:else if item.type === "hint"}
     <div class="hiword-ai-setting-label">
       <span class="hiword-ai-setting-name">{item.title}</span>
     </div>
-    <div class="ais-hint">{item.text}</div>
+    <div class="ais-hint">{t(item.text || "")}</div>
 
   {:else if item.type === "actions"}
     <div class="hiword-ai-setting-label">
-      <span class="hiword-ai-setting-name">{item.title}</span>
-      {#if item.desc}<span class="hiword-ai-setting-desc">{item.desc}</span>{/if}
+      <span class="hiword-ai-setting-name">{t(item.title)}</span>
+      {#if item.desc}<span class="hiword-ai-setting-desc">{t(item.desc || "")}</span>{/if}
     </div>
     <div class="ais-actions">
       {#each item.buttons || [] as b}
         <button
           class="b3-button {b.variant === 'primary' ? 'b3-button--primary' : 'b3-button--outline'}"
           on:click={() => onAction(b.action)}
-        >{b.label}</button>
+        >{t(b.label)}</button>
       {/each}
       <span class="ais-action-msg" class:is-ok={msgKind === "ok"} class:is-err={msgKind === "error"}>{msg}</span>
     </div>
@@ -125,14 +127,14 @@
   {:else}
     <div class="hiword-ai-setting-label">
       <span class="hiword-ai-setting-name">
-        {item.title}
+        {t(item.title)}
         {#if item.wired !== "yes"}
           <span class="ais-badge" data-wired={item.wired}>
-            {item.wired === "partial" ? "🟡 待接线" : "🔵 规划中"}
+            {item.wired === "partial" ? "🟡 " + t("待接线") : "🔵 " + t("规划中")}
           </span>
         {/if}
       </span>
-      {#if item.desc}<span class="hiword-ai-setting-desc">{item.desc}</span>{/if}
+      {#if item.desc}<span class="hiword-ai-setting-desc">{t(item.desc || "")}</span>{/if}
     </div>
 
     {#if item.type === "password"}
@@ -142,7 +144,7 @@
             class="hiword-ai-input"
             type={revealed ? "text" : "password"}
             value={showVal(value)}
-            placeholder={item.placeholder || ""}
+            placeholder={t(item.placeholder || "")}
             {disabled}
             spellcheck="false"
             on:input={onText}
@@ -151,21 +153,21 @@
           <button
             class="hiword-ai-icon-btn"
             type="button"
-            title="从剪贴板导入"
+            title={t("从剪贴板导入")}
             {disabled}
             on:click={pasteFromClipboard}
           >📋</button>
           <button
             class="hiword-ai-icon-btn"
             type="button"
-            title={revealed ? "隐藏" : "显示"}
+            title={revealed ? t("隐藏") : t("显示")}
             {disabled}
             on:click={() => (revealed = !revealed)}
           >{revealed ? "🙈" : "👁"}</button>
         </div>
         {#if pasteMsg}<div class="ais-paste-msg">{pasteMsg}</div>{/if}
         <!-- R4：密钥仅存本地的固定提示（所有密码类输入统一显示，防外泄） -->
-        <div class="ais-local-only">🔒 密钥仅保存在本机思源笔记数据目录，不会上传到任何服务器；分享配置或截图时请注意外泄。</div>
+        <div class="ais-local-only">🔒 {t("密钥仅保存在本机思源笔记数据目录，不会上传到任何服务器；分享配置或截图时请注意外泄。")}</div>
       </div>
 
     {:else if item.type === "text"}
@@ -174,7 +176,7 @@
           class="hiword-ai-input"
           type="text"
           value={showVal(value)}
-          placeholder={item.placeholder || ""}
+          placeholder={t(item.placeholder || "")}
           {disabled}
           spellcheck="false"
           on:input={onText}
@@ -214,7 +216,7 @@
     {:else if item.type === "select"}
       <div class="hiword-ai-field">
         <RWSelect
-          options={item.options || []}
+          options={(item.options || []).map((o) => ({ ...o, label: t(o.label) }))}
           value={showVal(value)}
           {disabled}
           onChange={(v) => onChange(item.key, v)}
@@ -225,7 +227,7 @@
       <textarea
         class="hiword-ai-setting-textarea"
         rows={item.rows || 4}
-        placeholder={item.placeholder || ""}
+        placeholder={t(item.placeholder || "")}
         {disabled}
         spellcheck="false"
         on:input={onText}
@@ -241,7 +243,7 @@
       >{showVal(value)}</textarea>
     {/if}
 
-    {#if item.todoNote}<div class="ais-note" data-wired={item.wired}>{item.todoNote}</div>{/if}
+    {#if item.todoNote}<div class="ais-note" data-wired={item.wired}>{t(item.todoNote || "")}</div>{/if}
   {/if}
 </div>
 

@@ -31,9 +31,11 @@ test("AI 精读面板模板：含 chevron 按钮 #hiword-ai-resizer-toggle", asy
     /id="hiword-ai-resizer"[\s\S]*?id="hiword-ai-resizer-toggle"[\s\S]*?>▾</,
     "模板应在 resizer 内放置 toggle 按钮,默认 ▾"
   );
+  // 2026-09-11 i18n：aria-label 改为 t("收起输入区") 模板插值，
+  // 断言相应放宽为「中文原文仍在」——两种形态（裸字面量 / ${t("…")}）都接受。
   assert.match(
     src,
-    /id="hiword-ai-resizer-toggle"[^>]*aria-label="收起输入区"/,
+    /id="hiword-ai-resizer-toggle"[^>]*aria-label="(?:\$\{t\(")?收起输入区/,
     "应设默认 aria-label「收起输入区」"
   );
 });

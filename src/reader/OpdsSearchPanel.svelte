@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { t } from "../i18n/index.ts";
   /**
    * OPDS 在线书源面板（B · 在线书源 / OPDS 搜书）
    * 使用 portal 挂载到 body，逃离 dock 裁剪，获得更宽的书目展示空间。
@@ -105,8 +106,8 @@
 
   async function drillNav(e: OpdsEntry) {
     if (!e.href) return;
-    stack = [...stack, { url: e.href, title: e.title || "目录" }];
-    await loadFeed(e.href, e.title || "目录");
+    stack = [...stack, { url: e.href, title: e.title || t("目录") }];
+    await loadFeed(e.href, e.title || t("目录"));
   }
 
   function goBack(idx: number) {
@@ -124,7 +125,7 @@
     try {
       const f = await searchOpds(activeCatalog, q, feed?.links);
       feed = f;
-      stack = [{ url: activeCatalog.url, title: activeCatalog.name }, { url: "", title: `搜索：${q}` }];
+      stack = [{ url: activeCatalog.url, title: activeCatalog.name }, { url: "", title: `${t("搜索：")}${q}` }];
       loadCovers(f);
     } catch (e: any) {
       error = e?.message || String(e);
@@ -151,10 +152,10 @@
     try {
       const file = await downloadAsFile(e.download.href, activeCatalog.auth, e.title);
       const meta = await store.importBook(file);
-      if (meta) showToast(`已导入《${e.title}》`);
-      else showToast(`《${e.title}》已存在，跳过`);
+      if (meta) showToast(t("已导入《{title}》", { title: e.title ?? "" }));
+      else showToast(t("《{title}》已存在，跳过", { title: e.title ?? "" }));
     } catch (err: any) {
-      showToast(`导入失败：${err?.message || err}`);
+      showToast(t("导入失败：") + (err?.message || err));
     } finally {
       importingId = "";
     }
@@ -164,7 +165,7 @@
     const name = fName.trim();
     const url = fUrl.trim();
     if (!name || !url) {
-      showToast("请填写书源名称与地址");
+      showToast(t("请填写书源名称与地址"));
       return;
     }
     const id = "u_" + Date.now().toString(36);
@@ -175,12 +176,12 @@
     saveCustom();
     fName = fUrl = fAuth = fSearch = "";
     showManage = false;
-    showToast(`已添加书源「${name}」`);
+    showToast(t("已添加书源「{name}」", { name }));
   }
 
   function removeCatalog(c: OpdsCatalog) {
     if (BUILTIN_CATALOGS.some((b) => b.id === c.id)) {
-      showToast("内置书源不可删除");
+      showToast(t("内置书源不可删除"));
       return;
     }
     catalogs = catalogs.filter((x) => x.id !== c.id);
@@ -200,8 +201,8 @@
 <div class="edit-mask" use:portal on:click|self={close}>
   <div class="edit-panel opds-panel">
     <header class="panel-header">
-      <h2 class="panel-title">在线书源</h2>
-      <button class="panel-close" on:click={close} aria-label="关闭">×</button>
+      <h2 class="panel-title">{t("在线书源")}</h2>
+      <button class="panel-close" on:click={close} aria-label={t("关闭")}>×</button>
     </header>
 
     <!-- 工具栏 -->
@@ -213,12 +214,12 @@
       </select>
       <input
         class="opds-search"
-        placeholder="搜索书名 / 作者…"
+        placeholder={t("搜索书名 / 作者…")}
         bind:value={query}
         on:keydown={(e) => e.key === "Enter" && doSearch()}
       />
-      <button class="opds-btn primary" on:click={doSearch}>搜索</button>
-      <button class="opds-btn" on:click={() => (showManage = !showManage)}>管理</button>
+      <button class="opds-btn primary" on:click={doSearch}>{t("搜索")}</button>
+      <button class="opds-btn" on:click={() => (showManage = !showManage)}>{t("管理")}</button>
     </div>
 
     {#if showManage}
@@ -228,18 +229,18 @@
             <div class="opds-cat-row">
               <span class="opds-cat-name" title={c.url}>{c.name}</span>
               {#if !BUILTIN_CATALOGS.some((b) => b.id === c.id)}
-                <button class="opds-cat-del" title="删除" on:click={() => removeCatalog(c)}>删除</button>
+                <button class="opds-cat-del" title={t("删除")} on:click={() => removeCatalog(c)}>{t("删除")}</button>
               {:else}
-                <span class="opds-cat-badge">内置</span>
+                <span class="opds-cat-badge">{t("内置")}</span>
               {/if}
             </div>
           {/each}
         </div>
         <div class="opds-add">
-          <input class="opds-in" placeholder="书源名称" bind:value={fName} />
-          <input class="opds-in" placeholder="OPDS 地址（含 http）" bind:value={fUrl} />
-          <input class="opds-in" placeholder="Basic Auth（可选）user:pass" bind:value={fAuth} />
-          <input class="opds-in" placeholder="搜索模板（可选，&#123;q&#125; 占位）" bind:value={fSearch} />
+          <input class="opds-in" placeholder={t("书源名称")} bind:value={fName} />
+          <input class="opds-in" placeholder={t("OPDS 地址（含 http）")} bind:value={fUrl} />
+          <input class="opds-in" placeholder={t("Basic Auth（可选）user:pass")} bind:value={fAuth} />
+          <input class="opds-in" placeholder={t("搜索模板（可选，{q} 占位）")} bind:value={fSearch} />
           <button class="opds-btn primary" on:click={addCatalog}>添加书源</button>
         </div>
       </div>
@@ -249,7 +250,7 @@
       <nav class="opds-crumbs">
         {#each stack as crumb, i (i)}
           <button class="opds-crumb" class:active={i === stack.length - 1} on:click={() => goBack(i)}>
-            {crumb.title || "目录"}
+            {crumb.title || t("目录")}
           </button>
           {#if i < stack.length - 1}<span class="opds-crumb-sep">›</span>{/if}
         {/each}
@@ -261,23 +262,23 @@
       {#if loading}
         <div class="opds-state">
           <div class="opds-spinner"></div>
-          <div>正在加载书源…</div>
+          <div>{t("正在加载书源…")}</div>
         </div>
       {:else if error}
         <div class="opds-state error">
           <div>{error}</div>
-          <button class="opds-btn" on:click={() => (error = "")}>知道了</button>
+          <button class="opds-btn" on:click={() => (error = "")}>{t("知道了")}</button>
         </div>
       {:else if feed}
         {#if !feed.entries.length}
-          <div class="opds-state">这个目录没有条目，返回上一级或换本书源</div>
+          <div class="opds-state">{t("这个目录没有条目，返回上一级或换本书源")}</div>
         {:else}
           <div class="opds-grid">
             {#each feed.entries as e, i (e.kind + (e.href || e.id || e.title || i))}
               {#if e.kind === "navigation"}
                 <button class="opds-card folder" on:click={() => drillNav(e)}>
                   <span class="opds-folder-icon">📁</span>
-                  <span class="opds-card-title">{e.title || "（无标题）"}</span>
+                  <span class="opds-card-title">{e.title || t("（无标题）")}</span>
                   <span class="opds-card-arrow">›</span>
                 </button>
               {:else}
@@ -290,7 +291,7 @@
                     {/if}
                   </div>
                   <div class="opds-card-body">
-                    <div class="opds-card-title" title={e.title}>{e.title || "（无标题）"}</div>
+                    <div class="opds-card-title" title={e.title}>{e.title || t("（无标题）")}</div>
                     {#if e.author}<div class="opds-card-author">{e.author}</div>{/if}
                     {#if e.summary}<div class="opds-card-sum">{truncate(e.summary, 120)}</div>{/if}
                     <div class="opds-card-actions">
@@ -300,10 +301,10 @@
                           disabled={!!importingId}
                           on:click={() => importEntry(e)}
                         >
-                          {importingId === (e.id || e.title || "book") ? "导入中…" : "导入书架"}
+                          {importingId === (e.id || e.title || "book") ? t("导入中…") : t("导入书架")}
                         </button>
                       {:else}
-                        <span class="opds-no-dl">不可下载</span>
+                        <span class="opds-no-dl">{t("不可下载")}</span>
                       {/if}
                     </div>
                   </div>
@@ -313,7 +314,7 @@
           </div>
         {/if}
       {:else}
-        <div class="opds-state">选择上方书源开始浏览；或输入关键词搜索</div>
+        <div class="opds-state">{t("选择上方书源开始浏览；或输入关键词搜索")}</div>
       {/if}
     </div>
 

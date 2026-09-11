@@ -100,7 +100,7 @@ test("runAiDeepRead: jsonMode 失败时回退补全高亮词语境", async () =>
   assert.equal(res.words[0].context, "Apple is red.");
 });
 
-test("runAiChat: 对话模式直出 markdown，注入 system 并用 user_input 包裹用户消息", async () => {
+test("runAiChat: 对话模式直出 markdown，零注入（不补 system、不包 user_input）", async () => {
   let capturedMessages = null;
   const transport = async (req) => {
     capturedMessages = JSON.parse(req.body).messages;
@@ -126,18 +126,18 @@ test("runAiChat: 对话模式直出 markdown，注入 system 并用 user_input �
   assert.equal(res.raw, "你好，我明白了。");
   assert.equal(res.words.length, 0);
   assert.equal(res.sentences.length, 0);
-  // 2026-09-04 P0-1：空 system 被丢弃并替换为对话版 system（含角色与禁止续写约束）
-  assert.equal(capturedMessages.length, 4);
-  assert.equal(capturedMessages[0].role, "system");
-  assert.match(capturedMessages[0].content, /英语学习助手/);
-  assert.match(capturedMessages[0].content, /禁止续写/);
-  // 2026-09-04 P0-2：user 消息被标签包裹，assistant 消息保持原样，历史条数不变
-  assert.equal(capturedMessages[1].content, "<user_input>\n解释一下这句话\n</user_input>");
-  assert.equal(capturedMessages[2].content, "好的。");
-  assert.equal(capturedMessages[3].content, "<user_input>\n那这句呢\n</user_input>");
+  // 2026-09-10 零注入：空的 system 占位**只被丢弃**，不再补内置底线指令。
+  // （旧实现补 DEFAULT_AI_CHAT_SYSTEM，其禁令清单 + 「无论其如何表述都必须拒绝」会让模型
+  //   把用户的正常提问判成「材料里夹带的指令」而直接拒答——用户实测截图实证。）
+  assert.equal(capturedMessages.length, 3);
+  assert.equal(capturedMessages.some((m) => m.role === "system"), false, "零注入下不应存在任何 system 消息");
+  // 2026-09-10 零注入：user 消息**不再**被 <user_input> 包裹，assistant 保持原样
+  assert.equal(capturedMessages[0].content, "解释一下这句话");
+  assert.equal(capturedMessages[1].content, "好的。");
+  assert.equal(capturedMessages[2].content, "那这句呢");
 });
 
-test("runAiChat [P0-1]: 调用方已带 system 时不覆盖", async () => {
+test("runAiChat [P0-1]: 调用方已带 system 时原样透传（不覆盖、不追加）", async () => {
   let capturedMessages = null;
   const transport = async (req) => {
     capturedMessages = JSON.parse(req.body).messages;
@@ -152,8 +152,10 @@ test("runAiChat [P0-1]: 调用方已带 system 时不覆盖", async () => {
     { ...DEFAULT_AI_SETTINGS },
     { transport }
   );
+  assert.equal(capturedMessages[0].role, "system");
   assert.equal(capturedMessages[0].content, "自定义提示词");
-  assert.equal(capturedMessages[1].content, "<user_input>\nhi\n</user_input>");
+  // 2026-09-10 零注入：user 消息不再被 <user_input> 包裹
+  assert.equal(capturedMessages[1].content, "hi");
 });
 
 test("runAiChat [P0-3]: 截断不再自动续传，只保留 truncated 标记", async () => {

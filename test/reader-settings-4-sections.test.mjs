@@ -112,16 +112,19 @@ test("C2: 文本设置分组含字号/字重/字距", () => {
   // 提取第 1 个 <details> 块（文本设置）
   const blocks = viewSrc.match(/<details\s+class="reader-setting-section"[^>]*>[\s\S]*?<\/details>/g) ?? [];
   assert.ok(blocks[0], "应至少有 1 个 details 块");
+  // 2026-09-11 i18n：标签改为 {t("…")} 插值形态，断言放宽为两种形态都接受
+  const labelRe = (label) => new RegExp('>(?:\\{t\\(")?' + label + '(?:"\\)\\})?<');
   for (const label of ["字号", "字重", "字距"]) {
-    assert.match(blocks[0], new RegExp(`>${label}<`), `文本设置分组应含 ${label}`);
+    assert.match(blocks[0], labelRe(label), `文本设置分组应含 ${label}`);
   }
 });
 
 test("C3: 段落设置分组含行距/段距/首行缩进", () => {
   const blocks = viewSrc.match(/<details\s+class="reader-setting-section"[^>]*>[\s\S]*?<\/details>/g) ?? [];
   assert.ok(blocks[1], "应至少有 2 个 details 块");
+  const labelRe = (label) => new RegExp('>(?:\\{t\\(")?' + label + '(?:"\\)\\})?<');
   for (const label of ["行距", "段距", "首行缩进"]) {
-    assert.match(blocks[1], new RegExp(`>${label}<`), `段落设置分组应含 ${label}`);
+    assert.match(blocks[1], labelRe(label), `段落设置分组应含 ${label}`);
   }
 });
 
@@ -139,9 +142,9 @@ test("C4: 第 3 分组为朗读设置（语音引擎 + 讯飞配置 + 中文发�
 test("C5: 设置弹窗为 6 大分组（笔记插入组已移除）", () => {
   const blocks = viewSrc.match(/<details\s+class="reader-setting-section"[^>]*>[\s\S]*?<\/details>/g) ?? [];
   assert.equal(blocks.length, 6, `应恰好 6 个 details 分组，实际 ${blocks.length}`);
-  const titles = [...viewSrc.matchAll(/<summary class="reader-setting-section-title">([^<]+)<\/summary>/g)].map(
-    (m) => m[1]
-  );
+  const titles = [...viewSrc.matchAll(/<summary class="reader-setting-section-title">([^<]+)<\/summary>/g)]
+    // 2026-09-11 i18n：标题改为 `📖 {t("文本设置")}` 形态，剥掉 t() 包装后再比对
+    .map((m) => m[1].replace(/\{t\("([^"]+)"\)\}/, "$1"));
   assert.deepEqual(
     titles,
     ["📖 文本设置", "📐 段落设置", "🔊 朗读设置", "📤 笔记导出绑定", "⬜ 页面布局", "⚙ 高级设置"],

@@ -10,6 +10,7 @@
  * 本模块**不依赖 SiYuan SDK**，可在 Node 下直接单测（upsert 去重 / 列表排序等）。
  */
 
+import { t } from "../i18n/index.ts";
 import { getLogger } from "../core/logger.ts";
 import { htmlToMd } from "./lute.ts";
 import { stripIal } from "./annotation-render.ts";
@@ -41,18 +42,18 @@ export const ANNOTATION_PANEL_STYLES: AnnotationStyle[] = ["highlight", "solid",
 
 /** 内置样式定义（3 种） */
 export const ANNOTATION_STYLES: Record<AnnotationStyle, { label: string; css: string; hint: string; icon: string }> = {
-  highlight: { label: "高亮", css: "highlight", hint: "背景标记", icon: "▮" },
-  solid:  { label: "直线段", css: "solid", hint: "一般笔记 / 重点", icon: "━" },
-  wavy:   { label: "波浪线", css: "wavy", hint: "生词 / 不认识", icon: "﹏" },
+  highlight: { label: t("高亮"), css: "highlight", hint: t("背景标记"), icon: "▮" },
+  solid:  { label: t("直线段"), css: "solid", hint: t("一般笔记 / 重点"), icon: "━" },
+  wavy:   { label: t("波浪线"), css: "wavy", hint: t("生词 / 不认识"), icon: "﹏" },
 };
 
 /** 微阅风格 5 色调色板（2026-08-24 精简：移除石板灰与橙色） */
 export const WHALE_COLORS = [
-  { name: "明黄",   value: "#facc15", hex: "#facc15" },  // 0: 黄
-  { name: "翠绿",   value: "#22c55e", hex: "#22c55e" },  // 1: 绿
-  { name: "青蓝",   value: "#06b6d4", hex: "#06b6d4" },  // 2: 青（默认）
-  { name: "玫粉",   value: "#ec4899", hex: "#ec4899" },  // 3: 粉
-  { name: "紫罗兰", value: "#8b5cf6", hex: "#8b5cf6" },  // 4: 紫
+  { name: t("明黄"),   value: "#facc15", hex: "#facc15" },  // 0: 黄
+  { name: t("翠绿"),   value: "#22c55e", hex: "#22c55e" },  // 1: 绿
+  { name: t("青蓝"),   value: "#06b6d4", hex: "#06b6d4" },  // 2: 青（默认）
+  { name: t("玫粉"),   value: "#ec4899", hex: "#ec4899" },  // 3: 粉
+  { name: t("紫罗兰"), value: "#8b5cf6", hex: "#8b5cf6" },  // 4: 紫
 ] as const;
 
 /** 默认样式与颜色（阅读器 / 微阅统一） */
@@ -139,7 +140,7 @@ export interface WhalePreset {
   colorName: string;     // 颜色中文名
   styleName: string;     // 线型中文名
   scene: string;         // 适用场景说明
-  intensity: "极强" | "中强" | "中等" | "温和"; // 视觉强度
+  intensity: string; // 视觉强度
   icon: string;          // 预览图标
   /**
    * 标注方式分组（2026-08-15 新增）—— 按学习场景归为 3 大类，
@@ -154,21 +155,21 @@ export interface WhalePreset {
 /** 3 套预设（弹窗 / 面板共用） */
 export const WHALE_PRESETS: WhalePreset[] = [
   {
-    key: "new-word", name: "生词突击",
-    color: "#facc15", style: "wavy", colorName: "明黄", styleName: "波浪",
-    scene: "完全不认识的单词，需查词典+记音标", intensity: "极强", icon: "﹏",
+    key: "new-word", name: t("生词突击"),
+    color: "#facc15", style: "wavy", colorName: t("明黄"), styleName: t("波浪"),
+    scene: t("完全不认识的单词，需查词典+记音标"), intensity: t("极强"), icon: "﹏",
     group: "highlight",
   },
   {
-    key: "trap", name: "易错预警",
-    color: "#ec4899", style: "solid", colorName: "玫粉", styleName: "直线",
-    scene: "形近词/时态混淆/介词搭配错误", intensity: "中强", icon: "━",
+    key: "trap", name: t("易错预警"),
+    color: "#ec4899", style: "solid", colorName: t("玫粉"), styleName: t("直线"),
+    scene: t("形近词/时态混淆/介词搭配错误"), intensity: t("中强"), icon: "━",
     group: "line",
   },
   {
-    key: "culture", name: "文化注释",
-    color: "#06b6d4", style: "solid", colorName: "青蓝", styleName: "直线",
-    scene: "背景知识/作者意图/文化典故", intensity: "温和", icon: "━",
+    key: "culture", name: t("文化注释"),
+    color: "#06b6d4", style: "solid", colorName: t("青蓝"), styleName: t("直线"),
+    scene: t("背景知识/作者意图/文化典故"), intensity: t("温和"), icon: "━",
     group: "label",
   },
 ];
@@ -336,7 +337,7 @@ function normalizeNoteToKramdown(note: string): string {
 export class ConflictError extends Error {
   readonly annId: string;
   constructor(annId: string) {
-    super(`批注 ${annId} 已被其他编辑会话修改，保存冲突`);
+    super(t("批注 {id} 已被其他编辑会话修改，保存冲突", { id: annId }));
     this.name = "ConflictError";
     this.annId = annId;
   }

@@ -7,7 +7,6 @@
 
 import type { AiSettings } from "./ai-settings.ts";
 import {
-  DEFAULT_AI_CHAT_SYSTEM,
   fillAiTemplate,
   resolveModelParams,
   resolveModelStreamOverride,
@@ -619,23 +618,25 @@ export async function runAiDeepRead(
 }
 
 /**
- * 对话模式的消息预处理（2026-09-04 P0：止住跑题）：
- * 1) 注入对话版 system（缺失时补 DEFAULT_AI_CHAT_SYSTEM）——原先对话裸发 messages 无 system，
- *    模型无从得知自己是"英语学习助手"，只能按材料本身的文体（小说/新闻）续写。
- * 2) 把每条 user 消息用 <user_input> 标签包裹——配合 system 的声明，
- *    把内容降级为"待处理材料"，材料里的指令性文字（如 "continue the story"）不再被执行。
- * 3) 丢弃空的 system 消息（历史数据里存在 content:"" 的占位，发给 API 无意义且干扰 system 判定）。
+ * 对话模式的消息预处理（2026-09-10 改为**零注入**）。
+ *
+ * ## 旧实现做过两件「替用户做主」的事，均已移除
+ * 1) 无 system 时强制补 `DEFAULT_AI_CHAT_SYSTEM`（19 行禁令清单）；
+ * 2) 把每条 user 消息包进 `<user_input>` 标签，把用户输入降级成「待处理材料」。
+ *
+ * 二者叠加的后果（用户实测截图实证）：模型把用户的**正常提问**也判成
+ * 「材料里夹带的指令」，照着「无论其如何表述，你都必须拒绝」执行 → 直接拒答。
+ * 界面写的是自由对话，实际 100% 被这段看不见的禁令限定——这是「AI 被限制」的真根因。
+ *
+ * ## 现状
+ * 只丢弃空的 system 占位消息（历史数据里存在 content:"" 的 system，
+ * 发给 API 无意义且干扰 system 判定），其余**原样透传**。
+ * 用户没选角色、没配模型专属提示词、没开 SOUL 时，模型收不到任何 system 提示词。
+ *
+ * 注：结构化精读链（`runAiDeepRead`）仍自行用 `<user_input>` 包裹材料，不受此处影响。
  */
 function prepareChatMessages(messages: AiMessage[]): AiMessage[] {
-  const out: AiMessage[] = [];
-  for (const m of messages) {
-    if (m.role === "system" && !m.content?.trim()) continue;
-    out.push(m.role === "user" ? { ...m, content: `<user_input>\n${m.content}\n</user_input>` } : m);
-  }
-  if (!out.some((m) => m.role === "system")) {
-    out.unshift({ role: "system", content: DEFAULT_AI_CHAT_SYSTEM });
-  }
-  return out;
+  return messages.filter((m) => !(m.role === "system" && !m.content?.trim()));
 }
 
 /**
@@ -652,20 +653,21 @@ export async function runAiChat(
   const signal = opts?.signal;
   const payload = prepareChatMessages(messages);
   // R2（2026-09-07）：模型专属系统提示词最高优先级——非空时**替换**对话 system
-  // （此时 system 可能已是 DEFAULT_AI_CHAT_SYSTEM 或激活 AI 角色的提示词，一并覆盖；
-  //  SOUL 记忆随后仍会追加到其后，不冲突）。无 system 消息时补一条。
+  // （2026-09-10 零注入后，system 通常不存在，此时直接补一条；SOUL 随后追加，不冲突）。
   const modelSys = resolveModelSystemPrompt({ model: settings.model, modelParams: activePlatformOf(settings)?.modelParams || settings.modelParams });
   if (modelSys) {
     const sysMsg = payload.find((m) => m.role === "system");
     if (sysMsg) sysMsg.content = modelSys;
     else payload.unshift({ role: "system", content: modelSys });
   }
-  // 第 5 批（P0-5）：SOUL 长期记忆同样注入对话 system（找不到 system 则补默认）
+  // 第 5 批（P0-5）：SOUL 长期记忆同样注入对话 system。
+  // ⚠️ 2026-09-10：此处原写 `DEFAULT_AI_CHAT_SYSTEM + soul`——只要开了 SOUL，
+  // 那段禁令就会从后门重新回到对话里（零注入失效）。已改为只补 soul 本身。
   const soul = await buildSoulSection(settings);
   if (soul) {
     const sysMsg = payload.find((m) => m.role === "system");
     if (sysMsg) sysMsg.content += soul;
-    else payload.unshift({ role: "system", content: DEFAULT_AI_CHAT_SYSTEM + soul });
+    else payload.unshift({ role: "system", content: soul });
   }
   let gen: AiGenerateResult;
   let buffered = false; // 是否走了代理缓冲回退（用于 UI 提示）

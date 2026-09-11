@@ -1,3 +1,4 @@
+import { t } from "../i18n/index.ts";
 /**
  * 微阅风格确认弹窗（删除批注等二次确认）
  * ------------------------------------------------------------------
@@ -14,16 +15,16 @@ export function confirmDelete(message: string): Promise<boolean> {
     ov.innerHTML = `
       <div class="whale-dlg whale-confirm" role="alertdialog" aria-modal="true">
         <div class="whale-dlg-head">
-          <span class="whale-dlg-title">确认删除</span>
+          <span class="whale-dlg-title">${t("确认删除")}</span>
           <div class="whale-dlg-head-right">
-            <button class="whale-dlg-close" id="wc-cancel" title="取消">✕</button>
+            <button class="whale-dlg-close" id="wc-cancel" title="${t("取消")}">✕</button>
           </div>
         </div>
         <div class="whale-confirm-body">${escapeHtml(message)}</div>
         <div class="whale-dlg-foot">
           <span class="whale-dlg-spacer"></span>
-          <button class="whale-dlg-btn" id="wc-cancel2">取消</button>
-          <button class="whale-dlg-btn whale-dlg-btn--danger" id="wc-ok">删除</button>
+          <button class="whale-dlg-btn" id="wc-cancel2">${t("取消")}</button>
+          <button class="whale-dlg-btn whale-dlg-btn--danger" id="wc-ok">${t("删除")}</button>
         </div>
       </div>
     `;

@@ -1,6 +1,7 @@
 <script lang="ts">
   import { logSwallow } from "../core/safe.ts";
 import { getLogger } from "../core/logger.ts";
+  import { t } from "../i18n/index";
   /**
    * 阅读器 - 阅读面板（P0 + P1 打磨）
    * ---------------------------------------------------------------
@@ -478,7 +479,7 @@ import { getLogger } from "../core/logger.ts";
   // 2026-08-29 Phase 1：工具栏可见性（移动端中心点击切换，Readest 式沉浸阅读）
   let toolbarVisible = true;
   let footnoteHTML = "";
-  let footnoteType = "脚注";
+  let footnoteType = t("脚注");
   let footnoteEl: HTMLElement;
   // 2026-08-27 晚（P2.1）：脚注「悬停预览」——在点击之外补充 hover 触发
   let footnoteHoverTimer: any = null;
@@ -1738,7 +1739,7 @@ import { getLogger } from "../core/logger.ts";
     try {
       const blob = await store.getBlob(bookId);
       meta = store.get(bookId);
-      if (!blob || !meta) throw new Error("书籍不存在或文件丢失");
+      if (!blob || !meta) throw new Error(t("书籍不存在或文件丢失"));
       console.log("[REword] openBook blob 就绪", { size: blob.size, format: meta.format });
       title = meta.title;
       // 2026-09-04 P0-3：开书立即设置 ink 上下文，让 currentPageStrokes 派生
@@ -1777,9 +1778,9 @@ import { getLogger } from "../core/logger.ts";
               activeHref = matchedHref;
             }
           }
-          chapterLabel = pdfTotalPages > 0 ? `第 ${page}/${pdfTotalPages} 页` : "";
+          chapterLabel = pdfTotalPages > 0 ? t("第 {page}/{pages} 页", { page, pages: pdfTotalPages }) : "";
         } else {
-          chapterLabel = d?.tocItem?.label ?? (totalSections ? `第 ${(d?.index ?? 0) + 1}/${totalSections} 节` : "");
+          chapterLabel = d?.tocItem?.label ?? (totalSections ? t("第 {n}/{total} 节", { n: (d?.index ?? 0) + 1, total: totalSections }) : "");
         }
         currentSectionIndex = typeof d?.index === "number" ? d.index : currentSectionIndex;
         // 独立 Tab 模式：标题联动「书名 · 章节」
@@ -1837,7 +1838,7 @@ import { getLogger } from "../core/logger.ts";
             });
             if (detection.verdict === "other") {
               settingsStore.update({ bilingual: false });
-              toast("本书未识别为英文书籍，已自动关闭双语对照", 2800, "info" as any);
+              toast(t("本书未识别为英文书籍，已自动关闭双语对照"), 2800, "info" as any);
               getLogger().info(
                 `[REword][双语] 恢复复核拦截非英文书：bookId=${bookId} source=${detection.source} conf=${detection.confidence}`,
               );
@@ -1963,13 +1964,13 @@ import { getLogger } from "../core/logger.ts";
       // 错误分类 + 友好中文提示（2026-08-25 增强）
       const msg = String(e?.message || e || "").toLowerCase();
       if (msg.includes("unsupported") || msg.includes("format") || msg.includes("mobi") || msg.includes("azw")) {
-        errorMsg = "该文件格式暂不支持，建议转换为 EPUB 格式后重试。";
+        errorMsg = t("该文件格式暂不支持，建议转换为 EPUB 格式后重试。");
       } else if (msg.includes("parse") || msg.includes("xml") || msg.includes("opf") || msg.includes("container")) {
-        errorMsg = "书籍结构解析失败，文件可能已损坏或非标准 EPUB。";
+        errorMsg = t("书籍结构解析失败，文件可能已损坏或非标准 EPUB。");
       } else if (msg.includes("not found") || msg.includes("missing") || msg.includes("ENOENT")) {
-        errorMsg = "文件未找到，可能已被移动或删除。请重新导入。";
+        errorMsg = t("文件未找到，可能已被移动或删除。请重新导入。");
       } else {
-        errorMsg = e?.message || "打开失败，请检查文件格式是否正确。";
+        errorMsg = e?.message || t("打开失败，请检查文件格式是否正确。");
       }
     } finally {
       stopOpenWatchdog();
@@ -2159,9 +2160,9 @@ import { getLogger } from "../core/logger.ts";
     const md = buildRectMarkdown(bookId, title, [{ page, id: it.id, assetPath: it.snapshotPath || "" }]);
     try {
       await navigator.clipboard.writeText(md);
-      toast("链接已复制，粘贴到文档即可");
+      toast(t("链接已复制，粘贴到文档即可"));
     } catch {
-      toast("剪贴板复制失败");
+      toast(t("剪贴板复制失败"));
     }
   }
 
@@ -2181,7 +2182,7 @@ import { getLogger } from "../core/logger.ts";
     };
     let contents: any[] = [];
     try { contents = (view as any)?.renderer?.getContents?.() || []; } catch { contents = []; }
-    if (!contents.length) { toast("PDF 未就绪"); return; }
+    if (!contents.length) { toast(t("PDF 未就绪")); return; }
 
     // 收集页信息 + 命中页（重叠两个方向都 > 8px 才算）
     const frames: Array<{ index: number; c: any; fr: DOMRect; rect: SelRect }> = [];
@@ -2192,10 +2193,10 @@ import { getLogger } from "../core/logger.ts";
       frames.push({ index: c.index ?? 0, c, fr, rect: { left: fr.left, top: fr.top, right: fr.right, bottom: fr.bottom } });
     }
     const hits = collectPageHits(sel, frames);
-    if (!hits.length) { toast("框选区域不在页面上"); return; }
+    if (!hits.length) { toast(t("框选区域不在页面上")); return; }
 
     if (!annStore) { try { annStore = getAnnotationStore(); } catch { annStore = null; } }
-    if (!annStore) { toast("批注存储不可用"); return; }
+    if (!annStore) { toast(t("批注存储不可用")); return; }
 
     const hitIndexSet = new Set(hits.map((h) => h.index));
     const entries: RectMdEntry[] = [];
@@ -2234,7 +2235,7 @@ import { getLogger } from "../core/logger.ts";
           docId: bookId,
           bookId,
           cfi: "",
-          sentence: `矩形框选 · P${page}`,
+          sentence: t("矩形框选 · P{page}", { page }),
           selectedText: "",
           note: "",
           origin: "manual",
@@ -2252,19 +2253,19 @@ import { getLogger } from "../core/logger.ts";
         entries.push({ page, id: created.id, assetPath });
       }
 
-      if (!entries.length) { toast("框选区域不在页面上"); return; }
+      if (!entries.length) { toast(t("框选区域不在页面上")); return; }
 
       // 3. 复制 markdown：每页一节（链接行 + 图片行），标题「书名 · 第 N 页」不带 id
       const md = buildRectMarkdown(bookId, title, entries);
       try {
         await navigator.clipboard.writeText(md);
         const hasImg = entries.some((e) => e.assetPath);
-        const tail = hasImg ? "（链接 + 截图）" : "（链接）";
+        const tail = hasImg ? t("（链接 + 截图）") : t("（链接）");
         toast(entries.length > 1
-          ? `跨 ${entries.length} 页框选已复制${tail}，粘贴到文档即可`
-          : `矩形标注已复制${tail}，粘贴到文档即可`);
+          ? t("跨 {n} 页框选已复制{tail}，粘贴到文档即可", { n: entries.length, tail })
+          : t("矩形标注已复制{tail}，粘贴到文档即可", { tail }));
       } catch {
-        toast("标注已保存，但剪贴板复制失败");
+        toast(t("标注已保存，但剪贴板复制失败"));
       }
     } finally {
       pdfRectBusy = false;
@@ -2319,7 +2320,7 @@ import { getLogger } from "../core/logger.ts";
     const readChars = Math.min(totalChars, totalChars * Math.max(0, frac));
     const remain = totalChars - readChars;
     if (remain <= 0) {
-      etaText = "已读完";
+      etaText = t("已读完");
       return;
     }
     const minsRead = sessionReadMs / 60000;
@@ -2327,13 +2328,13 @@ import { getLogger } from "../core/logger.ts";
     if (speed < 60) speed = 400; // 无实测数据时用默认速度
     const remainMin = remain / speed;
     if (remainMin < 1) {
-      etaText = "即将读完";
+      etaText = t("即将读完");
     } else if (remainMin < 60) {
-      etaText = `还剩 ~${Math.round(remainMin)} 分钟`;
+      etaText = t("还剩 ~{n} 分钟", { n: Math.round(remainMin) });
     } else {
       const h = Math.floor(remainMin / 60);
       const m = Math.round(remainMin % 60);
-      etaText = m ? `还剩 ~${h} 小时 ${m} 分钟` : `还剩 ~${h} 小时`;
+      etaText = m ? t("还剩 ~{h} 小时 {m} 分钟", { h, m }) : t("还剩 ~{h} 小时", { h });
     }
   }
 
@@ -2786,7 +2787,7 @@ import { getLogger } from "../core/logger.ts";
         style: s.style,
         createdAt: s.createdAt,
         selectedText: "",
-        sentence: `墨迹 · p${s.pageIndex + 1}`,
+        sentence: t("墨迹 · p{n}", { n: s.pageIndex + 1 }),
         note: "",
         // 墨迹不可导出为文本 markdown，但 exportAnnots 走 selectedText 路径，
         // 留空串即可被 filter 过滤掉
@@ -2807,7 +2808,7 @@ import { getLogger } from "../core/logger.ts";
   async function toggleCurrentBookmark() {
     const cfi = currentCfi();
     if (!cfi) {
-      toast("还拿不到当前位置，翻一页再试");
+      toast(t("还拿不到当前位置，翻一页再试"));
       return;
     }
     const res = await store.toggleBookmark(bookId, {
@@ -2817,7 +2818,7 @@ import { getLogger } from "../core/logger.ts";
       bookType: currentBookType(),
     });
     bookmarks = res.list;
-    toast(res.added ? "已添加书签" : "已移除书签");
+    toast(res.added ? t("已添加书签") : t("已移除书签"));
   }
 
   async function jumpBookmark(bm: BookMark) {
@@ -2881,10 +2882,10 @@ import { getLogger } from "../core/logger.ts";
 
   /** 2026-09-09 B：条目类型文案（tooltip 用，说明这是什么标注） */
   function annotKindLabel(it: any): string {
-    if (it?.kind === "ink") return "墨迹";
-    if (it?.kind === "rect") return "矩形框选";
-    if (String(it?.type || "") === "annotate") return "批注";
-    return ANNOTATION_STYLES[normalizeAnnotationStyle(it?.style)]?.label || "高亮";
+    if (it?.kind === "ink") return t("墨迹");
+    if (it?.kind === "rect") return t("矩形框选");
+    if (String(it?.type || "") === "annotate") return t("批注");
+    return t(ANNOTATION_STYLES[normalizeAnnotationStyle(it?.style)]?.label || "高亮");
   }
 
   /** 2026-09-04 P0-3：墨迹删除入口。直接调 store 的 removeStroke 触发 inkSaver 订阅自动落盘 */
@@ -2897,13 +2898,13 @@ import { getLogger } from "../core/logger.ts";
   /** 导出本书全部摘录为 Markdown（写入剪贴板，可直接粘贴进思源文档） */
   function exportAnnots() {
     if (!annotsList.length) {
-      toast("本书还没有摘录");
+      toast(t("本书还没有摘录"));
       return;
     }
     // 2026-09-04 P0-3：跳过墨迹（无文本，导出无意义）—— 只导文本摘录
     const textOnly = annotsList.filter((it: any) => it.kind !== "ink");
     if (!textOnly.length) {
-      toast("没有可导出的文本摘录（墨迹不导出）");
+      toast(t("没有可导出的文本摘录（墨迹不导出）"));
       return;
     }
     const body = textOnly
@@ -2913,13 +2914,13 @@ import { getLogger } from "../core/logger.ts";
         return [text ? `> ${text}` : "", note].filter(Boolean).join("\n\n");
       })
       .join("\n\n");
-    const md = `# 《${title || "阅读"}》摘录\n\n${body}\n`;
+    const md = t("# 《{title}》摘录\n\n{body}\n", { title: title || t("阅读"), body });
     try {
       navigator.clipboard?.writeText(md);
-      toast(`已导出 ${textOnly.length} 条摘录到剪贴板`);
+      toast(t("已导出 {n} 条摘录到剪贴板", { n: textOnly.length }));
     } catch (__swallowErr) {
       logSwallow(__swallowErr, "ReaderView.svelte · exportAnnots", "warn");
-      toast("导出失败，请检查剪贴板权限");
+      toast(t("导出失败，请检查剪贴板权限"));
     }
   }
 
@@ -3319,8 +3320,8 @@ import { getLogger } from "../core/logger.ts";
   /** 缩放百分比显示（工具栏用） */
   function zoomPercentLabel(): string {
     if (!isPdfBook()) return "";
-    if (currentZoom.kind === "fit-width") return "↔ 适应宽度";
-    if (currentZoom.kind === "fit-page") return "⊡ 适应整页";
+    if (currentZoom.kind === "fit-width") return t("↔ 适应宽度");
+    if (currentZoom.kind === "fit-page") return t("⊡ 适应整页");
     return `${Math.round(currentZoom.scale * 100)}%`;
   }
 
@@ -3849,10 +3850,10 @@ import { getLogger } from "../core/logger.ts";
           settings = settingsStore.update({ translationArchiveDocId: id });
         }
       );
-      toast(docId ? "已启用译文归档，新建译文会同步写进思源" : "启用失败：无法创建归档文档，请检查思源笔记本", 2600);
+      toast(docId ? t("已启用译文归档，新建译文会同步写进思源") : t("启用失败：无法创建归档文档，请检查思源笔记本"), 2600);
     } catch (err) {
       console.warn("[REword] 启用译文归档失败:", err);
-      toast("启用译文归档失败，请重试", 2600, "error" as any);
+      toast(t("启用译文归档失败，请重试"), 2600, "error" as any);
     }
   }
 
@@ -3879,7 +3880,7 @@ import { getLogger } from "../core/logger.ts";
   async function onResetBookTokens() {
     await resetTokenUsage?.(bookId);
     refreshBookTokenUsage();
-    toast("本书 Token 统计已重置");
+    toast(t("本书 Token 统计已重置"));
   }
 
   function fmtTok(n: number): string {
@@ -3951,8 +3952,8 @@ import { getLogger } from "../core/logger.ts";
     //   避免用户误触导致所有译文丢失（下次翻页会全量重译，费 token）
     const isCurrentBook = target === bookId;
     const msg = isCurrentBook
-      ? `清空本书「${meta?.title || title || "当前书籍"}」全部翻译缓存？\n\n将删除 ${bilingualCacheCount} 段译文（${bilingualCachedPages} 页）。\n之后翻页会重新翻译，会消耗 AI token。\n\n确定继续？`
-      : `清空所选书籍 ${cacheBookList.find((b) => b.bookId === target)?.title || target} 的翻译缓存？\n\n确定继续？`;
+      ? t("清空本书「{title}」全部翻译缓存？\n\n将删除 {n} 段译文（{p} 页）。\n之后翻页会重新翻译，会消耗 AI token。\n\n确定继续？", { title: meta?.title || title || t("当前书籍"), n: bilingualCacheCount, p: bilingualCachedPages })
+      : t("清空所选书籍 {title} 的翻译缓存？\n\n确定继续？", { title: cacheBookList.find((b) => b.bookId === target)?.title || target });
     if (!confirm(msg)) return;
     clearingCache = true;
     try {
@@ -3961,10 +3962,10 @@ import { getLogger } from "../core/logger.ts";
       await refreshCacheBookList();
       // 2026-08-31 v1.4.4 P2：清空后立即 refresh 眼前屏（避免残留旧译文）
       if (bilingualOn) ensureBilingualHandle()?.refresh();
-      toast(isCurrentBook ? "本书翻译缓存已清空，下次翻页会重新翻译" : "已清空所选书籍翻译缓存");
+      toast(isCurrentBook ? t("本书翻译缓存已清空，下次翻页会重新翻译") : t("已清空所选书籍翻译缓存"));
     } catch (e) {
       console.warn("[REword] 清空翻译缓存失败:", e);
-      toast("清空缓存失败，请重试", 2600, "error" as any);
+      toast(t("清空缓存失败，请重试"), 2600, "error" as any);
     } finally {
       clearingCache = false;
     }
@@ -3975,16 +3976,16 @@ import { getLogger } from "../core/logger.ts";
   async function onCleanOrphanCaches() {
     if (!cleanOrphanCaches || clearingOrphans) return;
     // 2026-08-31 v1.4.4 P2：清理无效缓存也加二次确认（不可逆）
-    if (!confirm("清理无效（孤儿）翻译缓存？\n\n仅清书架中已不存在书籍对应的缓存文件，\n当前在读书籍的缓存不受影响。\n\n确定继续？")) return;
+    if (!confirm(t("清理无效（孤儿）翻译缓存？\n\n仅清书架中已不存在书籍对应的缓存文件，\n当前在读书籍的缓存不受影响。\n\n确定继续？"))) return;
     clearingOrphans = true;
     try {
       const n = await cleanOrphanCaches();
       await refreshCacheBookList();
       await refreshCacheStats(selectedCacheBookId || bookId);
-      toast(n > 0 ? `已清理 ${n} 份无效缓存` : "没有需要清理的无效缓存");
+      toast(n > 0 ? t("已清理 {count} 份无效缓存", { count: n }) : t("没有需要清理的无效缓存"));
     } catch (e) {
       console.warn("[REword] 清理无效缓存失败:", e);
-      toast("清理无效缓存失败，请重试", 2600, "error" as any);
+      toast(t("清理无效缓存失败，请重试"), 2600, "error" as any);
     } finally {
       clearingOrphans = false;
     }
@@ -3994,7 +3995,7 @@ import { getLogger } from "../core/logger.ts";
   async function openPretranslateDialog() {
     if (ptRunning) { ptOpen = true; return; }
     if (!isTranslationConfigured || !isTranslationConfigured()) {
-      toast("请先在「AI 设置 → AI 服务」中配置并启用 AI（翻译默认走 AI）", 3200, "info" as any);
+      toast(t("请先在「AI 设置 → AI 服务」中配置并启用 AI（翻译默认走 AI）"), 3200, "info" as any);
       return;
     }
     ensureBilingualHandle();
@@ -4032,7 +4033,7 @@ import { getLogger } from "../core/logger.ts";
   /** 预翻译弹窗：可用引擎选项（仅显示已配置/未锁定的） */
   function ptEngineOptions(): { value: string; label: string; disabled?: boolean; hint?: string }[] {
     const s = ptAiSettings();
-    if (!s) return [{ value: "auto", label: "自动（按优先级尝试）" }];
+    if (!s) return [{ value: "auto", label: t("自动（按优先级尝试）") }];
     const cfg = {
       ...s,
       aiEnabled: s.enabled,
@@ -4040,15 +4041,15 @@ import { getLogger } from "../core/logger.ts";
       aiModels: s.models,
     };
     const opts: { value: string; label: string; disabled?: boolean; hint?: string }[] = [
-      { value: "auto", label: "自动（按优先级尝试）" },
+      { value: "auto", label: t("自动（按优先级尝试）") },
     ];
     const engines: { value: string; label: string }[] = [
-      { value: "tencent", label: "腾讯翻译" },
-      { value: "youdao", label: "有道翻译" },
-      { value: "baidu", label: "百度翻译" },
-      { value: "microsoft", label: "微软翻译" },
+      { value: "tencent", label: t("腾讯翻译") },
+      { value: "youdao", label: t("有道翻译") },
+      { value: "baidu", label: t("百度翻译") },
+      { value: "microsoft", label: t("微软翻译") },
       { value: "libretranslate", label: "LibreTranslate" },
-      { value: "ai", label: "AI 翻译" },
+      { value: "ai", label: t("AI 翻译") },
     ];
     for (const e of engines) {
       const avail = isEngineAvailable(e.value, cfg);
@@ -4058,7 +4059,7 @@ import { getLogger } from "../core/logger.ts";
         // 已配置但达到用量锁：显示为禁用项并提示
         const used = s.tencentCharsUsed ?? 0;
         const lock = s.tencentCharsLock ?? 4_000_000;
-        opts.push({ value: e.value, label: e.label, disabled: true, hint: `已用尽 ${lock.toLocaleString()} 字符` });
+        opts.push({ value: e.value, label: e.label, disabled: true, hint: t("已用尽 {n} 字符", { n: lock.toLocaleString() }) });
       }
       // 未配置的引擎直接隐藏，不占用界面
     }
@@ -4071,7 +4072,7 @@ import { getLogger } from "../core/logger.ts";
     const models = (s?.models || []).filter((m) => typeof m === "string" && m.trim());
     const current = s?.model?.trim();
     if (current && !models.includes(current)) models.unshift(current);
-    return [{ value: "", label: "默认（沿用当前 AI 设置）" }, ...models.map((m) => ({ value: m, label: m }))];
+    return [{ value: "", label: t("默认（沿用当前 AI 设置）") }, ...models.map((m) => ({ value: m, label: m }))];
   }
 
   /** 预翻译弹窗：是否显示腾讯用量锁行 */
@@ -4103,8 +4104,8 @@ import { getLogger } from "../core/logger.ts";
       await refreshCacheBookList();
       toast(
         p.pending === 0
-          ? "本书已全部缓存，翻页 / 滚动时自动显示双语对照"
-          : `整书预翻译完成，已缓存 ${p.done} 段，当前页已显示译文`,
+          ? t("本书已全部缓存，翻页 / 滚动时自动显示双语对照")
+          : t("整书预翻译完成，已缓存 {n} 段，当前页已显示译文", { n: p.done }),
         3000, "info" as any
       );
       // 2026-09-01 P0：完成后主动把已缓存译文注入当前可视区域，用户立刻能看到对照
@@ -4114,7 +4115,7 @@ import { getLogger } from "../core/logger.ts";
       ptAbort = null;
       await refreshCacheStats(bookId);
       await refreshCacheBookList();
-      toast("已停止整书预翻译（已翻译部分已缓存，可重跑续译）", 2400, "info" as any);
+      toast(t("已停止整书预翻译（已翻译部分已缓存，可重跑续译）"), 2400, "info" as any);
     } else if (p.status === "error") {
       ptRunning = false;
       ptAbort = null;
@@ -4125,7 +4126,7 @@ import { getLogger } from "../core/logger.ts";
   async function startPretranslate() {
     if (ptRunning) return;
     if (!isTranslationConfigured || !isTranslationConfigured()) {
-      toast("请先在「AI 设置 → AI 服务」中配置并启用 AI（翻译默认走 AI）", 3200, "info" as any);
+      toast(t("请先在「AI 设置 → AI 服务」中配置并启用 AI（翻译默认走 AI）"), 3200, "info" as any);
       return;
     }
     ensureBilingualHandle();
@@ -4149,12 +4150,12 @@ import { getLogger } from "../core/logger.ts";
       signal,
       onProgress: (p: PretranslateProgress) => { void onPtProgress(p); },
     };
-    toast("开始整书预翻译（后台进行，不阻塞阅读）", 2200, "info" as any);
+    toast(t("开始整书预翻译（后台进行，不阻塞阅读）"), 2200, "info" as any);
     try {
       await bilingualHandle!.pretranslateAll(opts);
     } catch (e) {
       console.warn("[REword] 整书预翻译失败:", e);
-      toast("整书预翻译失败，请检查 AI 配置与网络", 3000, "error" as any);
+      toast(t("整书预翻译失败，请检查 AI 配置与网络"), 3000, "error" as any);
     }
   }
 
@@ -4186,10 +4187,10 @@ import { getLogger } from "../core/logger.ts";
   /** 把剩余秒数格式化为「X 分 Y 秒」 */
   function fmtEta(s: number): string {
     s = Math.max(0, Math.round(s));
-    if (s < 60) return `${s} 秒`;
+    if (s < 60) return t("{n} 秒", { n: s });
     const m = Math.floor(s / 60);
     const r = s % 60;
-    return r ? `${m} 分 ${r} 秒` : `${m} 分`;
+    return r ? t("{m} 分 {s} 秒", { m, s: r }) : t("{m} 分", { m });
   }
 
   function togglePrimerEditor() {
@@ -4255,7 +4256,7 @@ import { getLogger } from "../core/logger.ts";
     primerChars = 0;
     primerTokens = 0;
     primerOpen = false;
-    toast("已清除本书上下文");
+    toast(t("已清除本书上下文"));
   }
 
   function destroyPrimerEditor() {
@@ -4279,7 +4280,7 @@ import { getLogger } from "../core/logger.ts";
       const raw = (view?.renderer?.getContents?.() as any[]) || [];
       const docs = raw.map((c) => c?.doc).filter(Boolean) as Document[];
       if (!docs.length) {
-        toast("未找到已翻译内容");
+        toast(t("未找到已翻译内容"));
         return;
       }
       const rows: Array<{ src: string; dst: string; ch: string }> = [];
@@ -4303,25 +4304,25 @@ import { getLogger } from "../core/logger.ts";
         });
       }
       if (!rows.length) {
-        toast("当前章节暂无已翻译段落（请先开启双语并滚动加载）");
+        toast(t("当前章节暂无已翻译段落（请先开启双语并滚动加载）"));
         return;
       }
-      const title = meta?.title || "本书";
+      const title = meta?.title || t("本书");
       const lines = [
-        `# ${title} · 双语生词本`,
+        t("# {title} · 双语生词本", { title }),
         "",
-        `> 导出于 ${new Date().toLocaleString()} · 共 ${rows.length} 段`,
+        t("> 导出于 {date} · 共 {n} 段", { date: new Date().toLocaleString(), n: rows.length }),
         "",
-        "| 原文 | 译文 |",
+        t("| 原文 | 译文 |"),
         "| --- | --- |",
         ...rows.map((r) => `| ${r.src.replace(/\|/g, "\\|").slice(0, 300)} | ${r.dst.replace(/\|/g, "\\|")} |`),
       ];
       const md = lines.join("\n");
       await navigator.clipboard.writeText(md);
-      toast(`已复制 ${rows.length} 段生词 Markdown，可粘贴进思源笔记`);
+      toast(t("已复制 {n} 段生词 Markdown，可粘贴进思源笔记", { n: rows.length }));
     } catch (e: any) {
       console.warn("[REword] 生词本导出失败:", e);
-      toast("导出失败：" + String(e?.message || e));
+      toast(t("导出失败：") + String(e?.message || e));
     }
   }
 
@@ -4528,7 +4529,7 @@ import { getLogger } from "../core/logger.ts";
       await loadFontBlob(font);
       applyStyles();
     } catch (err: any) {
-      alert(`导入字体失败：${err?.message || err}`);
+      alert(t("导入字体失败：{err}", { err: err?.message || err }));
     } finally {
       fontImporting = false;
       input.value = "";
@@ -4774,9 +4775,9 @@ import { getLogger } from "../core/logger.ts";
   // 因 setLastAnnotationStyle 内部有 300ms 防抖，连续点颜色只会落盘一次。
   $: persistLastStyle(lastStyle, lastColor);
   // 「标注」按钮上的样式预览文案（Svelte4 模板表达式不支持 ?. / ??，故在 script 里算好再给模板用）
-  $: lastStyleLabel = ANNOTATION_STYLES[lastStyle]?.label || "高亮";
+  $: lastStyleLabel = t(ANNOTATION_STYLES[lastStyle]?.label || "高亮");
   $: lastColorName =
-    (WHALE_COLORS as readonly { name: string; value: string }[]).find((c) => c.value === lastColor)?.name || "自定义色";
+    t((WHALE_COLORS as readonly { name: string; value: string }[]).find((c) => c.value === lastColor)?.name || "自定义色");
   // 2026-08-24 根治：当前编辑/待删除标注的独立缓存，不随 selToolbar 状态重置而丢失。
   // 修复「删除按钮点击时 selToolbar.editingId 已被选区检测(ws)/关闭逻辑重置为 undefined/null，
   // 导致 onAnnDeleteById 第一行 return 的死锁」。删除时优先读这两个变量。
@@ -4801,7 +4802,7 @@ import { getLogger } from "../core/logger.ts";
     visible: false, x: 0, y: 0, mode: "create",
     id: null, cfi: "", text: "",
     style: getDefaultAnnotationStyle(), color: getDefaultAnnotationColor(), note: "", group: "未分组",
-    time: "", labels: [], styleLabel: "直线", styleGlyph: "━",
+    time: "", labels: [], styleLabel: t("直线"), styleGlyph: "━",
     place: "below",
   };
   let noteEditorEl: HTMLElement | null = null;
@@ -5297,12 +5298,12 @@ import { getLogger } from "../core/logger.ts";
     const pos = rect
       ? positionPopupNear(rect, 268, 160)
       : { x: (readerViewEl?.clientWidth ?? window.innerWidth) / 2, y: 80, place: "below" as ToolbarPlace };
-    const annStyle = ANNOTATION_STYLES[style] || { label: "直线", icon: "━" };
+    const annStyle = ANNOTATION_STYLES[style] || { label: t("直线"), icon: "━" };
     noteEditor = {
       visible: true, x: pos.x, y: pos.y, mode: "preview",
       id: rec.id, cfi: rec.cfi,
       text, note, style, color, group, time, labels,
-      styleLabel: annStyle.label, styleGlyph: annStyle.icon,
+      styleLabel: t(annStyle.label), styleGlyph: annStyle.icon,
       place: pos.place,
     };
   }
@@ -5381,12 +5382,12 @@ import { getLogger } from "../core/logger.ts";
     const pos = rect
       ? positionPopupNear(rect, 268, 120)
       : { x: (readerViewEl?.clientWidth ?? window.innerWidth) / 2, y: 80, place: "below" as ToolbarPlace };
-    const annStyle = ANNOTATION_STYLES[style] || { label: "直线", icon: "━" };
+    const annStyle = ANNOTATION_STYLES[style] || { label: t("直线"), icon: "━" };
     noteEditor = {
       visible: true, x: pos.x, y: pos.y, mode: "highlight",
       id: rec.id, cfi: rec.cfi,
       text: "", note: "", style, color, group: stored?.group ?? "未分组", time: "",
-      labels: [], styleLabel: annStyle.label, styleGlyph: annStyle.icon,
+      labels: [], styleLabel: t(annStyle.label), styleGlyph: annStyle.icon,
       place: pos.place,
     };
   }
@@ -5405,7 +5406,7 @@ import { getLogger } from "../core/logger.ts";
       });
       if (hit) rec = { id: hit.id, cfi: hit.cfi, color: hit.color };
     }
-    if (!rec) { toast("未找到该阅读批注"); return; }
+    if (!rec) { toast(t("未找到该阅读批注")); return; }
     showViewerForRec(rec, null);
   }
 
@@ -5848,7 +5849,7 @@ import { getLogger } from "../core/logger.ts";
       if (myToken !== footnoteReqToken) return; // 已有更新的请求，丢弃本条过期结果
       if (!result.html) {
         // 抽取失败：降级放行（回退为普通跳转）
-        toast("脚注内容获取失败，将跳转到原位置");
+        toast(t("脚注内容获取失败，将跳转到原位置"));
         closeFootnote();
         return;
       }
@@ -5861,7 +5862,7 @@ import { getLogger } from "../core/logger.ts";
       if (myToken !== footnoteReqToken) return;
       footnoteLoading = false;
       console.warn("[REword] 脚注展示失败:", err);
-      toast("脚注展示异常");
+      toast(t("脚注展示异常"));
     }
   }
 
@@ -5999,7 +6000,7 @@ import { getLogger } from "../core/logger.ts";
     footnoteReqToken++; // 作废在途抽取请求，避免关闭后旧结果回填气泡
     showFootnote = false;
     footnoteHTML = "";
-    footnoteType = "脚注";
+    footnoteType = t("脚注");
     footnoteLoading = false;
     footnoteHoverAnchor = null;
     footnotePinned = false;
@@ -6308,7 +6309,7 @@ import { getLogger } from "../core/logger.ts";
     if (!annStore) {
       try { annStore = getAnnotationStore(); } catch { annStore = null; }
     }
-    if (!annStore || !bookId) { toast("批注存储不可用"); return; }
+    if (!annStore || !bookId) { toast(t("批注存储不可用")); return; }
     const input: any = {
       blockId: `book:${bookId}`,   // 派生虚拟块 ID，复用现有去重/聚合逻辑
       docId: bookId,
@@ -6356,7 +6357,7 @@ import { getLogger } from "../core/logger.ts";
     if (!text) return;
     try { navigator.clipboard?.writeText(text); } catch (__swallowErr) { logSwallow(__swallowErr, "ReaderView.svelte · onSelCopy", "warn"); }
     closeSelToolbar();
-    toast("已复制");
+    toast(t("已复制"));
   }
 
   // 「高亮」按钮：切换第二层样式条（3 样式 + 5 色）展开/收起。
@@ -6376,10 +6377,10 @@ import { getLogger } from "../core/logger.ts";
     if (selToolbar.mode === "edit") return;
     const cfi = selInfo?.cfi;
     const text = selToolbar.text?.trim();
-    if (!cfi || !text) { toast("请先选中文本"); return; }
+    if (!cfi || !text) { toast(t("请先选中文本")); return; }
     await saveHighlight(cfi, text, lastStyle, lastColor, "");
     closeSelToolbar();
-    toast(`已${ANNOTATION_STYLES[lastStyle]?.label || "高亮"}`);
+    toast(t("已{style}", { style: t(ANNOTATION_STYLES[lastStyle]?.label || "高亮") }));
   }
 
   // 样式条中点击「样式/颜色」→ 用该组合一步创建高亮（create 态）。
@@ -6387,11 +6388,11 @@ import { getLogger } from "../core/logger.ts";
     if (selToolbar.mode === "edit") return;
     const cfi = selInfo?.cfi;
     const text = selToolbar.text?.trim();
-    if (!cfi || !text) { toast("请先选中文本"); return; }
+    if (!cfi || !text) { toast(t("请先选中文本")); return; }
     lastStyle = style; lastColor = color; // 同步偏好，供下次「高亮」复用
     await saveHighlight(cfi, text, style, color, "");
     closeSelToolbar();
-    toast("已高亮");
+    toast(t("已高亮"));
   }
 
   // edit 态「批注」按钮：打开该标注的查看气泡（时间 + 原文 + 批注 + 标签 + 即时改色/样式 + 复制/编辑/删除）。
@@ -6416,7 +6417,7 @@ import { getLogger } from "../core/logger.ts";
     suppressNextCreateToolbar = true; // 阻止 selectionchange → showToolbarFor 重建
     const text = selToolbar.text?.trim();
     const cfi = selInfo?.cfi;
-    if (!text || !cfi) { toast("请先选中文本"); return }
+    if (!text || !cfi) { toast(t("请先选中文本")); return }
     // 定位：统一用 positionPopupNear（锚定选区末端 + 四向避让 + 边界夹紧）。
     // 优先用已保存的选区矩形（lastSelRect 已是选区末端 clientRect，跟手）；
     // 极端情况无 rect 时兜底用工具栏当前位置，保证弹窗一定出现。
@@ -6439,7 +6440,7 @@ import { getLogger } from "../core/logger.ts";
       group: lastGroup,
       time: "",
       labels: [],
-      styleLabel: "直线",
+      styleLabel: t("直线"),
       styleGlyph: "━",
       place,
     };
@@ -6464,7 +6465,7 @@ import { getLogger } from "../core/logger.ts";
     if (!text) return;
     try { navigator.clipboard?.writeText(text); } catch (__swallowErr) { logSwallow(__swallowErr, "ReaderView.svelte · onViewerCopy", "warn"); }
     closeNoteEditor();
-    toast("已复制");
+    toast(t("已复制"));
   }
 
   // 预览卡「导出」：将「原文 + 笔记」组合为 Markdown 复制到剪贴板（轻量导出，后续可接思源文档）
@@ -6472,9 +6473,9 @@ import { getLogger } from "../core/logger.ts";
     const text = (noteEditor.text || "").trim();
     const note = (noteEditor.note || "").trim();
     const md = [text ? `> ${text}` : "", note ? note : ""].filter(Boolean).join("\n\n");
-    if (!md) { toast("无内容可导出"); return; }
+    if (!md) { toast(t("无内容可导出")); return; }
     try { navigator.clipboard?.writeText(md); } catch (__swallowErr) { logSwallow(__swallowErr, "ReaderView.svelte · onViewerExport", "warn"); }
-    toast("已导出批注到剪贴板");
+    toast(t("已导出批注到剪贴板"));
   }
 
   /** 共享：软删除一条标注（视觉擦除 + 数据软删 + reconcile），供查看气泡与划词工具栏复用 */
@@ -6519,19 +6520,19 @@ import { getLogger } from "../core/logger.ts";
     const cfi = noteEditor.cfi;
     closeNoteEditor();
     await removeAnnotationById(id, cfi);
-    toast("已删除");
+    toast(t("已删除"));
   }
 
   // 统一批注浮层保存（create 新增 type='annotate'；edit 更新已有记录 id 存在）
   async function onNoteSave() {
     const { cfi, text, style, color, note, group, id } = noteEditor;
-    if (!cfi || !text) { toast("请先选中文本"); return; }
+    if (!cfi || !text) { toast(t("请先选中文本")); return; }
     lastStyle = style; lastColor = color; lastGroup = group; // 同步偏好，供「高亮」复用
     const noteVal = note?.trim() || "";
     if (id) {
       // 更新已有标注：upsert(id) 就地更新 note/样式/颜色/类型
       if (!annStore) { try { annStore = getAnnotationStore(); } catch { annStore = null; } }
-      if (!annStore) { toast("批注存储不可用"); return; }
+      if (!annStore) { toast(t("批注存储不可用")); return; }
       annStore.upsert({
         id,
         style,
@@ -6549,14 +6550,14 @@ import { getLogger } from "../core/logger.ts";
       }
       noteEditor = { ...noteEditor, visible: false, mode: "create", id: null };
       closeSelToolbar();
-      toast("已更新批注");
+      toast(t("已更新批注"));
       // R3：列表刷新 + 侧边栏广播由 annStore.subscribe 单通道触发，不再手动调用
       onProtectTab?.(); // 已修改/批注：固定阅读 Tab，避免被数量超限回收顶掉
     } else {
       await saveHighlight(cfi, text, style, color, noteVal, group, "annotate");
       noteEditor = { ...noteEditor, visible: false, mode: "create", id: null };
       closeSelToolbar();
-      toast("已保存批注");
+      toast(t("已保存批注"));
       onProtectTab?.(); // 已新增批注/高亮：固定阅读 Tab，避免被数量超限回收顶掉
     }
   }
@@ -6640,11 +6641,11 @@ import { getLogger } from "../core/logger.ts";
       try {
         await addReaderAnnotation({ id: effId, cfi, color, style, note });
         if (effId) annByValue.set(cfi, { id: effId, cfi, color });
-        toast(`样式已改为 ${ANNOTATION_STYLES[style]?.label || style}`);
+        toast(t("样式已改为 {style}", { style: t(ANNOTATION_STYLES[style]?.label || style) }));
         dbg.step("applyEditStyle", "✅ 视觉更新成功（直接绘制）", { cfi, style, effId });
       } catch (e) {
         console.error("[REword] applyEditStyle 视觉更新失败:", e);
-        toast("样式切换失败，请重试");
+        toast(t("样式切换失败，请重试"));
         dbg.warn("applyEditStyle", "❌ 视觉更新失败", { cfi, style, err: String(e) });
       }
     } else {
@@ -6689,11 +6690,11 @@ import { getLogger } from "../core/logger.ts";
       try {
         await addReaderAnnotation({ id: effId, cfi, color, style, note });
         if (effId) annByValue.set(cfi, { id: effId, cfi, color });
-        toast(`颜色已更改`);
+        toast(t("颜色已更改"));
         dbg.step("applyEditColor", "✅ 视觉更新成功（直接绘制）", { cfi, color, effId });
       } catch (e) {
         console.error("[REword] applyEditColor 视觉更新失败:", e);
-        toast("颜色切换失败，请重试");
+        toast(t("颜色切换失败，请重试"));
         dbg.warn("applyEditColor", "❌ 视觉更新失败", { cfi, color, err: String(e) });
       }
     } else {
@@ -6814,7 +6815,7 @@ import { getLogger } from "../core/logger.ts";
           .filter((w) => w.length >= 2)
       )
     );
-    if (!words.length) { try { toast("当前句无可收藏的单词"); } catch { /* 忽略 */ } return; }
+    if (!words.length) { try { toast(t("当前句无可收藏的单词")); } catch { /* 忽略 */ } return; }
     let added = 0;
     let skipped = 0;
     for (const w of words) {
@@ -6825,7 +6826,7 @@ import { getLogger } from "../core/logger.ts";
       } catch { /* 忽略单项失败 */ }
     }
     try {
-      toast(`已加入生词本 ${added} 个${skipped ? `（已存在 ${skipped} 个跳过）` : ""}`);
+      toast(t("已加入生词本 {n} 个{extra}", { n: added, extra: skipped ? t("（已存在 {n} 个跳过）", { n: skipped }) : "" }));
     } catch { /* 忽略 */ }
   }
 
@@ -6898,7 +6899,7 @@ import { getLogger } from "../core/logger.ts";
     closeSelToolbar();
     if (!text) return;
     if (onTranslateToAi) onTranslateToAi(text);
-    else toast("翻译未配置：请先在 AI 设置中开启并填写 API");
+    else toast(t("翻译未配置：请先在 AI 设置中开启并填写 API"));
   }
 
   // ========== 2026-08-27 重设计：双语对照开关 ==========
@@ -6920,7 +6921,7 @@ import { getLogger } from "../core/logger.ts";
     const prevLabel = btn ? btn.textContent : "";
     if (btn) {
       btn.disabled = true;
-      btn.textContent = "重译中…";
+      btn.textContent = t("重译中…");
     }
     try {
       // 前文参考：取原文段落的前两个兄弟段落文本，保持译法一致
@@ -6948,7 +6949,7 @@ import { getLogger } from "../core/logger.ts";
       );
       const tr = (res?.[0] || "").trim();
       if (!tr) {
-        toast("AI 未返回译文，请稍后重试", 2400, "error" as any);
+        toast(t("AI 未返回译文，请稍后重试"), 2400, "error" as any);
         return;
       }
 
@@ -6966,11 +6967,11 @@ import { getLogger } from "../core/logger.ts";
 
     } catch (e) {
       console.warn("[REword] 段落 AI 重译失败:", e);
-      toast("AI 重译失败，请检查 AI 配置或稍后重试", 2600, "error" as any);
+      toast(t("AI 重译失败，请检查 AI 配置或稍后重试"), 2600, "error" as any);
     } finally {
       if (btn) {
         btn.disabled = false;
-        btn.textContent = prevLabel || "✨ AI 重译";
+        btn.textContent = prevLabel || t("✨ AI 重译");
       }
     }
   }
@@ -7105,7 +7106,7 @@ import { getLogger } from "../core/logger.ts";
         // 否则 AI 配置错误/网络/限流被静默吞掉、用户无感知。8 秒冷却防刷屏。
         if (total > 0 && done === 0 && Date.now() - bilingualFailToastAt > 8000) {
           bilingualFailToastAt = Date.now();
-          toast("双语翻译失败：请检查「AI 设置 → AI 服务」配置与网络", 3200, "error" as any);
+          toast(t("双语翻译失败：请检查「AI 设置 → AI 服务」配置与网络"), 3200, "error" as any);
         }
         if (done >= total) {
           setTimeout(() => {
@@ -7137,7 +7138,7 @@ import { getLogger } from "../core/logger.ts";
       refreshCacheStats(bookId);
       refreshCacheBookList();
     } else {
-      toast("请先在「AI 设置 → AI 服务」中配置并启用 AI（翻译默认走 AI）", 3200, "info" as any);
+      toast(t("请先在「AI 设置 → AI 服务」中配置并启用 AI（翻译默认走 AI）"), 3200, "info" as any);
     }
   }
 
@@ -7196,7 +7197,7 @@ import { getLogger } from "../core/logger.ts";
         getLogger().info(
           `[REword][双语] 非英文书籍，不开启双语：bookId=${bookId} source=${detection.source} conf=${detection.confidence}`,
         );
-        toast("未识别为英文书籍，双语对照暂不可用", 2600, "info" as any);
+        toast(t("未识别为英文书籍，双语对照暂不可用"), 2600, "info" as any);
         return;
       }
       getLogger().info(
@@ -7206,7 +7207,7 @@ import { getLogger } from "../core/logger.ts";
       const configured = !isTranslationConfigured || isTranslationConfigured();
       console.log("[REword] 双语: 开启检查, isTranslationConfigured=", configured);
       if (!configured) {
-        toast("请先在「AI 设置 → AI 服务」中配置并启用 AI（翻译默认走 AI）", 3200, "info" as any);
+        toast(t("请先在「AI 设置 → AI 服务」中配置并启用 AI（翻译默认走 AI）"), 3200, "info" as any);
         return;
       }
       // 2026-08-31 Phase 4：默认模式=ask → 弹窗询问；whole-book → 直接整书预翻译；progressive → 直接渐进式
@@ -7239,7 +7240,7 @@ import { getLogger } from "../core/logger.ts";
       bilingualOn = false;
       bilingualProgress = { done: 0, total: 0, active: false };
       settingsStore.update({ bilingual: false });
-      toast("双语功能异常，请重试或重启插件", 2500, "error" as any);
+      toast(t("双语功能异常，请重试或重启插件"), 2500, "error" as any);
     }
   }
 
@@ -7308,7 +7309,7 @@ import { getLogger } from "../core/logger.ts";
 
   function buildBookDeepLink(cfi: string): string {
     const url = buildBookDeepLinkUrl(cfi);
-    return url ? `[回原文](${url})` : "";
+    return url ? t("[回原文]({url})", { url }) : "";
   }
 
   /**
@@ -7344,11 +7345,11 @@ import { getLogger } from "../core/logger.ts";
     closeSelToolbar();
     const noteSettings = settings.note;
     const now = new Date();
-    const ts = `${now.getMonth() + 1}月${now.getDate()}日 ${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
+    const ts = t("{m}月{d}日 {hh}:{mm}", { m: now.getMonth() + 1, d: now.getDate(), hh: String(now.getHours()).padStart(2, "0"), mm: String(now.getMinutes()).padStart(2, "0") });
     // 1. 渲染 markdown（按 linkFormat 模板，缺省时用 simple）
     const template = noteSettings.linkFormat || NOTE_TEMPLATE_PRESETS.simple.template;
     const md = renderNoteTemplate(template, {
-      bookTitle: title || "阅读",
+      bookTitle: title || t("阅读"),
       author: bookAuthor || "",
       chapter: chapterLabel || "",
       cfi: selInfo?.cfi || "",
@@ -7364,9 +7365,9 @@ import { getLogger } from "../core/logger.ts";
     if (pos === "clipboard") {
       try {
         navigator.clipboard?.writeText(md);
-        toast("已复制到剪贴板");
+        toast(t("已复制到剪贴板"));
       } catch {
-        toast("复制失败，请检查浏览器剪贴板权限");
+        toast(t("复制失败，请检查浏览器剪贴板权限"));
       }
       return;
     }
@@ -7375,30 +7376,30 @@ import { getLogger } from "../core/logger.ts";
       if (onInsertToCurrentDoc) {
         const r = onInsertToCurrentDoc(md);
         if (r && typeof (r as Promise<string>).then === "function") {
-          (r as Promise<string>).then(() => toast("已插入当前文档")).catch(() => toast("插入失败"));
+          (r as Promise<string>).then(() => toast(t("已插入当前文档"))).catch(() => toast(t("插入失败")));
         } else {
-          toast("已插入当前文档");
+          toast(t("已插入当前文档"));
         }
       } else if (onSendToNote) {
         // 降级：写入默认笔记本
-        const r = onSendToNote({ markdown: md, title: `${title || "阅读"}摘录 ${ts}`, readerType: isPdfBook() ? "pdf" : "book" });
+        const r = onSendToNote({ markdown: md, title: t("{title}摘录 {ts}", { title: title || t("阅读"), ts }), readerType: isPdfBook() ? "pdf" : "book" });
         if (r && typeof (r as Promise<string>).then === "function") {
-          (r as Promise<string>).then(() => toast("已发送（未配置 currentDoc，降级到笔记本）")).catch(() => toast("发送失败"));
+          (r as Promise<string>).then(() => toast(t("已发送（未配置 currentDoc，降级到笔记本）"))).catch(() => toast(t("发送失败")));
         } else {
-          toast("已发送");
+          toast(t("已发送"));
         }
       } else {
-        toast("未配置发送目标，请在思源笔记的 REword 设置中配置笔记本");
+        toast(t("未配置发送目标，请在思源笔记的 REword 设置中配置笔记本"));
       }
       return;
     }
     // notebook
-    if (!onSendToNote) { toast("发送未配置"); return; }
-    const r = onSendToNote({ markdown: md, title: `${title || "阅读"}摘录 ${ts}` });
+    if (!onSendToNote) { toast(t("发送未配置")); return; }
+    const r = onSendToNote({ markdown: md, title: t("{title}摘录 {ts}", { title: title || t("阅读"), ts }) });
     if (r && typeof (r as Promise<string>).then === "function") {
-      (r as Promise<string>).then(() => toast("已发送到笔记本")).catch(() => toast("发送失败"));
+      (r as Promise<string>).then(() => toast(t("已发送到笔记本"))).catch(() => toast(t("发送失败")));
     } else {
-      toast("已发送到笔记本");
+      toast(t("已发送到笔记本"));
     }
   }
 
@@ -7455,7 +7456,7 @@ import { getLogger } from "../core/logger.ts";
     if (annStore && bookId) syncVisualWithStore(view, annStore, bookId);
     annByValue.delete(cfi);
     closeSelToolbar();
-    toast("已清除残留高亮");
+    toast(t("已清除残留高亮"));
   }
 
   // 划词工具栏 edit 模式：点击「删除」按钮立即移除该标注并重置界面（P0 B2：删除时清 selInfo，
@@ -7489,12 +7490,12 @@ import { getLogger } from "../core/logger.ts";
         syncVisualWithStore(view, annStore, bookId || "");
         annByValue.delete(fallbackCfi);
         closeSelToolbar();
-        toast("已删除");  // 纯视觉清除成功，高亮已消失
+        toast(t("已删除"));  // 纯视觉清除成功，高亮已消失
         return;
       }
       // 既无 id 也无 cfi：真正无法定位目标
       closeSelToolbar();
-      toast("未找到标注记录");
+      toast(t("未找到标注记录"));
       return;
     }
     // 取目标记录：优先 annStore.get(id)；缺失时经 edit 工具栏锚点（selInfo.cfi）
@@ -7521,7 +7522,7 @@ import { getLogger } from "../core/logger.ts";
         annByValue.delete(cfi);
       }
       closeSelToolbar();
-      toast("标注记录已不存在，已清理高亮");
+      toast(t("标注记录已不存在，已清理高亮"));
       return;
     }
     // 缓存用于撤销（软删除后数据仍在，撤销只清 deletedAt）
@@ -7570,7 +7571,7 @@ import { getLogger } from "../core/logger.ts";
    */
   function armUndoFor(rec: any) {
     // 无记录（数据层已缺失）时仍需给用户删除反馈，只是没有可撤销对象
-    if (!rec?.id) { toast("已删除"); return; }
+    if (!rec?.id) { toast(t("已删除")); return; }
     pendingDelete = rec;
     if (undoTimer) clearTimeout(undoTimer);
     undoTimer = setTimeout(() => {
@@ -7581,7 +7582,7 @@ import { getLogger } from "../core/logger.ts";
         catch (e) { console.warn("[REword] 清理矩形快照失败:", e); }
       }
     }, 3000);
-    toastWithUndo("已删除");
+    toastWithUndo(t("已删除"));
   }
 
   /** 2026-09-09 C：覆盖层删除矩形后的回调（数据已软删，此处只登记撤销窗口） */
@@ -7606,10 +7607,10 @@ import { getLogger } from "../core/logger.ts";
         await addReaderAnnotation({ id: r.id, cfi: r.cfi, color: r.color, style: r.style, note: r.note || "" });
         annByValue.set(r.cfi, { id: r.id, cfi: r.cfi, color: r.color });
       }
-      toast("已撤销");
+      toast(t("已撤销"));
     } catch (err) {
       console.warn("[REword] 撤销删除失败:", err);
-      toast("撤销失败");
+      toast(t("撤销失败"));
     }
   }
 
@@ -7637,12 +7638,12 @@ import { getLogger } from "../core/logger.ts";
           onRemoveFromVocab?.(w);
           target.classList.remove("star-on");
           target.textContent = "☆";
-          target.title = "加入词库";
+          target.title = t("加入词库");
         } else {
           onAddToVocab?.(w);
           target.classList.add("star-on");
           target.textContent = "★";
-          target.title = "移出词库";
+          target.title = t("移出词库");
         }
       }
       return;
@@ -7706,7 +7707,7 @@ import { getLogger } from "../core/logger.ts";
         const willShow = rest.hidden;
         rest.hidden = !willShow;
         const exCount = moreContainer.querySelectorAll(".hiword-dict-sense-ex-row").length;
-        target.innerHTML = `<span class="hiword-dict-sense-toggle-arrow">${willShow ? "▴" : "▾"}</span> ${willShow ? "收起例句" : `展开 ${Math.max(0, exCount - 1)} 条例句`}`;
+        target.innerHTML = `<span class="hiword-dict-sense-toggle-arrow">${willShow ? "▴" : "▾"}</span> ${willShow ? t("收起例句") : t("展开 {n} 条例句", { n: Math.max(0, exCount - 1) })}`;
       }
       return;
     }
@@ -8049,20 +8050,20 @@ import { getLogger } from "../core/logger.ts";
     <div class="reader-toolbar-left">
       <button
         class="reader-btn"
-        title={onCloseTab ? "关闭阅读（书架在侧边栏）" : "返回书架"}
+        title={onCloseTab ? t("关闭阅读（书架在侧边栏）") : t("返回书架")}
         on:click={() => (onCloseTab ? onCloseTab() : onBack())}
       >‹</button>
       <button
         class="reader-btn reader-drawer-anchor"
         data-drawer-anchor="toc"
-        title="目录（点空白收起，再点收起）"
+        title={t("目录（点空白收起，再点收起）")}
         class:reader-btn-active={showToc}
         on:click={() => toggleDrawer("toc")}
       >☰</button>
       <button
         class="reader-btn reader-drawer-anchor"
         data-drawer-anchor="marks"
-        title="我的标记（书签 + 摘录，点空白收起）"
+        title={t("我的标记（书签 + 摘录，点空白收起）")}
         class:reader-btn-active={showMarks}
         on:click={() => toggleDrawer("marks")}
       >📝</button>
@@ -8070,7 +8071,7 @@ import { getLogger } from "../core/logger.ts";
         <!-- 2026-09-09 P1：矩形框选（图表/排版块 → 跳转链接 + 图片快照） -->
         <button
           class="reader-btn"
-          title="矩形框选：框选图表区域，自动复制跳转链接 + 截图，粘贴到文档即可；右键点矩形可换色/删除；Esc 退出"
+          title={t("矩形框选：框选图表区域，自动复制跳转链接 + 截图，粘贴到文档即可；右键点矩形可换色/删除；Esc 退出")}
           class:reader-btn-active={pdfRectMode}
           on:click={togglePdfRectMode}
         >⬚</button>
@@ -8089,7 +8090,7 @@ import { getLogger } from "../core/logger.ts";
     </div>
     <!-- 右：进度 + 双语 / 设置 / 搜索 / PDF 缩放 -->
     <div class="reader-toolbar-right">
-      <span class="reader-progress" title="阅读进度">{progressText}</span>
+      <span class="reader-progress" title={t("阅读进度")}>{progressText}</span>
       {#if !isIphoneMode}
         <!-- [REword 2026-09-02] 图书界面专属：双语对照（PDF 画布无法注入译文，故不显示） -->
         {#if readerMode !== "pdf"}
@@ -8108,13 +8109,13 @@ import { getLogger } from "../core/logger.ts";
         <!-- 图书与 PDF 共用：设置 + 搜索 -->
         <button
           class="reader-btn reader-settings-btn"
-          title="设置"
+          title={t("设置")}
           class:reader-btn-active={showSettings}
           on:click={toggleSettings}
         >⚙</button>
         <button
           class="reader-btn"
-          title="搜索全书（F3 / ⌘F）"
+          title={t("搜索全书（F3 / ⌘F）")}
           class:reader-btn-active={showSearch}
           on:click={toggleSearch}
         >🔍</button>
@@ -8140,9 +8141,9 @@ import { getLogger } from "../core/logger.ts";
   {#if showToc}
     <div class="reader-popover reader-toc" style="--tail-left:{tailLeft}px" on:wheel|stopPropagation>
       <div class="reader-popover-title">
-        目录
+        {t("目录")}
         {#if tocItems.length}
-          <span class="reader-toc-count">已读 {tocReadCount}/{tocItems.length}</span>
+          <span class="reader-toc-count">{t("已读 {n}/{m}", { n: tocReadCount, m: tocItems.length })}</span>
         {/if}
       </div>
       <div class="reader-toc-list">
@@ -8159,7 +8160,7 @@ import { getLogger } from "../core/logger.ts";
             {item.title}
           </button>
         {:else}
-          <div class="reader-toc-empty">本书没有目录</div>
+          <div class="reader-toc-empty">{t("本书没有目录")}</div>
         {/each}
       </div>
     </div>
@@ -8171,27 +8172,27 @@ import { getLogger } from "../core/logger.ts";
         <input
           class="reader-search-input"
           type="text"
-          placeholder="搜索…（↑/↓ 切换，Enter 搜，Esc 关）"
+          placeholder={t("搜索…（↑/↓ 切换，Enter 搜，Esc 关）")}
           bind:value={searchQuery}
           bind:this={searchInput}
           on:input={onSearchInput}
           on:keydown={onSearchKeydown}
         />
-        <button class="reader-mini-btn" on:click={startSearch}>搜</button>
-        <button class="reader-mini-btn" on:click={closeSearch} title="关闭">✕</button>
+        <button class="reader-mini-btn" on:click={startSearch}>{t("搜")}</button>
+        <button class="reader-mini-btn" on:click={closeSearch} title={t("关闭")}>✕</button>
       </div>
 
       <div class="reader-search-options">
         <div class="reader-search-scope">
-          <button class="reader-seg reader-seg-sm" class:reader-seg-active={searchScope === "book"} on:click={() => (searchScope = "book")}>全书</button>
-          <button class="reader-seg reader-seg-sm" class:reader-seg-active={searchScope === "chapter"} on:click={() => (searchScope = "chapter")}>当前章</button>
+          <button class="reader-seg reader-seg-sm" class:reader-seg-active={searchScope === "book"} on:click={() => (searchScope = "book")}>{t("全书")}</button>
+          <button class="reader-seg reader-seg-sm" class:reader-seg-active={searchScope === "chapter"} on:click={() => (searchScope = "chapter")}>{t("当前章")}</button>
         </div>
-        <label class="reader-search-opt"><input type="checkbox" bind:checked={searchCaseSensitive} on:change={startSearch} />大小写</label>
-        <label class="reader-search-opt"><input type="checkbox" bind:checked={searchWholeWord} on:change={startSearch} />全字</label>
+        <label class="reader-search-opt"><input type="checkbox" bind:checked={searchCaseSensitive} on:change={startSearch} />{t("大小写")}</label>
+        <label class="reader-search-opt"><input type="checkbox" bind:checked={searchWholeWord} on:change={startSearch} />{t("全字")}</label>
       </div>
 
       {#if searching}
-        <div class="reader-search-status">搜索中…</div>
+        <div class="reader-search-status">{t("搜索中…")}</div>
       {:else if searchResults.length}
         <div class="reader-search-status">
           <span class="reader-search-count">{searchIndex + 1} / {searchResults.length}</span>
@@ -8208,7 +8209,7 @@ import { getLogger } from "../core/logger.ts";
               on:click={() => void goSearchResultAt(i)}
             >
               <div class="reader-search-item-head">
-                <span class="reader-search-item-chapter">{hit.chapterLabel || "正文"}</span>
+                <span class="reader-search-item-chapter">{hit.chapterLabel || t("正文")}</span>
                 <span class="reader-search-item-pct">{hit.progressPercent}%</span>
               </div>
               <div class="reader-search-item-excerpt">{@html highlightExcerpt(hit.excerpt, searchQuery, searchCaseSensitive)}</div>
@@ -8216,7 +8217,7 @@ import { getLogger } from "../core/logger.ts";
           {/each}
         </div>
       {:else if searchQuery.trim()}
-        <div class="reader-search-status">未找到「{searchQuery.trim()}」</div>
+        <div class="reader-search-status">{t("未找到「{q}」", { q: searchQuery.trim() })}</div>
       {/if}
     </div>
   {/if}
@@ -8226,25 +8227,25 @@ import { getLogger } from "../core/logger.ts";
       <!-- 子区 1：书签 -->
       <div class="reader-marks-section">
         <div class="reader-popover-title">
-          书签
+          {t("书签")}
           {#if bookmarks.length}
-            <span class="reader-toc-count">{bookmarks.length} 条</span>
+            <span class="reader-toc-count">{t("{n} 条", { n: bookmarks.length })}</span>
           {/if}
         </div>
         <div class="reader-bm-list">
-          <button class="reader-bm-add" on:click={toggleCurrentBookmark}>＋ 在当前页加书签</button>
+          <button class="reader-bm-add" on:click={toggleCurrentBookmark}>＋ {t("在当前页加书签")}</button>
           {#each bookmarks as bm (bm.id)}
             <div class="reader-bm-item">
-              <button class="reader-bm-main" title="跳转到书签" on:click={() => jumpBookmark(bm)}>
-                <span class="reader-bm-label">{bm.label || "书签"}</span>
+              <button class="reader-bm-main" title={t("跳转到书签")} on:click={() => jumpBookmark(bm)}>
+                <span class="reader-bm-label">{bm.label || t("书签")}</span>
                 {#if bm.excerpt}
                   <span class="reader-bm-excerpt">{bm.excerpt}</span>
                 {/if}
               </button>
-              <button class="reader-mini-btn" title="删除书签" on:click={() => removeBookmark(bm)}>✕</button>
+              <button class="reader-mini-btn" title={t("删除书签")} on:click={() => removeBookmark(bm)}>✕</button>
             </div>
           {:else}
-            <div class="reader-toc-empty">还没有书签，点上面按钮在当前页加一个</div>
+            <div class="reader-toc-empty">{t("还没有书签，点上面按钮在当前页加一个")}</div>
           {/each}
         </div>
       </div>
@@ -8256,10 +8257,10 @@ import { getLogger } from "../core/logger.ts";
            此前一律只显示文字，高亮与批注分辨不出。 -->
       <div class="reader-marks-section">
         <div class="reader-popover-title">
-          标注与摘录
+          {t("标注与摘录")}
           {#if annotsList.length}
-            <span class="reader-toc-count">{annotsList.length} 条</span>
-            <button class="reader-mini-btn" title="导出文本摘录为 Markdown 到剪贴板（墨迹不导出）" on:click={exportAnnots}>导出</button>
+            <span class="reader-toc-count">{t("{n} 条", { n: annotsList.length })}</span>
+            <button class="reader-mini-btn" title={t("导出文本摘录为 Markdown 到剪贴板（墨迹不导出）")} on:click={exportAnnots}>{t("导出")}</button>
           {/if}
         </div>
         <div class="reader-annots-list">
@@ -8267,13 +8268,13 @@ import { getLogger } from "../core/logger.ts";
             <div class="reader-annot-item" class:reader-annot-item-ink={it.kind === "ink"}>
               <span class="reader-annot-dot" style="background:{it.color || '#06b6d4'}"></span>
               <span class="reader-annot-kind" title={annotKindLabel(it)}>{annotGlyph(it)}</span>
-              <button class="reader-annot-main" title="跳转到{annotKindLabel(it)}所在位置" on:click={() => jumpAnnot(it)}>
+              <button class="reader-annot-main" title={t("跳转到{kind}所在位置", { kind: annotKindLabel(it) })} on:click={() => jumpAnnot(it)}>
                 <span class="reader-annot-text">
                   {#if it.kind === "ink"}
                     <span class="reader-annot-ink-tag">✎ {it.sentence}</span>
                     <span class="reader-annot-ink-meta">{it.brush} · {it.style}</span>
                   {:else}
-                    {String(it.selectedText || it.sentence || "").trim() || "（无文本）"}
+                    {String(it.selectedText || it.sentence || "").trim() || t("（无文本）")}
                   {/if}
                 </span>
                 {#if it.kind !== "ink" && String(it.note || "").trim()}
@@ -8282,12 +8283,12 @@ import { getLogger } from "../core/logger.ts";
               </button>
               <button
                 class="reader-mini-btn"
-                title={it.kind === "ink" ? "删除这条墨迹" : "删除这条摘录"}
+                title={it.kind === "ink" ? t("删除这条墨迹") : t("删除这条摘录")}
                 on:click={() => it.kind === "ink" ? removeInkStroke(it) : removeAnnot(it)}
               >✕</button>
             </div>
           {:else}
-            <div class="reader-toc-empty">本书还没有标注，划选文本后点「标注」或「批注」</div>
+            <div class="reader-toc-empty">{t("本书还没有标注，划选文本后点「标注」或「批注」")}</div>
           {/each}
         </div>
       </div>
@@ -8296,7 +8297,7 @@ import { getLogger } from "../core/logger.ts";
 
   {#if showSettings}
     <div class="reader-popover reader-settings">
-      <div class="reader-popover-title">阅读设置</div>
+      <div class="reader-popover-title">{t("阅读设置")}</div>
 
       <!-- 2026-08-25：3 大分类（文本/段落/页面布局），折叠式分组 -->
       <!-- 1. 文本设置：字号（已有）+ 字重 + 字距 -->
@@ -8304,9 +8305,9 @@ import { getLogger } from "../core/logger.ts";
            PDF 是固定版式画布渲染，改这些毫无效果 → 归为图书界面专属，PDF 模式整段隐藏。 -->
       {#if readerMode !== "pdf"}
       <details class="reader-setting-section">
-        <summary class="reader-setting-section-title">📖 文本设置</summary>
+        <summary class="reader-setting-section-title">📖 {t("文本设置")}</summary>
         <div class="reader-setting-row">
-          <span class="reader-setting-label">字号</span>
+          <span class="reader-setting-label">{t("字号")}</span>
           <div class="reader-setting-control">
             <button class="reader-mini-btn" on:click={() => changeFont(-1)}>A-</button>
             <span class="reader-setting-value">{settings.fontSize}px</span>
@@ -8327,8 +8328,8 @@ import { getLogger } from "../core/logger.ts";
           </div>
         </div>
         <div class="reader-setting-row reader-setting-toggle-row">
-          <span class="reader-setting-label">统一正文字号</span>
-          <label class="reader-switch" title="压平书籍自带字号（如 font-size: medium），让字号 A+/A- 全局生效；关闭则保留原书字号">
+          <span class="reader-setting-label">{t("统一正文字号")}</span>
+          <label class="reader-switch" title={t("压平书籍自带字号（如 font-size: medium），让字号 A+/A- 全局生效；关闭则保留原书字号")}>
             <input
               type="checkbox"
               checked={settings.overrideBookFontSize !== false}
@@ -8338,7 +8339,7 @@ import { getLogger } from "../core/logger.ts";
           </label>
         </div>
         <div class="reader-setting-row">
-          <span class="reader-setting-label">字重</span>
+          <span class="reader-setting-label">{t("字重")}</span>
           <div class="reader-setting-control">
             <input
               type="range"
@@ -8346,13 +8347,13 @@ import { getLogger } from "../core/logger.ts";
               value={settings.text.fontWeight}
               on:input={(e) => setTextWeight(+e.currentTarget.value)}
               class="reader-slider"
-              title="仅可变字体（如 LXGW WenKai）生效；静态字体只渲染 100 的倍数"
+              title={t("仅可变字体（如 LXGW WenKai）生效；静态字体只渲染 100 的倍数")}
             />
             <span class="reader-setting-value">{settings.text.fontWeight}</span>
           </div>
         </div>
         <div class="reader-setting-row">
-          <span class="reader-setting-label">字距</span>
+          <span class="reader-setting-label">{t("字距")}</span>
           <div class="reader-setting-control">
             <input
               type="range"
@@ -8368,9 +8369,9 @@ import { getLogger } from "../core/logger.ts";
 
       <!-- 2. 段落设置：行距（已有）+ 段距 + 首行缩进 -->
       <details class="reader-setting-section">
-        <summary class="reader-setting-section-title">📐 段落设置</summary>
+        <summary class="reader-setting-section-title">📐 {t("段落设置")}</summary>
         <div class="reader-setting-row">
-          <span class="reader-setting-label">行距</span>
+          <span class="reader-setting-label">{t("行距")}</span>
           <div class="reader-setting-control">
             <input
               type="range"
@@ -8383,7 +8384,7 @@ import { getLogger } from "../core/logger.ts";
           </div>
         </div>
         <div class="reader-setting-row">
-          <span class="reader-setting-label">段距</span>
+          <span class="reader-setting-label">{t("段距")}</span>
           <div class="reader-setting-control">
             <input
               type="range"
@@ -8396,7 +8397,7 @@ import { getLogger } from "../core/logger.ts";
           </div>
         </div>
         <div class="reader-setting-row">
-          <span class="reader-setting-label">首行缩进</span>
+          <span class="reader-setting-label">{t("首行缩进")}</span>
           <div class="reader-setting-control">
             <input
               type="range"
@@ -8412,30 +8413,30 @@ import { getLogger } from "../core/logger.ts";
 
       <!-- 2026-08-28：4. 朗读设置（参考 Readest） -->
       <details class="reader-setting-section">
-        <summary class="reader-setting-section-title">🔊 朗读设置</summary>
+        <summary class="reader-setting-section-title">🔊 {t("朗读设置")}</summary>
 
         <div class="reader-setting-row">
-          <span class="reader-setting-label">语音引擎</span>
+          <span class="reader-setting-label">{t("语音引擎")}</span>
           <select class="reader-select" value={ttsCfg.engine} on:change={onTtsEngine}>
-            <option value="system">系统语音（推荐·离线）</option>
-            <option value="youdao">有道真人音</option>
-            <option value="edge">Edge 神经音（云端·受限）</option>
-            <option value="iflytek">讯飞语记（云端·中文更自然）</option>
-            <option value="auto">自动（系统优先）</option>
+            <option value="system">{t("系统语音（推荐·离线）")}</option>
+            <option value="youdao">{t("有道真人音")}</option>
+            <option value="edge">{t("Edge 神经音（云端·受限）")}</option>
+            <option value="iflytek">{t("讯飞语记（云端·中文更自然）")}</option>
+            <option value="auto">{t("自动（系统优先）")}</option>
           </select>
         </div>
         <p class="reader-setting-hint">
-          中文朗读质量取决于本机嗓音：系统设置 → 辅助功能 → 语音 → 下载「中文（普通话）」等增强嗓音后，
-          「中文嗓音」下拉即可选用，引擎会自动优选 Neural 类嗓音。Edge 云端神经音需微软服务器认证头，
-          浏览器环境通常无法连通，会回退系统语音；讯飞语记改用 URL 鉴权可直连，中文质量更自然（需配置密钥）。
+          {t("中文朗读质量取决于本机嗓音：系统设置 → 辅助功能 → 语音 → 下载「中文（普通话）」等增强嗓音后，")}
+          {t("「中文嗓音」下拉即可选用，引擎会自动优选 Neural 类嗓音。Edge 云端神经音需微软服务器认证头，")}
+          {t("浏览器环境通常无法连通，会回退系统语音；讯飞语记改用 URL 鉴权可直连，中文质量更自然（需配置密钥）。")}
         </p>
 
         {#if ttsCfg.engine === "iflytek"}
         <div class="reader-setting-subblock">
-          <div class="reader-setting-subtitle">讯飞语记配置（开放平台免费领取 AppID / APIKey / APISecret）</div>
+          <div class="reader-setting-subtitle">{t("讯飞语记配置（开放平台免费领取 AppID / APIKey / APISecret）")}</div>
           <div class="reader-setting-row">
             <span class="reader-setting-label">AppID</span>
-            <input class="reader-input" type="text" placeholder="如 12345678" value={ttsCfg.iflytekAppId || ""} on:input={onTtsIflytekAppId} />
+            <input class="reader-input" type="text" placeholder={t("如 12345678")} value={ttsCfg.iflytekAppId || ""} on:input={onTtsIflytekAppId} />
           </div>
           <div class="reader-setting-row">
             <span class="reader-setting-label">APIKey</span>
@@ -8446,22 +8447,22 @@ import { getLogger } from "../core/logger.ts";
             <input class="reader-input" type="password" placeholder="APISecret" value={ttsCfg.iflytekApiSecret || ""} on:input={onTtsIflytekApiSecret} />
           </div>
           <div class="reader-setting-row">
-            <span class="reader-setting-label">中文发音人</span>
+            <span class="reader-setting-label">{t("中文发音人")}</span>
             <select class="reader-select" value={ttsCfg.iflytekVoice || "xiaoyan"} on:change={onTtsIflytekVoice}>
-              <option value="xiaoyan">讯飞小燕（默认）</option>
-              <option value="x4_lingfeizhe_assist">灵泽（中文·增强）</option>
-              <option value="x4_lingfeichen_assist">灵辰（中文·增强）</option>
-              <option value="x4_lingxiaoqi_assist">小琪（中文·增强）</option>
-              <option value="xiaoyu">讯飞小鱼（女声）</option>
-              <option value="aisjiuxu">讯飞许久（男声）</option>
+              <option value="xiaoyan">{t("讯飞小燕（默认）")}</option>
+              <option value="x4_lingfeizhe_assist">{t("灵泽（中文·增强）")}</option>
+              <option value="x4_lingfeichen_assist">{t("灵辰（中文·增强）")}</option>
+              <option value="x4_lingxiaoqi_assist">{t("小琪（中文·增强）")}</option>
+              <option value="xiaoyu">{t("讯飞小鱼（女声）")}</option>
+              <option value="aisjiuxu">{t("讯飞许久（男声）")}</option>
             </select>
           </div>
-          <p class="reader-setting-hint">英文句自动使用讯飞英文神经音（Gavin）。密钥保存在本插件本地配置，仅用于调用讯飞服务。</p>
+          <p class="reader-setting-hint">{t("英文句自动使用讯飞英文神经音（Gavin）。密钥保存在本插件本地配置，仅用于调用讯飞服务。")}</p>
         </div>
         {/if}
 
         <div class="reader-setting-row">
-          <span class="reader-setting-label">语速</span>
+          <span class="reader-setting-label">{t("语速")}</span>
           <div class="reader-setting-control">
             <input type="range" min="0.5" max="3" step="0.1" value={ttsCfg.rate} on:input={onTtsRateSetting} class="reader-slider" />
             <span class="reader-setting-value">{ttsCfg.rate.toFixed(1)}×</span>
@@ -8469,7 +8470,7 @@ import { getLogger } from "../core/logger.ts";
         </div>
 
         <div class="reader-setting-row">
-          <span class="reader-setting-label">音高</span>
+          <span class="reader-setting-label">{t("音高")}</span>
           <div class="reader-setting-control">
             <input type="range" min="0.5" max="2" step="0.1" value={ttsCfg.pitch} on:input={onTtsPitch} class="reader-slider" />
             <span class="reader-setting-value">{ttsCfg.pitch.toFixed(1)}</span>
@@ -8477,7 +8478,7 @@ import { getLogger } from "../core/logger.ts";
         </div>
 
         <div class="reader-setting-row">
-          <span class="reader-setting-label">音量</span>
+          <span class="reader-setting-label">{t("音量")}</span>
           <div class="reader-setting-control">
             <input type="range" min="0" max="1" step="0.05" value={ttsCfg.volume} on:input={onTtsVolume} class="reader-slider" />
             <span class="reader-setting-value">{Math.round(ttsCfg.volume * 100)}%</span>
@@ -8485,17 +8486,17 @@ import { getLogger } from "../core/logger.ts";
         </div>
 
         <div class="reader-setting-row">
-          <span class="reader-setting-label">口音</span>
+          <span class="reader-setting-label">{t("口音")}</span>
           <select class="reader-select" value={ttsCfg.accent} on:change={onTtsAccent}>
-            <option value="us">美音</option>
-            <option value="uk">英音</option>
+            <option value="us">{t("美音")}</option>
+            <option value="uk">{t("英音")}</option>
           </select>
         </div>
 
         <div class="reader-setting-row">
-          <span class="reader-setting-label">中文嗓音</span>
+          <span class="reader-setting-label">{t("中文嗓音")}</span>
           <select class="reader-select" value={ttsCfg.preferVoiceURIZh || ""} on:change={onTtsVoiceZh}>
-            <option value="">自动（系统中文嗓音）</option>
+            <option value="">{t("自动（系统中文嗓音）")}</option>
             {#each ttsVoices.filter((v) => v.lang.toLowerCase().startsWith("zh")) as v (v.uri)}
               <option value={v.uri}>{v.name} ({v.lang})</option>
             {/each}
@@ -8503,9 +8504,9 @@ import { getLogger } from "../core/logger.ts";
         </div>
 
         <div class="reader-setting-row">
-          <span class="reader-setting-label">英文嗓音</span>
+          <span class="reader-setting-label">{t("英文嗓音")}</span>
           <select class="reader-select" value={ttsCfg.preferVoiceURIEn || ""} on:change={onTtsVoiceEn}>
-            <option value="">自动（系统英文嗓音）</option>
+            <option value="">{t("自动（系统英文嗓音）")}</option>
             {#each ttsVoices.filter((v) => v.lang.toLowerCase().startsWith("en")) as v (v.uri)}
               <option value={v.uri}>{v.name} ({v.lang})</option>
             {/each}
@@ -8513,24 +8514,24 @@ import { getLogger } from "../core/logger.ts";
         </div>
 
         <div class="reader-setting-row">
-          <span class="reader-setting-label">朗读粒度</span>
+          <span class="reader-setting-label">{t("朗读粒度")}</span>
           <select class="reader-select" value={ttsCfg.granularity} on:change={onTtsGranularity}>
-            <option value="sentence">整句</option>
-            <option value="word">逐词</option>
+            <option value="sentence">{t("整句")}</option>
+            <option value="word">{t("逐词")}</option>
           </select>
         </div>
 
         <div class="reader-setting-row">
-          <span class="reader-setting-label">朗读范围</span>
+          <span class="reader-setting-label">{t("朗读范围")}</span>
           <select class="reader-select" value={ttsCfg.scope} on:change={onTtsScope}>
-            <option value="selection">仅选区</option>
-            <option value="section">本节</option>
-            <option value="book">全书</option>
+            <option value="selection">{t("仅选区")}</option>
+            <option value="section">{t("本节")}</option>
+            <option value="book">{t("全书")}</option>
           </select>
         </div>
 
         <div class="reader-setting-row">
-          <span class="reader-setting-label">句间停顿</span>
+          <span class="reader-setting-label">{t("句间停顿")}</span>
           <div class="reader-setting-control">
             <input type="range" min="0" max="2000" step="50" value={ttsCfg.interval} on:input={onTtsInterval} class="reader-slider" />
             <span class="reader-setting-value">{ttsCfg.interval}ms</span>
@@ -8538,45 +8539,45 @@ import { getLogger } from "../core/logger.ts";
         </div>
 
         <div class="reader-setting-row reader-setting-toggle-row">
-          <span class="reader-setting-label">句子高亮</span>
-          <label class="reader-switch" title="朗读时高亮当前句（临时，停止即清除，不污染标注）">
+          <span class="reader-setting-label">{t("句子高亮")}</span>
+          <label class="reader-switch" title={t("朗读时高亮当前句（临时，停止即清除，不污染标注）")}>
             <input type="checkbox" checked={ttsCfg.enableHighlight} on:change={onTtsHighlightEnabled} />
             <span class="reader-switch-track"></span>
           </label>
         </div>
 
         <div class="reader-setting-row">
-          <span class="reader-setting-label">高亮样式</span>
+          <span class="reader-setting-label">{t("高亮样式")}</span>
           <select class="reader-select" value={ttsCfg.highlightStyle} on:change={onTtsHighlightStyle}>
-            <option value="background">底色</option>
-            <option value="underline">下划线</option>
-            <option value="wave">波浪线</option>
-            <option value="outline">描边</option>
+            <option value="background">{t("底色")}</option>
+            <option value="underline">{t("下划线")}</option>
+            <option value="wave">{t("波浪线")}</option>
+            <option value="outline">{t("描边")}</option>
           </select>
         </div>
 
         <div class="reader-setting-row">
-          <span class="reader-setting-label">高亮颜色</span>
+          <span class="reader-setting-label">{t("高亮颜色")}</span>
           <input type="color" value={ttsCfg.highlightColor} on:input={onTtsHighlightColor} class="reader-color" />
         </div>
 
         <div class="reader-setting-row reader-setting-toggle-row">
-          <span class="reader-setting-label">自动翻页</span>
-          <label class="reader-switch" title="读完当前节自动翻到下一节续读">
+          <span class="reader-setting-label">{t("自动翻页")}</span>
+          <label class="reader-switch" title={t("读完当前节自动翻到下一节续读")}>
             <input type="checkbox" checked={ttsCfg.autoPage} on:change={onTtsAutoPage} />
             <span class="reader-switch-track"></span>
           </label>
         </div>
 
         <div class="reader-setting-row">
-          <span class="reader-setting-label">睡眠定时</span>
+          <span class="reader-setting-label">{t("睡眠定时")}</span>
           <select class="reader-select" value={ttsCfg.sleepTimerMin} on:change={onTtsSleep}>
-            <option value="0">关闭</option>
-            <option value="15">15 分钟</option>
-            <option value="30">30 分钟</option>
-            <option value="45">45 分钟</option>
-            <option value="60">60 分钟</option>
-            <option value="90">90 分钟</option>
+            <option value="0">{t("关闭")}</option>
+            <option value="15">{t("15 分钟")}</option>
+            <option value="30">{t("30 分钟")}</option>
+            <option value="45">{t("45 分钟")}</option>
+            <option value="60">{t("60 分钟")}</option>
+            <option value="90">{t("90 分钟")}</option>
           </select>
         </div>
       </details>
@@ -8584,13 +8585,13 @@ import { getLogger } from "../core/logger.ts";
 
       <!-- 2026-09-01 笔记导出绑定：从双语设置迁移至阅读器设置浮层，支持拖拽绑定 -->
       <details class="reader-setting-section">
-        <summary class="reader-setting-section-title">📤 笔记导出绑定</summary>
+        <summary class="reader-setting-section-title">📤 {t("笔记导出绑定")}</summary>
         <p class="reader-setting-hint">
-          将「阅读摘录」「书图谱」发送到你指定的思源文档。可直接把左侧思源文档树中的文档拖入下方窗口完成绑定，
-          或粘贴文档 ID 后点「绑定」。未绑定时不导出。
+          {t("将「阅读摘录」「书图谱」发送到你指定的思源文档。可直接把左侧思源文档树中的文档拖入下方窗口完成绑定，")}
+          {t("或粘贴文档 ID 后点「绑定」。未绑定时不导出。")}
         </p>
         <BindDropzone
-          label="阅读摘录"
+          label={t("阅读摘录")}
           docId={settings.excerptDocId}
           docTitle={settings.excerptDocTitle}
           notebookId={settings.excerptNotebookId}
@@ -8606,7 +8607,7 @@ import { getLogger } from "../core/logger.ts";
           }))}
         />
         <BindDropzone
-          label="书图谱"
+          label={t("书图谱")}
           docId={settings.bookGraphDocId}
           docTitle={settings.bookGraphDocTitle}
           notebookId={settings.bookGraphNotebookId}
@@ -8627,18 +8628,18 @@ import { getLogger } from "../core/logger.ts";
            [REword 2026-09-09] 边距/分栏对 PDF 画布无效 → 归为图书专属，PDF 模式隐藏 -->
       {#if readerMode !== "pdf"}
       <details class="reader-setting-section">
-        <summary class="reader-setting-section-title">⬜ 页面布局</summary>
+        <summary class="reader-setting-section-title">⬜ {t("页面布局")}</summary>
         <div class="reader-setting-row">
-          <span class="reader-setting-label" title="一键套用边距/行距/段距/字距组合">排版预设</span>
+          <span class="reader-setting-label" title={t("一键套用边距/行距/段距/字距组合")}>{t("排版预设")}</span>
           <div class="reader-setting-control">
             {#each Object.entries(READER_TYPO_PRESETS) as [key, preset]}
-              <button class="reader-seg" title={preset.hint} on:click={() => applyLayoutPreset(key)}>{preset.label}</button>
+              <button class="reader-seg" title={t(preset.hint)} on:click={() => applyLayoutPreset(key)}>{t(preset.label)}</button>
             {/each}
           </div>
         </div>
         <div class="reader-setting-grid-2col">
           <div class="reader-setting-row">
-            <span class="reader-setting-label">上边距</span>
+            <span class="reader-setting-label">{t("上边距")}</span>
             <input type="range" min="0" max="100" step="2"
               value={settings.layout.marginTopPx}
               on:input={(e) => setMarginPx("marginTopPx", +e.currentTarget.value)}
@@ -8646,7 +8647,7 @@ import { getLogger } from "../core/logger.ts";
             <span class="reader-setting-value">{settings.layout.marginTopPx}px</span>
           </div>
           <div class="reader-setting-row">
-            <span class="reader-setting-label">下边距</span>
+            <span class="reader-setting-label">{t("下边距")}</span>
             <input type="range" min="0" max="100" step="2"
               value={settings.layout.marginBottomPx}
               on:input={(e) => setMarginPx("marginBottomPx", +e.currentTarget.value)}
@@ -8654,7 +8655,7 @@ import { getLogger } from "../core/logger.ts";
             <span class="reader-setting-value">{settings.layout.marginBottomPx}px</span>
           </div>
           <div class="reader-setting-row">
-            <span class="reader-setting-label">左边距</span>
+            <span class="reader-setting-label">{t("左边距")}</span>
             <input type="range" min="0" max="100" step="2"
               value={settings.layout.marginLeftPx}
               on:input={(e) => setMarginPx("marginLeftPx", +e.currentTarget.value)}
@@ -8662,7 +8663,7 @@ import { getLogger } from "../core/logger.ts";
             <span class="reader-setting-value">{settings.layout.marginLeftPx}px</span>
           </div>
           <div class="reader-setting-row">
-            <span class="reader-setting-label">右边距</span>
+            <span class="reader-setting-label">{t("右边距")}</span>
             <input type="range" min="0" max="100" step="2"
               value={settings.layout.marginRightPx}
               on:input={(e) => setMarginPx("marginRightPx", +e.currentTarget.value)}
@@ -8671,7 +8672,7 @@ import { getLogger } from "../core/logger.ts";
           </div>
         </div>
         <div class="reader-setting-row">
-          <span class="reader-setting-label">分栏间距</span>
+          <span class="reader-setting-label">{t("分栏间距")}</span>
           <div class="reader-setting-control">
             <input type="range" min="0" max="40" step="2"
               value={settings.layout.columnGapPx}
@@ -8681,55 +8682,55 @@ import { getLogger } from "../core/logger.ts";
           </div>
         </div>
         <div class="reader-setting-row reader-setting-toggle-row">
-          <span class="reader-setting-label">跟随思源文档边距</span>
+          <span class="reader-setting-label">{t("跟随思源文档边距")}</span>
           <label class="reader-switch"><input type="checkbox" checked={settings.layout.followSiyuanMargin} on:change={setFollowSiyuanMargin} /><span class="reader-switch-track"></span></label>
         </div>
         <div class="reader-setting-row reader-setting-toggle-row">
-          <span class="reader-setting-label">显示页眉</span>
+          <span class="reader-setting-label">{t("显示页眉")}</span>
           <label class="reader-switch"><input type="checkbox" checked={settings.layout.showHeader} on:change={setShowHeader} /><span class="reader-switch-track"></span></label>
         </div>
         <div class="reader-setting-row reader-setting-toggle-row">
-          <span class="reader-setting-label">显示页脚</span>
+          <span class="reader-setting-label">{t("显示页脚")}</span>
           <label class="reader-switch"><input type="checkbox" checked={settings.layout.showFooter} on:change={setShowFooter} /><span class="reader-switch-track"></span></label>
         </div>
         <div class="reader-setting-row reader-setting-toggle-row">
-          <span class="reader-setting-label">显示阅读进度</span>
+          <span class="reader-setting-label">{t("显示阅读进度")}</span>
           <label class="reader-switch"><input type="checkbox" checked={settings.layout.showProgress} on:change={setShowProgress} /><span class="reader-switch-track"></span></label>
         </div>
         <div class="reader-setting-row">
-          <span class="reader-setting-label">进度样式</span>
+          <span class="reader-setting-label">{t("进度样式")}</span>
           <div class="reader-setting-control">
             {#each Object.entries(PROGRESS_STYLE_PRESETS) as [key, preset]}
               <button class="reader-seg" class:reader-seg-active={settings.layout.progressStyle === key}
-                on:click={() => setProgressStyle(key)}>{preset.label}</button>
+                on:click={() => setProgressStyle(key)}>{t(preset.label)}</button>
             {/each}
           </div>
         </div>
         <div class="reader-setting-row">
-          <span class="reader-setting-label" title="底部进度条程序坞的唤出方式">进度条唤出方式</span>
+          <span class="reader-setting-label" title={t("底部进度条程序坞的唤出方式")}>{t("进度条唤出方式")}</span>
           <div class="reader-setting-control">
             {#each Object.entries(BOTTOM_BAR_MODE_PRESETS) as [key, preset]}
               <button class="reader-seg" class:reader-seg-active={settings.layout.bottomBarMode === key}
-                title={preset.hint} on:click={() => setBottomBarMode(key)}>{preset.label}</button>
+                title={t(preset.hint)} on:click={() => setBottomBarMode(key)}>{t(preset.label)}</button>
             {/each}
           </div>
         </div>
         <div class="reader-setting-row">
-          <span class="reader-setting-label">参考页数</span>
+          <span class="reader-setting-label">{t("参考页数")}</span>
           <div class="reader-setting-control">
             <input type="range" min="0" max="2000" step="10"
               value={settings.layout.referencePageCount}
               on:input={(e) => setReferencePageCount(+e.currentTarget.value)}
               class="reader-slider" />
-            <span class="reader-setting-value">{settings.layout.referencePageCount || "不显示"}</span>
+            <span class="reader-setting-value">{settings.layout.referencePageCount || t("不显示")}</span>
           </div>
         </div>
         <div class="reader-setting-row reader-setting-toggle-row">
-          <span class="reader-setting-label">显示当前时间</span>
+          <span class="reader-setting-label">{t("显示当前时间")}</span>
           <label class="reader-switch"><input type="checkbox" checked={settings.layout.showCurrentTime} on:change={setShowCurrentTime} /><span class="reader-switch-track"></span></label>
         </div>
         <div class="reader-setting-row reader-setting-toggle-row">
-          <span class="reader-setting-label">使用 24 小时制</span>
+          <span class="reader-setting-label">{t("使用 24 小时制")}</span>
           <label class="reader-switch"><input type="checkbox" checked={settings.layout.use24Hour} on:change={setUse24Hour} /><span class="reader-switch-track"></span></label>
         </div>
       </details>
@@ -8740,27 +8741,27 @@ import { getLogger } from "../core/logger.ts";
       <!-- 已有：主题/字体/行宽/模式/动画/点击翻页 — 2026-08-25 紧凑化：移入「高级设置」二级折叠
            主面板（4 大分组）保持一屏可览，次要项折叠。 -->
       <details class="reader-setting-section">
-        <summary class="reader-setting-section-title">⚙ 高级设置</summary>
+        <summary class="reader-setting-section-title">⚙ {t("高级设置")}</summary>
 
         <!-- 2026-09-09：自页面布局段挪入（该段 PDF 隐藏，但此开关是全局启动行为，需对 PDF 可达） -->
         <div class="reader-setting-row reader-setting-toggle-row">
-          <span class="reader-setting-label" title="思源不会自动恢复自定义阅读 Tab；开启后重启思源会自动重开上次打开的书">重启后恢复阅读 Tab</span>
+          <span class="reader-setting-label" title={t("思源不会自动恢复自定义阅读 Tab；开启后重启思源会自动重开上次打开的书")}>{t("重启后恢复阅读 Tab")}</span>
           <label class="reader-switch"><input type="checkbox" checked={settings.layout.restoreTabsOnLaunch !== false} on:change={setRestoreTabs} /><span class="reader-switch-track"></span></label>
         </div>
 
         <!-- 主题 -->
         <div class="reader-setting-row">
-          <span class="reader-setting-label">主题</span>
+          <span class="reader-setting-label">{t("主题")}</span>
           <div class="reader-theme-grid">
             {#each Object.entries(THEME_PRESETS) as [key, preset]}
               <button
                 class="reader-theme-swatch"
                 class:reader-seg-active={settings.theme === key}
-                title={preset.label}
+                title={t(preset.label)}
                 on:click={() => onSetTheme(key)}
               >
                 <span class="reader-swatch-dot" style={swatchStyle(preset.bg)}></span>
-                <span class="reader-swatch-label">{preset.label}</span>
+                <span class="reader-swatch-label">{t(preset.label)}</span>
               </button>
             {/each}
           </div>
@@ -8768,13 +8769,13 @@ import { getLogger } from "../core/logger.ts";
 
         {#if settings.theme === "custom"}
           <div class="reader-setting-row">
-            <span class="reader-setting-label">文字色</span>
+            <span class="reader-setting-label">{t("文字色")}</span>
             <input
               type="color"
               value={settings.customFg || "#222222"}
               on:change={(e) => onCustomColor("customFg", e)}
             />
-            <span class="reader-setting-label">背景色</span>
+            <span class="reader-setting-label">{t("背景色")}</span>
             <input
               type="color"
               value={settings.customBg || "#ffffff"}
@@ -8782,38 +8783,38 @@ import { getLogger } from "../core/logger.ts";
             />
           </div>
           <div class="reader-setting-row reader-setting-col">
-            <span class="reader-setting-label">背景图（URL）</span>
+            <span class="reader-setting-label">{t("背景图（URL）")}</span>
             <input
               class="reader-text-input"
               type="text"
-              placeholder="https://… 或 data:image/… 图片地址，留空则只用背景色"
+              placeholder={t("https://… 或 data:image/… 图片地址，留空则只用背景色")}
               value={settings.customBgImage || ""}
               on:input={(e) => onCustomBgImage(e)}
             />
             {#if settings.customBgImage}
-              <button class="reader-text-clear" title="清除背景图" on:click={clearCustomBgImage}>清除</button>
+              <button class="reader-text-clear" title={t("清除背景图")} on:click={clearCustomBgImage}>{t("清除")}</button>
             {/if}
           </div>
         {/if}
 
         <!-- 字体 -->
         <div class="reader-setting-row">
-          <span class="reader-setting-label">字体</span>
+          <span class="reader-setting-label">{t("字体")}</span>
           <div class="reader-setting-control">
             {#each Object.entries(FONT_MODE_PRESETS) as [key, preset]}
               <button
                 class="reader-seg"
                 class:reader-seg-active={settings.fontMode === key}
-                title={preset.hint}
+                title={t(preset.hint)}
                 on:click={() => pickFontMode(key)}
-              >{preset.label}</button>
+              >{t(preset.label)}</button>
             {/each}
           </div>
         </div>
 
         <div class="reader-setting-row reader-setting-toggle-row">
-          <span class="reader-setting-label">覆盖书籍字体</span>
-          <label class="reader-switch" title="强制正文使用阅读器字体（霞鹜文楷），覆盖书籍自带字体；关闭则保留原书排版">
+          <span class="reader-setting-label">{t("覆盖书籍字体")}</span>
+          <label class="reader-switch" title={t("强制正文使用阅读器字体（霞鹜文楷），覆盖书籍自带字体；关闭则保留原书排版")}>
             <input
               type="checkbox"
               checked={!!settings.overridePublisherFont}
@@ -8825,27 +8826,27 @@ import { getLogger } from "../core/logger.ts";
 
         {#if settings.fontMode === "classified"}
           <div class="reader-setting-row">
-            <span class="reader-setting-label">默认字体</span>
+            <span class="reader-setting-label">{t("默认字体")}</span>
             <div class="reader-setting-control">
               {#each Object.entries(DEFAULT_FONT_FAMILY_PRESETS) as [key, preset]}
                 <button
                   class="reader-seg"
                   class:reader-seg-active={(settings.defaultFontFamily || "serif") === key}
-                  title={preset.hint}
+                  title={t(preset.hint)}
                   on:click={() => setDefaultFontFamily(key)}
-                >{preset.label}</button>
+                >{t(preset.label)}</button>
               {/each}
             </div>
           </div>
 
           <div class="reader-setting-row reader-setting-row-stack">
-            <span class="reader-setting-label">衬线字体</span>
+            <span class="reader-setting-label">{t("衬线字体")}</span>
             <select
               class="reader-font-select"
               value={settings.serifFont || ""}
               on:change={(e) => setFontFace("serifFont", e.currentTarget.value)}
             >
-              <option value="">未指定（用候选池顺序）</option>
+              <option value="">{t("未指定（用候选池顺序）")}</option>
               {#each SERIF_FONT_PRESETS as f}
                 <option value={f}>{f}</option>
               {/each}
@@ -8853,13 +8854,13 @@ import { getLogger } from "../core/logger.ts";
           </div>
 
           <div class="reader-setting-row reader-setting-row-stack">
-            <span class="reader-setting-label">无衬线字体</span>
+            <span class="reader-setting-label">{t("无衬线字体")}</span>
             <select
               class="reader-font-select"
               value={settings.sansSerifFont || ""}
               on:change={(e) => setFontFace("sansSerifFont", e.currentTarget.value)}
             >
-              <option value="">未指定（用候选池顺序）</option>
+              <option value="">{t("未指定（用候选池顺序）")}</option>
               {#each SANS_SERIF_FONT_PRESETS as f}
                 <option value={f}>{f}</option>
               {/each}
@@ -8867,14 +8868,14 @@ import { getLogger } from "../core/logger.ts";
           </div>
 
           <div class="reader-setting-row reader-setting-row-stack">
-            <span class="reader-setting-label">等宽字体</span>
+            <span class="reader-setting-label">{t("等宽字体")}</span>
             <select
               class="reader-font-select"
-              title="代码块 / <pre> / <code> 专用；正文绝不用等宽"
+              title={t("代码块 / <pre> / <code> 专用；正文绝不用等宽")}
               value={settings.monospaceFont || ""}
               on:change={(e) => setFontFace("monospaceFont", e.currentTarget.value)}
             >
-              <option value="">未指定（用候选池顺序）</option>
+              <option value="">{t("未指定（用候选池顺序）")}</option>
               {#each MONOSPACE_FONT_PRESETS as f}
                 <option value={f}>{f}</option>
               {/each}
@@ -8882,14 +8883,14 @@ import { getLogger } from "../core/logger.ts";
           </div>
 
           <div class="reader-setting-row reader-setting-row-stack">
-            <span class="reader-setting-label">中文字体</span>
+            <span class="reader-setting-label">{t("中文字体")}</span>
             <select
               class="reader-font-select"
-              title="插入每条链的次位；留空则只用跨平台 CJK 兜底栈"
+              title={t("插入每条链的次位；留空则只用跨平台 CJK 兜底栈")}
               value={settings.defaultCJKFont || ""}
               on:change={(e) => setFontFace("defaultCJKFont", e.currentTarget.value)}
             >
-              <option value="">留空（跨平台兜底）</option>
+              <option value="">{t("留空（跨平台兜底）")}</option>
               {#each CJK_FONT_PRESETS as f}
                 <option value={f}>{f}</option>
               {/each}
@@ -8897,7 +8898,7 @@ import { getLogger } from "../core/logger.ts";
           </div>
 
           <div class="reader-font-hint">
-            三条链各自带跨平台 CJK 兜底，未安装的字体会自动跳过。代码类元素固定走等宽链。
+            {t("三条链各自带跨平台 CJK 兜底，未安装的字体会自动跳过。代码类元素固定走等宽链。")}
           </div>
         {/if}
 
@@ -8908,17 +8909,17 @@ import { getLogger } from "../core/logger.ts";
                 class="reader-font-item"
                 class:reader-font-item-active={settings.customFontId === f.id}
               >
-                <button class="reader-font-pick" title="使用此字体" on:click={() => pickCustomFont(f.id)}>
+                <button class="reader-font-pick" title={t("使用此字体")} on:click={() => pickCustomFont(f.id)}>
                   <span class="reader-font-name">{f.name}</span>
                   <span class="reader-font-size">{fmtFontSize(f.size)}</span>
                 </button>
-                <button class="reader-font-del" title="删除此字体" on:click={() => delFont(f.id)}>✕</button>
+                <button class="reader-font-del" title={t("删除此字体")} on:click={() => delFont(f.id)}>✕</button>
               </div>
             {:else}
-              <div class="reader-font-empty">还没有自定义字体，点击下方导入</div>
+              <div class="reader-font-empty">{t("还没有自定义字体，点击下方导入")}</div>
             {/each}
             <button class="reader-font-import" disabled={fontImporting} on:click={() => fontInput?.click()}>
-              {fontImporting ? "导入中…" : "+ 导入字体（ttf/otf/woff/woff2）"}
+              {fontImporting ? t("导入中…") : t("+ 导入字体（ttf/otf/woff/woff2）")}
             </button>
             <input
               bind:this={fontInput}
@@ -8932,50 +8933,50 @@ import { getLogger } from "../core/logger.ts";
 
         <!-- 页面边距三档预设（铺满 / 正常 / 宽松）+ 自定义 -->
         <div class="reader-setting-row">
-          <span class="reader-setting-label">页面边距</span>
+          <span class="reader-setting-label">{t("页面边距")}</span>
           <div class="reader-setting-control">
             {#each Object.entries(LAYOUT_PRESETS) as [key, preset]}
               <button
                 class="reader-seg"
                 class:reader-seg-active={detectLayoutPreset(settings.layout) === key}
                 on:click={() => onSetLayoutPreset(key)}
-              >{preset.label}</button>
+              >{t(preset.label)}</button>
             {/each}
           </div>
         </div>
 
         <!-- 模式 -->
         <div class="reader-setting-row">
-          <span class="reader-setting-label">模式</span>
+          <span class="reader-setting-label">{t("模式")}</span>
           <div class="reader-setting-control">
             {#each Object.entries(FLOW_PRESETS) as [key, preset]}
               <button
                 class="reader-seg"
                 class:reader-seg-active={settings.flow === key}
                 on:click={() => onSetFlow(key)}
-              >{preset.label}</button>
+              >{t(preset.label)}</button>
             {/each}
           </div>
         </div>
 
         <!-- 动画 -->
         <div class="reader-setting-row">
-          <span class="reader-setting-label">动画</span>
+          <span class="reader-setting-label">{t("动画")}</span>
           <div class="reader-setting-control">
             {#each Object.entries(TURN_STYLE_PRESETS) as [key, preset]}
               <button
                 class="reader-seg"
                 class:reader-seg-active={settings.turnStyle === key}
                 on:click={() => onSetTurnStyle(key)}
-              >{preset.label}</button>
+              >{t(preset.label)}</button>
             {/each}
           </div>
         </div>
 
         <!-- 点击翻页 -->
         <div class="reader-setting-row reader-setting-toggle-row">
-          <span class="reader-setting-label">点击翻页</span>
-          <label class="reader-switch" title="点击页面左右三分之一区域翻页（默认关闭，防误触）">
+          <span class="reader-setting-label">{t("点击翻页")}</span>
+          <label class="reader-switch" title={t("点击页面左右三分之一区域翻页（默认关闭，防误触）")}>
             <input
               type="checkbox"
               checked={!!settings.clickToTurn}
@@ -8987,8 +8988,8 @@ import { getLogger } from "../core/logger.ts";
 
         <!-- 专注模式（P2.2）：滚动时高亮中心段落、其余淡出，仅滚动模式生效 -->
         <div class="reader-setting-row reader-setting-toggle-row">
-          <span class="reader-setting-label">专注模式</span>
-          <label class="reader-switch" title="滚动时高亮当前阅读段落、其余淡出，减少干扰（仅「滚动」模式下生效）">
+          <span class="reader-setting-label">{t("专注模式")}</span>
+          <label class="reader-switch" title={t("滚动时高亮当前阅读段落、其余淡出，减少干扰（仅「滚动」模式下生效）")}>
             <input
               type="checkbox"
               checked={!!settings.focusMode}
@@ -9021,36 +9022,36 @@ import { getLogger } from "../core/logger.ts";
     <div class="reword-pt-overlay" on:click={closePretranslateDialog} on:keydown={onPtKeydown} tabindex="-1">
       <div class="reword-pt-modal reword-glass" role="dialog" aria-modal="true" on:click|stopPropagation on:keydown={onPtKeydown}>
         <div class="reword-pt-header">
-          <span class="reword-pt-title">整书预翻译</span>
-          <button class="reword-pt-close" title="关闭（运行中将转后台）" on:click={closePretranslateDialog}>×</button>
+          <span class="reword-pt-title">{t("整书预翻译")}</span>
+          <button class="reword-pt-close" title={t("关闭（运行中将转后台）")} on:click={closePretranslateDialog}>×</button>
         </div>
 
         <div class="reword-pt-book">
           <div class="reword-pt-cover">EPUB</div>
           <div>
-            <div class="reword-pt-book-title">{meta?.title || title || "本书"}</div>
-            <div class="reword-pt-book-sub">共 {(ptProgress.total || ptStats.total)} 段 · 已缓存 {(ptProgress.cached || ptStats.cached)} 段</div>
+            <div class="reword-pt-book-title">{meta?.title || title || t("本书")}</div>
+            <div class="reword-pt-book-sub">{t("共 {n} 段 · 已缓存 {m} 段", { n: (ptProgress.total || ptStats.total), m: (ptProgress.cached || ptStats.cached) })}</div>
           </div>
         </div>
 
         <div class="reword-pt-stats">
-          <div class="reword-pt-stat"><span class="reword-pt-stat-label">总段数</span><span class="reword-pt-stat-num">{(ptProgress.total || ptStats.total)}</span></div>
-          <div class="reword-pt-stat"><span class="reword-pt-stat-label">已缓存</span><span class="reword-pt-stat-num reword-pt-ok">{Math.max(ptProgress.cached || 0, ptProgress.done || 0)}</span></div>
-          <div class="reword-pt-stat"><span class="reword-pt-stat-label">待译</span><span class="reword-pt-stat-num reword-pt-warn">{Math.max(0, (ptProgress.total || 0) - (ptProgress.done || 0))}</span></div>
-          <div class="reword-pt-stat"><span class="reword-pt-stat-label">预估 Token</span><span class="reword-pt-stat-num">{(ptStats.estTokens || 0).toLocaleString()}</span></div>
+          <div class="reword-pt-stat"><span class="reword-pt-stat-label">{t("总段数")}</span><span class="reword-pt-stat-num">{(ptProgress.total || ptStats.total)}</span></div>
+          <div class="reword-pt-stat"><span class="reword-pt-stat-label">{t("已缓存")}</span><span class="reword-pt-stat-num reword-pt-ok">{Math.max(ptProgress.cached || 0, ptProgress.done || 0)}</span></div>
+          <div class="reword-pt-stat"><span class="reword-pt-stat-label">{t("待译")}</span><span class="reword-pt-stat-num reword-pt-warn">{Math.max(0, (ptProgress.total || 0) - (ptProgress.done || 0))}</span></div>
+          <div class="reword-pt-stat"><span class="reword-pt-stat-label">{t("预估 Token")}</span><span class="reword-pt-stat-num">{(ptStats.estTokens || 0).toLocaleString()}</span></div>
         </div>
 
         <div class="reword-pt-options" class:reword-pt-disabled={ptRunning}>
-          <div class="reword-pt-field reword-pt-pipeline" title="缓存命中优先；未命中时先使用设置中已启用的免费翻译引擎，全部失败后再使用下方 AI 模型">
-            <label>翻译顺序</label>
+          <div class="reword-pt-field reword-pt-pipeline" title={t("缓存命中优先；未命中时先使用设置中已启用的免费翻译引擎，全部失败后再使用下方 AI 模型")}>
+            <label>{t("翻译顺序")}</label>
             <div class="reword-pt-pipeline-flow">
-              <span class="reword-pt-pill">翻译引擎</span>
+              <span class="reword-pt-pill">{t("翻译引擎")}</span>
               <span class="reword-pt-arrow">→</span>
-              <span class="reword-pt-pill reword-pt-pill-ai">AI 翻译</span>
+              <span class="reword-pt-pill reword-pt-pill-ai">{t("AI 翻译")}</span>
             </div>
           </div>
           <div class="reword-pt-field">
-            <label title="仅显示已启用且已配置的引擎；达到用量锁的引擎会被禁用">翻译引擎</label>
+            <label title={t("仅显示已启用且已配置的引擎；达到用量锁的引擎会被禁用")}>{t("翻译引擎")}</label>
             <select bind:value={ptForm.engine} disabled={ptRunning}>
               {#each ptEngineOptions() as opt}
                 <option value={opt.value} disabled={opt.disabled}>{opt.label}{opt.hint ? ` (${opt.hint})` : ""}</option>
@@ -9059,7 +9060,7 @@ import { getLogger } from "../core/logger.ts";
           </div>
           {#if ptShowModelSelect()}
             <div class="reword-pt-field">
-              <label title="仅显示当前 AI 设置中可用的模型">翻译模型</label>
+              <label title={t("仅显示当前 AI 设置中可用的模型")}>{t("翻译模型")}</label>
               <select bind:value={ptForm.model} disabled={ptRunning}>
                 {#each ptModelOptions() as opt}
                   <option value={opt.value}>{opt.label}</option>
@@ -9068,17 +9069,17 @@ import { getLogger } from "../core/logger.ts";
             </div>
           {/if}
           {#if ptShowTencentLock()}
-            <div class="reword-pt-field reword-pt-tencent-lock" title="腾讯翻译每月 500 万字符免费额度；达到设定上限后自动禁用">
-              <label>腾讯用量锁</label>
+            <div class="reword-pt-field reword-pt-tencent-lock" title={t("腾讯翻译每月 500 万字符免费额度；达到设定上限后自动禁用")}>
+              <label>{t("腾讯用量锁")}</label>
               <div class="reword-pt-lock-input">
                 <input type="number" min="0" bind:value={ptForm.tencentLockWan} disabled={ptRunning} />
-                <span>万字符</span>
+                <span>{t("万字符")}</span>
               </div>
-              <span class="reword-pt-lock-used">已用 {(ptAiSettings()?.tencentCharsUsed ?? 0).toLocaleString()} / {(ptAiSettings()?.tencentCharsLock ?? 4_000_000).toLocaleString()}</span>
+              <span class="reword-pt-lock-used">{t("已用 {a} / {b}", { a: (ptAiSettings()?.tencentCharsUsed ?? 0).toLocaleString(), b: (ptAiSettings()?.tencentCharsLock ?? 4_000_000).toLocaleString() })}</span>
             </div>
           {/if}
           <div class="reword-pt-field">
-            <label>目标语言</label>
+            <label>{t("目标语言")}</label>
             <select bind:value={ptForm.to} disabled={ptRunning}>
               {#each TARGET_LANG_OPTIONS as opt}
                 <option value={opt.value}>{opt.label}</option>
@@ -9086,16 +9087,16 @@ import { getLogger } from "../core/logger.ts";
             </select>
           </div>
           <div class="reword-pt-field">
-            <label title="每个并发列每次取走的块数；新运行时默认 2 列 × 每列 5 块">每列块数</label>
+            <label title={t("每个并发列每次取走的块数；新运行时默认 2 列 × 每列 5 块")}>{t("每列块数")}</label>
             <input type="number" min="1" max="16" bind:value={ptForm.batchSize} disabled={ptRunning} />
           </div>
           <div class="reword-pt-field">
-            <label title="同时送译的列数">并发列数</label>
+            <label title={t("同时送译的列数")}>{t("并发列数")}</label>
             <input type="number" min="1" max="4" bind:value={ptForm.concurrency} disabled={ptRunning} />
           </div>
           <label class="reword-pt-overwrite">
             <input type="checkbox" bind:checked={ptForm.overwrite} disabled={ptRunning} />
-            <span>覆盖已有缓存（重译全部段落，将消耗更多 Token）</span>
+            <span>{t("覆盖已有缓存（重译全部段落，将消耗更多 Token）")}</span>
           </label>
         </div>
 
@@ -9103,13 +9104,13 @@ import { getLogger } from "../core/logger.ts";
           <div class="reword-pt-progress">
             <div class="reword-pt-progress-top">
               <span>
-                {#if ptProgress.status === "running"}已翻译 {ptProgress.done}/{ptProgress.total}
-                {:else if ptProgress.status === "done"}已完成（已缓存 {(ptProgress.cached || 0) + (ptProgress.done || 0)} 段）
-                {:else if ptProgress.status === "cancelled"}已停止（已缓存 {(ptProgress.cached || 0) + (ptProgress.done || 0)} 段）
-                {:else}翻译失败{/if}
+                {#if ptProgress.status === "running"}{t("已翻译 {n}/{m}", { n: ptProgress.done, m: ptProgress.total })}
+                {:else if ptProgress.status === "done"}{t("已完成（已缓存 {n} 段）", { n: (ptProgress.cached || 0) + (ptProgress.done || 0) })}
+                {:else if ptProgress.status === "cancelled"}{t("已停止（已缓存 {n} 段）", { n: (ptProgress.cached || 0) + (ptProgress.done || 0) })}
+                {:else}{t("翻译失败")}{/if}
               </span>
               <span class="reword-pt-eta">
-                {#if ptProgress.status === "running" && ptProgress.etaSeconds != null}剩余约 {fmtEta(ptProgress.etaSeconds)}{/if}
+                {#if ptProgress.status === "running" && ptProgress.etaSeconds != null}{t("剩余约 {t}", { t: fmtEta(ptProgress.etaSeconds) })}{/if}
               </span>
             </div>
             <div class="reword-pt-bar">
@@ -9120,42 +9121,42 @@ import { getLogger } from "../core/logger.ts";
         {/if}
 
         <div class="reword-pt-telemetry">
-          <div class="reword-pt-telemetry-title">引擎状态 / 成本（实时）</div>
+          <div class="reword-pt-telemetry-title">{t("引擎状态 / 成本（实时）")}</div>
           <div class="reword-pt-telemetry-grid">
             <div class="reword-pt-tel-item">
-              <span class="reword-pt-tel-label">缓存节省</span>
-              <span class="reword-pt-tel-num reword-pt-ok">{ptTelemetry.cache.toLocaleString()} 段</span>
+              <span class="reword-pt-tel-label">{t("缓存节省")}</span>
+              <span class="reword-pt-tel-num reword-pt-ok">{t("{n} 段", { n: ptTelemetry.cache.toLocaleString() })}</span>
             </div>
             <div class="reword-pt-tel-item">
-              <span class="reword-pt-tel-label">腾讯字符</span>
+              <span class="reword-pt-tel-label">{t("腾讯字符")}</span>
               <span class="reword-pt-tel-num">{ptTelemetry.tencentChars.toLocaleString()}</span>
             </div>
             <div class="reword-pt-tel-item">
-              <span class="reword-pt-tel-label">引擎失败</span>
+              <span class="reword-pt-tel-label">{t("引擎失败")}</span>
               <span class="reword-pt-tel-num" class:reword-pt-warn={ptTelemetry.errors > 0}>{ptTelemetry.errors}</span>
             </div>
           </div>
           {#if Object.keys(ptTelemetry.engines).length}
             <div class="reword-pt-tel-engines">
               {#each Object.keys(ptTelemetry.engines) as eng}
-                <span class="reword-pt-tel-engine">{engineLabel(eng)} · {ptTelemetry.engines[eng].toLocaleString()} 段</span>
+                <span class="reword-pt-tel-engine">{engineLabel(eng)} · {t("{n} 段", { n: ptTelemetry.engines[eng].toLocaleString() })}</span>
               {/each}
             </div>
           {/if}
         </div>
 
         {#if ptProgress.status === "idle" && !ptForm.overwrite && (ptStats.pending || 0) === 0}
-          <p style="color:var(--b3-theme-on-surface,#999);font-size:12px;margin:0 0 10px;">本书已全部缓存，勾选「覆盖已有缓存」可重新翻译</p>
+          <p style="color:var(--b3-theme-on-surface,#999);font-size:12px;margin:0 0 10px;">{t("本书已全部缓存，勾选「覆盖已有缓存」可重新翻译")}</p>
         {/if}
         <div class="reword-pt-footer">
           {#if ptProgress.status === "idle"}
-            <button class="reword-pt-btn reword-pt-btn-ghost" on:click={closePretranslateDialog}>取消</button>
-            <button class="reword-pt-btn reword-pt-btn-primary" on:click={startPretranslate} disabled={!ptForm.overwrite && (ptStats.pending || 0) === 0}>开始预翻译</button>
+            <button class="reword-pt-btn reword-pt-btn-ghost" on:click={closePretranslateDialog}>{t("取消")}</button>
+            <button class="reword-pt-btn reword-pt-btn-primary" on:click={startPretranslate} disabled={!ptForm.overwrite && (ptStats.pending || 0) === 0}>{t("开始预翻译")}</button>
           {:else if ptProgress.status === "running"}
-            <button class="reword-pt-btn reword-pt-btn-ghost" on:click={backgroundPretranslate}>后台运行</button>
-            <button class="reword-pt-btn reword-pt-btn-warn" on:click={stopPretranslate}>停止</button>
+            <button class="reword-pt-btn reword-pt-btn-ghost" on:click={backgroundPretranslate}>{t("后台运行")}</button>
+            <button class="reword-pt-btn reword-pt-btn-warn" on:click={stopPretranslate}>{t("停止")}</button>
           {:else}
-            <button class="reword-pt-btn reword-pt-btn-primary" on:click={closePretranslateDialog}>关闭</button>
+            <button class="reword-pt-btn reword-pt-btn-primary" on:click={closePretranslateDialog}>{t("关闭")}</button>
           {/if}
         </div>
       </div>
@@ -9166,24 +9167,24 @@ import { getLogger } from "../core/logger.ts";
   {#if askModeOpen}
     <div class="reword-pt-overlay" on:click={() => (askModeOpen = false)} on:keydown={() => {}} tabindex="-1">
       <div class="reword-pt-modal reword-glass" role="dialog" aria-modal="true" on:click|stopPropagation on:keydown={() => {}} style="max-width: 440px;">
-        <div class="reword-pt-title">选择翻译方式</div>
-        <p style="color:var(--b3-theme-on-surface,#777);font-size:12px;margin:6px 0 16px;">要如何翻译这本书？</p>
+        <div class="reword-pt-title">{t("选择翻译方式")}</div>
+        <p style="color:var(--b3-theme-on-surface,#777);font-size:12px;margin:6px 0 16px;">{t("要如何翻译这本书？")}</p>
         {#if askCacheStats}
           <p style="color:var(--b3-theme-primary,#3b82f6);font-size:12px;margin:0 0 14px;background:rgba(59,130,246,0.1);padding:8px 10px;border-radius:8px;">
-            本书已缓存 {askCacheStats.cached} / {askCacheStats.total} 段 · 剩余 {askCacheStats.pending} 段待译
+            {t("本书已缓存 {a} / {b} 段 · 剩余 {c} 段待译", { a: askCacheStats.cached, b: askCacheStats.total, c: askCacheStats.pending })}
           </p>
         {/if}
         <div style="display:flex;gap:10px;">
-          <button class="reword-pt-btn reword-pt-btn-primary" on:click={chooseWholeBook}>整书预翻译</button>
-          <button class="reword-pt-btn" on:click={chooseProgressive}>渐进式翻译</button>
+          <button class="reword-pt-btn reword-pt-btn-primary" on:click={chooseWholeBook}>{t("整书预翻译")}</button>
+          <button class="reword-pt-btn" on:click={chooseProgressive}>{t("渐进式翻译")}</button>
         </div>
         <!-- 2026-09-05 F4：记忆行为透明化（此前选一次就永久记住但用户不知情） -->
         <label style="display:flex;align-items:center;gap:6px;margin-top:12px;font-size:12px;color:var(--b3-theme-on-surface,#777);cursor:pointer;">
           <input type="checkbox" bind:checked={askRemember} />
-          <span>记住本书的选择，下次不再询问（可在 设置 → 显示与界面 清除）</span>
+          <span>{t("记住本书的选择，下次不再询问（可在 设置 → 显示与界面 清除）")}</span>
         </label>
         <p style="color:var(--b3-theme-on-surface,#999);font-size:11px;line-height:1.55;margin-top:10px;">
-          整书：后台翻译全书并写入缓存，翻页 / 重开秒出；渐进式：只译当前分节 + 后续窗口，随读随译、更省额度。
+          {t("整书：后台翻译全书并写入缓存，翻页 / 重开秒出；渐进式：只译当前分节 + 后续窗口，随读随译、更省额度。")}
         </p>
       </div>
     </div>
@@ -9195,8 +9196,8 @@ import { getLogger } from "../core/logger.ts";
       on:click={openPretranslateDialog}
       on:keydown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); openPretranslateDialog(); } }}>
       <span class="reword-pt-floating-spinner"></span>
-      <span class="reword-pt-floating-text">翻译中 {ptProgress.total > 0 ? Math.round((ptProgress.done / ptProgress.total) * 100) : 0}%</span>
-      <span class="reword-pt-floating-hint">点击查看进度</span>
+      <span class="reword-pt-floating-text">{t("翻译中 {n}%", { n: ptProgress.total > 0 ? Math.round((ptProgress.done / ptProgress.total) * 100) : 0 })}</span>
+      <span class="reword-pt-floating-hint">{t("点击查看进度")}</span>
     </div>
   {/if}
 
@@ -9223,13 +9224,13 @@ import { getLogger } from "../core/logger.ts";
         <div
           class="pdf-rect-capture"
           role="application"
-          aria-label="矩形框选模式"
+          aria-label={t("矩形框选模式")}
           on:mousedown={onRectCaptureMouseDownStart}
         >
           {#if pdfRectDrag}
             <div class="pdf-rect-preview" style={pdfRectPreviewCss}></div>
           {/if}
-          <span class="pdf-rect-hint">框选图表 / 排版区域，松手自动复制链接 + 截图（Esc 退出）</span>
+          <span class="pdf-rect-hint">{t("框选图表 / 排版区域，松手自动复制链接 + 截图（Esc 退出）")}</span>
         </div>
       {/if}
     {/if}
@@ -9237,8 +9238,8 @@ import { getLogger } from "../core/logger.ts";
       <div class="reader-side-tap" aria-hidden="false">
         <button
           class="reader-side-arrow reader-side-left reader-ui-transition"
-          title="上一页（←/PageUp）"
-          aria-label="上一页"
+          title={t("上一页（←/PageUp）")}
+          aria-label={t("上一页")}
           on:pointerdown={() => arrowDown("prev")}
           on:pointerup={stopArrowRepeat}
           on:pointerleave={stopArrowRepeat}
@@ -9248,8 +9249,8 @@ import { getLogger } from "../core/logger.ts";
         </button>
         <button
           class="reader-side-arrow reader-side-right reader-ui-transition"
-          title="下一页（→/PageDown/空格）"
-          aria-label="下一页"
+          title={t("下一页（→/PageDown/空格）")}
+          aria-label={t("下一页")}
           on:pointerdown={() => arrowDown("next")}
           on:pointerup={stopArrowRepeat}
           on:pointerleave={stopArrowRepeat}
@@ -9264,11 +9265,11 @@ import { getLogger } from "../core/logger.ts";
   <!-- 2026-08-26 调试 HUD：foliate 原生标注管线诊断（DEBUG_READER=true 时显示） -->
   {#if DEBUG_READER}
   <div class="reader-debug-hud">
-    <div class="reader-debug-hud-title">🔍 REword 高亮诊断（foliate 原生）</div>
+    <div class="reader-debug-hud-title">🔍 {t("REword 高亮诊断（foliate 原生）")}</div>
     <div class="reader-debug-hud-row"><b>setup:</b> {dbgHud.setupCalled} <b>annStore:</b> {dbgHud.annStoreReady} <b>bookId:</b> {dbgHud.bookIdAtSetup}</div>
     <div class="reader-debug-hud-row"><b>storeAnnots:</b> {dbgHud.annotCountInStore} <b>totalInStore:</b> {dbgHud.totalInStore} <b>bookIdMatch:</b> {dbgHud.bookIdMatch}</div>
     <div class="reader-debug-hud-row"><b>createOverlay:</b> {dbgHud.createOverlayCalls} <b>relocate:</b> {dbgHud.relocateCalls} <b>evtIdx:</b> {dbgHud.ovr_evtIndex}</div>
-    <div class="reader-debug-hud-row"><b>addAnnotation 调用:</b> {dbgHud.addAnnotationTries} <b>失败:</b> {dbgHud.addAnnotationErrors} <b>绘制:</b> {dbgHud.drawnCount}</div>
+    <div class="reader-debug-hud-row"><b>{t("addAnnotation 调用:")}</b> {dbgHud.addAnnotationTries} <b>{t("失败:")}</b> {dbgHud.addAnnotationErrors} <b>{t("绘制:")}</b> {dbgHud.drawnCount}</div>
     <div class="reader-debug-hud-row"><b>lastDraw:</b> {dbgHud.lastDraw}</div>
   </div>
   {/if}
@@ -9284,9 +9285,9 @@ import { getLogger } from "../core/logger.ts";
     on:mouseenter={() => { bottomBarBarHover = true; updateBottomBarReveal(); }}
     on:mouseleave={() => { bottomBarBarHover = false; updateBottomBarReveal(); }}
   >
-    <button class="reader-btn reader-bottom-collapse" title="收起进度条" on:click={collapseBottomBar}>⌄</button>
-    <button class="reader-btn" title="第一页（Home）" on:click={goFirstPage}>⏮</button>
-    <button class="reader-btn" title="上一页" on:click={turnPrev}>◀</button>
+    <button class="reader-btn reader-bottom-collapse" title={t("收起进度条")} on:click={collapseBottomBar}>⌄</button>
+    <button class="reader-btn" title={t("第一页（Home）")} on:click={goFirstPage}>⏮</button>
+    <button class="reader-btn" title={t("上一页")} on:click={turnPrev}>◀</button>
     <div class="reader-progress-wrap">
       {#if chapterMarks.length}
         {#each chapterMarks as m (m.left)}
@@ -9310,10 +9311,10 @@ import { getLogger } from "../core/logger.ts";
     </div>
     <span class="reader-progress-text">{progressText}</span>
     {#if etaText}
-      <span class="reader-eta" title="按当前阅读速度估算">{etaText}</span>
+      <span class="reader-eta" title={t("按当前阅读速度估算")}>{etaText}</span>
     {/if}
-    <button class="reader-btn" title="下一页" on:click={turnNext}>▶</button>
-    <button class="reader-btn" title="最后一页（End）" on:click={goLastPage}>⏭</button>
+    <button class="reader-btn" title={t("下一页")} on:click={turnNext}>▶</button>
+    <button class="reader-btn" title={t("最后一页（End）")} on:click={goLastPage}>⏭</button>
   </div>
 
   <!-- 2026-08-30 · 底部进度条「把手」：常驻（dot / both 模式）。
@@ -9323,7 +9324,7 @@ import { getLogger } from "../core/logger.ts";
   <button
     class="reader-bottom-handle"
     class:reader-bottom-handle-revealed={bottomBarRevealed}
-    title={bottomBarRevealed ? "点击收起进度条" : "点击展开进度条"}
+    title={bottomBarRevealed ? t("点击收起进度条") : t("点击展开进度条")}
     on:click={toggleBottomBarPin}
   >
     <span class="reader-bottom-handle-dot"></span>
@@ -9333,34 +9334,34 @@ import { getLogger } from "../core/logger.ts";
   <!-- 2026-08-28：连续朗读控制条（参考 Readest 朗读体验） -->
   {#if showTtsBar}
   <div class="reader-tts-bar">
-    <button class="reader-btn reader-tts-btn" title="上一句" on:click={ttsPrev}>⏮</button>
-    <button class="reader-btn reader-tts-btn reader-tts-play" title="播放/暂停（Space）" on:click={ttsTogglePlay}>
+    <button class="reader-btn reader-tts-btn" title={t("上一句")} on:click={ttsPrev}>⏮</button>
+    <button class="reader-btn reader-tts-btn reader-tts-play" title={t("播放/暂停（Space）")} on:click={ttsTogglePlay}>
       {ttsState === "playing" ? "⏸" : "▶"}
     </button>
-    <button class="reader-btn reader-tts-btn" title="下一句" on:click={ttsNext}>⏭</button>
-    <button class="reader-btn reader-tts-btn" title="停止" on:click={ttsStop}>⏹</button>
+    <button class="reader-btn reader-tts-btn" title={t("下一句")} on:click={ttsNext}>⏭</button>
+    <button class="reader-btn reader-tts-btn" title={t("停止")} on:click={ttsStop}>⏹</button>
     <div class="reader-tts-meta">
       <span class="reader-tts-progress">{ttsProgress.total ? ttsProgress.index + 1 : 0}/{ttsProgress.total}</span>
       <span class="reader-tts-current" title={ttsCurrentText}>{ttsCurrentText}</span>
     </div>
     <div class="reader-tts-rate">
-      <span class="reader-tts-rate-label">语速</span>
+      <span class="reader-tts-rate-label">{t("语速")}</span>
       <input type="range" min="0.5" max="3" step="0.1" value={ttsRate} on:input={onTtsRateInput} />
       <span class="reader-tts-rate-val">{ttsRate.toFixed(1)}×</span>
     </div>
-    <button class="reader-btn reader-tts-btn" class:reader-btn-active={ttsHighlightOn} title="句子高亮跟随" on:click={ttsToggleHighlight}>高亮</button>
-    <button class="reader-btn reader-tts-btn" title="收藏本句生词到生词本" on:click={ttsCollectWords}>收词</button>
+    <button class="reader-btn reader-tts-btn" class:reader-btn-active={ttsHighlightOn} title={t("句子高亮跟随")} on:click={ttsToggleHighlight}>{t("高亮")}</button>
+    <button class="reader-btn reader-tts-btn" title={t("收藏本句生词到生词本")} on:click={ttsCollectWords}>{t("收词")}</button>
   </div>
   {/if}
 
   {#if pausedByCrash}
     <!-- 2026-09-08 启动卡死修复：卡死后不自动开书，显示手动打开入口 -->
     <div class="reader-error">
-      上次启动异常，已暂停自动打开本书
-      <button class="reader-btn" style="margin-left:8px;" on:click={manualReopen}>重新打开</button>
+      {t("上次启动异常，已暂停自动打开本书")}
+      <button class="reader-btn" style="margin-left:8px;" on:click={manualReopen}>{t("重新打开")}</button>
     </div>
   {:else if errorMsg}
-    <div class="reader-error">打开失败：{errorMsg}</div>
+    <div class="reader-error">{t("打开失败：")}{errorMsg}</div>
   {/if}
 
   {#if showToc || showSettings || showSearch}
@@ -9392,7 +9393,7 @@ import { getLogger } from "../core/logger.ts";
               <button
                 class="reader-style-btn"
                 class:active={(selToolbar.mode === "edit" ? selToolbar.annStyle : lastStyle) === s}
-                title={ANNOTATION_STYLES[s].label}
+                title={t(ANNOTATION_STYLES[s].label)}
                 on:click={() => selToolbar.mode === "edit" ? applyEditStyle(s) : onSelCreate(s, lastColor)}>
                 <span class="reader-style-glyph style-{s}" style="--sc:{selToolbar.mode === 'edit' ? (selToolbar.annColor || lastColor) : lastColor}">{ANNOTATION_STYLES[s].icon}</span>
               </button>
@@ -9405,7 +9406,7 @@ import { getLogger } from "../core/logger.ts";
                 class="reader-color-dot"
                 class:active={(selToolbar.mode === 'edit' ? (selToolbar.annColor || lastColor) : lastColor) === c.value}
                 style="background:{c.value}"
-                title={c.name}
+                title={t(c.name)}
                 on:click={() => selToolbar.mode === "edit" ? applyEditColor(c.value) : onSelCreate(lastStyle, c.value)}></button>
             {/each}
           </div>
@@ -9416,38 +9417,38 @@ import { getLogger } from "../core/logger.ts";
         {#if selToolbar.mode === "edit"}
           {#if selToolbar.ghostCfi}
             <!-- 2026-08-24 死锁解除：数据已无活跃记录但视觉残留时，只给「清除残留高亮」入口 -->
-            <button class="reader-sel-item reader-sel-item-danger" title="清除残留高亮" on:click={onClearGhostHighlight}>
-              <span class="reader-sel-ico">{@html SEL_ICONS.trash}</span><span class="reader-sel-txt">清除残留</span>
+            <button class="reader-sel-item reader-sel-item-danger" title={t("清除残留高亮")} on:click={onClearGhostHighlight}>
+              <span class="reader-sel-ico">{@html SEL_ICONS.trash}</span><span class="reader-sel-txt">{t("清除残留")}</span>
             </button>
           {:else}
           <!-- 2026-08-26 标注 edit 模式：删除按钮替代「高亮」位置（最前），其余功能保留 -->
-          <button class="reader-sel-item reader-sel-item-danger" title="删除划线" on:click={onAnnDeleteById}>
-            <span class="reader-sel-ico">{@html SEL_ICONS.trash}</span><span class="reader-sel-txt">删除</span>
+          <button class="reader-sel-item reader-sel-item-danger" title={t("删除划线")} on:click={onAnnDeleteById}>
+            <span class="reader-sel-ico">{@html SEL_ICONS.trash}</span><span class="reader-sel-txt">{t("删除")}</span>
           </button>
-          <button class="reader-sel-item" title="复制" on:click={onSelCopy}>
-            <span class="reader-sel-ico">{@html SEL_ICONS.copy}</span><span class="reader-sel-txt">复制</span>
+          <button class="reader-sel-item" title={t("复制")} on:click={onSelCopy}>
+            <span class="reader-sel-ico">{@html SEL_ICONS.copy}</span><span class="reader-sel-txt">{t("复制")}</span>
           </button>
           {#if pdfAnnotEnabled("annotate")}
-          <button class="reader-sel-item" title="批注：升级为带笔记标注" on:click={onEditAnnotate}>
-            <span class="reader-sel-ico">{@html SEL_ICONS.annotate}</span><span class="reader-sel-txt">批注</span>
+          <button class="reader-sel-item" title={t("批注：升级为带笔记标注")} on:click={onEditAnnotate}>
+            <span class="reader-sel-ico">{@html SEL_ICONS.annotate}</span><span class="reader-sel-txt">{t("批注")}</span>
           </button>
           {/if}
-          <button class="reader-sel-item" title="词典" on:click={onSelDict}>
-            <span class="reader-sel-ico">{@html SEL_ICONS.dict}</span><span class="reader-sel-txt">词典</span>
+          <button class="reader-sel-item" title={t("词典")} on:click={onSelDict}>
+            <span class="reader-sel-ico">{@html SEL_ICONS.dict}</span><span class="reader-sel-txt">{t("词典")}</span>
           </button>
-          <button class="reader-sel-item" title="翻译" on:click={onSelTranslate}>
-            <span class="reader-sel-ico">{@html SEL_ICONS.translate}</span><span class="reader-sel-txt">翻译</span>
+          <button class="reader-sel-item" title={t("翻译")} on:click={onSelTranslate}>
+            <span class="reader-sel-ico">{@html SEL_ICONS.translate}</span><span class="reader-sel-txt">{t("翻译")}</span>
           </button>
-          <button class="reader-sel-item" title="朗读" on:click={onSelSpeak}>
-            <span class="reader-sel-ico">{@html SEL_ICONS.tts}</span><span class="reader-sel-txt">朗读</span>
+          <button class="reader-sel-item" title={t("朗读")} on:click={onSelSpeak}>
+            <span class="reader-sel-ico">{@html SEL_ICONS.tts}</span><span class="reader-sel-txt">{t("朗读")}</span>
           </button>
-          <button class="reader-sel-item" title="发送" on:click={onSelSend}>
-            <span class="reader-sel-ico">{@html SEL_ICONS.send}</span><span class="reader-sel-txt">发送</span>
+          <button class="reader-sel-item" title={t("发送")} on:click={onSelSend}>
+            <span class="reader-sel-ico">{@html SEL_ICONS.send}</span><span class="reader-sel-txt">{t("发送")}</span>
           </button>
           {/if}
         {:else}
-          <button class="reader-sel-item" title="复制" on:click={onSelCopy}>
-            <span class="reader-sel-ico">{@html SEL_ICONS.copy}</span><span class="reader-sel-txt">复制</span>
+          <button class="reader-sel-item" title={t("复制")} on:click={onSelCopy}>
+            <span class="reader-sel-ico">{@html SEL_ICONS.copy}</span><span class="reader-sel-txt">{t("复制")}</span>
           </button>
           <!-- 2026-08-30 微信读书式两段式「标注」：
                左段=一键高亮（直接用上次用过的样式+颜色，不再先弹样式条）；
@@ -9458,39 +9459,39 @@ import { getLogger } from "../core/logger.ts";
           <div class="reader-sel-split">
             <button
               class="reader-sel-item reader-sel-item-accent reader-sel-split-main"
-              title="标注：使用上次样式（{lastStyleLabel} + {lastColorName}）"
+              title={t("标注：使用上次样式（{style} + {color}）", { style: lastStyleLabel, color: lastColorName })}
               on:click={onQuickAnnotate}>
               <span class="reader-sel-ico">{@html SEL_ICONS.highlight}</span>
-              <span class="reader-sel-txt">标注</span>
+              <span class="reader-sel-txt">{t("标注")}</span>
               <span class="reader-sel-style-preview style-{lastStyle}" style="--spc:{lastColor}"></span>
             </button>
             <button
               class="reader-sel-split-more"
               class:active={selToolbar.stripVisible}
-              title="展开样式条：修改标注样式 / 颜色"
-              aria-label="展开样式条"
+              title={t("展开样式条：修改标注样式 / 颜色")}
+              aria-label={t("展开样式条")}
               on:click={toggleStyleStrip}>▾</button>
           </div>
           {/if}
           {#if pdfAnnotEnabled("annotate")}
           <button
             class="reader-sel-item reader-sel-item-accent"
-            title="批注：打开批注编辑气泡（样式+颜色+笔记）"
+            title={t("批注：打开批注编辑气泡（样式+颜色+笔记）")}
             on:click={openNoteEditor}>
-            <span class="reader-sel-ico">{@html SEL_ICONS.annotate}</span><span class="reader-sel-txt">批注</span>
+            <span class="reader-sel-ico">{@html SEL_ICONS.annotate}</span><span class="reader-sel-txt">{t("批注")}</span>
           </button>
           {/if}
-          <button class="reader-sel-item" title="词典" on:click={onSelDict}>
-            <span class="reader-sel-ico">{@html SEL_ICONS.dict}</span><span class="reader-sel-txt">词典</span>
+          <button class="reader-sel-item" title={t("词典")} on:click={onSelDict}>
+            <span class="reader-sel-ico">{@html SEL_ICONS.dict}</span><span class="reader-sel-txt">{t("词典")}</span>
           </button>
-          <button class="reader-sel-item" title="翻译" on:click={onSelTranslate}>
-            <span class="reader-sel-ico">{@html SEL_ICONS.translate}</span><span class="reader-sel-txt">翻译</span>
+          <button class="reader-sel-item" title={t("翻译")} on:click={onSelTranslate}>
+            <span class="reader-sel-ico">{@html SEL_ICONS.translate}</span><span class="reader-sel-txt">{t("翻译")}</span>
           </button>
-          <button class="reader-sel-item" title="朗读" on:click={onSelSpeak}>
-            <span class="reader-sel-ico">{@html SEL_ICONS.tts}</span><span class="reader-sel-txt">朗读</span>
+          <button class="reader-sel-item" title={t("朗读")} on:click={onSelSpeak}>
+            <span class="reader-sel-ico">{@html SEL_ICONS.tts}</span><span class="reader-sel-txt">{t("朗读")}</span>
           </button>
-          <button class="reader-sel-item" title="发送" on:click={onSelSend}>
-            <span class="reader-sel-ico">{@html SEL_ICONS.send}</span><span class="reader-sel-txt">发送</span>
+          <button class="reader-sel-item" title={t("发送")} on:click={onSelSend}>
+            <span class="reader-sel-ico">{@html SEL_ICONS.send}</span><span class="reader-sel-txt">{t("发送")}</span>
           </button>
         {/if}
       </div>
@@ -9503,17 +9504,17 @@ import { getLogger } from "../core/logger.ts";
       {#if noteEditor.mode === "preview"}
         <!-- 2026-08-26 简易预览卡：只读笔记 + 图标操作（复制/导出/删除）+ 编辑入口 -->
         <div class="reader-preview-head">
-          <span class="reader-viewer-time" title={noteEditor.time}>{noteEditor.time || "未记录时间"}</span>
+          <span class="reader-viewer-time" title={noteEditor.time}>{noteEditor.time || t("未记录时间")}</span>
           <span class="reader-preview-actions">
-            <button class="reader-icon-btn" title="复制" on:click={onViewerCopy}>{@html SEL_ICONS.copy}</button>
-            <button class="reader-icon-btn" title="导出" on:click={onViewerExport}>⬇️</button>
-            <button class="reader-icon-btn reader-icon-btn-danger" title="删除" on:click={onViewerDelete}>{@html SEL_ICONS.trash}</button>
+            <button class="reader-icon-btn" title={t("复制")} on:click={onViewerCopy}>{@html SEL_ICONS.copy}</button>
+            <button class="reader-icon-btn" title={t("导出")} on:click={onViewerExport}>⬇️</button>
+            <button class="reader-icon-btn reader-icon-btn-danger" title={t("删除")} on:click={onViewerDelete}>{@html SEL_ICONS.trash}</button>
           </span>
         </div>
         {#if noteEditor.note}
           <div class="reader-viewer-note reader-preview-note">{noteEditor.note}</div>
         {:else}
-          <div class="reader-preview-empty">（无批注内容）</div>
+          <div class="reader-preview-empty">{t("（无批注内容）")}</div>
         {/if}
         {#if noteEditor.labels.length}
           <div class="reader-viewer-labels">
@@ -9523,12 +9524,12 @@ import { getLogger } from "../core/logger.ts";
           </div>
         {/if}
         <div class="reader-preview-foot">
-          <button class="reader-viewer-btn reader-viewer-btn-primary" on:click={onViewerEdit}>✏️ 笔记</button>
+          <button class="reader-viewer-btn reader-viewer-btn-primary" on:click={onViewerEdit}>✏️ {t("笔记")}</button>
         </div>
       {:else if noteEditor.mode === "view"}
         <!-- 查看态（兼容保留）：时间 + 原文 + 批注 + 标签 + 即时改色/样式 + 复制/编辑/删除 -->
         <div class="reader-viewer-head">
-          <span class="reader-viewer-time" title={noteEditor.time}>{noteEditor.time || "未记录时间"}</span>
+          <span class="reader-viewer-time" title={noteEditor.time}>{noteEditor.time || t("未记录时间")}</span>
           <span class="reader-viewer-style">
             <span class="reader-style-glyph style-{noteEditor.style}" style="--sc:{noteEditor.color}" title={noteEditor.styleLabel}>{noteEditor.styleGlyph}</span>
           </span>
@@ -9547,43 +9548,43 @@ import { getLogger } from "../core/logger.ts";
         <!-- 即时改色 / 改样式（readest 颜色即分类：不改笔记、不关卡片） -->
         <div class="reader-style-row reader-viewer-style-row">
           {#each ANNOTATION_PANEL_STYLES as s}
-            <button class="reader-style-btn" class:active={s === noteEditor.style} title={ANNOTATION_STYLES[s].label} on:click={() => applyViewerStyle(s)}>
+            <button class="reader-style-btn" class:active={s === noteEditor.style} title={t(ANNOTATION_STYLES[s].label)} on:click={() => applyViewerStyle(s)}>
               <span class="reader-style-glyph style-{s}" style="--sc:{noteEditor.color}">{ANNOTATION_STYLES[s].icon}</span>
             </button>
           {/each}
         </div>
         <div class="reader-color-row">
           {#each WHALE_COLORS as c}
-            <button class="reader-color-dot" class:active={c.value === noteEditor.color} style="background:{c.value}" title={c.name} on:click={() => applyViewerColor(c.value)}></button>
+            <button class="reader-color-dot" class:active={c.value === noteEditor.color} style="background:{c.value}" title={t(c.name)} on:click={() => applyViewerColor(c.value)}></button>
           {/each}
         </div>
         <div class="reader-viewer-actions">
-          <button class="reader-viewer-btn" on:click={onViewerCopy}>复制</button>
-          <button class="reader-viewer-btn" on:click={onViewerEdit}>编辑</button>
-          <button class="reader-viewer-btn reader-viewer-btn-danger" on:click={onViewerDelete}>删除</button>
+          <button class="reader-viewer-btn" on:click={onViewerCopy}>{t("复制")}</button>
+          <button class="reader-viewer-btn" on:click={onViewerEdit}>{t("编辑")}</button>
+          <button class="reader-viewer-btn reader-viewer-btn-danger" on:click={onViewerDelete}>{t("删除")}</button>
         </div>
       {:else if noteEditor.mode === "highlight"}
         <!-- 纯标注（高亮）面板：与批注查看卡隔离。仅样式/颜色即时切换 + 删除，无时间/笔记/复制/编辑 -->
         <div class="reader-viewer-head">
-          <span class="reader-viewer-time">标注</span>
+          <span class="reader-viewer-time">{t("标注")}</span>
           <span class="reader-viewer-style">
             <span class="reader-style-glyph style-{noteEditor.style}" style="--sc:{noteEditor.color}" title={noteEditor.styleLabel}>{noteEditor.styleGlyph}</span>
           </span>
         </div>
         <div class="reader-style-row reader-viewer-style-row">
           {#each ANNOTATION_PANEL_STYLES as s}
-            <button class="reader-style-btn" class:active={s === noteEditor.style} title={ANNOTATION_STYLES[s].label} on:click={() => applyViewerStyle(s)}>
+            <button class="reader-style-btn" class:active={s === noteEditor.style} title={t(ANNOTATION_STYLES[s].label)} on:click={() => applyViewerStyle(s)}>
               <span class="reader-style-glyph style-{s}" style="--sc:{noteEditor.color}">{ANNOTATION_STYLES[s].icon}</span>
             </button>
           {/each}
         </div>
         <div class="reader-color-row">
           {#each WHALE_COLORS as c}
-            <button class="reader-color-dot" class:active={c.value === noteEditor.color} style="background:{c.value}" title={c.name} on:click={() => applyViewerColor(c.value)}></button>
+            <button class="reader-color-dot" class:active={c.value === noteEditor.color} style="background:{c.value}" title={t(c.name)} on:click={() => applyViewerColor(c.value)}></button>
           {/each}
         </div>
         <div class="reader-viewer-actions">
-          <button class="reader-viewer-btn reader-viewer-btn-danger" on:click={onViewerDelete}>删除</button>
+          <button class="reader-viewer-btn reader-viewer-btn-danger" on:click={onViewerDelete}>{t("删除")}</button>
         </div>
       {:else}
         <!-- 新建 / 编辑态：文本预览 + 样式/颜色 + 输入框 + 取消/保存 -->
@@ -9605,18 +9606,18 @@ import { getLogger } from "../core/logger.ts";
               class="reader-color-dot"
               class:active={c.value === noteEditor.color}
               style="background:{c.value}"
-              title={c.name}
+              title={t(c.name)}
               on:click={() => noteEditor = { ...noteEditor, color: c.value }}></button>
           {/each}
         </div>
         <textarea
           class="reader-note-input"
-          placeholder="写点批注…"
+          placeholder={t("写点批注…")}
           bind:value={noteEditor.note}
           use:focusNoteInput></textarea>
         <div class="reader-note-actions">
-          <button class="reader-note-btn" on:click={onNoteCancel}>取消</button>
-          <button class="reader-note-btn reader-note-btn-primary" on:click={onNoteSave}>保存</button>
+          <button class="reader-note-btn" on:click={onNoteCancel}>{t("取消")}</button>
+          <button class="reader-note-btn reader-note-btn-primary" on:click={onNoteSave}>{t("保存")}</button>
         </div>
       {/if}
     </div>
@@ -9628,11 +9629,11 @@ import { getLogger } from "../core/logger.ts";
       <div class="reader-footnote-head">
         <span class="reader-footnote-icon">💡</span>
         <span class="reader-footnote-title">{footnoteType}</span>
-        <button class="reader-footnote-close" on:click={closeFootnote} title="关闭">✕</button>
+        <button class="reader-footnote-close" on:click={closeFootnote} title={t("关闭")}>✕</button>
       </div>
       <div class="reader-footnote-body">
         {#if footnoteLoading && !footnoteHTML}
-          <div class="reader-footnote-loading">⌛ 脚注加载中…</div>
+          <div class="reader-footnote-loading">⌛ {t("脚注加载中…")}</div>
         {:else}
           {@html footnoteHTML}
         {/if}
@@ -9649,10 +9650,10 @@ import { getLogger } from "../core/logger.ts";
     <div class="reader-dict-popup" bind:this={dictPopupEl} style="left:{dictPopup.x}px; top:{dictPopup.y}px"
          on:mouseenter={onDictPopupEnter} on:mouseleave={onDictPopupLeave}>
       <div class="reader-dict-head">
-        <span>词典</span>
+        <span>{t("词典")}</span>
         <div class="reader-dict-head-actions">
-          <button class="reader-dict-send" on:click={sendToSidebar} title="在 REword 侧边栏查词（自动填入，无需手动输入）">侧边栏</button>
-          <button class="reader-dict-close" on:click={closeDictPopup} title="关闭">✕</button>
+          <button class="reader-dict-send" on:click={sendToSidebar} title={t("在 REword 侧边栏查词（自动填入，无需手动输入）")}>{t("侧边栏")}</button>
+          <button class="reader-dict-close" on:click={closeDictPopup} title={t("关闭")}>✕</button>
         </div>
       </div>
       <div class="reader-dict-body" on:click={onDictBodyClick}>{@html dictPopup.html}</div>
@@ -9666,7 +9667,7 @@ import { getLogger } from "../core/logger.ts";
     <div class="reader-toast">
       <span>{toastMsg}</span>
       {#if toastUndo}
-        <button class="reader-toast-undo" on:click={undoDelete}>撤销</button>
+        <button class="reader-toast-undo" on:click={undoDelete}>{t("撤销")}</button>
       {/if}
     </div>
   {/if}

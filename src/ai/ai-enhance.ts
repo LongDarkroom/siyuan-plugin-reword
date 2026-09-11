@@ -1,4 +1,5 @@
 import { logSwallow } from "../core/safe.ts";
+import { t } from "../i18n/index.ts";
 /**
  * REword · AI 输出思源原生样式增强
  * ------------------------------------------------------------------
@@ -30,7 +31,7 @@ function addScriptOnce(src: string, id: string): Promise<void> {
     if (existing) {
       if (existing.dataset.loaded === "true") return resolve();
       existing.addEventListener("load", () => resolve());
-      existing.addEventListener("error", () => reject(new Error("加载失败: " + src)));
+      existing.addEventListener("error", () => reject(new Error(t("加载失败: ") + src)));
       return;
     }
     const script = document.createElement("script");
@@ -40,7 +41,7 @@ function addScriptOnce(src: string, id: string): Promise<void> {
       script.dataset.loaded = "true";
       resolve();
     };
-    script.onerror = () => reject(new Error("加载失败: " + src));
+    script.onerror = () => reject(new Error(t("加载失败: ") + src));
     document.head.appendChild(script);
   });
 }
@@ -104,14 +105,14 @@ export function applyCodeToolbars(container: HTMLElement): void {
     bar.className = "hiword-ai-code-toolbar";
     bar.innerHTML =
       `<span class="hiword-ai-code-lang">${escapeHtmlAttr(lang || "code")}</span>` +
-      `<button type="button" class="hiword-ai-code-copy" data-act="copy">复制</button>`;
+      `<button type="button" class="hiword-ai-code-copy" data-act="copy">${t("复制")}</button>`;
     const copyBtn = bar.querySelector("[data-act='copy']") as HTMLButtonElement;
     copyBtn.addEventListener("click", (ev) => {
       ev.stopPropagation();
       const text = code.textContent || "";
       const done = (ok: boolean) => {
-        copyBtn.textContent = ok ? "已复制" : "复制失败";
-        setTimeout(() => (copyBtn.textContent = "复制"), 1500);
+        copyBtn.textContent = ok ? t("已复制") : t("复制失败");
+        setTimeout(() => (copyBtn.textContent = t("复制")), 1500);
       };
       if (navigator.clipboard?.writeText) {
         navigator.clipboard.writeText(text).then(() => done(true), () => fallbackCopy(text, done));

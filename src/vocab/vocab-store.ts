@@ -1,8 +1,9 @@
-import { WordStatus, MASTERY_MAX, LearningStatus } from "../types.ts";
-import type { WordRecord, VocabTheme, VocabBook, VocabStoreData, VocabSort, ReviewGrade, ReviewEvent, LearningStatus as LearningStatusType } from "../types.ts";
+import { WordStatus, MASTERY_MAX, LearningStatus, BookStatus, BookSource } from "../types.ts";
+import type { WordRecord, VocabTheme, VocabBook, VocabStoreData, VocabSort, ReviewGrade, ReviewEvent, LearningStatus as LearningStatusType, VocabLabel } from "../types.ts";
 import { sqlQuery, getBlockAttrs } from "../siyuan/index.ts";
 import { getLogger } from "../core/logger.ts";
 import { computeDifficulty } from "../review/difficulty.ts";
+import { VocabLabelsStore, DEFAULT_LABEL_COLOR } from "./labels-store.ts";
 
 /** 2026-08-22 新增:学习状态变更监听者(由 vocab-highlight 模块订阅) */
 export type LearningStatusListener = (word: string, status: LearningStatusType) => void;
@@ -59,9 +60,16 @@ export class VocabStore {
    * 注意:不在 persist() 内部 emit——避免"批量更新时所有 listener 重复触发重扫"。
    */
   private learningStatusListeners = new Set<LearningStatusListener>();
+  /**
+   * 2026-09-11 新增:标签元数据 store 引用(可选)。
+   * 不传时 getAllLabels() 仍能用,只是没有 color/description 元数据(全部用默认色)。
+   * 传时 renameLabel/mergeLabels/deleteLabel 会同步更新元数据。
+   */
+  private labelsStore?: VocabLabelsStore;
 
-  constructor(onChange?: () => void | Promise<void>) {
+  constructor(onChange?: () => void | Promise<void>, labelsStore?: VocabLabelsStore) {
     this.onChange = onChange;
+    this.labelsStore = labelsStore;
   }
 
   /**
@@ -111,6 +119,9 @@ export class VocabStore {
           }
         }
       }
+      // 2026-09-11 老数据前向兼容：补全 VocabBook.status / source / verifiedAt
+      // 老词库无 status/source 字段，统一迁移为 'verified' + 'manual'（已建好的词书默认已校验）
+      this.ensureBookStatus();
       this.ensureActiveValid();
       this.rebuildByWordIndex();
     } else {
@@ -191,6 +202,32 @@ export class VocabStore {
     }
   }
 
+  /**
+   * 2026-09-11 新增：老数据迁移。给所有 book 补 status/source/verifiedAt 默认值
+   * - 老词库无 status 字段 → 默认 'verified'（已建好的词书默认已校验，进复习）
+   * - 老词库无 source 字段 → 默认 'manual'
+   * - 缺 verifiedAt → 用 book.order==0 && themes[0].words[0]?.created ?? now
+   * 幂等：跑两遍结果一致
+   */
+  private ensureBookStatus(): void {
+    for (const book of this.data.books) {
+      if (!book.status) {
+        book.status = BookStatus.Verified;
+      }
+      if (!book.source) {
+        book.source = BookSource.Manual;
+      }
+      if (book.status === BookStatus.Verified && !book.verifiedAt) {
+        // 找该 book 最早词的 created 作为校验时间兜底
+        const firstWord = book.themes.flatMap(t => t.words)[0];
+        book.verifiedAt = firstWord?.created ?? new Date(0).toISOString();
+      }
+      if (book.status === BookStatus.Verified && book.verifiedWordCount === undefined) {
+        book.verifiedWordCount = book.themes.reduce((n, t) => n + t.words.length, 0);
+      }
+    }
+  }
+
   // ============ 读取 ============
 
   getBooks(): VocabBook[] {
@@ -226,6 +263,195 @@ export class VocabStore {
 
   getTheme(bookId: string, themeId: string): VocabTheme | undefined {
     return this.getBook(bookId)?.themes.find((t) => t.id === themeId);
+  }
+
+  /**
+   * 2026-09-11 新增（复习面板重构 P4）：取全部单词本（含 draft 草稿本与 ALL_BOOK_ID 虚拟本）。
+   * 供复习书源（review-source.ts）解析成员词与草稿判定；调用方自行过滤虚拟本。
+   * 只读快照副本，外部改动不影响内部状态。
+   */
+  getAllBooks(): VocabBook[] {
+    return [...this.data.books];
+  }
+
+  /**
+   * 2026-09-11 新增：取所有"已校验"的单词本（复习面板只取这些）
+   * 排除 ALL_BOOK_ID（虚拟聚合只读），排除 draft 草稿本
+   * 返回按 order 升序的真实书本
+   */
+  getReviewableBooks(): VocabBook[] {
+    return this.data.books
+      .filter(b => b.status === BookStatus.Verified)
+      .sort((a, b) => a.order - b.order);
+  }
+
+  /**
+   * 2026-09-11 新增：草稿本校验入库（draft → verified）
+   * - 单词总库不可校验（ALL_BOOK_ID 虚拟）
+   * - 已是 verified 返回 false（幂等）
+   * - 缺书 / status 不是 draft 返回 false
+   * - 校验成功：写 status=verified + verifiedAt=now + verifiedWordCount=当前词数
+   * 返回是否发生状态变化
+   */
+  async verifyBook(bookId: string): Promise<boolean> {
+    if (bookId === ALL_BOOK_ID) return false;
+    const book = this.data.books.find(b => b.id === bookId);
+    if (!book) return false;
+    if (book.status === BookStatus.Verified) return false;
+    if (book.status !== BookStatus.Draft) return false;
+    book.status = BookStatus.Verified;
+    book.verifiedAt = new Date().toISOString();
+    book.verifiedWordCount = book.themes.reduce((n, t) => n + t.words.length, 0);
+    await this.persist();
+    return true;
+  }
+
+  // ============ 标签全局管理（2026-09-11 新增）============
+  // 设计：词上只存 label 名字（labels: string[]），color/description/createdAt 等元数据
+  //       在 VocabLabelsStore。VocabStore 这层负责"全局操作"——遍历所有词同步 labels 数组。
+  //       名称比较走 lowercase + trim，避免用户输入大小写差异。
+
+  /**
+   * 取所有出现过的标签（含元数据 + 实时 wordCount）
+   * 排序：按 wordCount 降序，无元数据的标签用默认色
+   */
+  getAllLabels(): Array<VocabLabel & { wordCount: number }> {
+    const counter = new Map<string, number>();
+    for (const w of this.getAllWords()) {
+      if (!Array.isArray(w.labels)) continue;
+      for (const label of w.labels) {
+        const key = label.toLowerCase().trim();
+        if (!key) continue;
+        counter.set(key, (counter.get(key) ?? 0) + 1);
+      }
+    }
+    // 合并元数据
+    const result: Array<VocabLabel & { wordCount: number }> = [];
+    for (const [name, wordCount] of counter) {
+      const meta = this.labelsStore?.get(name);
+      result.push({
+        name,
+        color: meta?.color ?? DEFAULT_LABEL_COLOR,
+        description: meta?.description,
+        createdAt: meta?.createdAt ?? new Date(0).toISOString(),
+        wordCount,
+      });
+    }
+    // 元数据里有但词库没用过的也保留（wordCount=0）
+    if (this.labelsStore) {
+      const seen = new Set(counter.keys());
+      for (const meta of this.labelsStore.list()) {
+        const key = meta.name.toLowerCase().trim();
+        if (!seen.has(key)) {
+          result.push({ ...meta, wordCount: 0 });
+        }
+      }
+    }
+    // 按 wordCount 降序，再按 name 升序
+    result.sort((a, b) => b.wordCount - a.wordCount || a.name.localeCompare(b.name));
+    return result;
+  }
+
+  /** 按 label 筛所有词（大小写不敏感） */
+  getWordsByLabel(label: string): WordRecord[] {
+    const target = label.toLowerCase().trim();
+    if (!target) return [];
+    return this.getAllWords().filter(w => {
+      if (!Array.isArray(w.labels)) return false;
+      return w.labels.some(l => l.toLowerCase().trim() === target);
+    });
+  }
+
+  /**
+   * 全局重命名（同步改元数据 + 所有词的 labels 数组）
+   * 注意：大小写不敏感匹配；去重避免 to 已存在导致重复
+   * 返回：更新的词数（0 表示未找到 from 标签）
+   */
+  async renameLabel(from: string, to: string): Promise<{ updated: number }> {
+    if (from === to) return { updated: 0 };
+    const fromLow = from.toLowerCase().trim();
+    const toLow = to.toLowerCase().trim();
+    if (!fromLow || !toLow) return { updated: 0 };
+    let updated = 0;
+    for (const w of this.getAllWords()) {
+      if (!Array.isArray(w.labels)) continue;
+      let touched = false;
+      const newLabels = w.labels.map(l => {
+        if (l.toLowerCase().trim() === fromLow) {
+          touched = true;
+          return to;
+        }
+        return l;
+      });
+      if (touched) {
+        // 去重（避免 to 已在 labels 里 + 旧 from 还有残留）
+        w.labels = Array.from(new Set(newLabels.map(l => l)));
+        w.updated = new Date().toISOString();
+        updated++;
+      }
+    }
+    // 同步元数据
+    if (this.labelsStore) {
+      await this.labelsStore.rename(from, to);
+    }
+    if (updated > 0) await this.persist();
+    return { updated };
+  }
+
+  /**
+   * 全局合并 N 个标签到 1 个
+   * - 遍历所有词，命中 froms 中任一 → 替换为 to（去重）
+   * - 删除 froms 的元数据（to 保留）
+   * - 返回 updated 词数 + mergedFrom 列表（用于 UI 反馈）
+   */
+  async mergeLabels(froms: string[], to: string): Promise<{ updated: number; mergedFrom: string[] }> {
+    const fromSet = new Set(froms.map(s => s.toLowerCase().trim()).filter(Boolean));
+    if (fromSet.size === 0 || !to.trim()) return { updated: 0, mergedFrom: [] };
+    const toClean = to.trim();
+    let updated = 0;
+    for (const w of this.getAllWords()) {
+      if (!Array.isArray(w.labels)) continue;
+      const has = w.labels.some(l => fromSet.has(l.toLowerCase().trim()));
+      if (!has) continue;
+      const newLabels = w.labels
+        .filter(l => !fromSet.has(l.toLowerCase().trim()))
+        .concat([toClean]);
+      w.labels = Array.from(new Set(newLabels));
+      w.updated = new Date().toISOString();
+      updated++;
+    }
+    // 删除 froms 的元数据
+    if (this.labelsStore) {
+      for (const from of froms) {
+        await this.labelsStore.delete(from);
+      }
+    }
+    if (updated > 0) await this.persist();
+    return { updated, mergedFrom: froms };
+  }
+
+  /**
+   * 全局删除标签（从所有词 labels 数组移除 + 删元数据）
+   * 返回：更新的词数
+   */
+  async deleteLabel(label: string): Promise<{ updated: number }> {
+    const target = label.toLowerCase().trim();
+    if (!target) return { updated: 0 };
+    let updated = 0;
+    for (const w of this.getAllWords()) {
+      if (!Array.isArray(w.labels)) continue;
+      const before = w.labels.length;
+      w.labels = w.labels.filter(l => l.toLowerCase().trim() !== target);
+      if (w.labels.length < before) {
+        w.updated = new Date().toISOString();
+        updated++;
+      }
+    }
+    if (this.labelsStore) {
+      await this.labelsStore.delete(label);
+    }
+    if (updated > 0) await this.persist();
+    return { updated };
   }
 
   /** 全部单词（扁平，用于查重/检索） */

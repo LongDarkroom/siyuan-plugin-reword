@@ -1,3 +1,4 @@
+import { t } from "../i18n/index.ts";
 import { logSwallow } from "../core/safe.ts";
 /**
  * 微阅快速批注 —— 核心交互管理器
@@ -33,9 +34,9 @@ export const WHALE_COLOR_LIST = WHALE_COLORS;
 
 /** 微阅批注样式定义（2026-08-24 精简为 3 种：高亮 / 直线段 / 波浪线） */
 export const WHALE_LINE_STYLES: Record<AnnotationStyle, { label: string; css: string; icon: string; preview: string; hint?: string }> = {
-  highlight: { label: "高亮", css: "highlight", icon: "▮", preview: "background-color", hint: "背景标记" },
-  solid:  { label: "直线段", css: "solid",  icon: "━", preview: "text-decoration: underline", hint: "一般笔记" },
-  wavy:   { label: "波浪线", css: "wavy",  icon: "﹏", preview: "text-decoration-style: wavy", hint: "生词 / 不认识" },
+  highlight: { label: t("高亮"), css: "highlight", icon: "▮", preview: "background-color", hint: t("背景标记") },
+  solid:  { label: t("直线段"), css: "solid",  icon: "━", preview: "text-decoration: underline", hint: t("一般笔记") },
+  wavy:   { label: t("波浪线"), css: "wavy",  icon: "﹏", preview: "text-decoration-style: wavy", hint: t("生词 / 不认识") },
 };
 
 /** 宿主接口（由 index.ts 实现） */
@@ -154,12 +155,12 @@ export function buildWhaleDialogHtml(
       <div class="whale-dlg whale-dlg--popup">
         <!-- 顶部：标题 + 删除（编辑态）/关闭（拖拽区） -->
         <div class="whale-dlg-head" data-drag-handle>
-          <span class="whale-dlg-title">微阅批注</span>
+          <span class="whale-dlg-title">${t("微阅批注")}</span>
           <div class="whale-dlg-head-right">
-            ${isEdit ? `<button class="whale-dlg-trash" id="whale-dlg-delete" title="删除批注">
+            ${isEdit ? `<button class="whale-dlg-trash" id="whale-dlg-delete" title="${t("删除批注")}">
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"/><path d="M10 11v6M14 11v6"/></svg>
             </button>` : ""}
-            <button class="whale-dlg-close" id="whale-dlg-close" title="关闭">✕</button>
+            <button class="whale-dlg-close" id="whale-dlg-close" title="${t("关闭")}">✕</button>
           </div>
         </div>
 
@@ -177,29 +178,29 @@ export function buildWhaleDialogHtml(
 
         <!-- 框架样式（2026-08-17：合并原「快捷样式/自定义样式」手风琴；2026-08-18 打磨：默认展开，降低首次上色心智成本；2026-08-22 改：open 由参数 isAccordionOpen 控制，记忆模式生效） -->
         <details class="whale-dlg-accordion" id="whale-accordion-styles"${isAccordionOpen ? " open" : ""}>
-          <summary class="whale-dlg-more-summary">框架样式</summary>
+          <summary class="whale-dlg-more-summary">${t("框架样式")}</summary>
           <div class="whale-dlg-custom">
             <div class="whale-dlg-custom-row">
-              <label class="whale-dlg-custom-toggle" title="启用背景高亮">
+              <label class="whale-dlg-custom-toggle" title="${t("启用背景高亮")}">
                 <input type="checkbox" id="whale-dlg-has-highlight" ${defaultHasHighlight ? "checked" : ""} />
-                <span>高亮</span>
+                <span>${t("高亮")}</span>
               </label>
               <div class="whale-dlg-colors" id="whale-dlg-colors">
                 ${WHALE_COLOR_LIST.map((c) => `
                   <button class="whale-dlg-color-swatch ${c.value === defaultColor ? "active" : ""}"
-                          data-color="${c.value}" style="background:${c.value}" title="背景高亮 · ${c.name}"></button>
+                          data-color="${c.value}" style="background:${c.value}" title="${t("背景高亮 · {name}", { name: t(c.name) })}"></button>
                 `).join("")}
               </div>
             </div>
             <div class="whale-dlg-custom-row">
-              <label class="whale-dlg-custom-toggle" title="启用下划线">
+              <label class="whale-dlg-custom-toggle" title="${t("启用下划线")}">
                 <input type="checkbox" id="whale-dlg-has-line" ${defaultHasLine ? "checked" : ""} />
-                <span>线段</span>
+                <span>${t("线段")}</span>
               </label>
               <div class="whale-dlg-style-btns" id="whale-dlg-style-btns">
                 ${Object.entries(WHALE_LINE_STYLES).map(([key, val]) => `
                   <button class="whale-dlg-style-aa ${key === defaultStyle ? "active" : ""}"
-                          data-style="${key}" title="${val.label} · ${val.hint || ""}">
+                          data-style="${key}" title="${t(val.label)}${val.hint ? " · " + t(val.hint) : ""}">
                     <span style="${key === "highlight" ? `background:${defaultLineColor};color:#fff` : `text-decoration-line:underline;text-decoration-style:${val.css};text-decoration-color:${defaultLineColor};text-decoration-thickness:2px;color:${defaultLineColor}`}">Aa</span>
                   </button>
                 `).join("")}
@@ -207,12 +208,12 @@ export function buildWhaleDialogHtml(
               <div class="whale-dlg-colors" id="whale-dlg-line-colors">
                 ${WHALE_COLOR_LIST.map((c) => `
                   <button class="whale-dlg-color-swatch ${c.value === defaultLineColor ? "active" : ""}"
-                          data-line-color="${c.value}" style="background:${c.value}" title="线段颜色 · ${c.name}"></button>
+                          data-line-color="${c.value}" style="background:${c.value}" title="${t("线段颜色 · {name}", { name: t(c.name) })}"></button>
                 `).join("")}
               </div>
             </div>
             <div class="whale-dlg-custom-row">
-              <span class="whale-dlg-section-label">标签</span>
+              <span class="whale-dlg-section-label">${t("标签")}</span>
               <div class="whale-dlg-tags" id="whale-dlg-tags"></div>
             </div>
           </div>
@@ -220,14 +221,14 @@ export function buildWhaleDialogHtml(
 
         <!-- 底部：AI 助手 + 仅标注 + 保存（复制走原生右键/⌘C，2026-08-17 去底部复制按钮） -->
         <div class="whale-dlg-foot">
-          <button class="whale-dlg-btn whale-dlg-btn--ai" id="whale-dlg-ai" title="用 AI 助手改进批注（弹小窗,可填回）">🤖 AI</button>
+          <button class="whale-dlg-btn whale-dlg-btn--ai" id="whale-dlg-ai" title="${t("用 AI 助手改进批注（弹小窗,可填回）")}">🤖 AI</button>
           <span class="whale-dlg-spacer"></span>
-          <button class="whale-dlg-btn whale-dlg-btn--ghost" id="whale-dlg-annotate-only" title="只上色 / 画线 / 打标签，不写文字">只上色</button>
-          <button class="whale-dlg-btn whale-dlg-btn--primary" id="whale-dlg-ok">${isEdit ? "保存修改" : "保存"}</button>
+          <button class="whale-dlg-btn whale-dlg-btn--ghost" id="whale-dlg-annotate-only" title="${t("只上色 / 画线 / 打标签，不写文字")}">${t("只上色")}</button>
+          <button class="whale-dlg-btn whale-dlg-btn--primary" id="whale-dlg-ok">${isEdit ? t("保存修改") : t("保存")}</button>
         </div>
 
         <!-- 2026-08-22 新增：底部 resize 手柄（拖动调整弹窗高度） -->
-        <div class="whale-dlg-resize-handle" id="whale-dlg-resize-handle" title="拖动调整高度"></div>
+        <div class="whale-dlg-resize-handle" id="whale-dlg-resize-handle" title="${t("拖动调整高度")}"></div>
 
         <input type="hidden" id="whale-dlg-id" value="${opts.existing?.id || ""}" />
         <input type="hidden" id="whale-dlg-block" value="${opts.blockId}" />
@@ -345,18 +346,18 @@ export class WhaleAnnotationManager {
     toolbar.className = "whale-toolbar";
     toolbar.id = "whale-floating-toolbar";
     toolbar.innerHTML = `
-      <button class="whale-toolbar-btn" id="whale-tb-copy" title="复制">
+      <button class="whale-toolbar-btn" id="whale-tb-copy" title="${t("复制")}">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>
-        复制
+        ${t("复制")}
       </button>
       <div class="whale-toolbar-divider"></div>
-      <button class="whale-toolbar-btn whale-toolbar-btn--primary" id="whale-tb-annotate" title="添加批注">
+      <button class="whale-toolbar-btn whale-toolbar-btn--primary" id="whale-tb-annotate" title="${t("添加批注")}">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
-        批注
+        ${t("批注")}
       </button>
-      <button class="whale-toolbar-btn" id="whale-tb-style" title="快速样式">
+      <button class="whale-toolbar-btn" id="whale-tb-style" title="${t("快速样式")}">
         <span class="whale-style-preview" id="whale-tb-style-preview">━</span>
-        <span>样式</span>
+        <span>${t("样式")}</span>
         <span class="whale-toolbar-arrow">▾</span>
       </button>
     `;
@@ -484,7 +485,7 @@ export class WhaleAnnotationManager {
   createFromSelection(): void {
     const sel = this.host.getSelectionText();
     if (!sel) {
-      this.host.showMessage("请先框选要批注的内容", "info");
+      this.host.showMessage(t("请先框选要批注的内容"), "info");
       return;
     }
 
@@ -509,7 +510,7 @@ export class WhaleAnnotationManager {
     // 若面板/浮层正在编辑（持有非 dialog 会话），requestEditSession 返回 false → 拦截重复编辑。
     if (this.activeDialog) this.closeDialog();
     if (!requestEditSession("dialog")) {
-      this.host?.showMessage("已在别处编辑，请先完成当前编辑", "info");
+      this.host?.showMessage(t("已在别处编辑，请先完成当前编辑"), "info");
       return;
     }
     // 批注编辑器打开标志改由 requestEditSession 统一维护（D6/D8），此处不再直接赋值
@@ -629,8 +630,8 @@ export class WhaleAnnotationManager {
       const chips = labels
         .map((l) => `<button type="button" class="whale-dlg-tag-chip ${selectedLabels.has(l.id) ? "active" : ""}" data-label="${l.id}" style="--tag-color:${l.color || "#9ca3af"}">#${l.name}</button>`)
         .join("");
-      const addBtn = `<button type="button" class="whale-dlg-tag-chip whale-dlg-tag-add" id="whale-dlg-label-add">+ 新建标签</button>`;
-      wrap.innerHTML = `<span class="whale-dlg-section-label">标签</span>${chips}${addBtn}`;
+      const addBtn = `<button type="button" class="whale-dlg-tag-chip whale-dlg-tag-add" id="whale-dlg-label-add">+ ${t("新建标签")}</button>`;
+      wrap.innerHTML = `<span class="whale-dlg-section-label">${t("标签")}</span>${chips}${addBtn}`;
       // 重新绑定 chips 点击
       wrap.querySelectorAll("[data-label]").forEach((b) => {
         b.addEventListener("click", () => {
@@ -641,7 +642,7 @@ export class WhaleAnnotationManager {
       });
       // 新建标签
       wrap.querySelector("#whale-dlg-label-add")?.addEventListener("click", async () => {
-        const name = await this.host.promptInput("新标签名称（如 口语 / 作文素材）：", "");
+        const name = await this.host.promptInput(t("新标签名称（如 口语 / 作文素材）："), "");
         if (!name || !name.trim()) return;
         const created = await this.host.addLabel(name.trim());
         if (created) {
@@ -714,11 +715,11 @@ export class WhaleAnnotationManager {
     dlg.querySelector("#whale-dlg-delete")?.addEventListener("click", async () => {
       const id = (dlg.querySelector("#whale-dlg-id") as HTMLInputElement)?.value;
       if (!id) {
-        this.host.showMessage("未找到批注 ID，无法删除", "error");
+        this.host.showMessage(t("未找到批注 ID，无法删除"), "error");
         return;
       }
       // v4：自定义确认弹窗，防误删
-      const ok = await confirmDelete("确定删除这条批注？");
+      const ok = await confirmDelete(t("确定删除这条批注？"));
       if (!ok) return;
       try {
         const removed = await this.host.removeAnnotation(id);
@@ -726,10 +727,10 @@ export class WhaleAnnotationManager {
           this.host.showUndoForDeleted(id);
           this.closeDialog();
         } else {
-          this.host.showMessage("删除失败：批注不存在或已删除", "error");
+          this.host.showMessage(t("删除失败：批注不存在或已删除"), "error");
         }
       } catch (e: any) {
-        this.host.showMessage(`删除失败：${e?.message || e}`, "error");
+        this.host.showMessage(t("删除失败：{msg}", { msg: e?.message || e }), "error");
       }
     });
 
@@ -751,10 +752,10 @@ export class WhaleAnnotationManager {
           labels: [...selectedLabels],
           tags: [...selectedTags],
         });
-        this.host.showMessage(isEdit ? "批注已更新" : "批注已添加", "success");
+        this.host.showMessage(isEdit ? t("批注已更新") : t("批注已添加"), "success");
         this.closeDialog();
       } catch (err: any) {
-        this.host.showMessage(`保存失败：${err?.message || err}`, "error");
+        this.host.showMessage(t("保存失败：{msg}", { msg: err?.message || err }), "error");
       }
     };
 
@@ -764,7 +765,7 @@ export class WhaleAnnotationManager {
       const note = this.readAnnEditorContent(dlg);
       if (!note || !note.replace(/<[^>]*>/g, "").trim()) {
         // 序列化后纯文本为空（如只有空标签）→ 视为未填
-        this.host.showMessage("批注内容不能为空（或点「仅标注」只上色不写文字）", "info");
+        this.host.showMessage(t("批注内容不能为空（或点「仅标注」只上色不写文字）"), "info");
         const el = this.annEditor?.el || (dlg.querySelector("#whale-dlg-editor") as HTMLElement | null);
         el?.focus();
         return;
@@ -800,19 +801,19 @@ export class WhaleAnnotationManager {
           onFillBack: (reply: string) => {
             // 2026-08-22 改：就地写编辑器,不再关闭/重开批注弹窗
             if (!capturedDialog || !document.body.contains(capturedDialog)) {
-              this.host.showMessage("批注弹窗已关闭,无法填回", "error");
+              this.host.showMessage(t("批注弹窗已关闭,无法填回"), "error");
               return;
             }
             const ok = this.setNoteContent(reply);
             if (ok) {
-              this.host.showMessage("AI 回复已填入批注", "success");
+              this.host.showMessage(t("AI 回复已填入批注"), "success");
             } else {
-              this.host.showMessage("填回批注失败：编辑器未就绪", "error");
+              this.host.showMessage(t("填回批注失败：编辑器未就绪"), "error");
             }
           },
         });
       } catch (e: any) {
-        this.host.showMessage(`打开 AI 助手失败: ${e?.message || e}`, "error");
+        this.host.showMessage(t("打开 AI 助手失败: {msg}", { msg: e?.message || e }), "error");
       }
     });
 
@@ -863,7 +864,7 @@ export class WhaleAnnotationManager {
     if (hasBlockTable(initial)) {
       const hint = document.createElement("div");
       hint.className = "ann-table-edit-hint";
-      hint.textContent = "表格支持单元格文字编辑；增删行列请在文档中编辑。";
+      hint.textContent = t("表格支持单元格文字编辑；增删行列请在文档中编辑。");
       el.insertAdjacentElement("beforebegin", hint);
     }
     this.annEditor = mountAnnEditor(el, {
@@ -1215,7 +1216,7 @@ export class WhaleAnnotationManager {
 
     if (count > 0) {
       setLastAnnotationStyle(style, color);
-      this.host.showMessage(`已批注 ${count} 处`, "success");
+      this.host.showMessage(t("已批注 {n} 处", { n: count }), "success");
     }
   }
 

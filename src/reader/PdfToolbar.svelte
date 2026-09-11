@@ -9,6 +9,7 @@
   而图书工具栏 BookToolbar 则受 isIphoneMode 门控。
 -->
 <script lang="ts">
+  import { t } from "../i18n/index.ts";
   export let zoomLabel = "";
   export let pdfCurrentPage = 0;
   export let pdfTotalPages = 0;
@@ -22,35 +23,35 @@
 </script>
 
 <!-- PDF 缩放工具栏 -->
-<span class="reader-zoom-group" title="PDF 缩放：⌘/Ctrl + 滚轮（或触控板捏合）连续缩放；⌘/Ctrl + 1 / 2 / = / - 快捷档位；页面内双击切换适应宽度">
+<span class="reader-zoom-group" title={t("PDF 缩放：⌘/Ctrl + 滚轮（或触控板捏合）连续缩放；⌘/Ctrl + 1 / 2 / = / - 快捷档位；页面内双击切换适应宽度")}>
   <button
     class="reader-btn reader-zoom-btn"
-    title="缩小（⌘/Ctrl + -）"
+    title={t("缩小（⌘/Ctrl + -）")}
     on:click={onZoomOut}
   >−</button>
   <span class="reader-zoom-label">{zoomLabel}</span>
   <button
     class="reader-btn reader-zoom-btn"
-    title="放大（⌘/Ctrl + =）"
+    title={t("放大（⌘/Ctrl + =）")}
     on:click={onZoomIn}
   >+</button>
   <button
     class="reader-btn reader-zoom-btn"
-    title="适应宽度（⌘/Ctrl + 1）"
+    title={t("适应宽度（⌘/Ctrl + 1）")}
     on:click={onFitWidth}
   >↔</button>
   <button
     class="reader-btn reader-zoom-btn"
-    title="适应整页（⌘/Ctrl + 2）"
+    title={t("适应整页（⌘/Ctrl + 2）")}
     on:click={onFitPage}
   >⊡</button>
 </span>
 
 <!-- PDF「第 N/T 页」+ 跳转输入框（对齐 Obsidian PDF++ Go to page） -->
-<span class="reader-page-group" title="PDF 页码跳转：←/→ 翻页，数字框内回车跳转">
+<span class="reader-page-group" title={t("PDF 页码跳转：←/→ 翻页，数字框内回车跳转")}>
   <button
     class="reader-btn reader-page-btn"
-    title="上一页（←）"
+    title={t("上一页（←）")}
     disabled={!pdfTotalPages}
     on:click={() => onGoPage(Math.max(1, pdfCurrentPage - 1))}
   >‹</button>
@@ -71,7 +72,7 @@
   </span>
   <button
     class="reader-btn reader-page-btn"
-    title="下一页（→）"
+    title={t("下一页（→）")}
     disabled={!pdfTotalPages}
     on:click={() => onGoPage(Math.min(pdfTotalPages, pdfCurrentPage + 1))}
   >›</button>

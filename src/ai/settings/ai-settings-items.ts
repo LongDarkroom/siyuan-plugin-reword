@@ -147,8 +147,8 @@ export const SETTING_ITEMS: SettingItem[] = [
     group: "general",
     title: "发送快捷键",
     options: [
-      { value: "mod+enter", label: "⌘/Ctrl + Enter（默认）" },
-      { value: "enter", label: "Enter" },
+      { value: "mod+enter", label: "⌘/Ctrl + Enter" },
+      { value: "enter", label: "Enter（默认）" },
     ],
     wired: "yes",
     consumer:
@@ -466,16 +466,6 @@ export const SETTING_ITEMS: SettingItem[] = [
     rows: 4,
     wired: "yes",
     consumer: "src/index.ts · 简洁版重译入口",
-  },
-  {
-    key: "chatSystemPrompt",
-    type: "readonly",
-    group: "preset",
-    title: "对话防跑题提示词（内置，不可编辑）",
-    desc: "四层防跑题结构（唯一任务 / 严格禁止 / 输入边界 / 抗注入首尾重复）。开放编辑意味着可能被改坏，故只读展示",
-    rows: 5,
-    wired: "yes",
-    consumer: "src/ai/ai-settings.ts · DEFAULT_AI_CHAT_SYSTEM（硬编码常量）",
   },
   {
     key: "",

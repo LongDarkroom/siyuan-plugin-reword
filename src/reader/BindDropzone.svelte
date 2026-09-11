@@ -1,9 +1,10 @@
 <script lang="ts">
+  import { t } from "../i18n/index.ts";
   import { createEventDispatcher } from "svelte";
   import { getDocInfo } from "../siyuan/filetree.ts";
 
   /** 当前绑定的文档信息（用于展示，由父组件传入） */
-  export let label = "目标文档";
+  export let label = t("目标文档");
   export let docId = "";
   export let docTitle = "";
   export let notebookId = "";
@@ -37,14 +38,14 @@
       const info: any = await getDocInfo(id);
       // 校验返回确实对应一个存在的文档（id + 笔记本 box 必须存在）
       if (!info || !info.id || !info.box) {
-        errMsg = "无法解析该文档 ID，请确认文档存在且为文档 ID。";
+        errMsg = t("无法解析该文档 ID，请确认文档存在且为文档 ID。");
         return;
       }
       const title = info.name || info.title || info.hPath?.split("/").pop() || id;
       dispatch("bind", { docId: info.id, title, notebookId: info.box });
     } catch (e) {
       console.warn("[REword] 绑定文档解析失败:", e);
-      errMsg = "无法解析该文档 ID，请确认文档存在。";
+      errMsg = t("无法解析该文档 ID，请确认文档存在。");
     } finally {
       resolving = false;
     }
@@ -68,7 +69,7 @@
     dragOver = false;
     const raw = e.dataTransfer?.getData(SIYUAN_DROP_FILE) || "";
     if (!raw) {
-      errMsg = "拖入的不是思源笔记文档，请从左侧文档树拖入。";
+      errMsg = t("拖入的不是思源笔记文档，请从左侧文档树拖入。");
       return;
     }
     // 思源拖拽 payload：逗号分隔的文档 data-node-id 列表，取第一个
@@ -91,9 +92,9 @@
   <div class="bind-head">
     <span class="bind-label">{label}</span>
     {#if docId}
-      <span class="bind-status ok">已绑定：{docTitle || docId}</span>
+      <span class="bind-status ok">{t("已绑定")}：{docTitle || docId}</span>
     {:else}
-      <span class="bind-status none">未绑定</span>
+      <span class="bind-status none">{t("未绑定")}</span>
     {/if}
   </div>
 
@@ -103,12 +104,12 @@
     on:dragleave={onDragLeave}
     on:drop={onDrop}
     role="region"
-    aria-label="拖入思源笔记文档完成绑定"
+    aria-label={t("拖入思源笔记文档完成绑定")}
   >
     {#if dragOver}
-      <div class="bind-hint">松开以绑定到此文档</div>
+      <div class="bind-hint">{t("松开以绑定到此文档")}</div>
     {:else}
-      <div class="bind-hint">从左侧思源文档树拖入文档到这里</div>
+      <div class="bind-hint">{t("从左侧思源文档树拖入文档到这里")}</div>
     {/if}
   </div>
 
@@ -116,15 +117,15 @@
     <input
       class="bind-input"
       type="text"
-      placeholder="粘贴文档 ID…"
+      placeholder={t("粘贴文档 ID…")}
       bind:value={pasteId}
       on:keydown={(e) => {
         if (e.key === "Enter") onBindClick();
       }}
     />
-    <button class="bind-btn" on:click={onBindClick} disabled={resolving || !pasteId.trim()}>绑定</button>
+    <button class="bind-btn" on:click={onBindClick} disabled={resolving || !pasteId.trim()}>{t("绑定")}</button>
     {#if docId}
-      <button class="bind-btn bind-btn-clear" on:click={onClear}>清除</button>
+      <button class="bind-btn bind-btn-clear" on:click={onClear}>{t("清除")}</button>
     {/if}
   </div>
 
@@ -132,7 +133,7 @@
     <div class="bind-err">{errMsg}</div>
   {/if}
   {#if resolving}
-    <div class="bind-err" style="color:var(--b3-theme-on-surface,#999);">解析中…</div>
+    <div class="bind-err" style="color:var(--b3-theme-on-surface,#999);">{t("解析中…")}</div>
   {/if}
 </div>
 

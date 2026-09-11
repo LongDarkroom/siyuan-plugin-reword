@@ -11,6 +11,7 @@ import { getLogger } from "../core/logger.ts";
  * 测试可注入内存 mock。
  */
 import type { AiSettings, AiTransportMode } from "./types.ts";
+import { t as T } from "../i18n/index.ts";
 
 export type AiRole = "system" | "user" | "assistant";
 
@@ -297,7 +298,7 @@ export async function requestAIGenerate(
 ): Promise<AiGenerateResult> {
   const settings = opts.settings;
   const url = buildChatUrl(settings.baseUrl);
-  if (!url) throw new Error("AI baseUrl 为空或无法解析为 chat 端点");
+  if (!url) throw new Error(T("AI baseUrl 为空或无法解析为 chat 端点"));
 
   const body = buildRequestBody(opts.messages, settings, opts.jsonMode ?? settings.jsonMode);
   const headers: Record<string, string> = { "Content-Type": "application/json" };
@@ -313,7 +314,7 @@ export async function requestAIGenerate(
   });
 
   if (res.status < 200 || res.status >= 300) {
-    throw new Error(`AI 请求失败（HTTP ${res.status}）：${res.body.slice(0, 300)}`);
+    throw new Error(T("AI 请求失败（HTTP {status}）：{body}", { status: res.status, body: res.body.slice(0, 300) }));
   }
 
   const { content, reasoning } = extractContentFromBody(res.body);
@@ -353,7 +354,7 @@ export async function requestAIStream(opts: AiStreamOptions): Promise<AiStreamRe
   const settings = opts.settings;
   const mode: AiTransportMode = settings.transportMode ?? "auto";
   const url = buildChatUrl(settings.baseUrl);
-  if (!url) return { ok: false, content: "", error: "AI baseUrl 为空或无法解析为 chat 端点" };
+  if (!url) return { ok: false, content: "", error: T("AI baseUrl 为空或无法解析为 chat 端点") };
 
   const body = buildRequestBody(opts.messages, settings, opts.jsonMode ?? settings.jsonMode);
   body.stream = true; // 覆盖 buildRequestBody 中的 stream:false
@@ -412,7 +413,7 @@ export async function requestAIStream(opts: AiStreamOptions): Promise<AiStreamRe
       signal: opts.signal,
     });
     if (!resp.ok || !resp.body) {
-      throw new Error(`AI 请求失败（HTTP ${resp.status}）`);
+      throw new Error(T("AI 请求失败（HTTP {status}）", { status: resp.status }));
     }
 
     const reader = resp.body.getReader();
@@ -447,7 +448,7 @@ export async function requestAIStream(opts: AiStreamOptions): Promise<AiStreamRe
       // 直连失败原因（HTTP 状态/CORS/超时）被丢弃，排查时无从下手。
       const bufRes = await runBufferMode(opts);
       if (!bufRes.ok) {
-        return { ok: false, content: "", error: `直连失败：${directErr}；代理兜底失败：${bufRes.error || "未知错误"}` };
+        return { ok: false, content: "", error: `${T("直连失败：")}${directErr}${T("；代理兜底失败：")}${bufRes.error || T("未知错误")}` };
       }
       return bufRes;
     }
@@ -465,7 +466,7 @@ export async function requestAIStream(opts: AiStreamOptions): Promise<AiStreamRe
 async function runBufferMode(opts: AiStreamOptions): Promise<AiStreamResult> {
   const settings = opts.settings;
   const url = buildChatUrl(settings.baseUrl);
-  if (!url) return { ok: false, content: "", error: "AI baseUrl 为空或无法解析为 chat 端点" };
+  if (!url) return { ok: false, content: "", error: T("AI baseUrl 为空或无法解析为 chat 端点") };
   try {
     const gen = await requestAIGenerate(
       { messages: opts.messages, settings, jsonMode: opts.jsonMode ?? settings.jsonMode, timeout: opts.timeout },

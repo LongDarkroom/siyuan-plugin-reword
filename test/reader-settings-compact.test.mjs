@@ -68,34 +68,37 @@ test("B3: 4 边距 row 内不再用 reader-setting-control 包裹 slider（grid-
 // ============ C. 「高级设置」二级折叠 ============
 
 test("C1: 「高级设置」二级折叠组存在", () => {
-  // 应有 ⚙ 高级设置 summary
-  assert.match(viewSrc, /⚙ 高级设置/, "应有 ⚙ 高级设置 summary 标题");
+  // 应有 ⚙ 高级设置 summary（2026-09-11 i18n：兼容 `⚙ {t("高级设置")}` 插值形态）
+  assert.match(viewSrc, /⚙ (?:\{t\(")?高级设置/, "应有 ⚙ 高级设置 summary 标题");
 });
 
 // 2026-09 更新：「行宽」三档预设于 2026-08-29 被「页面边距」取代（原 lineWidth padding 对
 // foliate 不生效，改由 4 边距滑块 + 三档预设驱动 body padding），见 reader-settings.ts:520。
 test("C2: 高级设置内包含 主题 / 字体 / 页面边距 / 模式 / 动画 / 点击翻页", () => {
-  // 找「高级设置」summary 位置
-  const idx = viewSrc.indexOf("⚙ 高级设置");
+  // 找「高级设置」summary 位置（2026-09-11 i18n：兼容插值形态）
+  const idx = viewSrc.search(/⚙ (?:\{t\(")?高级设置/);
   assert.ok(idx > 0, "应找到 ⚙ 高级设置 summary");
   // 后续内容应包含 6 个次要项
   const after = viewSrc.slice(idx);
   // 取到对应的 </details> 结束位置
   const endIdx = after.indexOf("</details>");
   const block = after.slice(0, endIdx);
+  // 2026-09-11 i18n：标签改为 {t("…")} 插值形态，断言放宽为两种形态都接受
+  const labelRe = (label) => new RegExp('>(?:\\{t\\(")?' + label + '(?:"\\)\\})?<');
   for (const label of ["主题", "字体", "页面边距", "模式", "动画", "点击翻页"]) {
-    assert.match(block, new RegExp(`>${label}<`), `高级设置内应含 ${label}`);
+    assert.match(block, labelRe(label), `高级设置内应含 ${label}`);
   }
 });
 
 test("C3: 高级设置内不再包含 4 大分组的标签（不重复）", () => {
-  const idx = viewSrc.indexOf("⚙ 高级设置");
+  const idx = viewSrc.search(/⚙ (?:\{t\(")?高级设置/);
   const after = viewSrc.slice(idx);
   const endIdx = after.indexOf("</details>");
   const block = after.slice(0, endIdx);
-  // 4 大分组标签不应出现在高级设置内
+  // 4 大分组标签不应出现在高级设置内（2026-09-11 i18n：两种形态都查）
+  const labelRe = (label) => new RegExp('>(?:\\{t\\(")?' + label + '(?:"\\)\\})?<');
   for (const label of ["字号", "字重", "字距", "段距", "首行缩进", "上边距", "下边距", "左边距", "右边距", "分栏间距"]) {
-    assert.doesNotMatch(block, new RegExp(`>${label}<`), `高级设置内不应含 4 大分组项 ${label}`);
+    assert.doesNotMatch(block, labelRe(label), `高级设置内不应含 4 大分组项 ${label}`);
   }
 });
 
@@ -105,8 +108,11 @@ test("C3: 高级设置内不再包含 4 大分组的标签（不重复）", () =
 // （setNoteLinkFormat / linkFormat textarea 均不在 ReaderView 中，仅数据层 note.linkFormat 保留），
 // 故本用例只回归仍存在的 3 个分组。
 test("D1: 4 大分组中的 文本/段落/页面布局 仍在弹窗内（笔记插入已移除）", () => {
+  // 2026-09-11 i18n：兼容 `📖 {t("文本设置")}` 插值形态
   for (const title of ["📖 文本设置", "📐 段落设置", "⬜ 页面布局"]) {
-    assert.match(viewSrc, new RegExp(`>\\s*${title.replace(/[.*+?^${}()|[\\]\\\\]/g, "\\\\$&")}\\s*<`), `分组 ${title} 应仍在弹窗内`);
+    const m = title.match(/^(\S+)\s+(.+)$/);
+    const re = new RegExp('>\\s*' + m[1] + ' (?:\\{t\\(")?' + m[2] + '(?:"\\)\\})?\\s*<');
+    assert.match(viewSrc, re, `分组 ${title} 应仍在弹窗内`);
   }
 });
 
@@ -134,15 +140,18 @@ test("D3: 页面布局 / 笔记插入 / 高级设置 默认折叠（无 open）"
   }
 });
 
+// 2026-09-11 i18n：标签改为 {t("…")} 插值形态，断言放宽为两种形态都接受
+const labelRe = (label) => new RegExp('>(?:\\{t\\(")?' + label + '(?:"\\)\\})?<');
+
 test("D4: 文本设置（字号/字重/字距）仍在弹窗内", () => {
   for (const label of ["字号", "字重", "字距"]) {
-    assert.match(viewSrc, new RegExp(`>${label}<`), `文本设置应含 ${label}`);
+    assert.match(viewSrc, labelRe(label), `文本设置应含 ${label}`);
   }
 });
 
 test("D5: 段落设置（行距/段距/首行缩进）仍在弹窗内", () => {
   for (const label of ["行距", "段距", "首行缩进"]) {
-    assert.match(viewSrc, new RegExp(`>${label}<`), `段落设置应含 ${label}`);
+    assert.match(viewSrc, labelRe(label), `段落设置应含 ${label}`);
   }
 });
 

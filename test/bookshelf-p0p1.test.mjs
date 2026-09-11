@@ -197,10 +197,13 @@ test("[状态流转] saveProgress 读完自动置 finished，且不覆盖手动 
 test("[UI] 搜索框绑定 keyword，占位提示覆盖四个可搜字段", () => {
   assert.ok(/class="shelf-search-input"/.test(viewSrc), "应有搜索输入框");
   assert.ok(/bind:value=\{keyword\}/.test(viewSrc), "搜索框应双向绑定 keyword");
-  const m = viewSrc.match(/placeholder="([^"]*搜索[^"]*)"/);
+  // 2026-09-11 i18n：占位文案改为 placeholder={t("…")} 模板插值，
+  // 断言相应放宽为「两种形态都接受，且中文原文仍在」。
+  const m = viewSrc.match(/placeholder=(?:"([^"]*搜索[^"]*)"|\{t\("([^"]*搜索[^"]*)"\)\})/);
   assert.ok(m, "搜索框应有中文占位提示");
+  const placeholder = m[1] ?? m[2];
   for (const f of ["书名", "作者", "标签", "丛书"]) {
-    assert.ok(m[1].includes(f), `占位提示应含 ${f}`);
+    assert.ok(placeholder.includes(f), `占位提示应含 ${f}`);
   }
 });
 

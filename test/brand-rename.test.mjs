@@ -50,11 +50,10 @@ test("品牌改名：src/ 全部源码应至少出现「微阅批注」或「微
 
 test("品牌改名：whale-manager.ts dialog title 已是「微阅批注」", async () => {
   const src = await readFile("src/annotation/whale-manager.ts", "utf8");
-  assert.match(
-    src,
-    /class="whale-dlg-title">微阅批注</,
-    "dialog title 应为「微阅批注」"
-  );
+  // 2026-09-10 P2：功能名接入 i18n，title 变为 t("微阅批注")（中文仍是源码里的 key）。
+  // 两种形态都接受，重点校验「用户可见标题是微阅批注」这一事实。
+  const ok = /class="whale-dlg-title">微阅批注</.test(src) || /class="whale-dlg-title">\$\{t\("微阅批注"\)\}</.test(src);
+  assert.ok(ok, "dialog title 应为「微阅批注」（原始形态或 i18n 包装形态）");
 });
 
 test("品牌改名：anno-ai-dialog.ts 系统提示词已含「微阅批注」", async () => {
@@ -70,9 +69,10 @@ test("品牌改名：index.ts dock tab 文字已是「微阅批注」", async ()
   const src = await readFile("src/index.ts", "utf8");
   // 2026-08-31：dock tab 已从手写 HTML（data-tab="annotations">微阅批注<）
   // 改为 dockManager 配置式（{ id: "annotations", title: "微阅批注" }）。
-  // 两种形态都接受，重点校验「用户可见标题是微阅批注」这一事实。
+  // 2026-09-10 P3-1：功能名接入 i18n，title 变为 t("微阅批注")（中文仍是源码里的 key）。
+  // 三种形态都接受，重点校验「用户可见标题是微阅批注」这一事实。
   const hasHtmlTab = /data-tab="annotations">微阅批注</.test(src);
-  const hasConfigTab = /id:\s*"annotations"[\s\S]{0,120}?title:\s*"微阅批注"/.test(src);
+  const hasConfigTab = /id:\s*"annotations"[\s\S]{0,120}?title:\s*(?:t\(\s*)?"微阅批注"/.test(src);
   assert.ok(
     hasHtmlTab || hasConfigTab,
     "dock tab 文字应为「微阅批注」（HTML 形态或 dockManager 配置形态）"
@@ -81,9 +81,8 @@ test("品牌改名：index.ts dock tab 文字已是「微阅批注」", async ()
 
 test("品牌改名：whale-renderer.ts 侧边栏标题已是「微阅批注汇总」", async () => {
   const src = await readFile("src/annotation/whale-renderer.ts", "utf8");
-  assert.match(
-    src,
-    /whale-panel-title">微阅批注汇总</,
-    "侧边栏标题应为「微阅批注汇总」"
-  );
+  // 2026-09-10 P2：功能名接入 i18n，title 变为 t("微阅批注汇总")（中文仍是源码里的 key）。
+  // 两种形态都接受，重点校验「用户可见标题是微阅批注汇总」这一事实。
+  const ok = /whale-panel-title">微阅批注汇总</.test(src) || /whale-panel-title">\$\{t\("微阅批注汇总"\)\}</.test(src);
+  assert.ok(ok, "侧边栏标题应为「微阅批注汇总」（原始形态或 i18n 包装形态）");
 });

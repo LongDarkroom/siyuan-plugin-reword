@@ -13,7 +13,9 @@
    */
   import { Dialog } from "siyuan";
   import type { AiSettings } from "../ai-settings.ts";
-  import { DEFAULT_AI_SETTINGS, DEFAULT_AI_CHAT_SYSTEM } from "../ai-settings.ts";
+  import { DEFAULT_AI_SETTINGS } from "../ai-settings.ts";
+  // 2026-09-10 多语言：中文原文即 key，渲染时查表替换（见 src/i18n/index.ts 文件头）
+  import { t } from "../../i18n/index.ts";
   import {
     SETTING_GROUPS,
     itemsOfGroup,
@@ -55,8 +57,6 @@
   $: platformsVal = (valOfKey("platforms") as AiPlatform[] | undefined) || [];
 
   function valOf(item: SettingItem): unknown {
-    // 只读展示项不走 draft（AiSettings 里没有该字段，值是内置常量）
-    if (item.key === "chatSystemPrompt") return DEFAULT_AI_CHAT_SYSTEM;
     return valOfKey(item.key);
   }
 
@@ -215,7 +215,7 @@
         on:click={() => (active = g.id)}
       >
         <span class="ais-tab-icon" aria-hidden="true">{g.icon}</span>
-        <span class="ais-tab-label">{g.label}</span>
+        <span class="ais-tab-label">{t(g.label)}</span>
       </button>
     {/each}
   </nav>
@@ -227,8 +227,8 @@
         <header class="ais-head">
           <span class="ais-head-icon" aria-hidden="true">{grp.icon}</span>
           <div class="ais-head-text">
-            <h3 class="ais-head-title">{grp.label}</h3>
-            {#if grp.desc}<p class="ais-head-desc">{grp.desc}</p>{/if}
+            <h3 class="ais-head-title">{t(grp.label)}</h3>
+            {#if grp.desc}<p class="ais-head-desc">{t(grp.desc || "")}</p>{/if}
           </div>
         </header>
       {/if}
@@ -251,8 +251,8 @@
         {#if item.type === "models"}
           <div class="hiword-ai-setting-group">
             <div class="hiword-ai-setting-label">
-              <span class="hiword-ai-setting-name">{item.title}</span>
-              {#if item.desc}<span class="hiword-ai-setting-desc">{item.desc}</span>{/if}
+              <span class="hiword-ai-setting-name">{t(item.title)}</span>
+              {#if item.desc}<span class="hiword-ai-setting-desc">{t(item.desc || "")}</span>{/if}
             </div>
             <AiModelList
               models={modelsOf(item)}

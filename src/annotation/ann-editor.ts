@@ -1,3 +1,4 @@
+import { t } from "../i18n/index.ts";
 import { logSwallow } from "../core/safe.ts";
 /**
  * 批注内联编辑器 —— lite Protyle 统一封装（2026-08-17）
@@ -319,11 +320,11 @@ export class AnnEditor {
     const host = this.el;
     const bar = document.createElement("div");
     bar.className = "ann-fallback-toolbar";
-    bar.innerHTML = `<button type="button" data-cmd="bold" title="加粗"><b>B</b></button>` +
-      `<button type="button" data-cmd="italic" title="斜体"><i>I</i></button>` +
-      `<button type="button" data-cmd="underline" title="下划线"><u>U</u></button>` +
-      `<button type="button" data-cmd="strikeThrough" title="删除线"><s>S</s></button>` +
-      `<button type="button" data-cmd="hiliteColor" title="高亮">▣</button>`;
+    bar.innerHTML = `<button type="button" data-cmd="bold" title="${t("加粗")}"><b>B</b></button>` +
+      `<button type="button" data-cmd="italic" title="${t("斜体")}"><i>I</i></button>` +
+      `<button type="button" data-cmd="underline" title="${t("下划线")}"><u>U</u></button>` +
+      `<button type="button" data-cmd="strikeThrough" title="${t("删除线")}"><s>S</s></button>` +
+      `<button type="button" data-cmd="hiliteColor" title="${t("高亮")}">▣</button>`;
     // mousedown 阻止默认，避免点击按钮时 contenteditable 失焦导致选区丢失
     bar.addEventListener("mousedown", (e) => e.preventDefault());
     bar.querySelectorAll<HTMLButtonElement>("button").forEach((btn) => {

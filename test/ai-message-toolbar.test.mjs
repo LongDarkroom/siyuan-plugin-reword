@@ -39,8 +39,9 @@ test("AI 消息工具栏：5 个按钮，含重试", () => {
     ["copy-md", "copy-txt", "edit", "retry", "save-note"].sort(),
     "assistant 工具栏应含 复制MD/复制TXT/保存/编辑/重试 五个动作"
   );
-  // 2026-09-03：图标统一为自解释图形，↻ 改为 🔄（与 💾 / ✏️ 同一套 emoji 表意）
-  assert.match(html, /data-act="retry"[\s\S]*?>🔄/, "重试按钮图标应为 🔄");
+  // 2026-09-10：图标统一为单色 SVG（TOOLBAR_ICONS），stroke 用 currentColor 随 hover 变主题色
+  assert.match(html, /data-act="retry"[\s\S]*?<svg[^>]*stroke="currentColor"/, "重试图标应为 currentColor 单色 SVG");
+  assert.ok(!/🔄|💾|✏️/.test(html), "不应再残留 emoji 图标");
 });
 
 test("保存到笔记对话框：字段完整", () => {

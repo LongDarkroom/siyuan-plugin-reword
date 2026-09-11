@@ -12,6 +12,7 @@
   // 2026-09-05 设置统一：语言选项与预翻译弹窗同源（共享常量）；确认弹窗走项目统一组件
   import { SOURCE_LANG_OPTIONS, TARGET_LANG_OPTIONS } from "./bilingual-langs";
   import { confirmDelete } from "../annotation/whale-confirm";
+  import { t } from "../i18n/index";
 
   // L1 控件工厂样板：语言下拉选项已抽到 bilingual-langs.ts（与 ReaderView 预翻译弹窗共用）
 
@@ -33,14 +34,14 @@
 
   // ----- 子页切换 -----
   const TABS = [
-    { id: "whole-book", label: "预翻译全书" },
-    { id: "progressive", label: "渐进式翻译" },
-    { id: "engine", label: "引擎设置" },
-    { id: "monitor", label: "监督中心" },
-    { id: "cache", label: "缓存管理" },
-    { id: "glossary", label: "术语表" },
-    { id: "style", label: "翻译风格" },
-    { id: "display", label: "显示与界面" },
+    { id: "whole-book", label: t("预翻译全书") },
+    { id: "progressive", label: t("渐进式翻译") },
+    { id: "engine", label: t("引擎设置") },
+    { id: "monitor", label: t("监督中心") },
+    { id: "cache", label: t("缓存管理") },
+    { id: "glossary", label: t("术语表") },
+    { id: "style", label: t("翻译风格") },
+    { id: "display", label: t("显示与界面") },
   ];
   let activeTab = "whole-book";
 
@@ -91,10 +92,10 @@
 
   // ----- 引擎测试 -----
   const ENGINES = [
-    { id: "tencent", name: "腾讯云翻译", secret: "SecretKey", idLabel: "SecretId" },
-    { id: "baidu", name: "百度翻译", secret: "密钥", idLabel: "AppId" },
-    { id: "youdao", name: "有道智云", secret: "AppSecret", idLabel: "AppKey" },
-    { id: "ai", name: "AI 翻译（兜底）", secret: "API Key", idLabel: "Base URL" },
+    { id: "tencent", name: t("腾讯云翻译"), secret: "SecretKey", idLabel: "SecretId" },
+    { id: "baidu", name: t("百度翻译"), secret: t("密钥"), idLabel: "AppId" },
+    { id: "youdao", name: t("有道智云"), secret: "AppSecret", idLabel: "AppKey" },
+    { id: "ai", name: t("AI 翻译（兜底）"), secret: "API Key", idLabel: "Base URL" },
   ];
   let testing: Record<string, boolean> = {};
   let testResult: Record<string, { ok: boolean; provider?: string; error?: string }> = {};
@@ -157,11 +158,11 @@
   let cacheMsg = "";
   async function exportCsv() {
     const rows = [
-      ["引擎", "已用字符/Token", "用量锁/上限", "状态"],
-      ["腾讯云翻译", String(ai.tencentCharsUsed || 0), String(ai.tencentCharsLock || 0), lockOf("tencent") && (ai.tencentCharsUsed || 0) >= lockOf("tencent") ? "已锁定" : "正常"],
-      ["百度翻译", String(ai.baiduCharsUsed || 0), String(ai.baiduCharsLock || 0), lockOf("baidu") && (ai.baiduCharsUsed || 0) >= lockOf("baidu") ? "已锁定" : "正常"],
-      ["有道智云", String(ai.youdaoCharsUsed || 0), String(ai.youdaoCharsLock || 0), lockOf("youdao") && (ai.youdaoCharsUsed || 0) >= lockOf("youdao") ? "已锁定" : "正常"],
-      ["AI 翻译(Token)", String(ai.aiTokenUsed || 0), String(ai.aiTokenLimit || 0), ai.aiTokenLimit && (ai.aiTokenUsed || 0) >= ai.aiTokenLimit ? "已超上限" : "正常"],
+      [t("引擎"), t("已用字符/Token"), t("用量锁/上限"), t("状态")],
+      [t("腾讯云翻译"), String(ai.tencentCharsUsed || 0), String(ai.tencentCharsLock || 0), lockOf("tencent") && (ai.tencentCharsUsed || 0) >= lockOf("tencent") ? t("已锁定") : t("正常")],
+      [t("百度翻译"), String(ai.baiduCharsUsed || 0), String(ai.baiduCharsLock || 0), lockOf("baidu") && (ai.baiduCharsUsed || 0) >= lockOf("baidu") ? t("已锁定") : t("正常")],
+      [t("有道智云"), String(ai.youdaoCharsUsed || 0), String(ai.youdaoCharsLock || 0), lockOf("youdao") && (ai.youdaoCharsUsed || 0) >= lockOf("youdao") ? t("已锁定") : t("正常")],
+      [t("AI 翻译(Token)"), String(ai.aiTokenUsed || 0), String(ai.aiTokenLimit || 0), ai.aiTokenLimit && (ai.aiTokenUsed || 0) >= ai.aiTokenLimit ? t("已超上限") : t("正常")],
     ];
     const csv = rows.map((r) => r.join(",")).join("\n");
     const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
@@ -171,7 +172,7 @@
     a.download = "reword-translation-usage.csv";
     a.click();
     URL.revokeObjectURL(url);
-    cacheMsg = "已导出用量 CSV";
+    cacheMsg = t("已导出用量 CSV");
   }
 
   // ----- 缓存管理 -----
@@ -204,12 +205,12 @@
     if (!ts) return "";
     const sec = Math.floor(Date.now() / 1000) - ts;
     if (sec < 0) return "";
-    if (sec < 180) return "刚刚";
-    if (sec < 3600) return `${Math.floor(sec / 60)} 分钟前`;
-    if (sec < 86400) return `${Math.floor(sec / 3600)} 小时前`;
+    if (sec < 180) return t("刚刚");
+    if (sec < 3600) return t("{n} 分钟前", { n: Math.floor(sec / 60) });
+    if (sec < 86400) return t("{n} 小时前", { n: Math.floor(sec / 3600) });
     const d = Math.floor(sec / 86400);
-    if (d < 30) return `${d} 天前`;
-    return `${Math.floor(d / 30)} 个月前`;
+    if (d < 30) return t("{n} 天前", { n: d });
+    return t("{n} 个月前", { n: Math.floor(d / 30) });
   }
   // 排序：段数 / 书名 / 最近缓存
   $: sortedBooks = [...filteredBooks].sort((a, b) => {
@@ -255,21 +256,21 @@
     const label = b?.title || `ID ${bid}`;
     const n = b?.count || 0;
     // 2026-09-05：原生 confirm() → 项目统一确认弹窗（与批注/AI 面板同风格）
-    const ok = await confirmDelete(`删除「${label}」的翻译缓存？\n共 ${n} 段，删除后再次翻译会重新消耗额度。`);
+    const ok = await confirmDelete(t("删除「{label}」的翻译缓存？\n共 {n} 段，删除后再次翻译会重新消耗额度。", { label, n }));
     if (!ok) return;
     await clearTranslationCache(bid);
-    cacheMsg = `已删除「${label}」的缓存（${n} 段）`;
+    cacheMsg = t("已删除「{label}」的缓存（{n} 段）", { label, n });
     await loadCache();
   }
   async function cleanOrphan() {
     const n = await cleanOrphanTranslationCaches();
     cacheMsg = n
-      ? `已清理 ${n} 本无效缓存（书架已删除的书）`
-      : "没有需要清理的缓存（书架为空时会自动跳过，避免误删）";
+      ? t("已清理 {n} 本无效缓存（书架已删除的书）", { n })
+      : t("没有需要清理的缓存（书架为空时会自动跳过，避免误删）");
     await loadCache();
   }
   async function clearAllCache() {
-    const ok = await confirmDelete(`清空全部 ${books.length} 本书的翻译缓存（共 ${totalSegments} 段）？\n此操作不可撤销。`);
+    const ok = await confirmDelete(t("清空全部 {books} 本书的翻译缓存（共 {seg} 段）？\n此操作不可撤销。", { books: books.length, seg: totalSegments }));
     if (!ok) return;
     for (const b of books) {
       try {
@@ -301,13 +302,13 @@
           `select box, path from blocks where id='${docId.replace(/'/g, "''")}' and type='d'`
         );
         if (rows && rows.length) await removeDoc(rows[0].box, rows[0].path);
-        cacheMsg = "已关闭译文归档，归档文档已移入回收站；译文仅保留在本地 JSON 缓存。";
+        cacheMsg = t("已关闭译文归档，归档文档已移入回收站；译文仅保留在本地 JSON 缓存。");
       } catch (e) {
         console.warn("[REword] 清理归档文档失败:", e);
-        cacheMsg = "已关闭译文归档（设置已保存）；但删除归档文档失败，请手动在文档列表删除「REword 译文归档」。";
+        cacheMsg = t("已关闭译文归档（设置已保存）；但删除归档文档失败，请手动在文档列表删除「REword 译文归档」。");
       }
     } else {
-      cacheMsg = "已关闭译文归档；当前没有需要清理的归档文档。";
+      cacheMsg = t("已关闭译文归档；当前没有需要清理的归档文档。");
     }
     await loadCache();
   }
@@ -321,35 +322,35 @@
   let newGlossCase = false;
   function loadGlossary() {
     try {
-      glossary = (getGlossaryTerms?.() || []).map((t) => ({ src: t.src, dst: t.dst, caseSensitive: !!t.caseSensitive }));
+      glossary = (getGlossaryTerms?.() || []).map((g) => ({ src: g.src, dst: g.dst, caseSensitive: !!g.caseSensitive }));
     } catch {
       glossary = [];
     }
     glossaryLoaded = true;
   }
   async function persistGlossary() {
-    const clean = glossary.filter((t) => t && t.src && t.src.trim());
+    const clean = glossary.filter((g) => g && g.src && g.src.trim());
     try {
       await setGlossaryTerms?.(clean);
-      glossMsg = `术语表已保存（${clean.length} 条）`;
+      glossMsg = t("术语表已保存（{n} 条）", { n: clean.length });
     } catch (e: any) {
-      glossMsg = "保存失败：" + String(e?.message ?? e);
+      glossMsg = t("保存失败：") + String(e?.message ?? e);
     }
   }
   function addGlossTerm() {
-    if (!newGlossSrc.trim()) { glossMsg = "原文术语不能为空"; return; }
+    if (!newGlossSrc.trim()) { glossMsg = t("原文术语不能为空"); return; }
     glossary = [...glossary, { src: newGlossSrc.trim(), dst: newGlossDst.trim(), caseSensitive: newGlossCase }];
     newGlossSrc = ""; newGlossDst = ""; newGlossCase = false;
     persistGlossary();
   }
   async function removeGlossTerm(i: number) {
-    const ok = await confirmDelete("删除该术语？");
+    const ok = await confirmDelete(t("删除该术语？"));
     if (!ok) return;
     glossary = glossary.filter((_, idx) => idx !== i);
     persistGlossary();
   }
   async function clearGlossary() {
-    const ok = await confirmDelete("清空全部术语表？此操作不可撤销。");
+    const ok = await confirmDelete(t("清空全部术语表？此操作不可撤销。"));
     if (!ok) return;
     glossary = [];
     persistGlossary();
@@ -370,7 +371,7 @@
     await clearBilingualBookMode?.(bid);
     await loadBookModes();
   }
-  const BOOK_MODE_LABEL: Record<string, string> = { "whole-book": "整书预翻译", progressive: "渐进式翻译" };
+  const BOOK_MODE_LABEL: Record<string, string> = { "whole-book": t("整书预翻译"), progressive: t("渐进式翻译") };
 
   // ----- 翻译风格（新增子页） -----
   function applyStyle(v: "literal" | "natural") {
@@ -383,7 +384,7 @@
   // ----- 显示与界面（新增子页） -----
   const ORDERABLE = ["tencent", "baidu", "youdao"];
   const ENGINE_LABELS: Record<string, string> = {
-    tencent: "腾讯云翻译", baidu: "百度翻译", youdao: "有道智云",
+    tencent: t("腾讯云翻译"), baidu: t("百度翻译"), youdao: t("有道智云"),
   };
   const OTHER_ENGINES = ["microsoft", "libretranslate"];
   let engOrder: string[] = (ai.translatePriority || []).filter((id: string) => ORDERABLE.includes(id));
@@ -420,30 +421,30 @@
 
 <div class="bset-root">
   <header class="bset-head">
-    <div class="bset-title">双语翻译设置</div>
+    <div class="bset-title">{t("双语翻译设置")}</div>
     <div class="bset-default">
-      <span class="bset-default-label">点击「双语」时默认</span>
+      <span class="bset-default-label">{t("点击「双语」时默认")}</span>
       <div class="bset-seg">
         <button
           class="bset-seg-btn"
           class:active={($settingsStore.bilingualDefaultMode || "ask") === "ask"}
-          on:click={() => patchSettings({ bilingualDefaultMode: "ask" })}>询问我</button>
+          on:click={() => patchSettings({ bilingualDefaultMode: "ask" })}>{t("询问我")}</button>
         <button
           class="bset-seg-btn"
           class:active={$settingsStore.bilingualDefaultMode === "whole-book"}
-          on:click={() => patchSettings({ bilingualDefaultMode: "whole-book" })}>整书预翻译</button>
+          on:click={() => patchSettings({ bilingualDefaultMode: "whole-book" })}>{t("整书预翻译")}</button>
         <button
           class="bset-seg-btn"
           class:active={$settingsStore.bilingualDefaultMode === "progressive"}
-          on:click={() => patchSettings({ bilingualDefaultMode: "progressive" })}>渐进式</button>
+          on:click={() => patchSettings({ bilingualDefaultMode: "progressive" })}>{t("渐进式")}</button>
       </div>
     </div>
   </header>
 
   <div class="bset-body">
     <nav class="bset-rail">
-      {#each TABS as t (t.id)}
-        <button class="bset-rail-btn" class:active={activeTab === t.id} on:click={() => (activeTab = t.id)}>{t.label}</button>
+      {#each TABS as tab (tab.id)}
+        <button class="bset-rail-btn" class:active={activeTab === tab.id} on:click={() => (activeTab = tab.id)}>{t(tab.label)}</button>
       {/each}
     </nav>
 
@@ -451,60 +452,51 @@
       <!-- ============ 预翻译全书 ============ -->
       {#if activeTab === "whole-book"}
         <div class="bset-card">
-          <div class="bset-card-title">整书预翻译</div>
-          <p class="bset-desc">
-            打开一本英文书 → 点击「双语」→ 选「整书预翻译」：边读边显示译文，其余段落在后台翻译并写入缓存。
-            完成后翻页 / 重开本书都命中缓存秒出，不再消耗 AI Token。
-          </p>
+          <div class="bset-card-title">{t("整书预翻译")}</div>
+          <p class="bset-desc">{t("打开一本英文书 → 点击「双语」→ 选「整书预翻译」：边读边显示译文，其余段落在后台翻译并写入缓存。 完成后翻页 / 重开本书都命中缓存秒出，不再消耗 AI Token。")}</p>
           <div class="bset-row">
-            <span class="bset-label">源语言</span>
+            <span class="bset-label">{t("源语言")}</span>
             <RWSelect options={SOURCE_LANG_OPTIONS} value={$settingsStore.bilingualSourceLang || "en"} onChange={(v) => patchSettings({ bilingualSourceLang: v })} />
           </div>
           <div class="bset-row">
-            <span class="bset-label">目标语言</span>
+            <span class="bset-label">{t("目标语言")}</span>
             <RWSelect options={TARGET_LANG_OPTIONS} value={$settingsStore.bilingualTarget || "zh"} onChange={(v) => patchSettings({ bilingualTarget: v })} />
           </div>
           <div class="bset-row">
-            <span class="bset-label" title="翻译时跳过已缓存段落，避免重复消耗">跳过已缓存</span>
+            <span class="bset-label" title={t("翻译时跳过已缓存段落，避免重复消耗")}>{t("跳过已缓存")}</span>
             <RWSwitch checked={$settingsStore.bilingualSkipCached !== false} onChange={(c) => patchSettings({ bilingualSkipCached: c })} />
           </div>
           <div class="bset-row">
-            <span class="bset-label" title="边译边显示译文；关闭则纯后台缓存">实时预览译文</span>
+            <span class="bset-label" title={t("边译边显示译文；关闭则纯后台缓存")}>{t("实时预览译文")}</span>
             <RWSwitch checked={$settingsStore.bilingualRealtimePreview !== false} onChange={(c) => patchSettings({ bilingualRealtimePreview: c })} />
           </div>
-          <p class="bset-desc" style="margin-top:10px">
-            整书预翻译的节奏（并发列数 / 每列块数）在阅读器内点击「整书预翻译」弹窗中按次选择；
-            AI 兜底的批处理参数在「引擎设置 → AI 翻译」卡片中调整。
-          </p>
+          <p class="bset-desc" style="margin-top:10px">{t("整书预翻译的节奏（并发列数 / 每列块数）在阅读器内点击「整书预翻译」弹窗中按次选择； AI 兜底的批处理参数在「引擎设置 → AI 翻译」卡片中调整。")}</p>
         </div>
       {/if}
 
       <!-- ============ 渐进式翻译 ============ -->
       {#if activeTab === "progressive"}
         <div class="bset-card">
-          <div class="bset-card-title">渐进式翻译</div>
-          <p class="bset-desc">
-            只翻译「当前分节 + 后续 N 分节」窗口内的段落并缓存，随阅读进度自动向前补译。
-            轻量、即时，适合只想边读边看译文、不想整本烧 Token 的场景。
-          </p>
+          <div class="bset-card-title">{t("渐进式翻译")}</div>
+          <p class="bset-desc">{t("只翻译「当前分节 + 后续 N 分节」窗口内的段落并缓存，随阅读进度自动向前补译。 轻量、即时，适合只想边读边看译文、不想整本烧 Token 的场景。")}</p>
           <div class="bset-row">
-            <span class="bset-label" title="当前分节之后额外预译并注入的分节数（默认 2）；渐进取段与注入闸门共用此值">预取分节数</span>
+            <span class="bset-label" title={t("当前分节之后额外预译并注入的分节数（默认 2）；渐进取段与注入闸门共用此值")}>{t("预取分节数")}</span>
             <div class="bset-stepper">
               <button class="bset-mini" on:click={() => patchSettings({ bilingualPrefetchPages: Math.max(0, ($settingsStore.bilingualPrefetchPages ?? 2) - 1) })}>-</button>
-              <span class="bset-value">{$settingsStore.bilingualPrefetchPages ?? 2} 分节</span>
+              <span class="bset-value">{t("{n} 分节", { n: $settingsStore.bilingualPrefetchPages ?? 2 })}</span>
               <button class="bset-mini" on:click={() => patchSettings({ bilingualPrefetchPages: Math.min(4, ($settingsStore.bilingualPrefetchPages ?? 2) + 1) })}>+</button>
             </div>
           </div>
           <div class="bset-row">
-            <span class="bset-label" title="翻页时自动补译当前窗口">翻页自动补译</span>
+            <span class="bset-label" title={t("翻页时自动补译当前窗口")}>{t("翻页自动补译")}</span>
             <RWSwitch checked={$settingsStore.bilingualProgressiveAuto !== false} onChange={(c) => patchSettings({ bilingualProgressiveAuto: c })} />
           </div>
           <div class="bset-row">
-            <span class="bset-label">跳过已缓存</span>
+            <span class="bset-label">{t("跳过已缓存")}</span>
             <RWSwitch checked={$settingsStore.bilingualSkipCached !== false} onChange={(c) => patchSettings({ bilingualSkipCached: c })} />
           </div>
           <div class="bset-row">
-            <span class="bset-label" title="翻译失败的段落按 5s→30s 退避最多重试 2 次；关闭后等下一轮翻页窗口自然重试">失败自动重试</span>
+            <span class="bset-label" title={t("翻译失败的段落按 5s→30s 退避最多重试 2 次；关闭后等下一轮翻页窗口自然重试")}>{t("失败自动重试")}</span>
             <RWSwitch checked={$settingsStore.bilingualRetry !== false} onChange={(c) => patchSettings({ bilingualRetry: c })} />
           </div>
         </div>
@@ -513,24 +505,24 @@
       <!-- ============ 引擎设置 ============ -->
       {#if activeTab === "engine"}
         <div class="bset-card">
-          <div class="bset-card-title">翻译引擎</div>
-          <p class="bset-desc">免费引擎（腾讯 / 百度 / 有道）按优先级在前，AI 永远兜底。免费额度内的段落不消耗任何 AI Token。</p>
+          <div class="bset-card-title">{t("翻译引擎")}</div>
+          <p class="bset-desc">{t("免费引擎（腾讯 / 百度 / 有道）按优先级在前，AI 永远兜底。免费额度内的段落不消耗任何 AI Token。")}</p>
 
           {#each ENGINES as eng (eng.id)}
             <div class="bset-engine">
               <div class="bset-engine-head">
                 <span class="bset-engine-name">{eng.name}</span>
                 {#if eng.id !== "ai"}
-                  <label class="bset-check"><input type="checkbox" checked={!!ai[eng.id + "Enabled"]} on:change={(e) => saveAi({ [eng.id + "Enabled"]: e.target.checked })} /><span>启用</span></label>
+                  <label class="bset-check"><input type="checkbox" checked={!!ai[eng.id + "Enabled"]} on:change={(e) => saveAi({ [eng.id + "Enabled"]: e.target.checked })} /><span>{t("启用")}</span></label>
                 {:else}
-                  <label class="bset-check"><input type="checkbox" checked={!!ai.enabled} on:change={(e) => saveAi({ enabled: e.target.checked })} /><span>启用</span></label>
+                  <label class="bset-check"><input type="checkbox" checked={!!ai.enabled} on:change={(e) => saveAi({ enabled: e.target.checked })} /><span>{t("启用")}</span></label>
                 {/if}
                 <button class="bset-test" on:click={() => runTest(eng.id)} disabled={testing[eng.id]}>
-                  {testing[eng.id] ? "测试中…" : "测试连接"}
+                  {testing[eng.id] ? t("测试中…") : t("测试连接")}
                 </button>
                 {#if testResult[eng.id]}
                   <span class="bset-test-result" class:ok={testResult[eng.id].ok} class:fail={!testResult[eng.id].ok}>
-                    {testResult[eng.id].ok ? "✓ " + (testResult[eng.id].provider || "成功") : "✗ " + (testResult[eng.id].error || "失败")}
+                    {testResult[eng.id].ok ? "✓ " + (testResult[eng.id].provider || t("成功")) : "✗ " + (testResult[eng.id].error || t("失败"))}
                   </span>
                 {/if}
               </div>
@@ -539,32 +531,32 @@
                 <div class="bset-engine-fields">
                   <input class="bset-input" type="text" placeholder="https://api.openai.com/v1" bind:value={localAi.baseUrl} on:change={() => saveAi({ baseUrl: localAi.baseUrl })} />
                   <input class="bset-input" type="password" placeholder="API Key" bind:value={localAi.apiKey} on:change={() => saveAi({ apiKey: localAi.apiKey })} />
-                  <input class="bset-input" type="text" placeholder="模型（如 gpt-4o-mini）" bind:value={localAi.model} on:change={() => saveAi({ model: localAi.model })} />
+                  <input class="bset-input" type="text" placeholder={t("模型（如 gpt-4o-mini）")} bind:value={localAi.model} on:change={() => saveAi({ model: localAi.model })} />
                 </div>
                 <div class="bset-grid2">
                   <div class="bset-row">
-                    <span class="bset-label">翻译温度</span>
+                    <span class="bset-label">{t("翻译温度")}</span>
                     <input class="bset-range" type="range" min="0" max="1" step="0.05" bind:value={localAi.trTemperature} on:change={() => saveAi({ trTemperature: parseFloat(localAi.trTemperature) })} />
                     <span class="bset-value">{(localAi.trTemperature ?? 0.1).toFixed(2)}</span>
                   </div>
                   <div class="bset-row">
-                    <span class="bset-label">最大 Token</span>
+                    <span class="bset-label">{t("最大 Token")}</span>
                     <input class="bset-input" type="number" min="16" max="32768" step="16" bind:value={localAi.maxTokens} on:change={() => saveAi({ maxTokens: parseInt(localAi.maxTokens) || 2048 })} />
                   </div>
                 </div>
                 <!-- 2026-09-05 F2：AI 兜底批处理参数从「整书预翻译」迁来（它只影响 AI 引擎的批次合并，与预翻译节奏无关） -->
                 <div class="bset-grid2">
                   <div class="bset-row">
-                    <span class="bset-label" title="AI 兜底请求合并的段数上限（只影响 AI 引擎，不控制整书预翻译节奏）">AI 每批段数</span>
+                    <span class="bset-label" title={t("AI 兜底请求合并的段数上限（只影响 AI 引擎，不控制整书预翻译节奏）")}>{t("AI 每批段数")}</span>
                     <input class="bset-input" type="number" min="1" max="30" step="1" bind:value={localAi.trBatchSize} on:change={() => saveAi({ trBatchSize: parseInt(localAi.trBatchSize) || 8 })} />
                   </div>
                   <div class="bset-row">
-                    <span class="bset-label" title="AI 兜底同时发出的请求数">AI 并发请求数</span>
+                    <span class="bset-label" title={t("AI 兜底同时发出的请求数")}>{t("AI 并发请求数")}</span>
                     <input class="bset-input" type="number" min="1" max="8" step="1" bind:value={localAi.trConcurrency} on:change={() => saveAi({ trConcurrency: parseInt(localAi.trConcurrency) || 2 })} />
                   </div>
                 </div>
                 <div class="bset-row bset-row-col">
-                  <span class="bset-label">翻译提示词（{((localAi.translatePrompt || "").length)} 字符，上限 2000）</span>
+                  <span class="bset-label">{t("翻译提示词（{n} 字符，上限 2000）", { n: (localAi.translatePrompt || "").length })}</span>
                   <textarea class="bset-textarea" rows="4" maxlength="2000" bind:value={localAi.translatePrompt} on:change={() => saveAi({ translatePrompt: localAi.translatePrompt })}></textarea>
                 </div>
               {:else}
@@ -573,10 +565,10 @@
                   <input class="bset-input" type="password" placeholder={eng.secret} bind:value={localAi[secretFieldFor(eng.id)]} on:change={() => saveAi({ [secretFieldFor(eng.id)]: localAi[secretFieldFor(eng.id)] })} />
                 </div>
                 <div class="bset-row">
-                  <span class="bset-label">用量锁（0=不限）</span>
+                  <span class="bset-label">{t("用量锁（0=不限）")}</span>
                   <input class="bset-input" type="number" min="0" step="10000" bind:value={localAi[lockFieldFor(eng.id)]} on:change={() => saveAi({ [lockFieldFor(eng.id)]: parseInt(localAi[lockFieldFor(eng.id)]) || 0 })} />
-                  <span class="bset-used">已用 {((usedOf(eng.id) || 0) / 10000).toFixed(1)} 万</span>
-                  <button class="bset-mini" on:click={() => resetEngineUsageAndReload(eng.id)}>重置用量</button>
+                  <span class="bset-used">{t("已用 {n} 万", { n: ((usedOf(eng.id) || 0) / 10000).toFixed(1) })}</span>
+                  <button class="bset-mini" on:click={() => resetEngineUsageAndReload(eng.id)}>{t("重置用量")}</button>
                 </div>
               {/if}
             </div>
@@ -587,15 +579,15 @@
       <!-- ============ 监督中心 ============ -->
       {#if activeTab === "monitor"}
         <div class="bset-card">
-          <div class="bset-card-title">用量监督中心</div>
-          <p class="bset-desc">实时查看各引擎免费额度消耗与 AI Token 占用，避免超出免费额度。达到告警阈值（黄）即提示，达 100%（红）将触发停止/提示。</p>
+          <div class="bset-card-title">{t("用量监督中心")}</div>
+          <p class="bset-desc">{t("实时查看各引擎免费额度消耗与 AI Token 占用，避免超出免费额度。达到告警阈值（黄）即提示，达 100%（红）将触发停止/提示。")}</p>
 
           {#each ENGINES as eng (eng.id)}
             {#if eng.id !== "ai"}
               <div class="bset-mon">
                 <div class="bset-mon-head">
                   <span class="bset-mon-name">{eng.name}</span>
-                  <span class="bset-mon-num">{usedOf(eng.id)} / {lockOf(eng.id) || "不限"} 字符</span>
+                  <span class="bset-mon-num">{t("{a} / {b} 字符", { a: usedOf(eng.id), b: lockOf(eng.id) || t("不限") })}</span>
                 </div>
                 <div class="bset-bar"><div class="bset-bar-fill" style="width:{pct(usedOf(eng.id), lockOf(eng.id))}%;background:{ratioColor(ratio(usedOf(eng.id), lockOf(eng.id)))}"></div></div>
               </div>
@@ -604,20 +596,20 @@
 
           <div class="bset-mon">
             <div class="bset-mon-head">
-              <span class="bset-mon-name">AI 翻译（Token）</span>
-              <span class="bset-mon-num">{(ai.aiTokenUsed || 0)} / {(ai.aiTokenLimit || 0) || "不限"}</span>
+              <span class="bset-mon-name">{t("AI 翻译（Token）")}</span>
+              <span class="bset-mon-num">{t("{a} / {b}", { a: ai.aiTokenUsed || 0, b: (ai.aiTokenLimit || 0) || t("不限") })}</span>
             </div>
             <div class="bset-bar"><div class="bset-bar-fill" style="width:{pct(ai.aiTokenUsed || 0, ai.aiTokenLimit || 0)}%;background:{ratioColor(ratio(ai.aiTokenUsed || 0, ai.aiTokenLimit || 0))}"></div></div>
             <div class="bset-row" style="margin-top:10px">
-              <span class="bset-label">Token 告警阈值</span>
+              <span class="bset-label">{t("Token 告警阈值")}</span>
               <input class="bset-range" type="range" min="0.5" max="1" step="0.05" bind:value={localAi.aiTokenAlertRatio} on:change={() => saveAi({ aiTokenAlertRatio: parseFloat(localAi.aiTokenAlertRatio) })} />
               <span class="bset-value">{Math.round((localAi.aiTokenAlertRatio ?? 0.8) * 100)}%</span>
-              <button class="bset-mini" on:click={() => resetAiTokenUsageAndReload()}>重置 Token</button>
+              <button class="bset-mini" on:click={() => resetAiTokenUsageAndReload()}>{t("重置 Token")}</button>
             </div>
           </div>
 
           <div class="bset-actions">
-            <button class="bset-btn" on:click={exportCsv}>导出用量 CSV</button>
+            <button class="bset-btn" on:click={exportCsv}>{t("导出用量 CSV")}</button>
           </div>
           {#if cacheMsg}<div class="bset-msg">{cacheMsg}</div>{/if}
         </div>
@@ -626,69 +618,69 @@
       <!-- ============ 缓存管理 ============ -->
       {#if activeTab === "cache"}
         <div class="bset-card">
-          <div class="bset-card-title">翻译缓存管理</div>
-          <p class="bset-desc">译文按书缓存于本地（JSON + 可选思源 SQLite）。删除缓存后再次翻译会重新消耗额度。</p>
+          <div class="bset-card-title">{t("翻译缓存管理")}</div>
+          <p class="bset-desc">{t("译文按书缓存于本地（JSON + 可选思源 SQLite）。删除缓存后再次翻译会重新消耗额度。")}</p>
           <!-- 译文归档：一键关闭并清理（2026-09-05 样式收进 <style>，色值全部走 --b3 变量） -->
           <div class="bset-archive">
             <div class="bset-archive-head">
-              <span class="bset-archive-title">译文归档（思源 SQLite）</span>
+              <span class="bset-archive-title">{t("译文归档（思源 SQLite）")}</span>
               {#if $settingsStore.translationArchiveEnabled}
-                <span class="bset-archive-badge on">已开启</span>
+                <span class="bset-archive-badge on">{t("已开启")}</span>
               {:else}
-                <span class="bset-archive-badge off">已关闭</span>
+                <span class="bset-archive-badge off">{t("已关闭")}</span>
               {/if}
             </div>
-            <p class="bset-desc">开启后译文会额外写入思源文档「REword 译文归档」，可被搜索 / SQL 查询 / 同步；关闭后仅保留本地 JSON 缓存，书籍译文不受影响。</p>
+            <p class="bset-desc">{t("开启后译文会额外写入思源文档「REword 译文归档」，可被搜索 / SQL 查询 / 同步；关闭后仅保留本地 JSON 缓存，书籍译文不受影响。")}</p>
             {#if $settingsStore.translationArchiveEnabled || $settingsStore.translationArchiveDocId}
-              <button class="bset-btn bset-btn-danger" on:click={cleanArchive}>关闭并清理归档文档</button>
+              <button class="bset-btn bset-btn-danger" on:click={cleanArchive}>{t("关闭并清理归档文档")}</button>
             {:else}
-              <span class="bset-archive-hint">归档已关闭，无需清理</span>
+              <span class="bset-archive-hint">{t("归档已关闭，无需清理")}</span>
             {/if}
           </div>
 
           <div class="bset-cache-summary">
-            <span><b>{books.length}</b> 本</span>
-            <span><b>{totalSegments}</b> 段</span>
-            <span><b>{books.filter((b) => !b.title).length}</b> 本待识别</span>
-            <button class="bset-mini" on:click={loadCache}>刷新</button>
+            <span><b>{books.length}</b> {t("本")}</span>
+            <span><b>{totalSegments}</b> {t("段")}</span>
+            <span><b>{books.filter((b) => !b.title).length}</b> {t("本待识别")}</span>
+            <button class="bset-mini" on:click={loadCache}>{t("刷新")}</button>
           </div>
           <div class="bset-cache-tools">
-            <input class="bset-input" type="text" placeholder="搜索书名 / bookId" bind:value={cacheSearch} />
+            <input class="bset-input" type="text" placeholder={t("搜索书名 / bookId")} bind:value={cacheSearch} />
             <RWSelect
               options={[
-                { value: "count", label: "按段数（多→少）" },
-                { value: "title", label: "按书名" },
-                { value: "recent", label: "按最近缓存" },
+                { value: "count", label: t("按段数（多→少）") },
+                { value: "title", label: t("按书名") },
+                { value: "recent", label: t("按最近缓存") },
               ]}
               value={cacheSort}
               onChange={setCacheSort}
             />
-            <button class="bset-btn" on:click={cleanOrphan}>清理无效缓存</button>
-            <button class="bset-btn bset-btn-danger" on:click={clearAllCache}>清空全部</button>
+            <button class="bset-btn" on:click={cleanOrphan}>{t("清理无效缓存")}</button>
+            <button class="bset-btn bset-btn-danger" on:click={clearAllCache}>{t("清空全部")}</button>
           </div>
           {#if loadingCache}
-            <div class="bset-loading">加载缓存列表…</div>
+            <div class="bset-loading">{t("加载缓存列表…")}</div>
           {:else if sortedBooks.length === 0}
-            <div class="bset-empty">{books.length ? "没有匹配的缓存" : "暂无翻译缓存"}</div>
+            <div class="bset-empty">{books.length ? t("没有匹配的缓存") : t("暂无翻译缓存")}</div>
           {:else}
             <div class="bset-book-list">
               {#each sortedBooks as b (b.bookId)}
                 <div class="bset-book">
                   <div class="bset-book-info">
                     <div class="bset-book-title">
-                      {b.title || "(未命名)"}
-                      {#if !b.title}<span class="bset-badge">无书名</span>{/if}
+                      {b.title || t("(未命名)")}
+                      {#if !b.title}<span class="bset-badge">{t("无书名")}</span>{/if}
                     </div>
                     <div class="bset-book-meta">
-                      {b.count} 段 · {b.cachedPages} 页{b.pageRangeText ? " · " + b.pageRangeText : ""}{b.updated ? " · " + relTime(b.updated) : ""}
+                      {t("{n} 段", { n: b.count })} · {t("{n} 页", { n: b.cachedPages })}{b.pageRangeText ? " · " + b.pageRangeText : ""}{b.updated ? " · " + relTime(b.updated) : ""}
                     </div>
                     <div class="bset-book-id" title={b.bookId}>ID {b.bookId}</div>
                   </div>
                   <button
                     class="bset-mini bset-del"
                     on:click={() => delBook(b.bookId)}
-                    title="删除该书的全部译文缓存"
-                  >删除</button>
+                    title={t("删除该书的全部译文缓存")}
+                  >{t("删除")}</button>
                 </div>
               {/each}
             </div>
@@ -700,34 +692,31 @@
       <!-- ============ 术语表 ============ -->
       {#if activeTab === "glossary"}
         <div class="bset-card">
-          <div class="bset-card-title">术语表</div>
-          <p class="bset-desc">
-            为专有名词（人名、地名、术语）指定固定译法，保证全书前后一致。支持译前约束 + 译后兜底替换两种方式。
-            任一改动都会使相关译文缓存失效并自动重译。
-          </p>
+          <div class="bset-card-title">{t("术语表")}</div>
+          <p class="bset-desc">{t("为专有名词（人名、地名、术语）指定固定译法，保证全书前后一致。支持译前约束 + 译后兜底替换两种方式。 任一改动都会使相关译文缓存失效并自动重译。")}</p>
           <div class="bset-gloss-add">
-            <input class="bset-input" type="text" placeholder="原文术语（如 Tolkien）" bind:value={newGlossSrc} />
-            <input class="bset-input" type="text" placeholder="指定译法（如 托尔金；留空=保留原文）" bind:value={newGlossDst} />
-            <label class="bset-check"><input type="checkbox" bind:checked={newGlossCase} /><span>区分大小写</span></label>
-            <button class="bset-btn" on:click={addGlossTerm}>添加</button>
+            <input class="bset-input" type="text" placeholder={t("原文术语（如 Tolkien）")} bind:value={newGlossSrc} />
+            <input class="bset-input" type="text" placeholder={t("指定译法（如 托尔金；留空=保留原文）")} bind:value={newGlossDst} />
+            <label class="bset-check"><input type="checkbox" bind:checked={newGlossCase} /><span>{t("区分大小写")}</span></label>
+            <button class="bset-btn" on:click={addGlossTerm}>{t("添加")}</button>
           </div>
           {#if glossary.length === 0}
-            <div class="bset-empty">暂无术语</div>
+            <div class="bset-empty">{t("暂无术语")}</div>
           {:else}
             <div class="bset-gloss-list">
-              {#each glossary as t, i (i)}
+              {#each glossary as term, i (i)}
                 <div class="bset-gloss-row">
-                  <input class="bset-input bset-gloss-src" type="text" bind:value={t.src} on:blur={persistGlossary} />
+                  <input class="bset-input bset-gloss-src" type="text" bind:value={term.src} on:blur={persistGlossary} />
                   <span class="bset-gloss-arrow">→</span>
-                  <input class="bset-input bset-gloss-dst" type="text" bind:value={t.dst} on:blur={persistGlossary} />
-                  <label class="bset-check"><input type="checkbox" bind:checked={t.caseSensitive} on:change={persistGlossary} /><span>大小写</span></label>
-                  <button class="bset-mini bset-del" on:click={() => removeGlossTerm(i)}>删除</button>
+                  <input class="bset-input bset-gloss-dst" type="text" bind:value={term.dst} on:blur={persistGlossary} />
+                  <label class="bset-check"><input type="checkbox" bind:checked={term.caseSensitive} on:change={persistGlossary} /><span>{t("大小写")}</span></label>
+                  <button class="bset-mini bset-del" on:click={() => removeGlossTerm(i)}>{t("删除")}</button>
                 </div>
               {/each}
             </div>
           {/if}
           <div class="bset-actions">
-            <button class="bset-btn bset-btn-danger" on:click={clearGlossary}>清空全部</button>
+            <button class="bset-btn bset-btn-danger" on:click={clearGlossary}>{t("清空全部")}</button>
           </div>
           {#if glossMsg}<div class="bset-msg">{glossMsg}</div>{/if}
         </div>
@@ -736,65 +725,59 @@
       <!-- ============ 翻译风格 ============ -->
       {#if activeTab === "style"}
         <div class="bset-card">
-          <div class="bset-card-title">AI 翻译风格</div>
-          <p class="bset-desc">
-            选择 AI 兜底翻译的语气预设。切换会应用对应的「翻译提示词」；如需完全自定义，请到「引擎设置」页手动编辑提示词。
-          </p>
+          <div class="bset-card-title">{t("AI 翻译风格")}</div>
+          <p class="bset-desc">{t("选择 AI 兜底翻译的语气预设。切换会应用对应的「翻译提示词」；如需完全自定义，请到「引擎设置」页手动编辑提示词。")}</p>
           <div class="bset-row">
-            <span class="bset-label">翻译风格</span>
+            <span class="bset-label">{t("翻译风格")}</span>
             <div class="bset-seg">
-              <button class="bset-seg-btn" class:active={ai.bilingualStyle !== "natural"} on:click={() => applyStyle("literal")}>硬直译</button>
-              <button class="bset-seg-btn" class:active={ai.bilingualStyle === "natural"} on:click={() => applyStyle("natural")}>自然通顺</button>
+              <button class="bset-seg-btn" class:active={ai.bilingualStyle !== "natural"} on:click={() => applyStyle("literal")}>{t("硬直译")}</button>
+              <button class="bset-seg-btn" class:active={ai.bilingualStyle === "natural"} on:click={() => applyStyle("natural")}>{t("自然通顺")}</button>
             </div>
           </div>
           <div class="bset-row bset-row-col">
-            <span class="bset-label">当前提示词（{((ai.translatePrompt || "").length)} 字符）</span>
+            <span class="bset-label">{t("当前提示词（{n} 字符）", { n: (ai.translatePrompt || "").length })}</span>
             <div class="bset-prompt-preview">{ai.translatePrompt || ""}</div>
           </div>
-          <p class="bset-desc">
-            硬直译：逐词直译、禁止发挥，省 token 且风格稳定。自然通顺：在不改意前提下做极轻微润色，长译文可携带轻量 Markdown 排版。
-          </p>
+          <p class="bset-desc">{t("硬直译：逐词直译、禁止发挥，省 token 且风格稳定。自然通顺：在不改意前提下做极轻微润色，长译文可携带轻量 Markdown 排版。")}</p>
         </div>
 
         <!-- 2026-08-31 重新启用简洁版：译文版本（直译 / 简洁版） -->
         <div class="bset-card">
-          <div class="bset-card-title">译文版本</div>
-          <p class="bset-desc">
-            选择译文的长短风格。简洁版译文更短、更像学习者笔记（走独立的简洁版提示词，与直译缓存互不污染）。
-          </p>
+          <div class="bset-card-title">{t("译文版本")}</div>
+          <p class="bset-desc">{t("选择译文的长短风格。简洁版译文更短、更像学习者笔记（走独立的简洁版提示词，与直译缓存互不污染）。")}</p>
           <div class="bset-row">
-            <span class="bset-label">译文版本</span>
+            <span class="bset-label">{t("译文版本")}</span>
             <div class="bset-seg">
-              <button class="bset-seg-btn" class:active={$settingsStore.bilingualStyle !== "concise"} on:click={() => patchSettings({ bilingualStyle: "default" })}>直译</button>
-              <button class="bset-seg-btn" class:active={$settingsStore.bilingualStyle === "concise"} on:click={() => patchSettings({ bilingualStyle: "concise" })}>简洁版</button>
+              <button class="bset-seg-btn" class:active={$settingsStore.bilingualStyle !== "concise"} on:click={() => patchSettings({ bilingualStyle: "default" })}>{t("直译")}</button>
+              <button class="bset-seg-btn" class:active={$settingsStore.bilingualStyle === "concise"} on:click={() => patchSettings({ bilingualStyle: "concise" })}>{t("简洁版")}</button>
             </div>
           </div>
-          <p class="bset-desc">切换后：下一轮翻页注入、或重新整书预翻译即生效；已注入的译文需刷新双语（关闭再开启）才会更新。</p>
+          <p class="bset-desc">{t("切换后：下一轮翻页注入、或重新整书预翻译即生效；已注入的译文需刷新双语（关闭再开启）才会更新。")}</p>
         </div>
       {/if}
 
       <!-- ============ 显示与界面 ============ -->
       {#if activeTab === "display"}
         <div class="bset-card">
-          <div class="bset-card-title">显示与界面</div>
-          <p class="bset-desc">译文在正文中的呈现方式与阅读器行为偏好。</p>
+          <div class="bset-card-title">{t("显示与界面")}</div>
+          <p class="bset-desc">{t("译文在正文中的呈现方式与阅读器行为偏好。")}</p>
 
           <div class="bset-row">
-            <span class="bset-label">译文字号</span>
+            <span class="bset-label">{t("译文字号")}</span>
             <input class="bset-range" type="range" min="0.4" max="1.2" step="0.02" value={$settingsStore.translationFontSize ?? 0.62} on:change={(e) => patchSettings({ translationFontSize: parseFloat(e.target.value) })} />
             <span class="bset-value">{Math.round(($settingsStore.translationFontSize ?? 0.62) * 100)}%</span>
           </div>
           <div class="bset-row">
-            <span class="bset-label" title="段落级悬停时显示译文词">悬停显示译文词</span>
+            <span class="bset-label" title={t("段落级悬停时显示译文词")}>{t("悬停显示译文词")}</span>
             <label class="bset-switch"><input type="checkbox" checked={$settingsStore.paragraphHover !== false} on:change={(e) => patchSettings({ paragraphHover: e.target.checked })} /><span class="bset-track"></span></label>
           </div>
           <div class="bset-row">
-            <span class="bset-label" title="译文块显示引擎与送译原文/前文参考">双语调试信息</span>
+            <span class="bset-label" title={t("译文块显示引擎与送译原文/前文参考")}>{t("双语调试信息")}</span>
             <label class="bset-switch"><input type="checkbox" checked={$settingsStore.bilingualDebug === true} on:change={(e) => patchSettings({ bilingualDebug: e.target.checked })} /><span class="bset-track"></span></label>
           </div>
 
-          <div class="bset-sub">免费引擎优先级</div>
-          <p class="bset-desc">排在前的引擎优先尝试；全部失败才用 AI 兜底。微软 / LibreTranslate 始终排在末尾。</p>
+          <div class="bset-sub">{t("免费引擎优先级")}</div>
+          <p class="bset-desc">{t("排在前的引擎优先尝试；全部失败才用 AI 兜底。微软 / LibreTranslate 始终排在末尾。")}</p>
           <div class="bset-eng-order">
             {#each engOrder as id, i (id)}
               <div class="bset-eng-order-item">
@@ -807,21 +790,21 @@
             {/each}
           </div>
 
-          <div class="bset-sub">双语翻译模式记忆（按书）</div>
-          <p class="bset-desc">为每本书记住你选过的翻译方式（整书预翻译 / 渐进式）。记住后再次打开同书直接套用、不再弹窗询问。清除后下次打开该书重新选择。</p>
+          <div class="bset-sub">{t("双语翻译模式记忆（按书）")}</div>
+          <p class="bset-desc">{t("为每本书记住你选过的翻译方式（整书预翻译 / 渐进式）。记住后再次打开同书直接套用、不再弹窗询问。清除后下次打开该书重新选择。")}</p>
           {#if !bookModesLoaded}
-            <div class="bset-loading">加载记忆列表…</div>
+            <div class="bset-loading">{t("加载记忆列表…")}</div>
           {:else if bookModes.length === 0}
-            <div class="bset-empty">暂无按书记忆（点「双语」选过方式后会自动记录）</div>
+            <div class="bset-empty">{t("暂无按书记忆（点「双语」选过方式后会自动记录）")}</div>
           {:else}
             <div class="bset-book-list">
               {#each bookModes as m (m.bookId)}
                 <div class="bset-book">
                   <div class="bset-book-info">
                     <div class="bset-book-title">{m.title || m.bookId}</div>
-                    <div class="bset-book-meta">已记忆：{BOOK_MODE_LABEL[m.mode] || m.mode}</div>
+                    <div class="bset-book-meta">{t("已记忆：")}{BOOK_MODE_LABEL[m.mode] || m.mode}</div>
                   </div>
-                  <button class="bset-mini bset-del" on:click={() => clearBookMode(m.bookId)}>清除记忆</button>
+                  <button class="bset-mini bset-del" on:click={() => clearBookMode(m.bookId)}>{t("清除记忆")}</button>
                 </div>
               {/each}
             </div>

@@ -16,6 +16,15 @@ export async function getBlockKramdown(blockId: string): Promise<string> {
   return res?.kramdown ?? "";
 }
 
+/**
+ * 批量获取块的 kramdown（2026-09-11 新增：词书解析用）
+ * 并行调用 getBlockKramdown，避免 N+1 串行
+ * 失败的块返回空字符串（不抛错，调用方可过滤空项）
+ */
+export async function getBlockKramdowns(blockIds: string[]): Promise<string[]> {
+  return Promise.all(blockIds.map(id => getBlockKramdown(id).catch(() => "")));
+}
+
 /** 读取块属性（含 custom- 自定义属性与系统属性） */
 export async function getBlockAttrs(blockId: string): Promise<SiyuanBlockAttrs> {
   const res = await siyuanRequest<Record<string, string>>(SIYUAN_API.getBlockAttrs, { id: blockId });

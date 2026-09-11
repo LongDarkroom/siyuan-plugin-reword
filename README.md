@@ -4,16 +4,24 @@
 
 两套引擎共用一套数据：一边管"英语学习闭环"（查词 → 收词 → 复习），一边管"阅读与沉淀"（读书 → 标注 → 摘录回跳）。所有词典本地离线查询，阅读数据全部存在思源工作空间内。
 
+> [!TIP]
+> **English** — REword is a SiYuan plugin for English learners: **offline dictionary lookup, spaced-repetition vocabulary review, AI-powered intensive reading, and a full-featured e-book reader**, all in one workspace.
+>
+> - **Look up & collect** — Select any English word in your notes to query offline dictionaries (MDX / StarDict), then send it to a built-in SRS review queue with one shortcut.
+> - **Read & annotate** — EPUB / MOBI / AZW3 / FB2 / CBZ / PDF / TXT / Markdown reader with bilingual AI translation, highlights, handwriting ink, bookmarks and excerpt back-links into your notes.
+> - **AI intensive reading** — Send selected text or a whole document tab to AI for deep, bilingual explanations.
+> - **Dashboard** — A built-in workspace panel aggregates your stats: daily heatmap, review due queue, vocabulary mastery breakdown.
+> - **Offline & private** — All dictionaries are queried locally; your reading data never leaves the SiYuan workspace.
+
 ---
 
 ## 最近更新
 
 > 近期重要更新摘要，完整版本记录见 [CHANGELOG](CHANGELOG.md)。
 
-- **AI 精读输入框稳定性修复**：默认改用原生 `contenteditable` 输入框，彻底规避思源内核 Protyle 异步初始化导致的「无法输入 / 控制台报错」问题；Protyle 富文本模式改为可选开关（设置 → AI → 通用 → 启用 Protyle 富文本输入框）。
-- **词典导入修复**：修复「导入成功但重启后不生效」的问题——导入后正确写入启用列表并即时加载，重启后自动恢复。
-- **输入框排版优化**：AI 精读输入框的行高、字间距、段落间距更舒展美观。
-- **批量拖入多块**：AI 对话框支持一次拖入多个文档块 / 页签作为精读上下文。
+- **界面全量英文化**：全插件界面支持 English，约 2200 条界面文案 100% 覆盖；首次启动可选择语言，随时切换。
+- **聚合工作台**：组合栏新增工作台 Tab——统计卡（收词 / 复习 / 阅读 / 连续天数）、GitHub 风格 26 周学习热力图、到期复习 Top3、功能入口与掌握度分布，学习状况一屏尽览。
+- **主区页签形态**：组合栏是家、页签是放大镜——悬停任意功能 Tab 点 ⧉ 弹出为思源主区文档页签（大空间沉浸、可与笔记并排对照），⇄ 一键收回；组合栏常驻（工作台居首），布局管理仍支持角落停靠。
 
 ## 一、英语学习
 

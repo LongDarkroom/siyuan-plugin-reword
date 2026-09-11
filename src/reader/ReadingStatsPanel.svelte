@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { t } from "../i18n/index.ts";
   /**
    * 阅读统计面板（A · 阅读统计可视化）
    * 使用 portal 挂载到 body，逃离 dock 的 transform 裁剪，获得完整视口宽度。
@@ -67,7 +68,7 @@
 
   function monthLabel(ym: string): string {
     const [, m] = ym.split("-");
-    return `${Number(m)}月`;
+    return t("{n}月", { n: Number(m) });
   }
 
   function close() {
@@ -78,8 +79,8 @@
 <div class="edit-mask" use:portal on:click|self={close}>
   <div class="edit-panel stats-panel">
     <header class="panel-header">
-      <h2 class="panel-title">阅读统计</h2>
-      <button class="panel-close" on:click={close} aria-label="关闭">×</button>
+      <h2 class="panel-title">{t("阅读统计")}</h2>
+      <button class="panel-close" on:click={close} aria-label={t("关闭")}>×</button>
     </header>
 
     {#if stats}
@@ -92,7 +93,7 @@
               on:click={() => {
                 range = opt.key;
                 recompute();
-              }}>{opt.label}</button>
+              }}>{t(opt.label)}</button>
           {/each}
         </div>
 
@@ -100,40 +101,40 @@
         <section class="stats-overview">
           <div class="metric-card">
             <div class="metric-value">{fmtDuration(stats.totalMs)}</div>
-            <div class="metric-label">累计时长</div>
+            <div class="metric-label">{t("累计时长")}</div>
           </div>
           <div class="metric-card">
-            <div class="metric-value">{stats.streak}<span class="metric-unit">天</span></div>
-            <div class="metric-label">连续阅读</div>
+            <div class="metric-value">{stats.streak}<span class="metric-unit">{t("天")}</span></div>
+            <div class="metric-label">{t("连续阅读")}</div>
           </div>
           <div class="metric-card">
             <div class="metric-value">{stats.statusCounts.reading}</div>
-            <div class="metric-label">在读</div>
+            <div class="metric-label">{t("在读")}</div>
           </div>
           <div class="metric-card">
             <div class="metric-value">{stats.statusCounts.finished}</div>
-            <div class="metric-label">读完</div>
+            <div class="metric-label">{t("读完")}</div>
           </div>
           <div class="metric-card">
             <div class="metric-value">
               {stats.ratedCount ? stats.avgRating.toFixed(1) : "—"}
             </div>
-            <div class="metric-label">平均评分</div>
+            <div class="metric-label">{t("平均评分")}</div>
           </div>
           <div class="metric-card">
-            <div class="metric-value">{stats.longestStreak}<span class="metric-unit">天</span></div>
-            <div class="metric-label">最长连续</div>
+            <div class="metric-value">{stats.longestStreak}<span class="metric-unit">{t("天")}</span></div>
+            <div class="metric-label">{t("最长连续")}</div>
           </div>
         </section>
 
         <!-- 日历热力图 -->
-        <RWSection title="近一年阅读热力" hint="每天">
+        <RWSection title={t("近一年阅读热力")} hint={t("每天")}>
           <div class="chart-card calendar-card">
             <div class="calendar-scroll">
               <div class="calendar-inner" style="width:{weeks * (CELL + GAP)}px">
                 <div class="month-labels" aria-hidden="true">
-                  {#each monthTicks as t}
-                    <span class="month-tick" style="left:{t.col * (CELL + GAP)}px">{t.label}</span>
+                  {#each monthTicks as mt}
+                    <span class="month-tick" style="left:{mt.col * (CELL + GAP)}px">{mt.label}</span>
                   {/each}
                 </div>
                 <div class="calendar-wrap">
@@ -153,7 +154,7 @@
                       <span
                         class="heat-cell"
                         style="background:{heatColor(d.ms)}"
-                        title={d.date + (d.ms ? " · " + fmtDuration(d.ms) : " · 未读")}
+                        title={d.date + (d.ms ? " · " + fmtDuration(d.ms) : " · " + t("未读"))}
                       ></span>
                     {/each}
                   </div>
@@ -161,19 +162,19 @@
               </div>
             </div>
             <div class="heat-legend">
-              <span>少</span>
+              <span>{t("少")}</span>
               <span class="heat-cell" style="background:{heatColor(0)}"></span>
               <span class="heat-cell" style="background:{heatColor(15 * 60000)}"></span>
               <span class="heat-cell" style="background:{heatColor(30 * 60000)}"></span>
               <span class="heat-cell" style="background:{heatColor(60 * 60000)}"></span>
               <span class="heat-cell" style="background:{heatColor(90 * 60000)}"></span>
-              <span>多</span>
+              <span>{t("多")}</span>
             </div>
           </div>
         </RWSection>
 
         <!-- 月度分布 -->
-        <RWSection title="近 12 个月分布">
+        <RWSection title={t("近 12 个月分布")}>
           <div class="chart-card month-chart">
             {#each stats.monthly as m}
               <div class="month-col" title={m.month + (m.ms ? " · " + fmtDuration(m.ms) : "")}>
@@ -187,7 +188,7 @@
         </RWSection>
 
         <!-- Top 书 -->
-        <RWSection title={"阅读时长 Top " + stats.topBooks.length}>
+        <RWSection title={t("阅读时长 Top ") + stats.topBooks.length}>
           <div class="chart-card top-chart">
             {#each stats.topBooks as b, i}
               <div class="top-row">
@@ -206,7 +207,7 @@
         </RWSection>
       </div>
     {:else}
-      <div class="stats-loading">加载中…</div>
+      <div class="stats-loading">{t("加载中…")}</div>
     {/if}
   </div>
 </div>

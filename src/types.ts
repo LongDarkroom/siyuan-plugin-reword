@@ -15,6 +15,71 @@ export type WordStatus = typeof WordStatus[keyof typeof WordStatus];
 export const MASTERY_MAX = 5;
 
 /**
+ * 单词本状态（2026-09-11 新增：词书校验流程）
+ * - draft：草稿。文档/块/文件解析后未确认，不进入复习面板、不参与调度
+ * - verified：已校验。用户已确认入复习，可被 scheduler 调度
+ * 老数据（缺 status 字段）通过 vocab-store.ensureBookStatus() 迁移为 'verified'
+ * 模式与 WordStatus 一致：const 对象 + 类型别名双形式，序列化值仍是字符串
+ */
+export const BookStatus = {
+  Draft: "draft",
+  Verified: "verified",
+} as const;
+export type BookStatus = typeof BookStatus[keyof typeof BookStatus];
+
+/**
+ * 单词本来源（2026-09-11 新增）
+ * - manual：手动逐词添加（老数据缺省值）
+ * - imported：文件导入（CSV / TXT / JSON）
+ * - doc-parsed：思源文档/块解析
+ * - builtin：预置词表（P1 阶段）
+ */
+export const BookSource = {
+  Manual: "manual",
+  Imported: "imported",
+  DocParsed: "doc-parsed",
+  Builtin: "builtin",
+} as const;
+export type BookSource = typeof BookSource[keyof typeof BookSource];
+
+/**
+ * 单词本导入元信息（2026-09-11 新增）
+ * 解析/导入时记录溯源，便于复查"这本词书从哪来"
+ * 仅在 source 为 'imported' / 'doc-parsed' 时有值
+ */
+export interface VocabBookImportMeta {
+  /** 解析格式：csv/txt/json/plain/doubledot/table/tsv/yaml/siyuan */
+  format: string;
+  /** 来源定位：文件名 / 思源文档 ID / 块 ID 列表 */
+  locator: string;
+  /** 原始解析行数 */
+  rawCount: number;
+  /** 去重后词数（写入词库的） */
+  dedupedCount: number;
+  /** 跳过的行数（非英文 / 空行 / 停用词） */
+  skippedCount: number;
+  /** 导入时间 ISO */
+  importedAt: string;
+}
+
+/**
+ * 全局标签（2026-09-11 新增：独立于 book/theme 结构的横切分类）
+ * 与 WordRecord.labels 字段配套：词可同时有多个 label，跨 book/theme
+ * 持久化：hiword-vocab-labels.json（独立于 hiword-vocab.json）
+ * wordCount 字段不持久化，每次 getAllLabels() 时实时聚合
+ */
+export interface VocabLabel {
+  /** 标签名（主键，唯一） */
+  name: string;
+  /** 显示色（hex，如 #10b981） */
+  color: string;
+  /** 可选描述（用户可填） */
+  description?: string;
+  /** 创建时间 ISO */
+  createdAt: string;
+}
+
+/**
  * 单词学习状态(2026-08-22 新增:词库驱动高亮体系)
  * 与 WordStatus(复习队列状态)独立:WordStatus 管复习队列进出,
  * LearningStatus 管"我对这个单词的掌握度"——直接驱动文档单词高亮颜色。
@@ -153,6 +218,16 @@ export interface VocabBook {
   name: string;
   order: number;       // 单词本排序权重
   themes: VocabTheme[];
+  /** 2026-09-11 新增：单词本状态（草稿/已校验），老数据缺 → 默认 'verified' */
+  status?: BookStatus;
+  /** 2026-09-11 新增：draft → verified 的转换时刻 ISO */
+  verifiedAt?: string;
+  /** 2026-09-11 新增：校验时的词数快照（用于"校验后词数"显示） */
+  verifiedWordCount?: number;
+  /** 2026-09-11 新增：单词本来源，老数据缺 → 默认 'manual' */
+  source?: BookSource;
+  /** 2026-09-11 新增：导入元信息（仅 imported/doc-parsed 时有值） */
+  importMeta?: VocabBookImportMeta;
 }
 
 /** 词库整体存储结构（存于插件数据 hiword-vocab.json） */

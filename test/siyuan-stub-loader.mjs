@@ -16,3 +16,21 @@ export async function resolve(specifier, context, nextResolve) {
   }
   return nextResolve(specifier, context);
 }
+
+/**
+ * 2026-09-10 扩展：让测试能直接 import JSON（i18n 语言包）。
+ * 生产构建由 Vite 内建支持 JSON，无需 import attributes；
+ * 但原生 Node ESM 要求 `with { type: "json" }`，加了又会让部分工具链告警。
+ * 故只在测试 loader 里把 .json 转成 `export default {...}` —— 生产代码零改动。
+ */
+export async function load(url, context, nextLoad) {
+  if (url.endsWith(".json")) {
+    const { readFile } = await import("node:fs/promises");
+    const { fileURLToPath } = await import("node:url");
+    const raw = await readFile(fileURLToPath(url), "utf8");
+    // JSON.parse 一遍：既校验格式，又保证导出的是纯数据
+    const source = `export default ${JSON.stringify(JSON.parse(raw))};`;
+    return { format: "module", source, shortCircuit: true };
+  }
+  return nextLoad(url, context);
+}
