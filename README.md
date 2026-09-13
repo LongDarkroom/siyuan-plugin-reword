@@ -1,8 +1,22 @@
-# RE word（REword）
+<h1 align="center">RE word（REword）</h1>
+<p align="center"><b>英语学习工作台 · 离线词典与电子书阅读器</b></p>
+<p align="center">让思源笔记变身英语学习闭环：查词 → 收词 → 复习 → 精读 → 沉淀</p>
 
-思源笔记插件：**离线查词 + 生词复习 + AI 精读 + 电子书阅读器**。
+<p align="center">离线查词（支持 MDX / StarDict 自定义词库）、框选快捷键收词、SM-2 间隔复习、AI 精读与文档上下文对话；内置 EPUB / MOBI / AZW3 / FB2 / CBZ / PDF / TXT / Markdown 全格式阅读器，支持 AI 双语对照、五色高亮、手写墨迹、书签摘录回跳与书架管理。所有词典本地离线查询，学习与阅读数据全部存放在你自己的思源工作空间内。</p>
 
-两套引擎共用一套数据：一边管"英语学习闭环"（查词 → 收词 → 复习），一边管"阅读与沉淀"（读书 → 标注 → 摘录回跳）。所有词典本地离线查询，阅读数据全部存在思源工作空间内。
+<p align="center">
+  <img src="https://img.shields.io/badge/version-1.7.3-blue?style=flat&logo=github&logoColor=white" alt="version 1.7.3">
+  <img src="https://img.shields.io/badge/license-MIT-green?style=flat&logo=opensourceinitiative&logoColor=white" alt="license MIT">
+  <img src="https://img.shields.io/badge/SiYuan-3.7.0%2B-orange?style=flat&logo=siyuan&logoColor=white" alt="SiYuan 3.7.0+">
+</p>
+
+<p align="center">
+  <a href="https://github.com/LongDarkroom/siyuan-plugin-reword"><img src="https://img.shields.io/badge/项目仓库-GitHub-181717?style=flat&logo=github&logoColor=white" alt="项目仓库"></a>
+  <a href="https://ld246.com/article/1787911845417"><img src="https://img.shields.io/badge/词典包获取指南-查看教程-0ea5e9?style=flat&logo=readthedocs&logoColor=white" alt="词典包获取指南"></a>
+  <a href="https://space.bilibili.com/39780528"><img src="https://img.shields.io/badge/B%20站-关注我-FB7299?style=flat&logo=bilibili&logoColor=white" alt="B 站"></a>
+  <img src="https://img.shields.io/badge/插件交流群-123795105-12B7F5?style=flat&logo=qq&logoColor=white" alt="插件交流群 123795105">
+  <a href="CHANGELOG.md"><img src="https://img.shields.io/badge/更新日志-CHANGELOG-6DB33F?style=flat&logo=keepachangelog&logoColor=white" alt="更新日志"></a>
+</p>
 
 > [!TIP]
 > **English** — REword is a SiYuan plugin for English learners: **offline dictionary lookup, spaced-repetition vocabulary review, AI-powered intensive reading, and a full-featured e-book reader**, all in one workspace.
@@ -112,6 +126,7 @@
 - 项目仓库：<https://github.com/LongDarkroom/siyuan-plugin-reword>
 - 词典包获取指南：<https://ld246.com/article/1787911845417>
 - B 站：<https://space.bilibili.com/39780528>（如果需要反馈，可以在 B 站给我私信）
+- 插件交流群：QQ 群 `123795105`
 
 ## 九、许可
 
