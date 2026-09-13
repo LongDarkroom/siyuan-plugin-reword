@@ -16,6 +16,7 @@ import {
   fixStandaloneDockIcons,
   restoreDockOrderFromCache,
   migrateDockLayoutOnce,
+  migrateRetiredFeaturesOnce,
   findDockByType,
   setStandaloneDockVisible,
   closeStandaloneDockPanel,
@@ -50,6 +51,19 @@ import { getDueQueue, nextReviewState, isDue } from "./review/scheduler.ts";
 // 2026-09-11 复习面板重构：星级筛选（mastery 档位）+ 书源绑定（添加单词书）
 import { countByMastery } from "./review/star-filter.ts";
 import { ReviewSourceStore, computeRelease, resolveSourceWords, summarizeSource, localDateKey, type ReviewSource } from "./review/review-source.ts";
+// 2026-09-12 每日记忆计划 + AI 造句（词典例句优先 → AI 补缺，内置可控 prompt）
+import { DailyPlanStore, planProgress } from "./review/daily-plan.ts";
+import { SentenceStore, type SentenceRecord } from "./sentence/sentence-store.ts";
+import { SentenceEngine } from "./sentence/sentence-engine.ts";
+// 2026-09-12 造句设置：独立于 AiSettings 的一份配置（零读零写 AI 精读 / 自由对话）
+import {
+  getSentenceSettings,
+  setSentenceSettings,
+  resetSentenceSettings,
+  loadSentenceSettings,
+} from "./sentence/sentence-settings.ts";
+import { requestAIGenerate } from "./ai/ai-client.ts";
+import { buildReviewDayMap, computeDayStreak, sumRecentDays } from "./review/review-history.ts";
 import { calibrateFromHistory, applyCalibration } from "./review/calibrate.ts";
 import { initReviewData } from "./review/review-data.ts";
 import { getReviewConfig, setReviewConfig, resetReviewConfig } from "./review/config.ts";
@@ -197,7 +211,6 @@ const INLINE_ICON_REWORD = `<svg viewBox="0 0 1024 1024"><g fill="none" stroke="
 
 // 2026-08-22：Dock 管理器各功能独立图标（symbol id，addDock 传 id 字符串）
 const ICON_REWORD = "iconREword";
-const ICON_VOCAB = "iconREwordVocab";
 const ICON_DICT = "iconREwordDict";
 const ICON_ANN = "iconREwordAnn";
 const ICON_AI = "iconREwordAI";
@@ -293,6 +306,14 @@ const DEFAULT_MANIFEST: DictManifest = {
   ],
 };
 
+/**
+ * 2026-09-12 复习 / 词库合并：主区「学习」面板内的三个小 Tab。
+ * - learn：学习记忆（词卡列表 / 每日计划 / 复习调度）
+ * - stats：数据统计（总览 / 近 7 天 / 星级分布 / 易忘词）
+ * - vocab：词库（原独立「词库」dock 面板，合并后成为本面板的第三个 pane）
+ */
+type StudyPane = "learn" | "stats" | "vocab";
+
 /** ArrayBuffer 转 base64（用于上传词典文件） */
 export default class RewordPlugin extends Plugin {
   // 字段在 onload() 中初始化，避免构造函数问题
@@ -330,14 +351,32 @@ export default class RewordPlugin extends Plugin {
   lastLaunchCrashed = false;
   /** 2026-09-11 v4：复习列表状态筛选（四状态：全部/待学习/已学习/标熟词） */
   private reviewListFilter: "all" | "todo" | "done" | "ripe" = "all";
-  /** 2026-09-11 复习面板重构：面板内小 Tab（学习记忆 / 数据统计） */
-  private reviewPane: "learn" | "stats" = "learn";
+  /**
+   * 2026-09-11 复习面板重构：面板内小 Tab。
+   * 2026-09-12 词库合并：三态 —— vocab（词库）/ learn（学习记忆）/ stats（数据统计）。
+   * 默认落「词库」：小 Tab 次序调整后（词库在首位）默认落点与之对齐。
+   */
+  private reviewPane: StudyPane = "vocab";
   /**
    * 2026-09-11 复习面板重构：复习书源（「添加单词书」）存储。
    * 回调惰性执行（persist 时 onload 必已完成），persistReviewSources 用可选链兜底。
    */
   private reviewSourceStore: ReviewSourceStore = new ReviewSourceStore(() => this.persistReviewSources?.update(this.reviewSourceStore.toJSON()));
   private persistReviewSources?: { update(d: unknown): void };
+  /** 2026-09-12：每日记忆计划（软目标：复习 N + 新词 M，可结转） */
+  private dailyPlanStore: DailyPlanStore = new DailyPlanStore(() => this.persistDailyPlan?.update(this.dailyPlanStore.export()));
+  private persistDailyPlan?: { update(d: unknown): void };
+  /** 2026-09-12：句子库（词典例句 + AI 补缺，采纳/收藏状态） */
+  private sentenceStore: SentenceStore = new SentenceStore(() => this.persistSentences?.update(this.sentenceStore.export()));
+  private persistSentences?: { update(d: unknown): void };
+  /** 2026-09-12：造句引擎（依赖注入，onload 后实例化） */
+  private sentenceEngine?: SentenceEngine;
+  /** 造句每日配额计数（跨天重置） */
+  private genCount = { date: "", n: 0 };
+  /** 词卡句子展开区展开态（按词记忆，重渲染保持） */
+  private openSentCards = new Set<string>();
+  /** 造句进行中标记（渲染 loading 态） */
+  private genBusy = new Set<string>();
   private dictReady!: boolean;
   private dictManifest!: DictManifest;
   /** 词典切换串行锁：避免快速连点导致多个 loadDictFile 交错、MDX 重复解析与状态残留 */
@@ -600,8 +639,6 @@ export default class RewordPlugin extends Plugin {
     const rewordIconSymbols = [
       // 主图标 / 组合栏（容器，承载全部功能）：打开的书
       `<symbol id="iconREword" viewBox="0 0 1024 1024"><g fill="none" stroke="currentColor" stroke-width="64" stroke-linecap="round" stroke-linejoin="round"><path d="M512 220c-90-46-200-58-372-46v600c172-12 282 0 372 46 90-46 200-58 372-46V174c-172-12-282 0-372 46z"/><path d="M512 220v600"/></g></symbol>`,
-      // 词库：单词卡（圆角卡片 + 三行文字线）—— 与书本 / 放大镜明显区分
-      `<symbol id="iconREwordVocab" viewBox="0 0 1024 1024"><g fill="none" stroke="currentColor" stroke-width="56" stroke-linecap="round" stroke-linejoin="round"><rect x="256" y="224" width="512" height="576" rx="56"/><path d="M352 352h320"/><path d="M352 480h320"/><path d="M352 608h208"/></g></symbol>`,
       // 查词典：放大镜（圆圈 + 手柄）—— 语义明确「查询」
       `<symbol id="iconREwordDict" viewBox="0 0 1024 1024"><g fill="none" stroke="currentColor" stroke-width="64" stroke-linecap="round" stroke-linejoin="round"><circle cx="448" cy="448" r="240"/><path d="M624 624L840 840"/></g></symbol>`,
       // 新增词条：加号圆（保留）
@@ -692,6 +729,37 @@ export default class RewordPlugin extends Plugin {
         (d) => this.saveData("hiword-review-sources.json", d),
         { onError: () => showMessage(t("复习书源保存失败，请检查存储空间"), 3000, "error") }
       );
+      // 2026-09-12 每日记忆计划持久化
+      this.persistDailyPlan = new PersistentStore(
+        (d) => this.saveData("hiword-daily-plan.json", d),
+        { onError: () => showMessage(t("每日计划保存失败，请检查存储空间"), 3000, "error") }
+      );
+      // 2026-09-12 句子库持久化
+      this.persistSentences = new PersistentStore(
+        (d) => this.saveData("hiword-sentences.json", d),
+        { onError: () => showMessage(t("句子库保存失败，请检查存储空间"), 3000, "error") }
+      );
+      // 造句引擎：词典例句优先（海词）→ AI 补缺（内置可控 prompt）；三层限流
+      // （aiSettings 运行时含 systemPrompt 等完整字段，normalizeAiSettings 填充；类型声明缺字段故 cast）
+      this.sentenceEngine = new SentenceEngine({
+        getSettings: () => this.aiSettings as any,
+        store: this.sentenceStore,
+        fetchOnline: fetchOnlineDict,
+        requestAi: requestAIGenerate,
+        getGenCountToday: () => {
+          const key = localDateKey();
+          if (this.genCount.date !== key) { this.genCount = { date: key, n: 0 }; }
+          return this.genCount.n;
+        },
+        incrGenCount: () => {
+          const key = localDateKey();
+          if (this.genCount.date !== key) this.genCount = { date: key, n: 0 };
+          this.genCount.n++;
+        },
+        // 2026-09-12：注入造句专属设置（句数 / 冷却 / 日限 / 队列间隔 / prompt 覆盖 / temperature）。
+        // 引擎内部对这份配置**只读**，且 temperature 经浅拷贝注入 requestAi，不写回 AiSettings。
+        getSentenceSettings: () => getSentenceSettings(),
+      });
       this.persistAiPresets = new PersistentStore(
         (d) => this.saveData("hiword-ai-presets.json", d),
         { onError: () => showMessage(T("AI 角色保存失败，请检查存储空间"), 3000, "error") }
@@ -863,16 +931,21 @@ export default class RewordPlugin extends Plugin {
       this.dockManager = new DockManager(this);
       const dockFeatures: DockableFeature[] = [
         { id: DASHBOARD_FEATURE_ID, title: t("工作台"), icon: DASHBOARD_ICON, defaultSlot: "combined" },
-        { id: "vocab", title: t("词库"), icon: ICON_VOCAB, defaultSlot: "combined" },
+        // 2026-09-12 合并：原「词库」feature 已并入本面板（内部第三个小 Tab「词库」），
+        // 只保留 review 一个 feature（id 不变，避免破坏已持久化布局 / 主区页签类型）。
+        // 2026-09-12 次序调整：「学习」紧随「工作台」之后（组合栏 Tab 顺序 = 本数组次序，
+        // 布局文件只存 slot 归属，不存次序）。
+        { id: "review", title: t("学习"), icon: ICON_REVIEW, defaultSlot: "combined" },
         { id: "dict", title: t("查词典"), icon: ICON_DICT, defaultSlot: "combined" },
         { id: "annotations", title: t("微阅批注"), icon: ICON_ANN, defaultSlot: "combined" },
         { id: "ai", title: t("AI 精读"), icon: ICON_AI, defaultSlot: "combined" },
-        { id: "review", title: t("复习"), icon: ICON_REVIEW, defaultSlot: "combined" },
         { id: READER_FEATURE_ID, title: t("阅读器"), icon: ICON_READER, defaultSlot: "combined" },
       ];
       for (const f of dockFeatures) this.dockManager.registerFeature(f);
       // 一次性迁移：将面板布局重置为「全部收入组合栏」的干净状态（消除旧布局残留的独立 Dock 杂乱）
       try { await this.migrateDockLayoutOnce(); } catch (e) { getLogger().warn("[REword] 面板布局迁移失败", { error: e }); }
+      // 清理已下线 feature（vocab）在布局文件中的残留键（词库已并入「学习」面板）
+      try { await this.migrateRetiredFeaturesOnce(); } catch (e) { getLogger().warn("[REword] 布局残留清理失败", { error: e }); }
       await this.dockManager.load();
     } catch (e) {
       getLogger().error("[REword] Dock 管理器初始化失败（回退单 Dock）", { operation: "初始化-Dock管理器", error: e });
@@ -983,6 +1056,9 @@ export default class RewordPlugin extends Plugin {
     // ========== 4. 容错初始化词库（失败不影响 UI）==========
     // 4.0 先加载持久化的复习校准配置，再注入 AWL/词频数据（让难度计算能用到），随后初始化词库并回填难度
     try { this.loadReviewConfig(); } catch (e) { getLogger().warn("[REword] 复习配置加载失败（用默认）:", { error: e }); }
+    // 2026-09-12 造句设置（hiword-sentence-settings.json）。
+    // 与 AI 精读 / 自由对话的 AiSettings 是两份互不影响的配置：这里只写本文件。
+    try { await this.loadSentenceSettingsFromDisk(); } catch (e) { getLogger().warn("[REword] 造句设置加载失败（用默认）:", { error: e }); }
     // 4.1 加载标注默认配置（默认颜色/线型/调色板/标签预设），供设置面板与新建批注统一读取
     try { initAnnotationConfig(this); await loadAnnotationConfig(); } catch (e) { getLogger().warn("[REword] 标注配置加载失败（用默认）:", { error: e }); }
     try { initReviewData(); } catch (e) { getLogger().warn("[REword] 复习数据注入失败:", { error: e }); }
@@ -1110,6 +1186,30 @@ export default class RewordPlugin extends Plugin {
     showMessage(t("复习算法配置已恢复默认"), 2200, "success" as any);
   }
 
+  // ========== 造句设置（SentenceSettings）持久化 ==========
+  // 独立文件 hiword-sentence-settings.json。绝不复用 AiSettings：
+  // 后者被 AI 精读 / 自由对话共用，且经 AI 面板 saveAll 全量回写，混入造句字段会互相污染。
+  /** 从磁盘装载造句设置（非法值由 normalizeSentenceSettings 归一） */
+  private async loadSentenceSettingsFromDisk(): Promise<void> {
+    const raw = await this.loadData("hiword-sentence-settings.json").catch(() => null);
+    loadSentenceSettings(raw && typeof raw === "object" && !Array.isArray(raw) ? raw : null);
+  }
+  /** 持久化当前造句设置（每次改动即落盘，不依赖设置弹窗的「保存所有设置」） */
+  private async saveSentenceSettings(): Promise<void> {
+    try {
+      await this.saveData("hiword-sentence-settings.json", getSentenceSettings());
+    } catch (e) {
+      getLogger().error("[REword] 造句设置保存失败:", { error: e });
+      showMessage(t("造句设置保存失败，请检查存储空间"), 3000, "error");
+    }
+  }
+  /** 命令：重置造句设置到默认初值 */
+  private resetSentenceSettingsCmd(): void {
+    resetSentenceSettings();
+    void this.saveSentenceSettings();
+    showMessage(t("造句设置已恢复默认"), 2200, "success" as any);
+  }
+
   /**
    * 命令：基于复习历史回拟合间隔倍率与难度修正系数（calibrate.ts）。
    * 历史不足时提示先积累；否则应用校准结果并落盘 hiword-review-config.json。
@@ -1213,8 +1313,21 @@ export default class RewordPlugin extends Plugin {
     } catch {
       this.reviewSourceStore.load(null);
     }
+    // 2026-09-12：加载句子库 + 每日记忆计划
+    try {
+      this.sentenceStore.load(await this.loadData("hiword-sentences.json"));
+    } catch {
+      this.sentenceStore.load(null);
+    }
+    try {
+      this.dailyPlanStore.load(await this.loadData("hiword-daily-plan.json"));
+    } catch {
+      this.dailyPlanStore.load(null);
+    }
     this.isReady = true;
     getLogger().info("[REword] 词库加载完成");
+    // 2026-09-12：确保今日计划已生成（跨天自动归档昨日 + 结转）
+    void this.ensureTodayPlan();
 
     // 2026-09-11 书源每日释放钩子：按 dailyNewLimit 分批把新词放入复习队列（一天一批）
     void this.releaseDueSources();
@@ -2773,11 +2886,14 @@ export default class RewordPlugin extends Plugin {
    * 避免从 AI 精读/查词典/批注等 Tab 中执行收藏后，把整个 dock 内容覆盖成词库列表。
    */
   private refreshVocabPanelIfVisible(): void {
-    if (!this.dockElement) return;
-    const activeTab = this.dockElement.querySelector(".hiword-dock-tab.active") as HTMLElement | null;
-    if (activeTab?.dataset.tab === "vocab") {
-      this.renderVocabPanel(this.dockElement);
-    }
+    const el = this.studyHostEl();
+    if (!el) return;
+    const paneEl = this.studyPaneContainer(el, "vocab");
+    if (!paneEl) return;
+    // 词库数据已变：作废词库 pane 的渲染标记（下次切到词库 Tab 时再重绘）；
+    // 若当前正停在词库 Tab 上则立即重绘 —— 学习面板没停在词库 Tab 时不打扰。
+    paneEl.removeAttribute("data-rendered");
+    if (this.reviewPane === "vocab") this.renderStudyPane(el, "vocab", true);
   }
 
   /**
@@ -3426,6 +3542,11 @@ export default class RewordPlugin extends Plugin {
     await migrateDockLayoutOnce(this);
   }
 
+  /** 清理已下线 feature（vocab）的布局残留 —— 词库并入「学习」面板后的一次性迁移 */
+  private async migrateRetiredFeaturesOnce(): Promise<void> {
+    await migrateRetiredFeaturesOnce(this);
+  }
+
   /** 根据 data-type 找到承载该 dock 的思源 Dock 实例 */
   private findDockByType(type: string): any {
     return findDockByType(this, type);
@@ -3504,8 +3625,18 @@ export default class RewordPlugin extends Plugin {
       dockElement.innerHTML = `<div class="hiword-dock-panel"><div class="hiword-dock-content" id="hiword-dock-content"></div></div>`;
       contentEl = dockElement.querySelector("#hiword-dock-content");
     }
+    if (!contentEl) return;
+    // 2026-09-12 兼容别名：旧「词库」feature 已并入「学习」面板（内部第三个小 Tab）。
+    // 遗留调用（旧布局残留 / 旧主区页签收养）一律重定向，绝不把词库单独渲染进面板。
+    if (id === "vocab") {
+      this.reviewPane = "vocab";
+      this.renderReviewPanel(dockElement);
+      return;
+    }
+    // 本次渲染将整体替换 #hiword-dock-content 的内容 → 先撤销旧的「学习」外壳标记。
+    // （renderReviewPanel 会重新打标；词库渲染走 pane 容器、不经过本方法，标记不受影响）
+    if (id !== "review") contentEl.removeAttribute("data-study-shell");
     if (id === DASHBOARD_FEATURE_ID) this.renderDashboardPanel(dockElement);
-    else if (id === "vocab") this.renderVocabPanel(dockElement);
     else if (id === "dict") this.renderDictPanel(dockElement);
     else if (id === "annotations") this.renderAnnotationsPanel(dockElement);
     else if (id === "ai") this.renderAiPanel(dockElement);
@@ -3529,22 +3660,45 @@ export default class RewordPlugin extends Plugin {
   /** @internal dashboard/dashboard-panel.ts 访问（public 仅为此目的） */
   public getDashboardSnapshot(): DashboardSnapshot | null {
     if (!this.isReady || !this.vocabStore) return null;
+    // 全量词只取一次：此前 computeReviewMetrics() 内部还各调一次
+    // getReviewCandidates()（其内部又是 getAllWords()），同一份数据被遍历三遍（F2）。
+    const words = this.vocabStore.getAllWords();
+    const candidates = words.filter((w) => w.status === WordStatus.Active);
+    // 复习按日次数：单一真源（review/review-history.ts）。
+    // 热力图、近 7 天柱状、卡片标题、复习面板数据统计 Tab 共用这一份，
+    // 同屏数字必然自洽，历史也不再随「最后一次复习」漂移（D1 / D2 / D3）。
+    const dayMap = buildReviewDayMap(words, this.vocabStore.getReviewEvents());
     return {
-      metrics: this.computeReviewMetrics(),
-      words: this.vocabStore.getAllWords(),
-      candidates: this.vocabStore.getReviewCandidates(),
+      metrics: this.computeReviewMetrics(words, dayMap),
+      words,
+      candidates,
       books: this.readerDock?.storeRef?.list ?? [],
+      reviewByDay: Object.fromEntries(dayMap),
+      // 阅读批注：仅取 bookId 存在者（= isReading，文档编辑区批注 bookId 为空）；
+      // getAll() 已过滤软删并按 createdAt 倒序。书名由 dashboard 侧查 snap.books 表，零 I/O。
+      readingAnnotations: this.annotationStore?.getAll().filter((a) => !!a.bookId) ?? [],
+      // Apple Pencil 墨迹走独立存储（hiword-ink.json）。只投影展示所需字段 ——
+      // 每条笔触带 points/path（可能上百个采样点），整包搬进快照没必要。
+      inkStrokes: (this.inkSaver?.getStrokes() ?? []).map((s) => ({
+        id: s.id,
+        bookId: s.bookId,
+        pageIndex: s.pageIndex,
+        createdAt: s.createdAt,
+        color: s.color,
+      })),
+      // 标签字典（id → 显示名 + 颜色），供 dashboard 把 labels[] 的 id 翻成 chip
+      labelDict: this.annotationLabelStore?.getAll().map((l) => ({ id: l.id, name: l.name, color: l.color })) ?? [],
     };
   }
 
   /**
-   * 刷新词库面板（词典就绪后调用，确保简洁模式能显示实时释义）
-   * 注意：此方法仅用于明确需要刷新词库的场景（如单词入库后）。
-   * 词典切换后的通用刷新请使用 refreshActivePanel()，避免覆盖非词库 Tab 的内容。
+   * 复习按日次数（单一真源包装）：优先事件级 reviewEvents，窗口外回落 lastReview。
+   * 供工作台与复习面板数据统计 Tab 共用，避免同口径各算一遍。
+   * @internal dashboard/dashboard-panel.ts 通过快照消费；此处供本文件内面板复用
    */
-  private refreshVocabPanel() {
-    // 2026-09-11 组合栏退役：词库可能承载在主区页签 / 独立 Dock，经 refreshFeature 路由
-    this.refreshFeature("vocab");
+  private reviewDayMap(words?: WordRecord[]): Map<string, number> {
+    const all = words ?? this.vocabStore?.getAllWords() ?? [];
+    return buildReviewDayMap(all, this.vocabStore?.getReviewEvents() ?? []);
   }
 
   /**
@@ -3574,7 +3728,10 @@ export default class RewordPlugin extends Plugin {
   private renderVocabPanel(dockElement: HTMLElement) {
     // 切换面板时自动停止列表朗读
     if (this._listReading) this.stopListReading();
-    const contentEl = dockElement.querySelector("#hiword-dock-content") as HTMLElement;
+    // 2026-09-12 合并：词库成为「学习」面板的第三个 pane。
+    // 容器入口由「#hiword-dock-content 整块」改为「vocab pane 容器」（事件选择器一字未改）。
+    // 外壳不在位（学习面板未渲染 / 已切到别的 Tab）时直接返回，绝不把词库内容误写进其它面板。
+    const contentEl = this.studyPaneContainer(dockElement, "vocab");
     if (!contentEl) return;
 
     if (!this.isReady) {
@@ -3958,12 +4115,14 @@ export default class RewordPlugin extends Plugin {
    * 先清空可能把目标过滤掉的 label 筛选。
    */
   private scrollVocabPanelToWord(word: string): void {
-    // 2026-09-11 组合栏退役：词库可能承载在主区页签 / 独立 Dock
-    const panelEl = this.getFeatureElement("vocab");
+    // 2026-09-12 词库并入「学习」面板：定位目标是 vocab pane；
+    // 宿主（真实 dock 元素）仍需保留，供需要重绘词库时传参（renderVocabPanel 只认宿主）。
+    const hostEl = this.studyHostEl();
+    const panelEl = hostEl ? this.studyPaneContainer(hostEl, "vocab") : null;
     // 1) 清空当前标签筛选(可能把目标过滤掉了)
     if (this.vocabLabelFilter && this.vocabLabelFilter !== "all") {
       this.vocabLabelFilter = "all";
-      if (panelEl) this.renderVocabPanel(panelEl);
+      if (hostEl) this.renderVocabPanel(hostEl);
     }
     // 2) 找目标行
     const safe = (window as any).CSS?.escape ? (window as any).CSS.escape(word) : word.replace(/"/g, '\\"');
@@ -6396,8 +6555,8 @@ export default class RewordPlugin extends Plugin {
       if (!word) return;
       e.preventDefault();
       e.stopPropagation();
-      // 页签化后 openTab 异步：等词库承载元素就绪再滚动定位
-      void withFeatureTab(this, "vocab", (el) => this.scrollVocabPanelToWord(word));
+      // 页签化后 openTab 异步：等「学习」面板就绪并切到词库 pane 后再滚动定位
+      void this.gotoStudyPane("vocab", () => this.scrollVocabPanelToWord(word));
     };
     this.disposables.addEventListener(document, "click", onVocabMarkClick, true);
   }
@@ -6839,23 +6998,167 @@ export default class RewordPlugin extends Plugin {
   }
 
   /**
-   * 复习面板（dock「复习」Tab）：展示调度概览 + 入口。
-   *  - 4 张指标卡：今日待复习 / 逾期 / 本周已复习 / 估计保留率
-   *  - 「开始复习」按钮（唤起 startReviewSession）、「⚙️ 算法设置」按钮（唤起 openReviewSettings）
-   *  - 状态筛选（学习中/已归档/已忽略/全部）+ 单词列表（按到期升序，含倒计时/间隔/保留率）
-   *  - 空态友好提示
+   * 「学习」面板外壳（原复习面板；2026-09-12 合并「词库」）。
+   *  - 三个小 Tab：词库 / 学习记忆 / 数据统计（次序见下方 panes 数组）
+   *  - 切换只做 pane 显隐 + 首次懒渲染（不重建外壳）⇒ 各 pane 的翻页 / 筛选 / 滚动位置全部保留
+   *  - pane 容器**不带** `hiword-dock-content` class：词库面板据此区分「合并态 / 独立态」
+   *    （见 studyPaneContainer），因此在任何承载形态下都能渲染到正确位置
    */
   private renderReviewPanel(dockElement: HTMLElement) {
     if (this._listReading) this.stopListReading();
-    const contentEl = dockElement.querySelector("#hiword-dock-content") as HTMLElement;
+    const contentEl = dockElement.querySelector("#hiword-dock-content") as HTMLElement | null;
     if (!contentEl) return;
+    if (!this.isReady || !this.vocabStore) {
+      contentEl.removeAttribute("data-study-shell");
+      contentEl.innerHTML = `<div class="hiword-empty">${t("插件尚未就绪")}</div>`;
+      return;
+    }
+
+    // 小 Tab 次序（2026-09-12 调整）：「词库」提到最前，其后才是「学习记忆 / 数据统计」。
+    // 该数组同时决定按钮行与 pane 容器的顺序，改这一处即两处生效。
+    const panes: { key: StudyPane; label: string }[] = [
+      { key: "vocab", label: "词库" },
+      { key: "learn", label: "学习记忆" },
+      { key: "stats", label: "数据统计" },
+    ];
+    contentEl.innerHTML = `
+      <div class="hiword-review-panel">
+        <div class="hiword-rp-subtabs">
+          ${panes.map((p) => `<button class="${this.studySubtabCls(p.key)}" data-rp-pane="${p.key}">${t(p.label)}</button>`).join("")}
+        </div>
+        ${panes.map((p) => `<div class="${this.studyPaneCls(p.key)}" data-rp-pane-body="${p.key}"></div>`).join("")}
+      </div>`;
+    // 打标：本 #hiword-dock-content 当前承载「学习」外壳 —— 词库 pane 容器定位的唯一权威依据
+    contentEl.dataset.studyShell = "1";
+    // 拖入文档 / 块 → 识别英文词并加入复习（三个 pane 共用；绑在外壳上，不再是「仅学习 Tab」）
+    const shellPanel = contentEl.querySelector(".hiword-review-panel") as HTMLElement | null;
+    if (shellPanel) this.bindReviewDropZone(shellPanel);
+    // 小 Tab 切换：显隐 + 首次懒渲染
+    contentEl.querySelectorAll<HTMLElement>("[data-rp-pane]").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const pane = btn.dataset.rpPane as StudyPane | undefined;
+        if (pane) this.switchStudyPane(pane, dockElement);
+      });
+    });
+    // 词卡右键菜单的全局关闭（仅绑定一次）；放在外壳而非学习 pane，
+    // 保证任何 pane 下都能正常关闭菜单。
+    if (!document.body.dataset.rewordCtxBound) {
+      document.body.dataset.rewordCtxBound = "1";
+      document.addEventListener("click", (e) => {
+        if (!(e.target as HTMLElement).closest(".hiword-rp-ctx")) this.closeReviewCtxMenu();
+      });
+      document.addEventListener("contextmenu", (e) => {
+        if (!(e.target as HTMLElement).closest(".hiword-rp-ctx")) this.closeReviewCtxMenu();
+      });
+      document.addEventListener("keydown", (e) => {
+        if (e.key === "Escape") this.closeReviewCtxMenu();
+      });
+    }
+    this.renderStudyPane(dockElement, this.reviewPane);
+  }
+
+  /** 小 Tab class（按当前 reviewPane 决定 --on） */
+  private studySubtabCls(p: StudyPane): string {
+    return `hiword-rp-subtab${this.reviewPane === p ? " hiword-rp-subtab--on" : ""}`;
+  }
+
+  /** pane 容器 class（含 `--learn / --stats / --vocab` 修饰符，供 CSS 按 pane 精确控布局） */
+  private studyPaneCls(p: StudyPane): string {
+    return `hiword-rp-pane hiword-rp-pane--${p}${this.reviewPane === p ? " hiword-rp-pane--on" : ""}`;
+  }
+
+  /**
+   * 切换「学习」面板小 Tab：只做 pane 显隐 + 首次懒渲染，**不整体重建外壳**。
+   * 因此词库翻页 / 筛选 / 排序、学习列表滚动位置等瞬时状态全部保留
+   * （原实现每次点小 Tab 都 renderReviewPanel 全量重绘，状态必丢）。
+   */
+  private switchStudyPane(pane: StudyPane, dockElement: HTMLElement, force = false): void {
+    this.reviewPane = pane;
+    const contentEl = dockElement.querySelector("#hiword-dock-content") as HTMLElement | null;
+    if (contentEl) {
+      contentEl.querySelectorAll<HTMLElement>("[data-rp-pane]").forEach((b) => {
+        b.classList.toggle("hiword-rp-subtab--on", b.dataset.rpPane === pane);
+      });
+      contentEl.querySelectorAll<HTMLElement>("[data-rp-pane-body]").forEach((el) => {
+        el.classList.toggle("hiword-rp-pane--on", el.dataset.rpPaneBody === pane);
+      });
+    }
+    this.renderStudyPane(dockElement, pane, force);
+  }
+
+  /** 渲染指定 pane（已渲染过则跳过；`data-rendered` 标记随外壳重建自动失效） */
+  private renderStudyPane(dockElement: HTMLElement, pane: StudyPane, force = false): void {
+    const paneEl = this.studyPaneContainer(dockElement, pane);
+    if (!paneEl) return;
+    if (!force && paneEl.dataset.rendered === "1") return;
+    if (pane === "learn") this.renderReviewLearnPane(paneEl, dockElement);
+    else if (pane === "stats") this.renderReviewStatsPane(paneEl, dockElement);
+    else this.renderVocabPanel(dockElement);
+    paneEl.dataset.rendered = "1";
+  }
+
+  /**
+   * 定位「学习」面板内的某个 pane 容器。
+   * 仅当 `#hiword-dock-content` 当前确实承载「学习」外壳（data-study-shell 标记）时返回元素，
+   * 否则返回 null —— 词库面板据此自动回落到「不渲染」，绝不把词库写进其它 Tab。
+   */
+  private studyPaneContainer(dockElement: HTMLElement, pane: StudyPane): HTMLElement | null {
+    const contentEl = dockElement.querySelector("#hiword-dock-content") as HTMLElement | null;
+    if (!contentEl || contentEl.dataset.studyShell !== "1") return null;
+    return contentEl.querySelector<HTMLElement>(`[data-rp-pane-body="${pane}"]`);
+  }
+
+  /** 「学习」面板的承载元素（组合栏是家；独立停靠时取其 dock 元素） */
+  private studyHostEl(): HTMLElement | null {
+    return this.getFeatureElement("review");
+  }
+
+  /** 重绘「学习」面板（外部数据变化后调用）：作废各 pane 渲染标记，随后只重绘当前 pane */
+  private refreshStudyPanel(): void {
+    const el = this.studyHostEl();
+    if (!el) return;
+    const contentEl = el.querySelector("#hiword-dock-content") as HTMLElement | null;
+    if (!contentEl || contentEl.dataset.studyShell !== "1") return;
+    contentEl.querySelectorAll<HTMLElement>("[data-rp-pane-body]").forEach((p) => p.removeAttribute("data-rendered"));
+    this.renderStudyPane(el, this.reviewPane, true);
+  }
+
+  /**
+   * 打开「学习」面板并切到指定 pane（词库合并后的统一跳转入口）。
+   * 路由与 withFeatureTab 一致：独立停靠 → 聚焦其 Dock；组合栏（家）→ 展开并激活 Tab；
+   * hidden → 降级开主区页签。after(el) 在承载元素就绪后回调。
+   */
+  /** @internal dock/dock-layout.ts focusFeatureDock 的 vocab 别名会跳到本方法 */
+  async gotoStudyPane(pane: StudyPane, after?: (el: HTMLElement) => void): Promise<void> {
+    this.reviewPane = pane;
+    await withFeatureTab(this, "review", (el) => {
+      const contentEl = el.querySelector("#hiword-dock-content") as HTMLElement | null;
+      // 外壳已在位 → 只切 pane（保留瞬时状态）；否则整体渲染（会按 reviewPane 画当前 pane）
+      if (contentEl?.dataset.studyShell === "1") this.switchStudyPane(pane, el);
+      else this.renderFeatureInto("review", el);
+      after?.(el);
+    });
+  }
+
+  /**
+   * 学习记忆 pane（原 renderReviewPanel 主体）：状态筛选 + 每日计划 + 词卡列表与全部行交互。
+   *  - 4 张指标卡：今日待复习 / 逾期 / 近 7 天复习 / 估计保留率
+   *  - 「开始复习」/「算法设置」/「复习面板设置」/「＋ 添加单词书」入口
+   *  - 状态筛选（全部/待学习/已学习/标熟词）+ 单词列表（按到期升序，含倒计时/间隔/保留率）
+   *  - 空态友好提示
+   */
+  private renderReviewLearnPane(paneEl: HTMLElement, dockElement: HTMLElement) {
+    // 沿用原实现的变量名：事件绑定选择器与行手势逻辑一字未改，只换了根容器
+    const contentEl = paneEl;
     if (!this.isReady || !this.vocabStore) {
       contentEl.innerHTML = `<div class="hiword-empty">${t("插件尚未就绪")}</div>`;
       return;
     }
 
-    const m = this.computeReviewMetrics();
     const all = this.vocabStore.getAllWords();
+    // 复习按日次数走单一真源（renderReviewPanel 本身没画按日图，但 computeReviewMetrics
+    // 的「近 7 天复习」要从它取值，口径必须与工作台一致）
+    const m = this.computeReviewMetrics(all, this.reviewDayMap(all));
     // 2026-09-11 v4：四状态（全部/待学习/已学习/标熟词）——零新增字段：
     // 待学习 = 从未复习（reps 0）；已学习 = 复习过且未标熟；标熟 = mastery 满级。
     const bandOf = (w: WordRecord): "todo" | "done" | "ripe" =>
@@ -6906,7 +7209,18 @@ export default class RewordPlugin extends Plugin {
         const concise = parsed.senses.slice(0, 2).join("；") || "（暂无释义）";
         const fullSenses = parsed.senses.map((s, i) => `${i + 1}. ${s}`).join("　");
         const phonetic = w.phonetic ? this.cleanPhonetic(w.phonetic) : "";
+        const sentOpen = this.openSentCards.has(w.word) || this.genBusy.has(w.word);
+        // 2026-09-12 P0：✨ 双态化（收起态=生成 / 展开态=收起），冷却剩余时间如实进 tooltip
+        // （旧文案「可再次点击强制重新生成」在按钮上是骗人的：点击只会被冷却拒绝）
+        const sentCdMs = this.sentenceEngine ? this.sentenceEngine.cooldownLeft(w.word) : 0;
+        const sentCdMin = sentCdMs > 0 ? Math.ceil(sentCdMs / 60000) : 0;
+        const sentTip = sentOpen
+          ? t("收起例句区")
+          : sentCdMin > 0
+            ? T("AI 造句（词典例句优先，AI 补缺）· 冷却剩余约 {m} 分钟，可强制重新生成", { m: sentCdMin })
+            : t("AI 造句（词典例句优先，AI 补缺）");
         return `<div class="hiword-rp-row" data-rp-word="${this.escapeHtml(w.word)}">
+          <div class="hiword-rp-rowmain">
           <div class="hiword-rp-body">
             <button class="hiword-rp-speak" type="button" data-action="rp-speak" data-word="${this.escapeAttr(w.word)}" title="${T("朗读")}">
               <svg viewBox="0 0 24 24" fill="currentColor"><path d="M11 5L6 9H2v6h4l5 4V5z"/><path d="M15.5 8.5a5 5 0 0 1 0 7" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
@@ -6923,14 +7237,23 @@ export default class RewordPlugin extends Plugin {
               </div>
             </div>
             <div class="hiword-rp-side">
+              <button class="hiword-rp-gen ${this.genBusy.has(w.word) ? "busy" : ""}${sentOpen && !this.genBusy.has(w.word) ? " on" : ""}" type="button" data-action="sent-toggle" data-word="${this.escapeAttr(w.word)}" title="${this.escapeAttr(sentTip)}">
+                ${this.genBusy.has(w.word)
+                  ? `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9" opacity=".3"/><path d="M12 3a9 9 0 0 1 9 9" stroke-linecap="round"/></svg>`
+                  : sentOpen
+                    ? `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>`
+                    : `<svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2l1.9 5.8a1 1 0 0 0 .6.6L20.3 11l-5.8 1.9a1 1 0 0 0-.6.6L12 19.4l-1.9-5.9a1 1 0 0 0-.6-.6L3.7 11l5.9-1.9a1 1 0 0 0 .6-.6L12 2z"/><path d="M19 15l.9 2.6 2.6.9-2.6.9L19 22l-.9-2.6-2.6-.9 2.6-.9L19 15z" opacity=".7"/></svg>`}
+              </button>
               ${this.renderMasteryStars(w.word, w.mastery)}
               <span class="hiword-rp-badge ${badgeCls}">${this.escapeHtml(due)}</span>
             </div>
           </div>
           <div class="hiword-rp-ops">
-            <button class="hiword-rp-ops-btn" type="button" data-action="rp-open" title="${T("在词典中打开")}">${t("查词典")}</button>
-            <button class="hiword-rp-ops-btn hiword-rp-ops-btn--danger" type="button" data-action="rp-unqueue" title="${t("归档并移出复习队列")}">${t("移出队列")}</button>
+            <button class="hiword-rp-ops-btn" type="button" data-action="rp-open" data-word="${this.escapeAttr(w.word)}" title="${T("在词典中打开")}">${t("查词典")}</button>
+            <button class="hiword-rp-ops-btn hiword-rp-ops-btn--danger" type="button" data-action="rp-unqueue" data-word="${this.escapeAttr(w.word)}" title="${t("归档并移出复习队列")}">${t("移出队列")}</button>
           </div>
+          </div>
+          ${sentOpen ? this.renderSentenceArea(w.word) : ""}
         </div>`;
       })
       .join("");
@@ -6947,21 +7270,31 @@ export default class RewordPlugin extends Plugin {
       ? `<div class="hiword-rp-done-banner">${t("今天没有到期单词，去学点新词或稍后再来")}</div>`
       : "";
 
-    // 2026-09-11 复习面板重构：双小 Tab（学习记忆 / 数据统计）
-    const paneCls = (p: "learn" | "stats") => `hiword-rp-pane${this.reviewPane === p ? " hiword-rp-pane--on" : ""}`;
-    const subtabCls = (p: "learn" | "stats") => `hiword-rp-subtab${this.reviewPane === p ? " hiword-rp-subtab--on" : ""}`;
     // 2026-09-11 v4：今日到期行动条（约 40 秒/词粗估用时）
     const estMin = Math.max(1, Math.round((m.dueCount * 2) / 3));
-
-    contentEl.innerHTML = `
-      <div class="hiword-review-panel">
-        <div class="hiword-rp-subtabs">
-          <button class="${subtabCls("learn")}" data-rp-pane="learn">${t("学习记忆")}</button>
-          <button class="${subtabCls("stats")}" data-rp-pane="stats">${t("数据统计")}</button>
-        </div>
-        <div class="${paneCls("learn")}" data-rp-pane-body="learn">
-          ${this.renderReviewDraftNotice()}
-          <div class="hiword-rp-state-tabs">${stateTabsHtml}</div>
+    // 2026-09-12 每日记忆计划：进度带（软目标 + 结转 + 超额排队提示）
+    void this.ensureTodayPlan();
+    const plan = this.dailyPlanStore.today();
+    const pp = plan ? planProgress(plan) : { done: 0, total: 0, pct: 0, allDone: false };
+    const planOver = plan ? Math.max(0, plan.dueTotal - plan.reviewTarget) : 0;
+    const ringOffset = Math.round(170 * (1 - pp.pct / 100));
+    const planHtml = plan ? `
+          <div class="hiword-rp-plan${pp.allDone ? " hiword-rp-plan--done" : ""}">
+            <div class="hiword-rp-plan-ring">
+              <svg width="64" height="64" viewBox="0 0 64 64">
+                <circle class="hiword-rp-ring-bg" cx="32" cy="32" r="27"/>
+                <circle class="hiword-rp-ring-fg" cx="32" cy="32" r="27" style="stroke-dasharray:170;stroke-dashoffset:${ringOffset}"/>
+              </svg>
+              <div class="hiword-rp-plan-num"><b>${pp.done}/${pp.total}</b><span>${t("今日计划")}</span></div>
+            </div>
+            <div class="hiword-rp-plan-main">
+              <div class="hiword-rp-plan-title">${pp.allDone ? t("🎉 今日计划已完成！") : t("今日计划：复习 {r} · 新词 {n}", { r: plan.reviewTarget, n: plan.newTarget })}</div>
+              <div class="hiword-rp-plan-sub">
+                ${T("已完成 {d} · 预计约 {min} 分钟", { d: pp.done, min: estMin })}${plan.carriedOver ? ` · ${T("含昨日结转 {n}", { n: plan.carriedOver })}` : ""}${planOver > 0 ? ` · ${T("另有 {n} 词超额排队（自选）", { n: planOver })}` : ""}
+              </div>
+            </div>
+            <button class="b3-button hiword-rp-start" data-action="review-start">▶ ${pp.allDone ? t("去复习超额词") : t("继续复习")}</button>
+          </div>` : `
           <div class="hiword-rp-duebar">
             <span class="hiword-rp-duebar-ic">⏰</span>
             <span class="hiword-rp-duebar-txt">
@@ -6970,11 +7303,17 @@ export default class RewordPlugin extends Plugin {
                 : `<b>${t("今日复习已完成")}</b><small>${t("没有到期单词，去学点新词或稍后再来")}</small>`}
             </span>
             ${m.dueCount > 0 ? `<button class="b3-button hiword-rp-start" data-action="review-start">▶ ${t("开始复习")}</button>` : ""}
-          </div>
+          </div>`;
+
+    contentEl.innerHTML = `
+          ${this.renderReviewDraftNotice()}
+          <div class="hiword-rp-state-tabs">${stateTabsHtml}</div>
+          ${planHtml}
           <div class="hiword-rp-import-hint" title="${t("将思源笔记中的文档或块拖到本面板，自动识别其中的英文单词并加入复习")}">${t("⬇ 把思源文档 / 块拖到此处，自动导入英文单词")}</div>
           <div class="hiword-rp-list-head">
             <span class="hiword-rp-count">${T("共 {n} 词", { n: all.length })}</span>
             <span style="flex:1"></span>
+            <button class="b3-button b3-button--small" data-action="review-batch-sent" title="${t("为当前列表中的单词批量生成例句（词典优先，AI 补缺；串行队列）")}">✨ ${t("批量造句")}</button>
             <button class="b3-button b3-button--small" data-action="review-settings" title="${t("调试复习算法参数")}">${t("算法设置")}</button>
             <button class="b3-button b3-button--small" data-action="review-add-book" title="${t("把词库中的单词本 / 主题绑定为复习书源，按每日配额释放新词")}">${t("＋ 添加单词书")}</button>
             <label class="hiword-rp-qsearch">
@@ -6985,25 +7324,13 @@ export default class RewordPlugin extends Plugin {
           <div class="hiword-rp-list">
             ${emptyHint || rows}
           </div>
-        </div>
-        <div class="${paneCls("stats")}" data-rp-pane-body="stats">
-          ${this.buildReviewStatsHtml()}
-        </div>
-      </div>
     `;
 
-    // 面板内小 Tab 切换（学习记忆 / 数据统计）
-    contentEl.querySelectorAll<HTMLElement>("[data-rp-pane]").forEach((btn) => {
-      btn.addEventListener("click", () => {
-        this.reviewPane = (btn.dataset.rpPane as "learn" | "stats") ?? "learn";
-        this.renderReviewPanel(dockElement);
-      });
-    });
     // 四状态 Tab（全部/待学习/已学习/标熟词）
     contentEl.querySelectorAll<HTMLElement>("[data-rp-list]").forEach((btn) => {
       btn.addEventListener("click", () => {
         this.reviewListFilter = (btn.dataset.rpList as typeof this.reviewListFilter) ?? "all";
-        this.renderReviewPanel(dockElement);
+        this.renderStudyPane(dockElement, "learn", true);
       });
     });
     // 熟练度圆圈：点击第 k 点设 k；再点当前最大值归零（与词库交互一致）
@@ -7023,7 +7350,7 @@ export default class RewordPlugin extends Plugin {
           1600,
           "info"
         );
-        this.renderReviewPanel(dockElement);
+        this.renderStudyPane(dockElement, "learn", true);
       });
     });
     // 朗读
@@ -7034,6 +7361,82 @@ export default class RewordPlugin extends Plugin {
         if (w) this.speak(w);
       });
     });
+    // 2026-09-12：✨ AI 造句（词卡按钮 / 展开区按钮）
+    // 2026-09-12 P0：词卡 ✨ 改双态（sent-toggle），展开区另有 sent-gen / sent-regen / sent-close
+    contentEl.querySelectorAll<HTMLElement>('[data-action="sent-toggle"]').forEach((el) => {
+      el.addEventListener("click", (e) => {
+        e.stopPropagation();
+        const w = el.dataset.word;
+        if (!w) return;
+        if (this.genBusy.has(w)) return; // 生成中不响应，避免误收起
+        // 已展开 → 收起；未展开 → 展开并生成
+        if (this.openSentCards.has(w)) {
+          this.openSentCards.delete(w);
+          this.renderStudyPane(dockElement, "learn", true);
+          return;
+        }
+        void this.generateSentencesForWord(w);
+      });
+    });
+    // 展开区「AI 造句」（无例句时）→ 常规生成（受冷却约束）
+    contentEl.querySelectorAll<HTMLElement>('[data-action="sent-gen"]').forEach((el) => {
+      el.addEventListener("click", (e) => {
+        e.stopPropagation();
+        const w = el.dataset.word;
+        if (w) void this.generateSentencesForWord(w);
+      });
+    });
+    // 展开区「重新生成」→ 切换为 AI 生成队列：跳过词典步骤与单词冷却（force + aiOnly），
+    // 句数固定为造句设置的 sentenceCount（默认 3）
+    contentEl.querySelectorAll<HTMLElement>('[data-action="sent-regen"]').forEach((el) => {
+      el.addEventListener("click", (e) => {
+        e.stopPropagation();
+        const w = el.dataset.word;
+        if (w) void this.generateSentencesForWord(w, true, true);
+      });
+    });
+    // 展开区「收起」→ 关闭该词的例句卡片（openSentCards 此前只增不减）
+    contentEl.querySelectorAll<HTMLElement>('[data-action="sent-close"]').forEach((el) => {
+      el.addEventListener("click", (e) => {
+        e.stopPropagation();
+        const w = el.dataset.word;
+        if (!w) return;
+        this.openSentCards.delete(w);
+        this.renderStudyPane(dockElement, "learn", true);
+      });
+    });
+    // 句子操作：朗读 / 采纳 / 收藏 / 删除
+    contentEl.querySelectorAll<HTMLElement>('[data-action="sent-speak"]').forEach((el) => {
+      el.addEventListener("click", (e) => {
+        e.stopPropagation();
+        const en = el.dataset.en;
+        if (en) this.speak(en);
+      });
+    });
+    contentEl.querySelectorAll<HTMLElement>('[data-action="sent-adopt"]').forEach((el) => {
+      el.addEventListener("click", (e) => {
+        e.stopPropagation();
+        const id = el.dataset.id;
+        if (id) void this.toggleSentenceStatus(id, "kept");
+      });
+    });
+    contentEl.querySelectorAll<HTMLElement>('[data-action="sent-fav"]').forEach((el) => {
+      el.addEventListener("click", (e) => {
+        e.stopPropagation();
+        const id = el.dataset.id;
+        if (id) void this.toggleSentenceStatus(id, "fav");
+      });
+    });
+    contentEl.querySelectorAll<HTMLElement>('[data-action="sent-del"]').forEach((el) => {
+      el.addEventListener("click", (e) => {
+        e.stopPropagation();
+        const id = el.dataset.id;
+        if (id) {
+          void this.sentenceStore.remove(id);
+          this.renderStudyPane(dockElement, "learn", true);
+        }
+      });
+    });
     // 开始复习
     contentEl.querySelector('[data-action="review-start"]')?.addEventListener("click", () => {
       this.startReviewSession();
@@ -7041,6 +7444,14 @@ export default class RewordPlugin extends Plugin {
     // 算法设置
     contentEl.querySelector('[data-action="review-settings"]')?.addEventListener("click", () => {
       this.openReviewSettings();
+    });
+    // 2026-09-12 批量造句（当前筛选列表）
+    contentEl.querySelector('[data-action="review-batch-sent"]')?.addEventListener("click", () => {
+      this.showBatchSentenceDialog(filtered);
+    });
+    // 复习面板设置（例句来源 / AI 造句提示词 / 限流配额）→ 统一设置面板的「复习计划」页
+    contentEl.querySelector('[data-action="review-sentence-settings"]')?.addEventListener("click", () => {
+      this.openUnifiedSettings("review");
     });
     // 添加单词书（书源绑定；弹层内保留"手动挑词"入口）
     contentEl.querySelector('[data-action="review-add-book"]')?.addEventListener("click", () => {
@@ -7055,30 +7466,22 @@ export default class RewordPlugin extends Plugin {
         row.style.display = !q || w.includes(q) ? "" : "none";
       });
     });
-    // 统计 Tab · 易忘词「定向复习」：置为立即可复习并切回学习 Tab
-    contentEl.querySelectorAll<HTMLElement>('[data-action="st-focus"]').forEach((btn) => {
-      btn.addEventListener("click", async (e) => {
-        e.stopPropagation();
-        const word = btn.dataset.word;
-        if (!word || !this.vocabStore) return;
-        try {
-          await this.vocabStore.reactivateWord(word);
-          await this.vocabStore.updateReviewStats(word, { due: new Date().toISOString() });
-          this.reviewPane = "learn";
-          this.reviewListFilter = "all";
-          showMessage(t("已将「{word}」置为立即可复习", { word }), 2400, "success" as any);
-        } finally {
-          if (this.dockElement) this.renderReviewPanel(this.dockElement);
-        }
-      });
-    });
-    // 拖入文档 / 块 → 自动识别英文词并加入复习
-    const rpPanel = contentEl.querySelector(".hiword-review-panel") as HTMLElement | null;
-    if (rpPanel) this.bindReviewDropZone(rpPanel);
     // 列表行：左拉手势（滑出操作区）+ 右键菜单 + 点击展开释义
-    const OPS_W = 132; // 操作区宽度（px），与 less 中 --rp-ops-w 一致
+    // 2026-09-12 P0：操作区宽度单一来源 —— 删掉 OPS_W = 132 硬编码。
+    // 原注释声称"与 less 中 --rp-ops-w 一致"，但该变量全项目不存在，.hiword-rp-ops 也没有
+    // width（由「查词典 / 移出队列」两个按钮撑开 ≈160px）。位移量用 132 而 CSS 按真实宽度
+    // translateX(100%) ⇒ 收起态残留约 28px 错位，展开态"移出队列"被 .hiword-rp-row 的
+    // overflow:hidden 裁掉。改为运行时实取，位移与 translateX 同源。
+    const opsWidth = (row: HTMLElement): number => {
+      const ops = row.querySelector(".hiword-rp-ops") as HTMLElement | null;
+      const w = ops?.offsetWidth || 0;
+      if (w > 0) return w;
+      // 兜底（操作区未渲染）：用行宽，保证不出现"位移超过容器"的裁切
+      return row.querySelector<HTMLElement>(".hiword-rp-rowmain")?.offsetWidth || row.clientWidth || 0;
+    };
     const setRowDrag = (row: HTMLElement, px: number) => {
-      row.style.setProperty("--rp-drag", `${Math.max(-OPS_W, Math.min(0, px))}px`);
+      const max = opsWidth(row);
+      row.style.setProperty("--rp-drag", `${Math.max(-max, Math.min(0, px))}px`);
     };
     contentEl.querySelectorAll<HTMLElement>(".hiword-rp-row").forEach((row) => {
       const word = row.dataset.rpWord || "";
@@ -7089,11 +7492,11 @@ export default class RewordPlugin extends Plugin {
         this.openReviewCtxMenu(e.clientX, e.clientY, word);
       });
       // —— 左拉手势（Pointer Events 统一鼠标 / 触屏）——
-      let sx = 0, sy = 0, moved = false, dragging = false, canceled = false;
+      let sx = 0, sy = 0, moved = false, dragging = false, canceled = false, ptrId = -1;
       row.addEventListener("pointerdown", (e) => {
         if (e.button !== 0) return; // 仅左键
         if ((e.target as HTMLElement).closest(".hiword-rp-ops, .hiword-rp-speak, .hiword-stars, .hiword-rp-ops-btn")) return;
-        sx = e.clientX; sy = e.clientY; moved = false; dragging = false; canceled = false;
+        sx = e.clientX; sy = e.clientY; moved = false; dragging = false; canceled = false; ptrId = e.pointerId;
       });
       row.addEventListener("pointermove", (e) => {
         if (sx === 0 && sy === 0) return;
@@ -7115,24 +7518,35 @@ export default class RewordPlugin extends Plugin {
         if (!dragging) {
           dragging = true;
           row.classList.add("hiword-rp-row--dragging");
+          // 2026-09-12 P0：捕获指针。否则指针拖出 .hiword-rp-row 后 pointerup 不再派发到 row，
+          // endDrag 永不执行 ⇒ --rp-drag 残留、卡片永久偏移且无法复位。
+          // 只在真正开始拖拽时捕获，避免吃掉行内按钮的普通点击。
+          try { row.setPointerCapture(e.pointerId); } catch { /* 指针已失效 */ }
         }
         setRowDrag(row, dx); // 左拉 dx<0
       });
       const endDrag = () => {
+        // 无论是否位移，都先释放捕获（否则后续指针事件被 row 独占）
+        try { if (ptrId >= 0 && row.hasPointerCapture(ptrId)) row.releasePointerCapture(ptrId); } catch { /* 已释放 */ }
+        ptrId = -1;
         if (!moved || canceled) { sx = sy = 0; return; }
         const current = parseFloat(row.style.getPropertyValue("--rp-drag") || "0");
         const open = current < -48; // 越过阈值 → 保持展开
         row.classList.remove("hiword-rp-row--dragging");
         row.classList.toggle("hiword-rp-row--ops-open", open);
-        setRowDrag(row, open ? -OPS_W : 0);
-        row.dataset.dragged = "1"; // 抑制随后的 click 展开释义
+        setRowDrag(row, open ? -opsWidth(row) : 0);
+        row.dataset.dragged = "1"; // 抑制随后的 click 展开释义 / 收起操作区
         setTimeout(() => delete row.dataset.dragged, 350);
         sx = sy = 0; moved = false;
       };
       row.addEventListener("pointerup", endDrag);
       row.addEventListener("pointercancel", endDrag);
       // 点击已展开行的空白区 → 收起
+      // 2026-09-12 P0：必须与下方「展开释义」监听同源加 dataset.dragged 守卫 ——
+      // endDrag 展开操作区后，浏览器会为同一次指针交互补发 click，命中本监听会立刻收回
+      // （表现为"拖拽后没固定住"，且收回瞬间把刚露出的两个按钮又裁掉）。
       row.addEventListener("click", (e) => {
+        if (row.dataset.dragged) return;
         if (row.classList.contains("hiword-rp-row--ops-open") && !(e.target as HTMLElement).closest(".hiword-rp-ops")) {
           row.classList.remove("hiword-rp-row--ops-open");
           setRowDrag(row, 0);
@@ -7164,19 +7578,38 @@ export default class RewordPlugin extends Plugin {
         row.style.removeProperty("--rp-drag");
       });
     }, { passive: true });
-    // 右键菜单全局关闭（仅绑定一次）
-    if (!document.body.dataset.rewordCtxBound) {
-      document.body.dataset.rewordCtxBound = "1";
-      document.addEventListener("click", (e) => {
-        if (!(e.target as HTMLElement).closest(".hiword-rp-ctx")) this.closeReviewCtxMenu();
+  }
+
+  /**
+   * 数据统计 pane（原复习面板「数据统计」小 Tab 的独立化）。
+   *  - 内容由 buildReviewStatsHtml 单源提供（总览 / 近 7 天柱状 / 星级分布 / 易忘词）
+   *  - 易忘词「定向复习」按钮的处理器在此 pane 内绑定（原挂在 learn pane 上，
+   *    因当时三 pane 同处一个 contentEl；显隐切换后必须各自绑定）
+   */
+  private renderReviewStatsPane(paneEl: HTMLElement, dockElement: HTMLElement) {
+    paneEl.innerHTML = this.buildReviewStatsHtml();
+    this.bindReviewStatsPane(paneEl, dockElement);
+  }
+
+  /** 统计 pane 事件绑定（当前仅易忘词「定向复习」） */
+  private bindReviewStatsPane(paneEl: HTMLElement, dockElement: HTMLElement) {
+    paneEl.querySelectorAll<HTMLElement>('[data-action="st-focus"]').forEach((btn) => {
+      btn.addEventListener("click", async (e) => {
+        e.stopPropagation();
+        const word = btn.dataset.word;
+        if (!word || !this.vocabStore) return;
+        try {
+          await this.vocabStore.reactivateWord(word);
+          await this.vocabStore.updateReviewStats(word, { due: new Date().toISOString() });
+          this.reviewListFilter = "all";
+          showMessage(t("已将「{word}」置为立即可复习", { word }), 2400, "success" as any);
+          // 切回学习记忆 pane（列表已变，必须强制重绘）
+          this.switchStudyPane("learn", dockElement, true);
+        } catch (err) {
+          getLogger().warn("[REword][review] 定向复习失败", { error: err });
+        }
       });
-      document.addEventListener("contextmenu", (e) => {
-        if (!(e.target as HTMLElement).closest(".hiword-rp-ctx")) this.closeReviewCtxMenu();
-      });
-      document.addEventListener("keydown", (e) => {
-        if (e.key === "Escape") this.closeReviewCtxMenu();
-      });
-    }
+    });
   }
 
   /** 归档并移出复习队列（滑出区按钮与右键菜单共用） */
@@ -7184,7 +7617,7 @@ export default class RewordPlugin extends Plugin {
     if (!this.vocabStore) return;
     await this.vocabStore.archiveWord(word);
     showMessage(t("已归档并移出复习队列：「{w}」", { w: word }), 2000, "info");
-    if (this.dockElement) this.renderReviewPanel(this.dockElement);
+    this.refreshStudyPanel();
   }
 
   /** 复习词卡右键菜单（单例容器，惰性创建） */
@@ -7203,6 +7636,7 @@ export default class RewordPlugin extends Plugin {
   private openReviewCtxMenu(x: number, y: number, word: string) {
     const menu = this.ensureReviewCtxMenu();
     menu.innerHTML = `
+      <button class="hiword-rp-ctx-item" data-action="ctx-gen"><svg viewBox="0 0 24 24" fill="currentColor" style="width:13px;height:13px;vertical-align:-2px;margin-right:5px"><path d="M12 2l1.9 5.8a1 1 0 0 0 .6.6L20.3 11l-5.8 1.9a1 1 0 0 0-.6.6L12 19.4l-1.9-5.9a1 1 0 0 0-.6-.6L3.7 11l5.9-1.9a1 1 0 0 0 .6-.6L12 2z"/></svg>${t("AI 造句")}</button>
       <button class="hiword-rp-ctx-item" data-action="rp-open">${t("查词典")}</button>
       <button class="hiword-rp-ctx-item hiword-rp-ctx-item--danger" data-action="rp-unqueue">${t("移出队列")}</button>`;
     menu.hidden = false;
@@ -7214,7 +7648,8 @@ export default class RewordPlugin extends Plugin {
     menu.querySelectorAll<HTMLElement>("[data-action]").forEach((btn) => {
       btn.addEventListener("click", () => {
         menu.hidden = true;
-        if (btn.dataset.action === "rp-open") this.lookupWordInDock(word);
+        if (btn.dataset.action === "ctx-gen") void this.generateSentencesForWord(word, true);
+        else if (btn.dataset.action === "rp-open") this.lookupWordInDock(word);
         else void this.unqueueReviewWord(word);
       });
     });
@@ -7225,21 +7660,26 @@ export default class RewordPlugin extends Plugin {
   }
 
   /**
-   * 复习概览指标：今日待复习 / 逾期 / 本周已复习 / 估计保留率。
+   * 复习概览指标：今日待复习（今天 24:00 前到期）/ 当前到期 / 逾期 / 近 7 天复习 / 估计保留率。
    * 估计保留率：对活跃词用遗忘曲线 0.9^(已过去天数 / 上次间隔)，新词（无间隔）记 1。
+   *
+   * @param words 全量词（调用方已取，避免重复 getAllWords）
+   * @param reviewDayMap 复习按日次数（单一真源，见 review/review-history.ts）
    */
-  private computeReviewMetrics(): { dueToday: number; dueCount: number; active: number; overdue: number; weekReviewed: number; retention: number } {
+  private computeReviewMetrics(
+    words: WordRecord[],
+    reviewDayMap: Map<string, number>
+  ): { dueToday: number; dueCount: number; active: number; overdue: number; weekReviewed: number; retention: number } {
     const now = Date.now();
     const DAY = 86_400_000;
     const sod = new Date();
     sod.setHours(0, 0, 0, 0);
-    const startOfDay = sod.getTime();
-    const endOfDay = startOfDay + DAY;
-    const active = this.vocabStore!.getReviewCandidates();
+    const dayStart = sod.getTime();
+    const endOfDay = dayStart + DAY;
+    const active = words.filter((w) => w.status === WordStatus.Active);
     let dueToday = 0;
     let dueCount = 0;
     let overdue = 0;
-    let weekReviewed = 0;
     let retSum = 0;
     for (const w of active) {
       const due = w.due ? Date.parse(w.due) : NaN;
@@ -7247,14 +7687,14 @@ export default class RewordPlugin extends Plugin {
       else {
         if (due <= endOfDay) dueToday++;
         if (due <= now) dueCount++;
-        if (due < startOfDay) overdue++;
-      }
-      if (w.lastReview) {
-        const lr = Date.parse(w.lastReview);
-        if (!Number.isNaN(lr) && now - lr <= 7 * DAY) weekReviewed++;
+        if (due < dayStart) overdue++;
       }
       retSum += this.wordRetention(w, now);
     }
+    // 「本周已复习」= 近 7 个自然日的复习次数，与工作台柱状图 / 热力图同源同窗。
+    // 此前是「active 候选里 lastReview 落在滚动 7×24h 的**词数**」，而工作台柱状图当时
+    // 按**全量词**的 lastReview 归日 —— 同一屏两个数字必然不等（D1）。
+    const weekReviewed = sumRecentDays(reviewDayMap, 7, now);
     const retention = active.length ? Math.round((retSum / active.length) * 100) : 100;
     return { dueToday, dueCount, active: active.length, overdue, weekReviewed, retention };
   }
@@ -7507,6 +7947,9 @@ export default class RewordPlugin extends Plugin {
         ? preferred.map((z) => `<div class="hiword-review__sense hiword-review__sense--preferred">⭐ ${this.escapeHtml(z)}</div>`).join("")
         : "";
       const meaningHtml = (hasPreferred && !showAllMeaning) ? preferredMeaningHtml : allMeaningHtml;
+      // 2026-09-12 ScrambleSentences 模式：揭示释义时同时展示该词「当天固定、次日轮换」的例句
+      const keptSents = this.sentenceStore.keptFor(rec.word);
+      const sentHtml = revealed && keptSents.length ? this.reviewSentenceHtml(keptSents, rec.word) : "";
       // 提示行(只在有偏好时显示):"⭐ 已应用偏好 (N/M) · [切换]"
       const prefHint = hasPreferred
         ? `<div class="hiword-review__pref-hint">
@@ -7531,6 +7974,7 @@ export default class RewordPlugin extends Plugin {
           <div class="hiword-review__phon">${this.escapeHtml(phonetic)}</div>
           <div class="hiword-review__pos">${this.escapeHtml(posText)}</div>
           <div class="hiword-review__meaning" ${revealed ? "" : "hidden"}>${meaningHtml}</div>
+          ${sentHtml}
           ${prefHint}
           <button class="b3-button hiword-review__reveal" data-action="review-reveal" ${revealed ? "hidden" : ""}>${T("显示释义")} <span class="hiword-review__kbd">${T("空格")}</span></button>
         </div>
@@ -7553,6 +7997,8 @@ export default class RewordPlugin extends Plugin {
       if (!rec) return;
       const patch = nextReviewState(rec, g);
       void this.vocabStore!.updateReviewStats(rec.word, patch);
+      // 2026-09-12 每日记忆计划：评分即完成计划内 1 词（软目标封顶）
+      void this.dailyPlanStore.markReviewDone();
       index++;
       revealed = false;
       renderCard();
@@ -7568,6 +8014,7 @@ export default class RewordPlugin extends Plugin {
         const rec = queue[index];
         if (action === "review-exit") { dialog.destroy(); this.refreshActivePanel(); return; }
         if (action === "review-tts") { if (rec) this.speak(rec.word); return; }
+        if (action === "review-sent-tts") { const sen = target.dataset.en; if (sen) this.speak(sen); return; }
         if (action === "review-reveal") { revealed = true; renderCard(); return; }
         if (action === "review-toggle-all") {
           // 2026-08-22 释义偏好:切换 meaning 区域是显示 ⭐ 首选 还是全部
@@ -8528,6 +8975,19 @@ export default class RewordPlugin extends Plugin {
 
     const c = getReviewConfig();
     const persist = () => void this.saveReviewConfig();
+    // 2026-09-12 造句设置：本函数同时承载「复习节奏」与「AI 造句」两组配置。
+    // 造句侧读写的是一份独立配置（hiword-sentence-settings.json），不碰 AiSettings。
+    const sp = () => getSentenceSettings();
+    const persistSp = () => void this.saveSentenceSettings();
+    const s = sp();
+    // 2026-09-12 每日记忆计划配置（dailyPlanStore 内部触发持久化）
+    const planCfg = this.dailyPlanStore.config();
+    // 首选本地词典候选（离线词典只用于释义 / 词性反查，不提供例句）
+    const localDicts = dictEngine.listDicts().filter((d) => !d.lang || d.lang === "en");
+    const dictOpts = [
+      `<option value="" ${!s.preferredDictId ? "selected" : ""}>${t("跟随当前激活词典")}</option>`,
+      ...localDicts.map((d) => `<option value="${this.escapeAttr(d.id)}" ${s.preferredDictId === d.id ? "selected" : ""}>${this.escapeHtml(d.name)}</option>`),
+    ].join("");
 
     container.innerHTML = `
       <div class="hiword-up-group">
@@ -8568,10 +9028,158 @@ export default class RewordPlugin extends Plugin {
       </div>
 
       <div class="hiword-up-group">
+        <div class="hiword-up-group-label"><span class="hiword-up-group-name">${t("每日记忆计划")}</span>
+          <span class="hiword-up-group-hint">${t("软目标：到期词多于目标时取前 N，其余超额自选；昨日未完成按比例结转")}</span></div>
+        <div class="hiword-up-row">
+          <span class="hiword-up-row-k">${t("每日复习目标")}</span>
+          <div class="hiword-up-slider-row">
+            <input type="range" id="up-pl-review" min="1" max="100" step="5" value="${planCfg.reviewTarget}" />
+            <span class="hiword-up-slider-val" id="up-pl-review-v">${t("{n} 词", { n: planCfg.reviewTarget })}</span>
+          </div>
+        </div>
+        <div class="hiword-up-row">
+          <span class="hiword-up-row-k">${t("每日新词目标")}</span>
+          <div class="hiword-up-slider-row">
+            <input type="range" id="up-pl-new" min="0" max="50" step="1" value="${planCfg.newTarget}" />
+            <span class="hiword-up-slider-val" id="up-pl-new-v">${t("{n} 词", { n: planCfg.newTarget })}</span>
+          </div>
+        </div>
+        <div class="hiword-up-row hiword-up-row--block">
+          <span class="hiword-up-row-k">${t("昨日结转上限")}</span>
+          <div class="hiword-up-slider-row">
+            <input type="range" id="up-pl-carry" min="0" max="100" step="10" value="${Math.round(planCfg.carryCapRatio * 100)}" />
+            <span class="hiword-up-slider-val" id="up-pl-carry-v">${Math.round(planCfg.carryCapRatio * 100)}%</span>
+          </div>
+          <span class="hiword-up-row-sub">${t("昨日未完成滚入今日的封顶比例（防任务雪崩）")}</span>
+        </div>
+      </div>
+
+      <div class="hiword-up-group">
+        <div class="hiword-up-group-label"><span class="hiword-up-group-name">${t("例句来源")}</span>
+          <span class="hiword-up-group-hint">${t("决定例句从哪里来；只作用于复习面板的造句链路")}</span></div>
+        <div class="hiword-up-row hiword-up-row--switch">
+          <label class="hiword-up-switch"><input type="checkbox" id="up-sp-online" ${s.useOnlineExamples ? "checked" : ""} /><span>${t("优先使用在线词典（海词）自带例句")}</span></label>
+        </div>
+        <div class="hiword-up-group-desc">${t("离线词典文件不含例句数据，例句只能来自在线词典；关闭后完全由 AI 生成。")}</div>
+        <div class="hiword-up-row hiword-up-row--check">
+          <button type="button" class="hiword-up-check ${s.aiGenEnabled ? "on" : ""}" id="up-sp-aigen" aria-pressed="${s.aiGenEnabled}" title="${t("关闭后 AI 完全不参与句子生成，仅词典例句生效")}">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>
+          </button>
+          <span class="hiword-up-check-label">${t("允许 AI 造句")}</span>
+          <span class="hiword-up-row-sub">${t("关闭后 AI 完全不参与句子生成，仅词典例句生效（不影响 AI 精读 / 自由对话）")}</span>
+        </div>
+        <div class="hiword-up-row hiword-up-row--switch" id="up-sp-aifill-row" ${s.aiGenEnabled ? "" : 'style="opacity:.45;pointer-events:none"'}>
+          <label class="hiword-up-switch"><input type="checkbox" id="up-sp-aifill" ${s.aiFillEnabled ? "checked" : ""} ${s.aiGenEnabled ? "" : "disabled"} /><span>${t("词典例句不足时用 AI 补缺")}</span></label>
+        </div>
+        <div class="hiword-up-row">
+          <span class="hiword-up-row-k">${t("例句词性筛选")}</span>
+          <input type="text" id="up-sp-posfilter" class="hiword-up-input" value="${this.escapeAttr(s.examplePosFilter.join(", "))}" placeholder="${t("留空 = 不过滤，如：n., v.")}" />
+        </div>
+        <div class="hiword-up-row">
+          <span class="hiword-up-row-k">${t("首选本地词典")}</span>
+          <select id="up-sp-dict" class="hiword-up-select">${dictOpts}</select>
+        </div>
+        <div class="hiword-up-row">
+          <span class="hiword-up-row-k">${t("默认词典源")}</span>
+          <select id="up-sp-src" class="hiword-up-select">
+            <option value="offline" ${(this.onlineSettings?.popupSource ?? "offline") === "offline" ? "selected" : ""}>${t("离线词典优先")}</option>
+            <option value="online" ${this.onlineSettings?.popupSource === "online" ? "selected" : ""}>${t("在线词典优先")}</option>
+          </select>
+        </div>
+        <div class="hiword-up-group-desc">${t("「默认词典源」与查词典小窗共用同一设置，改这里两边同时生效。")}</div>
+      </div>
+
+      <div class="hiword-up-group">
+        <div class="hiword-up-group-label"><span class="hiword-up-group-name">${t("AI 造句提示词与参数")}</span>
+          <span class="hiword-up-group-hint">${t("仅作用于复习面板造句；AI 精读与自由对话的提示词不受影响")}</span></div>
+        <div class="hiword-up-row">
+          <span class="hiword-up-row-k">${t("每词生成句数")}</span>
+          <div class="hiword-up-slider-row">
+            <input type="range" id="up-sp-n" min="1" max="5" step="1" value="${s.sentenceCount}" />
+            <span class="hiword-up-slider-val" id="up-sp-n-v">${t("{n} 句", { n: s.sentenceCount })}</span>
+          </div>
+        </div>
+        <div class="hiword-up-row hiword-up-row--block">
+          <span class="hiword-up-row-k">${t("生成温度")}</span>
+          <div class="hiword-up-slider-row">
+            <input type="range" id="up-sp-temp" min="0" max="2" step="0.1" value="${s.temperature}" />
+            <span class="hiword-up-slider-val" id="up-sp-temp-v">${s.temperature.toFixed(1)}</span>
+          </div>
+          <span class="hiword-up-row-sub">${t("越低越稳定，越高越多样（与 AI 精读的温度各自独立）")}</span>
+        </div>
+        <div class="hiword-up-row">
+          <span class="hiword-up-row-k">${t("句子长度下限")}</span>
+          <div class="hiword-up-slider-row">
+            <input type="range" id="up-sp-lenmin" min="3" max="20" step="1" value="${s.lenMin}" />
+            <span class="hiword-up-slider-val" id="up-sp-lenmin-v">${t("{n} 词", { n: s.lenMin })}</span>
+          </div>
+        </div>
+        <div class="hiword-up-row">
+          <span class="hiword-up-row-k">${t("句子长度上限")}</span>
+          <div class="hiword-up-slider-row">
+            <input type="range" id="up-sp-lenmax" min="6" max="40" step="1" value="${s.lenMax}" />
+            <span class="hiword-up-slider-val" id="up-sp-lenmax-v">${t("{n} 词", { n: s.lenMax })}</span>
+          </div>
+        </div>
+        <div class="hiword-up-row">
+          <span class="hiword-up-row-k">${t("场景范围")}</span>
+          <input type="text" id="up-sp-scen" class="hiword-up-input" value="${this.escapeAttr(s.scenarios.join(", "))}" placeholder="${t("逗号分隔，如：日常, 学术, 商务")}" />
+        </div>
+        <div class="hiword-up-row hiword-up-row--switch">
+          <label class="hiword-up-switch"><input type="checkbox" id="up-sp-posbias" ${s.posBias ? "checked" : ""} /><span>${t("附加「词性 → 句型倾向」学科提示")}</span></label>
+        </div>
+        <div class="hiword-up-row hiword-up-row--switch">
+          <label class="hiword-up-switch"><input type="checkbox" id="up-sp-mark" ${s.markWord ? "checked" : ""} /><span>${t("要求目标词加粗标记（** 包裹）")}</span></label>
+        </div>
+        <div class="hiword-up-row hiword-up-row--block">
+          <span class="hiword-up-row-k">${t("补充要求（追加到提示词末尾）")}</span>
+          <textarea id="up-sp-extra" class="hiword-up-textarea" rows="3" placeholder="${t("留空 = 不追加。例：只使用英式拼写；避免出现人名。")}">${this.escapeHtml(s.extraPrompt)}</textarea>
+        </div>
+        <div class="hiword-up-row hiword-up-row--block">
+          <span class="hiword-up-row-k">${t("自定义系统提示词（高级）")}</span>
+          <textarea id="up-sp-sys" class="hiword-up-textarea" rows="4" placeholder="${t("留空 = 使用内置模板。填写后整段替换内置系统提示词，务必保留 JSON 输出要求。")}">${this.escapeHtml(s.systemPrompt)}</textarea>
+        </div>
+        <div class="hiword-up-row hiword-up-row--block">
+          <span class="hiword-up-row-k">${t("自定义提问模板（高级）")}</span>
+          <textarea id="up-sp-user" class="hiword-up-textarea" rows="3" placeholder="${t("留空 = 使用内置模板。可用占位符：{word} 单词、{n} 句数。")}">${this.escapeHtml(s.userPrompt)}</textarea>
+        </div>
+      </div>
+
+      <div class="hiword-up-group">
+        <div class="hiword-up-group-label"><span class="hiword-up-group-name">${t("限流与配额")}</span>
+          <span class="hiword-up-group-hint">${t("防频率过高；句数/冷却等仅约束 AI 造句")}</span></div>
+        <div class="hiword-up-row">
+          <span class="hiword-up-row-k">${t("同词冷却时长")}</span>
+          <div class="hiword-up-slider-row">
+            <input type="range" id="up-sp-cool" min="0" max="168" step="1" value="${s.cooldownHours}" />
+            <span class="hiword-up-slider-val" id="up-sp-cool-v">${s.cooldownHours === 0 ? t("不冷却") : t("{n} 小时", { n: s.cooldownHours })}</span>
+          </div>
+        </div>
+        <div class="hiword-up-row">
+          <span class="hiword-up-row-k">${t("每日生成上限")}</span>
+          <div class="hiword-up-slider-row">
+            <input type="range" id="up-sp-daily" min="0" max="100" step="5" value="${Math.min(100, s.dailyLimit)}" />
+            <span class="hiword-up-slider-val" id="up-sp-daily-v">${s.dailyLimit === 0 ? t("不限") : t("{n} 词/天", { n: s.dailyLimit })}</span>
+          </div>
+        </div>
+        <div class="hiword-up-row hiword-up-row--block">
+          <span class="hiword-up-row-k">${t("请求间隔")}</span>
+          <div class="hiword-up-slider-row">
+            <input type="range" id="up-sp-queue" min="0" max="30" step="1" value="${Math.round(s.queueIntervalMs / 1000)}" />
+            <span class="hiword-up-slider-val" id="up-sp-queue-v">${s.queueIntervalMs === 0 ? t("不等待") : t("{n} 秒", { n: Math.round(s.queueIntervalMs / 1000) })}</span>
+          </div>
+          <span class="hiword-up-row-sub">${t("连续生成多个单词时，两次 AI 请求之间的最小间隔")}</span>
+        </div>
+      </div>
+
+      <div class="hiword-up-group">
         <div class="hiword-up-group-label"><span class="hiword-up-group-name">${t("校准与重置")}</span></div>
         <div class="hiword-up-row hiword-up-row--actions">
           <button class="b3-button b3-button--small" id="up-rv-calib">${t("基于复习历史校准")}</button>
           <button class="b3-button b3-button--small b3-button--outline" id="up-rv-reset">${t("恢复默认参数")}</button>
+        </div>
+        <div class="hiword-up-row hiword-up-row--actions">
+          <button class="b3-button b3-button--small b3-button--outline" id="up-sp-reset">${t("恢复默认造句设置")}</button>
         </div>
       </div>
     `;
@@ -8606,6 +9214,108 @@ export default class RewordPlugin extends Plugin {
     });
     const seedI = container.querySelector("#up-rv-seed") as HTMLInputElement;
     seedI?.addEventListener("change", () => { setReviewConfig({ enableFrequencySeed: seedI.checked }); persist(); });
+
+    // ========== 2026-09-12 造句设置接线 ==========
+    // 每个控件改动即 setSentenceSettings + 落盘（不依赖弹窗底部「保存所有设置」）
+    const bindRange = (id: string, apply: (v: number) => void, label: (v: number) => string) => {
+      const el = container.querySelector<HTMLInputElement>(`#${id}`);
+      if (!el) return;
+      const out = container.querySelector<HTMLElement>(`#${id}-v`);
+      el.addEventListener("input", () => {
+        const v = parseFloat(el.value);
+        if (!Number.isFinite(v)) return;
+        apply(v);
+        if (out) out.textContent = label(v);
+        persistSp();
+      });
+    };
+    const bindCheck = (id: string, apply: (b: boolean) => void) => {
+      const el = container.querySelector<HTMLInputElement>(`#${id}`);
+      el?.addEventListener("change", () => { apply(el.checked); persistSp(); });
+    };
+    const bindText = (id: string, apply: (v: string) => void) => {
+      const el = container.querySelector<HTMLInputElement | HTMLTextAreaElement>(`#${id}`);
+      el?.addEventListener("change", () => { apply(el.value); persistSp(); });
+    };
+    const splitList = (v: string) => v.split(/[,，、\n]/).map((x) => x.trim()).filter(Boolean);
+
+    bindCheck("up-sp-online", (b) => setSentenceSettings({ useOnlineExamples: b }));
+    bindCheck("up-sp-aifill", (b) => setSentenceSettings({ aiFillEnabled: b }));
+    // 2026-09-12 每日记忆计划：滑块 input 实时预览、change 落盘（dailyPlanStore.setConfig 内部持久化）
+    const bindPlanRange = (id: string, apply: (v: number) => void, fmt: (v: number) => string) => {
+      const el = container.querySelector<HTMLInputElement>(`#${id}`);
+      const out = container.querySelector<HTMLElement>(`#${id}-v`);
+      const sync = () => { if (out && el) out.textContent = fmt(Number(el.value)); };
+      el?.addEventListener("input", sync);
+      el?.addEventListener("change", () => { sync(); apply(Number(el.value)); });
+    };
+    bindPlanRange("up-pl-review", (v) => { void this.dailyPlanStore.setConfig({ reviewTarget: v }); }, (v) => t("{n} 词", { n: v }));
+    bindPlanRange("up-pl-new", (v) => { void this.dailyPlanStore.setConfig({ newTarget: v }); }, (v) => t("{n} 词", { n: v }));
+    bindPlanRange("up-pl-carry", (v) => { void this.dailyPlanStore.setConfig({ carryCapRatio: v / 100 }); }, (v) => `${v}%`);
+    // 2026-09-12「允许 AI 造句」总开关（图 2 样式：蓝圆白勾）：关闭 → 补缺开关灰显禁用
+    const aigenBtn = container.querySelector<HTMLButtonElement>("#up-sp-aigen");
+    const aifillRow = container.querySelector<HTMLElement>("#up-sp-aifill-row");
+    const aifillCb = container.querySelector<HTMLInputElement>("#up-sp-aifill");
+    const syncAiGen = (enabled: boolean) => {
+      aigenBtn?.classList.toggle("on", enabled);
+      aigenBtn?.setAttribute("aria-pressed", String(enabled));
+      if (aifillRow) { aifillRow.style.opacity = enabled ? "" : "0.45"; aifillRow.style.pointerEvents = enabled ? "" : "none"; }
+      if (aifillCb) aifillCb.disabled = !enabled;
+    };
+    aigenBtn?.addEventListener("click", () => {
+      const next = !sp().aiGenEnabled;
+      setSentenceSettings({ aiGenEnabled: next });
+      syncAiGen(next);
+      persistSp();
+    });
+    syncAiGen(s.aiGenEnabled);
+    bindCheck("up-sp-posbias", (b) => setSentenceSettings({ posBias: b }));
+    bindCheck("up-sp-mark", (b) => setSentenceSettings({ markWord: b }));
+    bindText("up-sp-posfilter", (v) => setSentenceSettings({ examplePosFilter: splitList(v) }));
+    bindText("up-sp-scen", (v) => setSentenceSettings({ scenarios: splitList(v) }));
+    bindText("up-sp-extra", (v) => setSentenceSettings({ extraPrompt: v }));
+    bindText("up-sp-sys", (v) => setSentenceSettings({ systemPrompt: v }));
+    bindText("up-sp-user", (v) => setSentenceSettings({ userPrompt: v }));
+
+    bindRange("up-sp-n", (v) => setSentenceSettings({ sentenceCount: v }), (v) => t("{n} 句", { n: v }));
+    bindRange("up-sp-temp", (v) => setSentenceSettings({ temperature: v }), (v) => v.toFixed(1));
+    bindRange("up-sp-cool", (v) => setSentenceSettings({ cooldownHours: v }), (v) => (v === 0 ? t("不冷却") : t("{n} 小时", { n: v })));
+    bindRange("up-sp-daily", (v) => setSentenceSettings({ dailyLimit: v }), (v) => (v === 0 ? t("不限") : t("{n} 词/天", { n: v })));
+    bindRange("up-sp-queue", (v) => setSentenceSettings({ queueIntervalMs: Math.round(v) * 1000 }), (v) => (v === 0 ? t("不等待") : t("{n} 秒", { n: v })));
+
+    // 句长上下限：配置层在「下限 ≥ 上限」时会整体回落默认，故改完两个滑块都要按存储值回写，
+    // 否则界面会显示一个并未生效的数字。
+    const syncLen = () => {
+      const s2 = sp();
+      for (const [id, val] of [["up-sp-lenmin", s2.lenMin], ["up-sp-lenmax", s2.lenMax]] as const) {
+        const el = container.querySelector<HTMLInputElement>(`#${id}`);
+        const out = container.querySelector<HTMLElement>(`#${id}-v`);
+        if (el) el.value = String(val);
+        if (out) out.textContent = t("{n} 词", { n: val });
+      }
+    };
+    bindRange("up-sp-lenmin", (v) => { setSentenceSettings({ lenMin: v }); syncLen(); }, (v) => t("{n} 词", { n: v }));
+    bindRange("up-sp-lenmax", (v) => { setSentenceSettings({ lenMax: v }); syncLen(); }, (v) => t("{n} 词", { n: v }));
+
+    // 首选本地词典
+    const dictSel = container.querySelector<HTMLSelectElement>("#up-sp-dict");
+    dictSel?.addEventListener("change", () => { setSentenceSettings({ preferredDictId: dictSel.value }); persistSp(); });
+    // 默认词典源：与查词典小窗共用 OnlineSettings.popupSource（单一真源，不另存一份）
+    const srcSel = container.querySelector<HTMLSelectElement>("#up-sp-src");
+    srcSel?.addEventListener("change", () => {
+      const popupSource = srcSel.value === "online" ? "online" : "offline";
+      void this.saveOnlineSettings({
+        ...(this.onlineSettings || { ...DEFAULT_ONLINE }),
+        popupSource,
+      });
+      showMessage(t("默认词典源已更新（查词典小窗同步生效）"), 1800, "info");
+    });
+    // 恢复默认造句设置
+    container.querySelector("#up-sp-reset")?.addEventListener("click", () => {
+      this.resetSentenceSettingsCmd();
+      container.dataset.rendered = "false";
+      this.renderReviewSettings(dlg, dialog);
+    });
 
     container.querySelector("#up-rv-calib")?.addEventListener("click", () => this.calibrateReview());
     container.querySelector("#up-rv-reset")?.addEventListener("click", () => {
@@ -8684,6 +9394,7 @@ export default class RewordPlugin extends Plugin {
       "hiword-review-config.json", "hiword-annotation-config.json", "hiword-reader-settings.json",
       "hiword-dock-layout.json", "hiword-dicts.json", "hiword-tts.json",
       "hiword-review-sources.json",
+      "hiword-daily-plan.json", "hiword-sentences.json",
     ];
 
     container.innerHTML = `
@@ -10365,10 +11076,7 @@ export default class RewordPlugin extends Plugin {
       );
       // 加入词库后：仅当 dock 当前停在「词库」Tab 时才重绘它，
       // 避免覆盖用户正在编辑的其它 Tab（如 AI 精读面板），造成编辑中断 / 误以为"切到词库界面"。
-      const activeTab = this.dockElement?.querySelector(".hiword-dock-tab.active") as HTMLElement | null;
-      if (this.dockElement && activeTab?.dataset.tab === "vocab") {
-        this.renderVocabPanel(this.dockElement);
-      }
+      this.refreshVocabPanelIfVisible();
     });
   }
 
@@ -10659,10 +11367,7 @@ export default class RewordPlugin extends Plugin {
         3500,
         "success" as any
       );
-      const activeTab = this.dockElement?.querySelector(".hiword-dock-tab.active") as HTMLElement | null;
-      if (this.dockElement && activeTab?.dataset.tab === "vocab") {
-        this.renderVocabPanel(this.dockElement);
-      }
+      this.refreshVocabPanelIfVisible();
     });
   }
 
@@ -10671,35 +11376,24 @@ export default class RewordPlugin extends Plugin {
 
   /**
    * 数据统计小 Tab：总览卡 + 近 7 天复习量柱状图 + 星级分布 + 易忘词 Top。
-   * 数据口径：全词库 lastReview 逐日归组 + mastery/lapse 字段，与学习 Tab 指标零重复。
+   * 数据口径：复习按日次数取自 review/review-history.ts 单一真源（事件级优先）+
+   * mastery/lapse 字段，与学习 Tab 指标零重复。
    */
   private buildReviewStatsHtml(): string {
     if (!this.vocabStore) return `<div class="hiword-empty">${t("插件尚未就绪")}</div>`;
     const now = Date.now();
     const DAY = 86_400_000;
     const all = this.vocabStore.getAllWords();
-    const m = this.computeReviewMetrics();
+    // 复习按日次数：单一真源（事件级 reviewEvents 优先，超出事件窗口的旧日子回落 lastReview）。
+    // 此前这里与工作台各自用 lastReview 归日：同日多次复习只算 1 次，再复习一次还会让
+    // 过去的格子变浅、今天变深（D2），两处口径也会互相打架（D1）。
+    const dayCount = this.reviewDayMap(all);
+    const m = this.computeReviewMetrics(all, dayCount);
 
-    // 已复习过的词按本地日期归组（连续天数 + 近 7 天柱状共用）
-    const daySet = new Set<string>();
-    const dayCount = new Map<string, number>();
-    for (const w of all) {
-      if (!w.lastReview) continue;
-      const tt = Date.parse(w.lastReview);
-      if (Number.isNaN(tt)) continue;
-      const key = localDateKey(tt);
-      daySet.add(key);
-      dayCount.set(key, (dayCount.get(key) ?? 0) + 1);
-    }
-    // 连续天数：今天有复习从今天数，否则从昨天数（今天还没学不打断连续）
-    let streak = 0;
     const sod = new Date(now);
     sod.setHours(0, 0, 0, 0);
-    let cursor = daySet.has(localDateKey(sod.getTime())) ? sod.getTime() : sod.getTime() - DAY;
-    while (daySet.has(localDateKey(cursor))) {
-      streak++;
-      cursor -= DAY;
-    }
+    // 连续天数：今天有复习从今天数，否则从昨天数（今天还没学不打断连续）
+    const streak = computeDayStreak(new Set(dayCount.keys()), now).streak;
 
     // 近 7 天柱状图
     const weekNames = [t("周日"), t("周一"), t("周二"), t("周三"), t("周四"), t("周五"), t("周六")];
@@ -10760,7 +11454,7 @@ export default class RewordPlugin extends Plugin {
     return `
       <div class="hiword-rp-stats">
         <div class="hiword-rp-st-cards">
-          <div class="hiword-rp-metric"><div class="hiword-rp-metric-val">${m.weekReviewed}</div><div class="hiword-rp-metric-label">${t("本周已复习")}</div></div>
+          <div class="hiword-rp-metric"><div class="hiword-rp-metric-val">${m.weekReviewed}</div><div class="hiword-rp-metric-label">${t("近 7 天复习")}</div></div>
           <div class="hiword-rp-metric"><div class="hiword-rp-metric-val">${m.retention}%</div><div class="hiword-rp-metric-label">${t("估计保留率")}</div></div>
           <div class="hiword-rp-metric"><div class="hiword-rp-metric-val">${streak}</div><div class="hiword-rp-metric-label">${t("连续天数")}</div></div>
           <div class="hiword-rp-metric"><div class="hiword-rp-metric-val">${ripeCount}</div><div class="hiword-rp-metric-label">${t("标熟词数")}</div></div>
@@ -10816,6 +11510,243 @@ export default class RewordPlugin extends Plugin {
         getLogger().warn("[REword][review-source] 书源释放失败（不影响其余功能）:", { source: src.targetLabel, error: e });
       }
     }
+  }
+
+  // ============ 2026-09-12 每日记忆计划 + AI 造句 ============
+
+  /** 当前到期词全集数（软目标输入：含今日 24:00 前到期） */
+  private dueCountAll(): number {
+    if (!this.vocabStore) return 0;
+    const now = Date.now();
+    let n = 0;
+    for (const w of this.vocabStore.getReviewCandidates()) {
+      const due = w.due ? Date.parse(w.due) : NaN;
+      if (Number.isNaN(due) || due <= now) n++;
+    }
+    return n;
+  }
+
+  /** 确保今日计划（词库就绪 / 打开复习面板时调用；跨天自动结转） */
+  private async ensureTodayPlan(): Promise<void> {
+    if (!this.vocabStore || !this.isReady) return;
+    try {
+      await this.dailyPlanStore.ensureToday(this.dueCountAll());
+    } catch (e) {
+      getLogger().warn("[REword][daily-plan] 今日计划生成失败:", { error: e });
+    }
+  }
+
+  /**
+   * ✨ AI 造句入口（用户拍板链路：海词/离线词典例句优先 → AI 补缺）。
+   * prompt 为内置可控常量（gen-prompt.ts），与 AI 精读自由对话的模板体系互不影响。
+   */
+  private async generateSentencesForWord(word: string, force = false, aiOnly = false): Promise<void> {
+    if (!this.vocabStore || !this.sentenceEngine) return;
+    if (this.genBusy.has(word)) return;
+    // 「重新生成」= 切换为 AI 队列：总开关关闭时 AI 队列不可用，直接提示不执行
+    if (aiOnly && !getSentenceSettings().aiGenEnabled) {
+      showMessage(t("AI 造句已关闭：在「算法设置 → 例句来源」中开启「允许 AI 造句」后再切换 AI 队列"), 3000, "info");
+      return;
+    }
+    this.genBusy.add(word);
+    this.openSentCards.add(word);
+    this.refreshStudyPanel();
+    try {
+      // 「重新生成」：清空该词草稿句（采纳/收藏保留），词典队列 → AI 生成队列
+      if (aiOnly) {
+        const drafts = this.sentenceStore.listFor(word).filter((s) => s.status === "draft");
+        for (const s of drafts) await this.sentenceStore.remove(s.id);
+      }
+      const rec = this.vocabStore.findRecord(word);
+      const res = await this.sentenceEngine.generateForWord(
+        word,
+        rec?.pos || "",
+        rec?.meaning || "",
+        // 句数由造句设置提供（引擎内部也会再次夹断到 1–5）
+        { n: getSentenceSettings().sentenceCount, force, aiOnly }
+      );
+      if (!res.ok) {
+        // 冷却时长与日限均来自造句设置，文案如实反映（不再写死 24 小时）
+        const st = getSentenceSettings();
+        const msg = res.skipped === "cooldown"
+          ? T("「{w}」24 小时内已生成过（可再次点击强制重新生成）", { w: word })
+          : res.skipped === "daily-limit"
+            ? T("今日 AI 造句配额已用完，明天再来")
+            : res.skipped === "ai-not-configured"
+              ? T("AI 未配置：先在设置中配置模型（词典例句不受影响）")
+              : res.skipped === "ai-disabled"
+                ? T("AI 造句已关闭：在「算法设置 → 例句来源」中开启「允许 AI 造句」（词典例句不受影响）")
+                : T("造句失败：{err}", { err: res.error || "unknown" });
+        showMessage(msg, 3000, "info");
+      } else if (res.dictAdded + res.aiAdded === 0) {
+        showMessage(T("未生成到合格例句，稍后再试"), 2400, "info");
+      }
+    } finally {
+      this.genBusy.delete(word);
+      this.refreshStudyPanel();
+    }
+  }
+
+  /** 批量造句弹层：当前筛选列表选词 → 串行队列逐词生成（词典优先，AI 补缺） */
+  private showBatchSentenceDialog(words: WordRecord[]): void {
+    const list = words.slice(0, 30); // 上限 30 防滥用（串行 5s/词，30 词约 2.5 分钟）
+    if (!list.length) {
+      showMessage(t("当前列表没有单词"), 2000, "info");
+      return;
+    }
+    const st = getSentenceSettings();
+    const dlg = new Dialog({
+      title: t("批量 AI 造句"),
+      width: responsiveDialogSize(560, "width"),
+      height: "62vh",
+      content: `
+      <div class="hiword-bs">
+        <div class="hiword-bs-desc">${T("将依次为 {n} 个词生成例句（每词 {m} 句；词典例句优先，AI 补缺；串行队列，约 {s} 秒）。", { n: list.length, m: st.sentenceCount, s: Math.max(1, list.length * Math.round(st.queueIntervalMs / 1000)) })}</div>
+        <div class="hiword-bs-list">
+          ${list
+            .map(
+              (w) => `<label class="hiword-bs-item">
+                <input type="checkbox" data-word="${this.escapeAttr(w.word)}" checked />
+                <span class="hiword-bs-word">${this.escapeHtml(w.word)}</span>
+                ${this.sentenceStore.countFor(w.word) ? `<span class="hiword-bs-has">${T("已有 {n} 句", { n: this.sentenceStore.countFor(w.word) })}</span>` : ""}
+              </label>`
+            )
+            .join("")}
+        </div>
+        <div class="hiword-bs-foot">
+          <span class="hiword-bs-sum" id="hiword-bs-sum"></span>
+          <span style="flex:1"></span>
+          <button class="b3-button b3-button--small" id="hiword-bs-cancel">${t("取消")}</button>
+          <button class="b3-button b3-button--small b3-button--primary" id="hiword-bs-go">${t("开始生成")}</button>
+        </div>
+      </div>`,
+    });
+    const root = dlg.element;
+    const boxes = [...root.querySelectorAll<HTMLInputElement>(".hiword-bs-item input")];
+    const sumEl = root.querySelector<HTMLElement>("#hiword-bs-sum");
+    const updateSum = () => {
+      const n = boxes.filter((b) => b.checked).length;
+      if (sumEl) sumEl.textContent = T("已选 {n} 词", { n });
+    };
+    updateSum();
+    boxes.forEach((b) => b.addEventListener("change", updateSum));
+    root.querySelector("#hiword-bs-cancel")?.addEventListener("click", () => dlg.destroy());
+    root.querySelector("#hiword-bs-go")?.addEventListener("click", async () => {
+      const picked = boxes.filter((b) => b.checked).map((b) => b.dataset.word || "").filter(Boolean);
+      dlg.destroy();
+      if (!picked.length || !this.sentenceEngine) return;
+      showMessage(T("批量造句开始：{n} 词排队中（串行队列，可稍后查看词卡展开区）", { n: picked.length }), 2600, "info");
+      let ok = 0;
+      for (const w of picked) {
+        const rec = this.vocabStore?.findRecord(w);
+        if (!rec) continue;
+        try {
+          const res = await this.sentenceEngine.generateForWord(w, rec.pos || "", rec.meaning || "", { n: st.sentenceCount });
+          if (res.ok && res.dictAdded + res.aiAdded > 0) ok++;
+        } catch {
+          // 单词失败不中断批量
+        }
+      }
+      showMessage(T("批量完成：{ok}/{n} 词生成成功（词典优先，AI 补缺）", { ok, n: picked.length }), 3200, ok === picked.length ? ("success" as any) : "info");
+      this.refreshStudyPanel();
+    });
+  }
+
+  /** 词卡句子展开区 HTML（已入库句子 + 生成中 skeleton + 操作按钮） */
+  private renderSentenceArea(word: string): string {
+    const sents = this.sentenceStore.listFor(word);
+    const busy = this.genBusy.has(word);
+    const cards = sents
+      .map((s) => {
+        const st = s.sentenceType || "phrase";
+        const kept = s.status === "kept";
+        const fav = s.status === "fav";
+        const tags = [
+          `<span class="hiword-rp-stype hiword-rp-stype--${this.escapeAttr(st)}" title="${this.escapeAttr(st)}">${st}</span>`,
+          s.tense && s.tense !== "未标注" ? `<span class="hiword-rp-stag">${this.escapeHtml(s.tense)}</span>` : "",
+          s.scenario && s.scenario !== "未标注" ? `<span class="hiword-rp-stag">${this.escapeHtml(s.scenario)}</span>` : "",
+          s.cefr && s.cefr !== "未标注" ? `<span class="hiword-rp-stag">${this.escapeHtml(s.cefr)}</span>` : "",
+          s.source === "dict" ? `<span class="hiword-rp-stag hiword-rp-stag--dict">${t("词典例句")}</span>` : "",
+        ].join("");
+        return `<div class="hiword-rp-sent">
+          <div class="hiword-rp-sent-en">${this.markWordInSentence(s.en, word)}</div>
+          <div class="hiword-rp-sent-zh">${this.escapeHtml(s.zh)}</div>
+          <div class="hiword-rp-sent-meta">${tags}
+            <span class="hiword-rp-sent-ops">
+              <button class="hiword-rp-sop" data-action="sent-speak" data-en="${this.escapeAttr(s.en)}" title="${t("朗读")}"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M11 5L6 9H2v6h4l5 4V5z"/><path d="M15.5 8.5a5 5 0 0 1 0 7" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg></button>
+              <button class="hiword-rp-sop hiword-rp-sop--adopt ${kept ? "on" : ""}" data-action="sent-adopt" data-id="${this.escapeAttr(s.id)}" title="${t("采纳（进入复习轮换）")}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg></button>
+              <button class="hiword-rp-sop hiword-rp-sop--fav ${fav ? "on" : ""}" data-action="sent-fav" data-id="${this.escapeAttr(s.id)}" title="${t("收藏")}"><svg viewBox="0 0 24 24" fill="${fav ? "currentColor" : "none"}" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"><path d="M12 2l3.1 6.3 6.9 1-5 4.9 1.2 6.8L12 17.8 5.8 21l1.2-6.8-5-4.9 6.9-1L12 2z"/></svg></button>
+              <button class="hiword-rp-sop" data-action="sent-del" data-id="${this.escapeAttr(s.id)}" title="${t("删除")}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6L6 18M6 6l12 12"/></svg></button>
+            </span>
+          </div>
+        </div>`;
+      })
+      .join("");
+    const loading = busy ? `<div class="hiword-rp-sent-skel"></div><div class="hiword-rp-sent-skel" style="width:92%"></div>` : "";
+    // 2026-09-12 P0：头部固定带「换 AI 句 / 收起」两个出口。
+    // 此前 openSentCards 只增不减、展开区没有任何关闭控件，用户点开例句后无法收回。
+    const tools = busy ? "" : `<span class="hiword-rp-sents-tools">
+        ${sents.length ? `<button class="hiword-rp-sents-tool hiword-rp-sents-tool--regen" data-action="sent-regen" data-word="${this.escapeAttr(word)}" title="${this.escapeAttr(T("切换为 AI 生成队列：替换当前词典例句（草稿句），固定生成 {n} 句", { n: getSentenceSettings().sentenceCount }))}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:12px;height:12px;vertical-align:-1px"><path d="M21 12a9 9 0 1 1-3.5-7.1"/><path d="M21 3v6h-6"/></svg>${t("换 AI 句")}</button>` : ""}
+        <button class="hiword-rp-sents-tool" data-action="sent-close" data-word="${this.escapeAttr(word)}" title="${t("收起例句区")}">${t("收起")}</button>
+      </span>`;
+    const hintText = busy
+      ? `⏳ ${t("造句中：词典例句优先，AI 补缺（串行队列）")}`
+      : sents.length
+        ? T("已收集 {n} 句 · 采纳的句子将在复习时轮换展示", { n: sents.length })
+        : t("暂无例句");
+    const hint = `<div class="hiword-rp-sents-hint">${hintText}${tools}</div>`;
+    const genBtn = !busy && !sents.length
+      ? `<button class="hiword-rp-gen-more" data-action="sent-gen" data-word="${this.escapeAttr(word)}"><svg viewBox="0 0 24 24" fill="currentColor" style="width:13px;height:13px;vertical-align:-2px;margin-right:5px"><path d="M12 2l1.9 5.8a1 1 0 0 0 .6.6L20.3 11l-5.8 1.9a1 1 0 0 0-.6.6L12 19.4l-1.9-5.9a1 1 0 0 0-.6-.6L3.7 11l5.9-1.9a1 1 0 0 0 .6-.6L12 2z"/></svg>${t("AI 造句")}</button>`
+      : "";
+    return `<div class="hiword-rp-sents">${hint}${cards}${loading}${genBtn}</div>`;
+  }
+
+  /** 复习会话例句卡（ScrambleSentences 模式）：已采纳句子当天固定、次日轮换（deterministic 选取） */
+  private reviewSentenceHtml(sents: SentenceRecord[], word: string): string {
+    const dayNo = Math.floor(Date.now() / 86_400_000);
+    let h = 0;
+    for (const c of word) h = (h * 31 + c.charCodeAt(0)) >>> 0;
+    const s = sents[(dayNo + h) % sents.length];
+    return `<div class="hiword-review__sent">
+      <div class="hiword-review__sent-label">${t("例句")} · ${t("当天固定、次日轮换（记词不记句）")}</div>
+      <div class="hiword-review__sent-en">${this.markWordInSentence(s.en, word)}</div>
+      <div class="hiword-review__sent-zh">${this.escapeHtml(s.zh)}</div>
+      <div class="hiword-review__sent-meta">
+        <span class="hiword-rp-stype hiword-rp-stype--${this.escapeAttr(s.sentenceType)}" title="${this.escapeAttr(s.sentenceType)}">${this.escapeHtml(s.sentenceType)}</span>
+        ${s.source === "dict" ? `<span class="hiword-rp-stag hiword-rp-stag--dict">${t("词典例句")}</span>` : ""}
+        <button class="hiword-review__sent-tts" data-action="review-sent-tts" data-en="${this.escapeAttr(s.en)}" title="${t("朗读句子")}">
+          <svg viewBox="0 0 24 24" fill="currentColor"><path d="M11 5L6 9H2v6h4l5 4V5z"/><path d="M15.5 8.5a5 5 0 0 1 0 7" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+        </button>
+      </div>
+    </div>`;
+  }
+
+  /** 目标词在句中加粗（词形变化宽松匹配） */
+  private markWordInSentence(en: string, word: string): string {
+    const esc = this.escapeHtml(en);
+    try {
+      const stem = word.length > 5 ? word.slice(0, Math.max(4, word.length - 2)) : word;
+      const re = new RegExp(`(${stem}[a-zA-Z]*)`, "i");
+      return esc.replace(re, "<b>$1</b>");
+    } catch {
+      return esc;
+    }
+  }
+
+  /** 采纳/收藏切换（再点取消）+ WordRecord.sentenceIds 回写 */
+  private async toggleSentenceStatus(id: string, next: "kept" | "fav"): Promise<void> {
+    const s = this.sentenceStore.get(id);
+    if (!s || !this.vocabStore) return;
+    const target: "draft" | "kept" | "fav" = s.status === next ? "draft" : next;
+    await this.sentenceStore.update(id, { status: target });
+    const rec = this.vocabStore.findRecord(s.word);
+    if (rec) {
+      const ids = new Set(rec.sentenceIds || []);
+      if (target === "draft") ids.delete(id);
+      else ids.add(id);
+      await this.vocabStore.updateReviewStats(s.word, { sentenceIds: [...ids] });
+    }
+    this.refreshStudyPanel();
   }
 
   /**
@@ -10997,7 +11928,7 @@ export default class RewordPlugin extends Plugin {
           3400,
           "success" as any
         );
-        if (this.dockElement) this.renderReviewPanel(this.dockElement);
+        this.refreshStudyPanel();
       } catch (e) {
         getLogger().warn("[REword][review-source] 绑定书源失败:", { error: e });
         showMessage(t("绑定书源失败，请重试"), 3000, "error");
@@ -11104,7 +12035,7 @@ export default class RewordPlugin extends Plugin {
       }
       dialog.destroy();
       showMessage(t("已将 {n} 个单词加入复习（立即可复习）", { n }), 3200, "success" as any);
-      if (this.dockElement) this.renderReviewPanel(this.dockElement);
+      this.refreshStudyPanel();
     });
     updateCount();
   }
@@ -11913,14 +12844,21 @@ export default class RewordPlugin extends Plugin {
     const jumpHandler = (btn: Element) => {
       const card = btn.closest(".whale-card, .whale-notes-item") as HTMLElement;
       if (!card) return;
-      // C 跳转定位：阅读批注（带 data-book + data-cfi）→ 打开/聚焦阅读 Tab 并跳转到对应位置弹气泡
+      const annId = card.dataset.id;
+      // C 跳转定位：阅读批注 → 统一入口。按「整条记录」跳，PDF 文本标注没有 cfi
+      // 也能落到正确页码并闪烁定位（旧链只认 cfi，PDF 标注点了毫无反应）。
+      const ann = annId ? this.annotationStore.get(annId) : undefined;
+      if (ann?.bookId) {
+        void this.openAnnotation(ann);
+        return;
+      }
+      // 降级：卡片只带 data-book + data-cfi（无 data-id）→ 仍走旧 cfi 链
       const bookId = card.dataset.book;
       const cfi = card.dataset.cfi;
       if (bookId && cfi) {
         void this.jumpToReading(bookId, cfi);
         return;
       }
-      const annId = card.dataset.id;
       if (annId) this.scrollEditorToAnnotation(annId);
     };
     contentEl.querySelectorAll(".whale-card-btn[data-action='jump']").forEach((btn) => {
@@ -12654,6 +13592,44 @@ export default class RewordPlugin extends Plugin {
       getLogger().warn("[REword] 跳转到阅读批注失败", { data: { bookId, cfi }, error: e });
       showMessage(T("跳转到阅读批注失败"), 2000, "error" as any);
     }
+  }
+
+  /**
+   * 统一标注跳转入口：把**整条记录**交给 ReaderView，复用其 cfi / page / rect 三分支
+   * （含 flashRect 闪烁定位，体验优于单纯 goTo）。
+   * 为什么需要它：旧链 jumpToReading(bookId, cfi) 只认 cfi，而 PDF 文本标注只有 page、
+   * 没有 cfi —— 从任何列表点进去都会撞上 ReaderTabController 的 `if (!bookId || !cfi) return`
+   * 静默失败。统一入口后四类标注（EPUB 文本 / PDF 文本 / 矩形 / 墨迹）全部可跳，
+   * 且跳转逻辑只有一处真源，不必在侧栏与工作台各自拼 cfi。
+   * @internal dashboard / 微阅批注面板共用
+   */
+  private async openAnnotation(
+    ann: { id?: string; bookId?: string; cfi?: string; page?: number; kind?: string } | null | undefined
+  ): Promise<void> {
+    if (!ann?.bookId) return;
+    try {
+      await this.readerDock?.tabController?.focusAnnotationRecord(ann.bookId, ann);
+    } catch (e) {
+      getLogger().warn("[REword] 跳转到阅读标注失败", { data: { bookId: ann.bookId, id: ann.id }, error: e });
+      showMessage(T("跳转到阅读批注失败"), 2000, "error" as any);
+    }
+  }
+
+  /** @internal dashboard 阅读标注条目点击：按 id 查 store → 统一入口 */
+  openAnnotationById(id: string): void {
+    const ann = this.annotationStore?.get(id);
+    if (ann) void this.openAnnotation(ann);
+  }
+
+  /**
+   * @internal dashboard 墨迹条目点击。
+   * 墨迹不在 annotationStore 里（独立存储 hiword-ink.json），所以按 id 查不到 ——
+   * 这里合成一条最小记录交给同一个统一入口，复用 ReaderView 的 kind==="ink" 分支。
+   * @param pageIndex InkStroke.pageIndex（**0-based**；ReaderView 侧负责 +1 转 1-based 页码）
+   */
+  openInkStroke(bookId: string, strokeId: string, pageIndex: number): void {
+    if (!bookId) return;
+    void this.openAnnotation({ id: strokeId, bookId, kind: "ink", page: pageIndex });
   }
 
   private closeInlineAnnotationPopover(): void {

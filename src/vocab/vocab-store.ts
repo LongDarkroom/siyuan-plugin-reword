@@ -777,6 +777,8 @@ export class VocabStore {
     const allowed: (keyof WordRecord)[] = [
       "queryCount", "difficulty", "recall", "reps", "lapse",
       "lastGrade", "lastReview", "due", "intervalDays", "ease",
+      // 2026-09-12：句子库索引（采纳/收藏句子的 id 列表）
+      "sentenceIds",
     ];
     const rec = loc.record as unknown as Record<string, unknown>;
     for (const k of allowed) {

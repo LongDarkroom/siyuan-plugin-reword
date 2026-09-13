@@ -668,10 +668,20 @@ import { getLogger } from "../core/logger.ts";
 
   // 阅读统计（时长 / 剩余时间估算）
   let totalChars = 0;
-  let sessionReadMs = 0;
+  /** 本次会话「有效阅读」累计，从不清零 —— 服务 ETA 的实测速度。
+   *  ⚠️ 与旧的 sessionReadMs 语义不同：后者实为「30s 待落盘滚动桶」，
+   *  每 30s 被清零 → updateEta 里 minsRead ≤ 0.5 → `minsRead > 1` 恒 false
+   *  → speed 恒回落 400 字/分，「按当前阅读速度估算」那个 tooltip 是假的（代码级必然，非概率）。 */
+  let activeMs = 0;
+  /** 待落盘累计：满 TIMER_FLUSH_MS 清零并写进 readingLog */
+  let flushAcc = 0;
   let etaText = "";
   let timeTimer: any = null;
   let lastTickAt = 0;
+  /** 最后一次活跃时刻（闸门 3「空闲转停」用） */
+  let lastActivityAt = 0;
+  /** 当前累加量所属的本地日期（闸门 4「跨零点归属」用） */
+  let curDayKey = "";
   let searchInput: HTMLInputElement;
 
   // 字体状态
@@ -1808,6 +1818,10 @@ import { getLogger } from "../core/logger.ts";
           }
         }
         updateEta(frac);
+        // 闸门 3 的活跃信号：翻页 / 滚动一定产生 relocate。
+        // 这条最关键 —— 用键盘翻页、或长时间盯着同一页看时鼠标完全不动，
+        // 若不把它算作活跃，静止阅读会被判空闲而停表（从「多计」翻成「少计」）。
+        markReaderActivity();
         // [REword patch 2026-08-29] PDF 缩放状态一并保存
         const savePayload: any = { cfi: d?.cfi, fraction: frac };
         if (isPdfBook()) {
@@ -2323,7 +2337,9 @@ import { getLogger } from "../core/logger.ts";
       etaText = t("已读完");
       return;
     }
-    const minsRead = sessionReadMs / 60000;
+    // 实测速度必须用「会话累计」activeMs —— 旧代码用 sessionReadMs（30s 滚动桶，
+    // 每 30s 清零 → minsRead 恒 ≤ 0.5 → 下面的判断恒 false → 恒用 400 字/分默认值）
+    const minsRead = activeMs / 60000;
     let speed = minsRead > 1 ? readChars / minsRead : 0; // chars/min 实测
     if (speed < 60) speed = 400; // 无实测数据时用默认速度
     const remainMin = remain / speed;
@@ -2338,20 +2354,106 @@ import { getLogger } from "../core/logger.ts";
     }
   }
 
-  /** 阅读时长计时：每秒累加（页面隐藏时暂停），每 30s 落盘一次 */
+  /* ================= 阅读计时（四道闸门）=================
+   * 原实现只有一个暂停条件 `!document.hidden`，实测三类越界（2026-09-12 污染 12 个有记录日
+   * 中的 5 个 >6h、合计占全部日志 77%，峰值 9/1 = 20h16m；一本儿童分级读物累计 36h01m
+   * 却只走了 8.3% 进度）：
+   *   ① 切到别的页签照计 —— 非激活页签只是 display:none，组件不销毁、interval 照跑；
+   *   ② 睡眠 / 挂起一次性补记 —— delta 无上限，合盖 8h 唤醒后整段写进当天；
+   *   ③ 无空闲门槛 —— 开着书走人照计。
+   * 历史虚高值无法回溯（readingLog 里没有活跃/空闲标记位），修后只保证今后准确。
+   */
+  const TIMER_TICK_MS = 1000;
+  /** 待落盘阈值：满即写盘并清零 */
+  const TIMER_FLUSH_MS = 30_000;
+  /**
+   * 闸门 2 · 单 tick 间隔上限。超此值判为挂起（睡眠 / 窗口最小化 / 主线程长任务），
+   * **丢弃该段而不是截断** —— 截断会把「睡了 8 小时」记成 5 秒，从虚高翻成虚低，同样是错值。
+   * 取 5000ms 而非 1–2s：Electron 主线程长任务（导入书 / 批量重排）会让定时器延迟 2–3s，
+   * 设太小会把正常卡顿误判为挂起。
+   */
+  const TIMER_GAP_MAX_MS = 5_000;
+  /**
+   * 闸门 3 · 空闲上限（ms）。⚠️ 宁松勿紧：读书时几分钟不动鼠标是常态（盯着同一页思考），
+   * 阈值定太紧会从「多计」翻转成「少计」——后者更伤信任（用户会以为掉数据）。
+   * 无交互时**停止累加而不是归零**（保住已累计的部分）。0 = 关闭该闸门。
+   */
+  const TIMER_IDLE_MAX_MS = 180_000;
+  /** 计入活跃的容器事件（capture + passive：回调只写时间戳，不干预默认行为） */
+  const TIMER_ACTIVITY_EVENTS = ["pointerdown", "pointermove", "wheel", "keydown", "touchstart"] as const;
+
+  /**
+   * 闸门 1 · 容器是否真的可见。
+   * 用 `offsetWidth > 0` 而非组件里既有的 `offsetParent === null` —— 后者在祖先为
+   * position:fixed 时会返回 null 而**误判为不可见**；display:none 时 offsetWidth 恒为 0，
+   * 语义精确，且是纯布局读取（每 tick 一次，成本可忽略）。
+   */
+  function timerContainerVisible(): boolean {
+    if (typeof document !== "undefined" && document.visibilityState !== "visible") return false;
+    return !!readerViewEl?.isConnected && readerViewEl.offsetWidth > 0;
+  }
+
+  /** 刷新活跃时刻（节流 1s：pointermove 是高频事件，这里只写时间戳、不读 DOM） */
+  function markReaderActivity(): void {
+    const n = Date.now();
+    if (n - lastActivityAt < 1000) return;
+    lastActivityAt = n;
+  }
+
+  /** 本地日期 key（YYYY-MM-DD），与 bookshelf-store 的 localDateKey 同口径 */
+  function timerDayKey(ts: number): string {
+    const d = new Date(ts);
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+  }
+
+  /** 落盘待累加量，并归入「累加所属日期」桶（闸门 4：不用落盘时刻取日期） */
+  function flushReadingTime(): void {
+    if (flushAcc <= 0) return;
+    const n = flushAcc;
+    flushAcc = 0;
+    void store.addReadingTime(bookId, n, curDayKey || undefined);
+  }
+
+  /** 挂活跃信号（**容器级**，不挂 document 全局监听：避免干扰思源原生 UI） */
+  function bindTimerActivity(): void {
+    if (!readerViewEl) return;
+    for (const ev of TIMER_ACTIVITY_EVENTS) {
+      readerViewEl.addEventListener(ev, markReaderActivity, { capture: true, passive: true });
+    }
+  }
+  function unbindTimerActivity(): void {
+    if (!readerViewEl) return;
+    for (const ev of TIMER_ACTIVITY_EVENTS) {
+      readerViewEl.removeEventListener(ev, markReaderActivity, { capture: true });
+    }
+  }
+
+  /** 窗口最小化 / 切回：重置基准，避免「回来第一 tick」被闸门 2 当成挂起、丢掉那 1s 真实阅读 */
+  function onTimerVisibilityChange(): void {
+    lastTickAt = Date.now();
+    if (typeof document !== "undefined" && document.visibilityState === "visible") {
+      lastActivityAt = Date.now();
+    }
+  }
+
+  /** 阅读时长计时：每秒推进一次，四道闸门见上方常量注释 */
   function startTimer() {
     lastTickAt = Date.now();
+    lastActivityAt = Date.now();
+    curDayKey = timerDayKey(lastTickAt);
     timeTimer = setInterval(() => {
       const now = Date.now();
-      if (!document.hidden) {
-        sessionReadMs += now - lastTickAt;
-        if (sessionReadMs >= 30000) {
-          void store.addReadingTime(bookId, sessionReadMs);
-          sessionReadMs = 0;
-        }
-      }
-      lastTickAt = now;
-    }, 1000);
+      const gap = now - lastTickAt;
+      lastTickAt = now; // 无条件推进：否则切页签期间 gap 会累积成巨值
+      if (!timerContainerVisible()) return;                                           // 闸门 1
+      if (gap < 0 || gap > TIMER_GAP_MAX_MS) return;                                  // 闸门 2（丢弃，不截断）
+      if (TIMER_IDLE_MAX_MS > 0 && now - lastActivityAt > TIMER_IDLE_MAX_MS) return;   // 闸门 3
+      const day = timerDayKey(now);
+      if (day !== curDayKey) { flushReadingTime(); curDayKey = day; }                 // 闸门 4（跨零点）
+      flushAcc += gap;
+      activeMs += gap;
+      if (flushAcc >= TIMER_FLUSH_MS) flushReadingTime();
+    }, TIMER_TICK_MS);
   }
 
   /** 组件键盘快捷键：F3/Cmd+F 搜索（挂在组件容器上；多 Tab 时非激活 Tab 隐藏不响应）。
@@ -2844,7 +2946,11 @@ import { getLogger } from "../core/logger.ts";
         return;
       } catch (__swallowErr) { logSwallow(__swallowErr, "ReaderView.svelte · jumpAnnot(cfi)", "warn"); }
     }
-    if (isPdfBook() && it?.page && it.page > 0) {
+    // 墨迹的 page 是 0-based pageIndex（第 1 页 = 0），文本标注的 page 是 1-based，
+    // 两者的「有效下限」不同：原先一律用 `it.page > 0` 会把**第 1 页的墨迹**挡在门外。
+    // 2026-09-12：工作台「阅读标注」并入墨迹后，这条守卫必须按类型区分。
+    const hasTargetPage = typeof it?.page === "number" && (it.kind === "ink" ? it.page >= 0 : it.page > 0);
+    if (isPdfBook() && hasTargetPage) {
       try {
         // 2026-09-04 P0-3：墨迹 kind 时 page 是 0-based pageIndex，需 +1 转为 1-based 页码
         // （文本标注 page 已是 1-based，goPdfPage 期望 1-based）
@@ -5457,6 +5563,27 @@ import { getLogger } from "../core/logger.ts";
     showViewerForCfi(cfi);
   }
 
+  /**
+   * 统一标注跳转入口（由 ReaderTabController.focusAnnotationRecord 调用）：
+   * 接收**整条标注记录**，复用内部 jumpAnnot 自行分支 ——
+   *   EPUB 文本 → goTo(cfi)；PDF（文本/矩形）→ goPdfPage(page) + flashRect 闪烁定位。
+   * 为什么要有它：旧 focusAnnotation(cfi) 只认 cfi，而 PDF 文本标注只有 page，
+   * 从工作台 / 微阅批注列表点进去会静默失败。
+   */
+  export async function focusAnnotationRecord(ann: any) {
+    if (!ann) return;
+    // 与 focusAnnotation 同款：等待 foliate view 就绪（书籍异步加载，openBookTab 返回时未必挂载完）
+    let tries = 0;
+    while (tries < 25) {
+      if (view && typeof (view as any).goTo === "function") break;
+      await new Promise((r) => setTimeout(r, 120));
+      tries++;
+    }
+    await jumpAnnot(ann);
+    // EPUB：jumpAnnot 的 cfi 分支只 goTo 不弹气泡，这里补上（与 focusAnnotation 体验一致）
+    if (!isPdfBook() && typeof ann.cfi === "string" && ann.cfi) showViewerForCfi(ann.cfi);
+  }
+
   function showToolbarFor(sel: ReaderSel) {
     // 2026-08-25 竞态防护：若 onContainerMouseDown 已检测到点了标注（suppressNextCreateToolbar=true），
     // 说明 show-annotation 会接管本次点击（弹 edit 工具栏或批注弹窗），跳过创建工具栏。
@@ -7825,6 +7952,9 @@ import { getLogger } from "../core/logger.ts";
     }
     // load() 解析后推送最新设置，订阅回调自动 applyStyles（view 就绪时）
     startTimer();
+    // 计时器配套：容器级活跃信号 + 窗口可见性（四道闸门见 startTimer 上方注释）
+    bindTimerActivity();
+    document.addEventListener("visibilitychange", onTimerVisibilityChange);
     // 先等待设置/字体加载完成再开书：用用户真实主题打开，避免打开瞬间用默认主题、iframe 透明导致的黑底/错主题闪屏
     void (async () => {
       await Promise.all([settingsStore.load(), fontStore.load()]);
@@ -7955,7 +8085,11 @@ import { getLogger } from "../core/logger.ts";
     // 2026-08-27：双语注入句柄销毁（移除全部译文节点，零残留）
     try { bilingualHandle?.destroy(); } catch (__swallowErr) { logSwallow(__swallowErr, "ReaderView.svelte · try { bilingualHandle?.destroy(); }", "debug"); }
     bilingualHandle = null;
-    if (sessionReadMs > 0) void store.addReadingTime(bookId, sessionReadMs);
+    // 2026-09-12 计时器四闸门：落盘余量 + 注销活跃/可见性监听（flushReadingTime 用
+    // curDayKey 归桶，跨零点时已按旧日期结算过，口径一致）
+    flushReadingTime();
+    unbindTimerActivity();
+    document.removeEventListener("visibilitychange", onTimerVisibilityChange);
     // 2026-08-23 修复：listener 绑在 readerViewEl（不是 document）
     if (readerViewEl) {
       readerViewEl.removeEventListener("mousedown", onContainerMouseDown);

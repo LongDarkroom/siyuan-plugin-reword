@@ -14,9 +14,12 @@
   --hw-surface: var(--b3-theme-background, #ffffff);        /* 面板底 */
   --hw-surface-2: var(--b3-theme-surface, #f7f8f9);         /* 次级底/卡片 */
   --hw-surface-3: var(--b3-list-hover, #f1f2f3);            /* hover 底 */
-  --hw-border: var(--b3-border-color, var(--b3-border-color, #e0e0e0));             /* 描边 */
+  /* 2026-09-12 E2：兜底原先写成自己（var(--b3-border-color, var(--b3-border-color, #e0e0e0))）
+     —— 上游未定义时内层又指回同一个变量，整条声明在计算值阶段失效。
+     字面色值只允许出现在本令牌块，面板内一律引令牌。 */
+  --hw-border: var(--b3-border-color, #e0e0e0);             /* 描边 */
   --hw-border-strong: var(--b3-border-color-hover, #bdbdbd);
-  --hw-text: var(--b3-theme-on-background, var(--b3-theme-on-background, #1f2329));        /* 主文字 */
+  --hw-text: var(--b3-theme-on-background, #1f2329);        /* 主文字 */
   --hw-text-2: var(--b3-theme-on-surface-light, #8f959e);   /* 次文字 */
   --hw-accent: var(--b3-theme-primary, #0f6bff);            /* 品牌色 */
   --hw-accent-lite: var(--b3-theme-primary-lightest, #e6f0ff);
@@ -25,6 +28,11 @@
   --hw-shadow: 0 4px 20px rgba(0,0,0,0.12), 0 1px 3px rgba(0,0,0,0.08);
   --hw-shadow-lg: 0 20px 60px rgba(0,0,0,0.25), 0 1px 3px rgba(0,0,0,0.08);
   --hw-hover-bg: var(--b3-list-hover, rgba(0,0,0,0.04));   /* 浅色 hover */
+  /* 2026-09-12 E1：功能标识色（工作台「功能入口」圆点等）。
+     原先是 dashboard-panel.ts 里唯一一处硬编码字面色值 #db61a2，违反该文件
+     「全部颜色走 --b3-* / --hw-*」的声明；收进令牌块后与 --hw-pos-* 同类，
+     面板内只引变量，改配色不必改代码。 */
+  --hw-feat-annotations: #db61a2;
 }
 .b3-theme--dark {
   --hw-hover-bg: var(--b3-list-hover, rgba(255,255,255,0.08));
@@ -32,10 +40,11 @@
 
 /* ===== P0 语义令牌：映射思源编辑器格式变量（词库/查词卡语义化用，自动适配明暗） ===== */
 :root, .b3--fonts {
-  --hw-word: var(--b3-protyle-inline-strong-color, var(--b3-theme-on-background, var(--b3-theme-on-background, #1f2329)));
+  /* 2026-09-12 E2：同上，兜底原先写成自己 */
+  --hw-word: var(--b3-protyle-inline-strong-color, var(--b3-theme-on-background, #1f2329));
   --hw-phon: var(--b3-protyle-inline-em-color, var(--b3-theme-on-surface-light, #8f959e));
   --hw-mark-bg: var(--b3-protyle-inline-mark-background, #ffe9a8);
-  --hw-mark-fg: var(--b3-protyle-inline-mark-color, var(--b3-theme-on-background, var(--b3-theme-on-background, #1f2329)));
+  --hw-mark-fg: var(--b3-protyle-inline-mark-color, var(--b3-theme-on-background, #1f2329));
   --hw-code-bg: var(--b3-protyle-code-background, rgba(0,0,0,0.06));
   --hw-quote-bg: var(--b3-bq-background, rgba(0,0,0,0.035));
   --hw-link: var(--b3-protyle-inline-link-color, var(--b3-theme-primary, var(--hw-accent)));
@@ -4318,7 +4327,7 @@ body.hiword-dragging {
 .hiword-up-input {
   width: 100%;
   padding: 8px 12px;
-  border: 1px solid var(--b3-theme-divider);
+  border: 1px solid var(--hw-border);
   border-radius: 9px;
   background: var(--b3-theme-background);
   color: var(--b3-theme-on-background, #333);
@@ -4326,13 +4335,13 @@ body.hiword-dragging {
   outline: none;
   box-sizing: border-box;
   transition: border-color 0.15s, box-shadow 0.15s;
-  &:hover { border-color: color-mix(in srgb, var(--b3-theme-primary) 40%, var(--b3-theme-divider)); }
+  &:hover { border-color: color-mix(in srgb, var(--b3-theme-primary) 40%, var(--hw-border)); }
   &:focus { border-color: var(--b3-theme-primary); box-shadow: 0 0 0 3px color-mix(in srgb, var(--b3-theme-primary) 15%, transparent); }
 }
 .hiword-up-select {
   width: 100%;
   padding: 8px 30px 8px 12px;
-  border: 1px solid var(--b3-theme-divider);
+  border: 1px solid var(--hw-border);
   border-radius: 9px;
   background-color: var(--b3-theme-background);
   color: var(--b3-theme-on-background, #333);
@@ -4347,7 +4356,7 @@ body.hiword-dragging {
   background-repeat: no-repeat;
   background-position: right 10px center;
   transition: border-color 0.15s, box-shadow 0.15s;
-  &:hover { border-color: color-mix(in srgb, var(--b3-theme-primary) 40%, var(--b3-theme-divider)); }
+  &:hover { border-color: color-mix(in srgb, var(--b3-theme-primary) 40%, var(--hw-border)); }
   &:focus {
     border-color: var(--b3-theme-primary);
     box-shadow: 0 0 0 3px color-mix(in srgb, var(--b3-theme-primary) 14%, transparent);
@@ -4494,10 +4503,50 @@ body.hiword-dragging {
   color: var(--b3-theme-on-surface, #444);
   cursor: pointer;
 }
+/* 2026-09-12「允许 AI 造句」圆形勾选开关（图 2 样式）：
+   关闭 = 浅灰圆（空心）；点亮 = 蓝色圆 + 白色对勾 */
+.hiword-up-row--check {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 2px 0;
+}
+.hiword-up-check {
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  border: 1.5px solid var(--b3-border-color, #c9ccd4);
+  background: var(--b3-theme-surface-hover, #e8eaee);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  padding: 0;
+  transition: all 0.18s;
+  color: transparent;
+}
+.hiword-up-check svg { width: 12px; height: 12px; }
+.hiword-up-check:hover { border-color: var(--b3-theme-primary, #3575f0); }
+/* 点亮：蓝底 + 白勾（图 2 的蓝色启动态） */
+.hiword-up-check.on {
+  background: var(--b3-theme-primary, #3575f0);
+  border-color: var(--b3-theme-primary, #3575f0);
+  color: #fff;
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--b3-theme-primary, #3575f0) 16%, transparent);
+}
+.hiword-up-check-label {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--b3-theme-on-background, #333);
+  cursor: pointer;
+  user-select: none;
+}
 .hiword-up-textarea {
   width: 100%;
   padding: 9px 12px;
-  border: 1px solid var(--b3-theme-divider);
+  border: 1px solid var(--hw-border);
   border-radius: 9px;
   background: var(--b3-theme-background);
   color: var(--b3-theme-on-background, #333);
@@ -4507,7 +4556,7 @@ body.hiword-dragging {
   box-sizing: border-box;
   resize: vertical;
   line-height: 1.5;
-  &:hover { border-color: color-mix(in srgb, var(--b3-theme-primary) 40%, var(--b3-theme-divider)); }
+  &:hover { border-color: color-mix(in srgb, var(--b3-theme-primary) 40%, var(--hw-border)); }
   &:focus { border-color: var(--b3-theme-primary); box-shadow: 0 0 0 3px color-mix(in srgb, var(--b3-theme-primary) 15%, transparent); }
 }
 .hiword-up-group--note {
@@ -4524,7 +4573,7 @@ body.hiword-dragging {
   flex-direction: column;
   gap: 2px;
   padding: 9px 14px;
-  border: 1px solid var(--b3-theme-divider);
+  border: 1px solid var(--hw-border);
   border-radius: 9px;
   cursor: pointer;
   transition: all 0.15s ease;
@@ -4551,7 +4600,7 @@ body.hiword-dragging {
 .hiword-ann-custom {
   width: 30px; height: 28px;
   padding: 0;
-  border: 1px solid var(--b3-theme-divider);
+  border: 1px solid var(--hw-border);
   border-radius: 7px;
   background: var(--b3-theme-background);
   cursor: pointer;
@@ -4561,7 +4610,7 @@ body.hiword-dragging {
 .hiword-ann-pitem {
   display: flex; align-items: center; gap: 6px;
   padding: 4px 6px 4px 4px;
-  border: 1px solid var(--b3-theme-divider);
+  border: 1px solid var(--hw-border);
   border-radius: 8px;
   background: var(--b3-theme-background);
 }
@@ -4591,7 +4640,7 @@ body.hiword-dragging {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 11.5px;
   background: var(--b3-theme-surface-lighter, #eee);
-  border: 1px solid var(--b3-theme-divider);
+  border: 1px solid var(--hw-border);
   border-bottom-width: 2px;
   border-radius: 5px;
   color: var(--b3-theme-on-surface, #444);
@@ -4618,7 +4667,7 @@ body.hiword-dragging {
       color-mix(in srgb, var(--b3-theme-primary) 12%, transparent),
       color-mix(in srgb, var(--b3-theme-primary) 4%, transparent)),
     var(--b3-theme-surface, #fff);
-  border: 1px solid color-mix(in srgb, var(--b3-theme-primary) 20%, var(--b3-theme-divider));
+  border: 1px solid color-mix(in srgb, var(--b3-theme-primary) 20%, var(--hw-border));
 }
 .hiword-about-logo {
   font-size: 30px; font-weight: 800; letter-spacing: -1px;
@@ -4993,9 +5042,9 @@ body.hiword-dragging {
      导致抽屉打开后不可见或尺寸为 0。保留 contain:layout 隔离布局即可 */
   contain: layout style;
   /* 加一层外框+阴影，让 AI 面板从思源 dock 背景中清晰区分出来 */
-  border: 1px solid var(--b3-theme-divider, rgba(0,0,0,.12));
+  border: 1px solid var(--hw-border);
   border-radius: 10px;
-  box-shadow: 0 1px 4px rgba(0,0,0,.06), 0 0 0 1px var(--b3-theme-divider, rgba(0,0,0,.06));
+  box-shadow: 0 1px 4px rgba(0,0,0,.06), 0 0 0 1px var(--hw-border);
   margin: 6px;
   width: calc(100% - 12px);
   height: calc(100% - 12px);
@@ -5029,7 +5078,7 @@ body.hiword-dragging {
   align-items: center;
   justify-content: space-between;
   padding: 6px 10px;
-  border-bottom: 1px solid var(--b3-theme-divider);
+  border-bottom: 1px solid var(--hw-border);
   flex-shrink: 0;
   gap: 6px;
   background: var(--b3-theme-surface);
@@ -5049,7 +5098,7 @@ body.hiword-dragging {
   align-items: center;
   gap: 4px;
   padding: 5px 10px;
-  border: 1px solid var(--b3-theme-divider);
+  border: 1px solid var(--hw-border);
   border-radius: 8px;
   background: transparent;
   color: var(--b3-theme-on-surface, #555);
@@ -5135,7 +5184,7 @@ body.hiword-dragging {
     background: var(--b3-theme-background-hover);
     border-radius: 3px;
   }
-  &::-webkit-scrollbar-thumb:hover { background: var(--b3-theme-divider); }
+  &::-webkit-scrollbar-thumb:hover { background: var(--hw-border); }
   /* 拖拽悬停高亮 */
   &--dragover {
     box-shadow: inset 0 0 0 2px var(--b3-theme-primary, var(--b3-theme-primary));
@@ -5191,7 +5240,7 @@ body.hiword-dragging {
   align-items: center;
   gap: 6px;
   padding: 4px 10px;
-  border-bottom: 1px solid var(--b3-theme-divider);
+  border-bottom: 1px solid var(--hw-border);
   background: var(--b3-theme-background);
   flex-shrink: 0;
   font-size: 12px;
@@ -5210,7 +5259,7 @@ body.hiword-dragging {
   font-weight: 500;
 }
 .hiword-ai-mode-switch {
-  border: 1px solid var(--b3-theme-divider);
+  border: 1px solid var(--hw-border);
   background: transparent;
   color: var(--b3-theme-on-surface-light, #888);
   border-radius: 999px;
@@ -5280,7 +5329,7 @@ body.hiword-dragging {
   flex-direction: column;
   gap: 2px;
   padding: 8px 12px;
-  border-bottom: 1px solid var(--b3-theme-divider);
+  border-bottom: 1px solid var(--hw-border);
   background: var(--b3-theme-background);
   font-size: 11.5px;
   flex-shrink: 0;
@@ -5936,7 +5985,7 @@ body.hiword-dragging {
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  border-top: 1px solid var(--b3-theme-divider);
+  border-top: 1px solid var(--hw-border);
   /* 使用与 body 一致的背景色，消除滚动时的视觉断层 */
   background: var(--b3-theme-background);
   /* 2026-09-03 方案 B：原 padding 4px 8px 6px 太紧。
@@ -6002,14 +6051,14 @@ body.hiword-dragging {
     right: 0;
     top: 10px;  /* 2026-08-22 调整：手柄线位置 */
     height: 2px;
-    background: var(--b3-theme-divider);
+    background: var(--hw-border);
     transition: background 0.15s ease;
   }
   &-grip {
     width: 32px;
     height: 3px;
     border-radius: 2px;
-    background: var(--b3-theme-divider);
+    background: var(--hw-border);
     transition: background 0.15s ease;
     position: relative;
     z-index: 1;
@@ -6049,7 +6098,7 @@ body.hiword-dragging {
   height: 0 !important;
   min-height: 0 !important;
   overflow: hidden !important;
-  border-top: 1px solid var(--b3-theme-divider);
+  border-top: 1px solid var(--hw-border);
   padding: 0 !important;
 }
 .hiword-ai-panel--collapsed .hiword-ai-resizer-toggle {
@@ -6064,7 +6113,7 @@ body.hiword-dragging {
   gap: 6px;
   padding: 6px 10px;
   background: var(--b3-theme-surface);
-  border: 1px solid var(--b3-theme-divider);
+  border: 1px solid var(--hw-border);
   border-radius: 8px;
   box-shadow: 0 4px 16px rgba(0,0,0,0.35);
   opacity: 0;
@@ -6081,7 +6130,7 @@ body.hiword-dragging {
 .hiword-ai-sel-btn {
   font-size: 12px;
   padding: 5px 10px;
-  border: 1px solid var(--b3-theme-divider);
+  border: 1px solid var(--hw-border);
   border-radius: 6px;
   background: transparent;
   color: var(--b3-theme-on-surface-light, #ccc);
@@ -6110,7 +6159,7 @@ body.hiword-dragging {
   min-width: 130px;
   padding: 4px;
   background: var(--b3-theme-surface);
-  border: 1px solid var(--b3-theme-divider);
+  border: 1px solid var(--hw-border);
   border-radius: 8px;
   box-shadow: 0 8px 28px rgba(0, 0, 0, 0.4);
   display: none;
@@ -6142,7 +6191,7 @@ body.hiword-dragging {
 .hiword-ann-style-btn {
   font-size: 11.5px;
   padding: 5px 10px;
-  border: 1px solid var(--b3-theme-divider);
+  border: 1px solid var(--hw-border);
   border-radius: 6px;
   background: transparent;
   color: var(--b3-theme-on-surface-light, #aaa);
@@ -6158,7 +6207,7 @@ body.hiword-dragging {
 .hiword-ann-tag-btn {
   font-size: 11.5px;
   padding: 4px 9px;
-  border: 1px solid var(--b3-theme-divider);
+  border: 1px solid var(--hw-border);
   border-radius: 14px;
   background: transparent;
   color: var(--b3-theme-on-surface-light, #999);
@@ -6185,7 +6234,7 @@ body.hiword-dragging {
   background: var(--b3-theme-background);
   /* 方案 B：1.5px 实色 border，与主题 on-surface 关联确保对比度；
      fallback 到 #c8ccd3 / #404249 处理暗色主题缺失变量的兜底。 */
-  border: 1.5px solid var(--hw-border-strong, color-mix(in srgb, var(--b3-theme-on-surface) 35%, var(--b3-theme-divider)));
+  border: 1.5px solid var(--hw-border-strong, color-mix(in srgb, var(--b3-theme-on-surface) 35%, var(--hw-border)));
   border-radius: 14px;
   /* 2026-09-03：原 padding 3px/5px/3px/4px 让输入框"贴得太紧"——
      文本与边框几乎挨在一起，多行时尤其显得局促。
@@ -6537,7 +6586,7 @@ body.hiword-dragging {
   justify-content: space-between;
   padding: 10px 14px;
   background: var(--b3-theme-surface-lighter, var(--b3-theme-surface));
-  border-bottom: 1px solid var(--b3-theme-divider);
+  border-bottom: 1px solid var(--hw-border);
   flex-shrink: 0;
 }
 .hiword-ai-query-title {
@@ -6564,13 +6613,13 @@ body.hiword-dragging {
 .hiword-ai-query-filters {
   padding: 10px 14px;
   flex-shrink: 0;
-  border-bottom: 1px solid var(--b3-theme-divider);
+  border-bottom: 1px solid var(--hw-border);
 }
 .hiword-ai-qf-input {
   width: 100%;
   padding: 7px 10px;
   border-radius: 8px;
-  border: 1px solid var(--b3-theme-divider);
+  border: 1px solid var(--hw-border);
   background: var(--b3-theme-surface-lighter, var(--b3-theme-surface));
   color: var(--b3-theme-on-background);
   font-size: 13px;
@@ -6600,7 +6649,7 @@ body.hiword-dragging {
   flex: 1;
   padding: 6px 8px;
   border-radius: 8px;
-  border: 1px solid var(--b3-theme-divider);
+  border: 1px solid var(--hw-border);
   background: var(--b3-theme-surface-lighter, var(--b3-theme-surface));
   color: var(--b3-theme-on-background);
   font-size: 12px;
@@ -6632,7 +6681,7 @@ body.hiword-dragging {
   overflow-y: auto;
   padding: 8px 14px;
   &::-webkit-scrollbar { width: 4px; }
-  &::-webkit-scrollbar-thumb { background: var(--b3-theme-divider); border-radius: 2px; }
+  &::-webkit-scrollbar-thumb { background: var(--hw-border); border-radius: 2px; }
 }
 .hiword-ai-query-empty {
   text-align: center;
@@ -6654,7 +6703,7 @@ body.hiword-dragging {
 }
 .hiword-ai-q-item {
   background: var(--b3-theme-surface-lighter, var(--b3-theme-surface));
-  border: 1px solid var(--b3-theme-divider);
+  border: 1px solid var(--hw-border);
   border-radius: 8px;
   padding: 10px 12px;
   transition: border-color 0.15s, background 0.15s;
@@ -6662,7 +6711,7 @@ body.hiword-dragging {
 }
 .hiword-ai-q-item:hover {
   background: var(--b3-theme-background-hover);
-  border-color: var(--b3-theme-divider);
+  border-color: var(--hw-border);
 }
 .hiword-ai-q-item-head {
   display: flex;
@@ -6705,7 +6754,7 @@ body.hiword-dragging {
   color: var(--b3-theme-on-surface-light, #999);
   margin-top: 4px;
   padding-left: 8px;
-  border-left: 2px solid var(--b3-theme-divider);
+  border-left: 2px solid var(--hw-border);
   /* 支持 kramdown 子集渲染 */
   strong { font-weight: 700; color: var(--b3-theme-on-background); }
   em { font-style: italic; }
@@ -6721,7 +6770,7 @@ body.hiword-dragging {
   align-items: center;
   gap: 10px;
   padding: 10px 14px;
-  border-top: 1px solid var(--b3-theme-divider);
+  border-top: 1px solid var(--hw-border);
   flex-shrink: 0;
   background: var(--b3-theme-surface-lighter, var(--b3-theme-surface));
 }
@@ -6742,7 +6791,7 @@ body.hiword-dragging {
   text-transform: uppercase;
 }
 .hiword-ai-word {
-  border: 1px solid var(--b3-theme-divider);
+  border: 1px solid var(--hw-border);
   border-radius: 8px;
   padding: 10px 12px;
   margin-bottom: 8px;
@@ -6837,7 +6886,7 @@ body.hiword-dragging {
 .hiword-ai-word-table {
   display: flex;
   flex-direction: column;
-  border: 1px solid var(--b3-theme-divider);
+  border: 1px solid var(--hw-border);
   border-radius: 8px;
   overflow: hidden;
 }
@@ -6846,7 +6895,7 @@ body.hiword-dragging {
   align-items: center;
   gap: 8px;
   padding: 8px 10px;
-  border-bottom: 1px solid var(--b3-theme-divider);
+  border-bottom: 1px solid var(--hw-border);
 }
 .hiword-ai-word-row:last-child {
   border-bottom: none;
@@ -6905,7 +6954,7 @@ body.hiword-dragging {
 
 /* P1-B 第 3 层：后校验不符项黄色提示条（warning 色系，可折叠） */
 .hiword-ai-issues {
-  border: 1px solid color-mix(in srgb, var(--b3-theme-warning) 45%, var(--b3-theme-divider));
+  border: 1px solid color-mix(in srgb, var(--b3-theme-warning) 45%, var(--hw-border));
   border-radius: 8px;
   margin-bottom: 10px;
   background: color-mix(in srgb, var(--b3-theme-warning) 8%, transparent);
@@ -7120,7 +7169,7 @@ body.hiword-dragging {
   max-width: 140px;
   padding: 2px 6px;
   border-radius: 6px;
-  border: 1px solid var(--b3-theme-divider);
+  border: 1px solid var(--hw-border);
   background: var(--b3-theme-background);
   color: var(--b3-theme-on-background);
   font-size: 12px;
@@ -7134,7 +7183,7 @@ body.hiword-dragging {
   font-size: 11px;
   padding: 2px 8px;
   border-radius: 999px;
-  border: 1px solid var(--b3-theme-divider);
+  border: 1px solid var(--hw-border);
   background: var(--b3-theme-surface-lighter, var(--b3-theme-surface));
   color: var(--b3-theme-on-surface-light, #999);
   cursor: pointer;
@@ -7151,7 +7200,7 @@ body.hiword-dragging {
   font-size: 12px;
   padding: 3px 8px;
   border-radius: 6px;
-  border: 1px solid var(--b3-theme-divider);
+  border: 1px solid var(--hw-border);
   background: transparent;
   color: var(--b3-theme-on-surface-light, #999);
   cursor: pointer;
@@ -7366,7 +7415,7 @@ body.hiword-dragging {
 .hiword-ai-msg-content .hiword-ai-collect,
 .hiword-ai-msg-content .hiword-ai-copy {
   padding: 2px 8px;
-  border: 1px solid var(--b3-theme-divider);
+  border: 1px solid var(--hw-border);
   border-radius: 4px;
   background: transparent;
   color: var(--b3-theme-on-surface-light, #aaa);
@@ -7436,7 +7485,7 @@ body.hiword-dragging {
 .hiword-ai-msg-tool:hover {
   background: var(--b3-theme-background-hover, rgba(0,0,0,.06));
   color: var(--b3-theme-primary, var(--b3-theme-primary));
-  border-color: var(--b3-theme-divider, rgba(0,0,0,.1));
+  border-color: var(--hw-border);
 }
 .hiword-ai-msg-tool-icon {
   display: inline-flex;
@@ -7465,7 +7514,7 @@ body.hiword-dragging {
   width: 100%;
   min-height: 120px;
   padding: 10px 12px;
-  border: 1px solid var(--b3-theme-divider);
+  border: 1px solid var(--hw-border);
   border-radius: 8px;
   background: var(--b3-theme-background);
   color: var(--b3-theme-on-background);
@@ -7502,7 +7551,7 @@ body.hiword-dragging {
   position: absolute;
   cursor: pointer;
   inset: 0;
-  background-color: var(--b3-theme-divider);
+  background-color: var(--hw-border);
   border-radius: 11px;
   transition: background 0.2s;
 }
@@ -7801,7 +7850,7 @@ body.hiword-dragging {
     background: var(--b3-theme-background-hover);
     border-radius: 3px;
   }
-  &::-webkit-scrollbar-thumb:hover { background: var(--b3-theme-divider); }
+  &::-webkit-scrollbar-thumb:hover { background: var(--hw-border); }
 }
 @keyframes fadeIn { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
 
@@ -8097,7 +8146,7 @@ body.hiword-dragging {
   align-items: center;
   gap: 3px;
   padding: 4px 8px;
-  border: 1.5px solid var(--b3-theme-divider);
+  border: 1.5px solid var(--hw-border);
   border-radius: 6px;
   background: var(--b3-theme-background);
   color: var(--b3-theme-on-background);
@@ -8250,14 +8299,14 @@ body.hiword-resizing {
 }
 .whale-confirm .whale-dlg-head {
   padding: 12px 16px 8px;
-  border-bottom: 1px solid var(--b3-theme-divider);
+  border-bottom: 1px solid var(--hw-border);
 }
 .hiword-ann-prompt-input {
   width: 100%;
   box-sizing: border-box;
   padding: 8px 10px;
   font-size: 13px;
-  border: 1px solid var(--b3-theme-divider);
+  border: 1px solid var(--hw-border);
   border-radius: 8px;
   background: var(--b3-theme-background);
   color: var(--b3-theme-on-background);
@@ -8320,7 +8369,7 @@ body.hiword-resizing {
   padding: 4px 12px;
   border-radius: 14px;
   background: var(--b3-theme-surface, var(--b3-theme-background));
-  border: 1px solid var(--b3-border-color, var(--b3-theme-divider));
+  border: 1px solid var(--b3-border-color, var(--hw-border));
   color: var(--b3-theme-on-surface, var(--b3-theme-on-background));
   cursor: pointer;
   white-space: nowrap;
@@ -8347,7 +8396,7 @@ body.hiword-resizing {
 }
 .whale-confirm .whale-dlg-foot {
   padding: 8px 16px 12px;
-  border-top: 1px solid var(--b3-theme-divider);
+  border-top: 1px solid var(--hw-border);
   background: var(--b3-theme-background);
   border-radius: 0 0 16px 16px;
   display: flex;
@@ -8423,7 +8472,7 @@ body.hiword-resizing {
   min-height: 72px;       /* 2026-08-22 紧凑化（120 → 72），默认更小巧 */
   max-height: 180px;      /* 2026-08-22 紧凑化（260 → 180），超出可滚动 */
   padding: 8px 12px;
-  border: 1.5px solid var(--hw-accent-lite, color-mix(in srgb, var(--hw-accent, var(--b3-theme-primary)) 30%, var(--b3-theme-divider)));
+  border: 1.5px solid var(--hw-accent-lite, color-mix(in srgb, var(--hw-accent, var(--b3-theme-primary)) 30%, var(--hw-border)));
   border-radius: 10px;
   background: var(--b3-theme-background);
   font-size: 14px;
@@ -8523,7 +8572,7 @@ body.hiword-resizing {
 
 .whale-dlg-tag-chip {
   padding: 4px 10px;
-  border: 1.5px solid var(--b3-theme-divider);
+  border: 1.5px solid var(--hw-border);
   border-radius: 20px;
   background: var(--b3-theme-background);
   color: var(--b3-theme-on-background);
@@ -8542,7 +8591,7 @@ body.hiword-resizing {
 /* 2026-08-14 新增：批注作用域开关（单词高亮 / 句子线型） */
 /* 2026-08-14 新增：分类标签 chip 按 --tag-color 上色 */
 .whale-dlg-tag-chip[style*="--tag-color"] {
-  border-color: color-mix(in srgb, var(--tag-color, var(--b3-theme-primary)) 45%, var(--b3-theme-divider));
+  border-color: color-mix(in srgb, var(--tag-color, var(--b3-theme-primary)) 45%, var(--hw-border));
   color: color-mix(in srgb, var(--tag-color, var(--b3-theme-primary)) 80%, var(--b3-theme-on-background));
 }
 .whale-dlg-tag-chip[style*="--tag-color"].active {
@@ -8569,7 +8618,7 @@ body.hiword-resizing {
 }
 .hiword-vb-tags-collapse-btn {
   align-self: flex-start;
-  border: 1px solid var(--b3-theme-divider);
+  border: 1px solid var(--hw-border);
   background: transparent;
   color: var(--b3-theme-on-surface-light, #999);
   font-size: 11px;
@@ -8594,7 +8643,7 @@ body.hiword-resizing {
   padding: 2px 10px;
   border-radius: 12px;
   background: transparent;
-  border: 1px solid color-mix(in srgb, var(--tag-color, var(--b3-theme-divider)) 45%, var(--b3-theme-divider));
+  border: 1px solid color-mix(in srgb, var(--tag-color, var(--hw-border)) 45%, var(--hw-border));
   color: color-mix(in srgb, var(--tag-color, var(--b3-theme-on-background)) 85%, var(--b3-theme-on-background));
   cursor: pointer;
   white-space: nowrap;
@@ -8678,7 +8727,7 @@ body.hiword-resizing {
 .hiword-vb-tag-empty-btn {
   font-size: 11px;
   padding: 2px 10px;
-  border: 1px dashed var(--b3-theme-divider);
+  border: 1px dashed var(--hw-border);
   border-radius: 12px;
   background: transparent;
   color: var(--b3-theme-on-surface-light, #999);
@@ -8749,7 +8798,7 @@ body.hiword-resizing {
   max-height: 180px;
   overflow-y: auto;
   padding: 4px;
-  border: 1px solid var(--b3-theme-divider);
+  border: 1px solid var(--hw-border);
   border-radius: 6px;
   background: color-mix(in srgb, var(--b3-theme-on-surface-light, #999) 3%, transparent);
 }
@@ -8760,7 +8809,7 @@ body.hiword-resizing {
   padding: 3px 10px;
   border-radius: 12px;
   background: transparent;
-  border: 1px solid color-mix(in srgb, var(--tag-color, var(--b3-theme-divider)) 45%, var(--b3-theme-divider));
+  border: 1px solid color-mix(in srgb, var(--tag-color, var(--hw-border)) 45%, var(--hw-border));
   color: color-mix(in srgb, var(--tag-color, var(--b3-theme-on-background)) 85%, var(--b3-theme-on-background));
   font-size: 12px;
   cursor: pointer;
@@ -8811,7 +8860,7 @@ body.hiword-resizing {
   display: flex;
   flex-direction: column;
   gap: 4px;
-  border: 1px solid var(--b3-theme-divider);
+  border: 1px solid var(--hw-border);
   border-radius: 6px;
   padding: 4px;
   background: color-mix(in srgb, var(--b3-theme-on-surface-light, #999) 3%, transparent);
@@ -8894,7 +8943,7 @@ body.hiword-resizing {
   align-items: center;
   gap: 12px;
   padding: 14px 16px 12px;
-  border-bottom: 1px solid var(--b3-theme-divider);
+  border-bottom: 1px solid var(--hw-border);
 }
 .whale-dlg-title {
   font-size: 15px;
@@ -8913,7 +8962,7 @@ body.hiword-resizing {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  border: 1.5px solid var(--b3-theme-divider);
+  border: 1.5px solid var(--hw-border);
   border-radius: 8px;
   background: var(--b3-theme-background);
   cursor: pointer;
@@ -9012,7 +9061,7 @@ body.hiword-resizing {
 /* 更多选项（折叠区）—— v5 增强视觉层次 */
 .whale-dlg-more {
   margin: 8px 16px 10px;
-  border: 1px solid var(--b3-theme-divider);
+  border: 1px solid var(--hw-border);
   border-left: 3px solid var(--b3-theme-primary);
   border-radius: 10px;
   background: linear-gradient(135deg, var(--b3-theme-surface) 0%, color-mix(in srgb, var(--b3-theme-primary) 4%, var(--b3-theme-surface)) 100%);
@@ -9023,7 +9072,7 @@ body.hiword-resizing {
 /* 2026-08-15 手风琴（快捷样式 / 自定义样式互斥展开） */
 .whale-dlg-accordion {
   margin: 0 16px 8px;
-  border: 1px solid var(--b3-theme-divider);
+  border: 1px solid var(--hw-border);
   border-radius: 10px;
   background: var(--b3-theme-background);
   overflow: hidden;
@@ -9098,7 +9147,7 @@ body.hiword-resizing {
   align-items: center;
   gap: 4px;
   padding: 4px 10px;
-  border: 1.5px solid var(--b3-theme-divider);
+  border: 1.5px solid var(--hw-border);
   border-radius: 20px;
   background: var(--b3-theme-background);
   color: var(--b3-theme-on-background);
@@ -9121,7 +9170,7 @@ body.hiword-resizing {
   align-items: center;
   gap: 8px;
   padding: 10px 14px;      /* 2026-08-22 紧凑化（12px 16px → 10px 14px） */
-  border-top: 1px solid var(--b3-theme-divider);
+  border-top: 1px solid var(--hw-border);
   background: var(--b3-theme-background);
   border-radius: 0 0 16px 16px;
 }
@@ -9161,7 +9210,7 @@ body.hiword-resizing {
 .whale-dlg-spacer { flex: 1; }
 .whale-dlg-btn {
   padding: 7px 20px;
-  border: 1.5px solid var(--b3-theme-divider);
+  border: 1.5px solid var(--hw-border);
   border-radius: 8px;
   background: var(--b3-theme-background);
   color: var(--b3-theme-on-background);
@@ -9170,7 +9219,7 @@ body.hiword-resizing {
   cursor: pointer;
   transition: all 0.12s;
 }
-.whale-dlg-btn:hover { background: var(--b3-theme-surface); border-color: var(--b3-theme-divider); }
+.whale-dlg-btn:hover { background: var(--b3-theme-surface); border-color: var(--hw-border); }
 .whale-dlg-btn--primary {
   background: var(--b3-theme-primary);
   border-color: transparent;
@@ -9182,7 +9231,7 @@ body.hiword-resizing {
 }
 /* 仅标注按钮（ghost 次要按钮，2026-08-15 新增） */
 .whale-dlg-btn--ghost {
-  border-color: var(--b3-theme-divider);
+  border-color: var(--hw-border);
   background: transparent;
   color: var(--b3-theme-on-surface-light, #999);
 }
@@ -9229,7 +9278,7 @@ body.hiword-resizing {
 /* mode 二级区：高亮色板 / 线型 / 标签（按 mode 显隐） */
 .whale-dlg-mode-sub {
   padding: 8px 16px 4px;
-  border-bottom: 1px solid var(--b3-theme-divider);
+  border-bottom: 1px solid var(--hw-border);
   background: color-mix(in srgb, var(--b3-theme-surface) 40%, transparent);
 }
 .whale-dlg-mode-panel {
@@ -9255,7 +9304,7 @@ body.hiword-resizing {
   border: 2px solid transparent;
   cursor: pointer;
   transition: transform 0.12s, border-color 0.12s;
-  box-shadow: 0 0 0 1px var(--b3-theme-divider);
+  box-shadow: 0 0 0 1px var(--hw-border);
 }
 .whale-dlg-colors .whale-dlg-color-swatch:hover { transform: scale(1.15); }
 .whale-dlg-colors .whale-dlg-color-swatch.active {
@@ -9291,7 +9340,7 @@ body.hiword-resizing {
   z-index: 100010;
   width: 240px;
   background: var(--b3-theme-background);
-  border: 1px solid var(--b3-theme-divider);
+  border: 1px solid var(--hw-border);
   border-radius: 10px;
   box-shadow: 0 8px 28px rgba(0,0,0,0.2);
   padding: 10px 12px;
@@ -9315,7 +9364,7 @@ body.hiword-resizing {
   border-radius: 50%;
   border: 2px solid transparent;
   cursor: pointer;
-  box-shadow: 0 0 0 1px var(--b3-theme-divider);
+  box-shadow: 0 0 0 1px var(--hw-border);
   transition: transform 0.12s, border-color 0.12s;
 }
 .hiword-quick-mark-swatch:hover { transform: scale(1.15); border-color: var(--b3-theme-on-background); }
@@ -9324,7 +9373,7 @@ body.hiword-resizing {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  border: 1.5px solid var(--b3-theme-divider);
+  border: 1.5px solid var(--hw-border);
   border-radius: 6px;
   background: var(--b3-theme-background);
   color: var(--b3-theme-on-background);
@@ -9383,7 +9432,7 @@ body.hiword-resizing {
 .whale-search-input {
   width: 100%;
   padding: 8px 30px 8px 32px;
-  border: 1.5px solid var(--b3-theme-divider);
+  border: 1.5px solid var(--hw-border);
   border-radius: 10px;
   font-size: 13px;
   color: var(--b3-theme-on-background);
@@ -9409,7 +9458,7 @@ body.hiword-resizing {
   font-size: 10px;
   cursor: pointer;
 }
-.whale-search-clear:hover { background: var(--b3-theme-divider); }
+.whale-search-clear:hover { background: var(--hw-border); }
 
 /* 分类 tabs */
 .whale-panel-tabs-wrap {
@@ -9426,7 +9475,7 @@ body.hiword-resizing {
 .whale-panel-tabs::-webkit-scrollbar { display: none; }
 /* 2026-08-15 新增：标签区收起/展开按钮 */
 .whale-tags-collapse-btn {
-  border: 1px solid var(--b3-theme-divider);
+  border: 1px solid var(--hw-border);
   background: transparent;
   color: var(--b3-theme-on-surface-light, #999);
   font-size: 11px;
@@ -9448,7 +9497,7 @@ body.hiword-resizing {
   gap: 6px;
   padding: 6px 12px;
   flex-wrap: wrap;
-  border-bottom: 1px solid var(--b3-theme-divider);
+  border-bottom: 1px solid var(--hw-border);
   background: color-mix(in srgb, var(--b3-theme-primary) 5%, transparent);
 }
 .whale-filter-chip {
@@ -9456,7 +9505,7 @@ body.hiword-resizing {
   align-items: center;
   gap: 4px;
   padding: 2px 10px;
-  border: 1px solid color-mix(in srgb, var(--b3-theme-primary) 45%, var(--b3-theme-divider));
+  border: 1px solid color-mix(in srgb, var(--b3-theme-primary) 45%, var(--hw-border));
   border-radius: 14px;
   background: var(--b3-theme-background);
   color: var(--b3-theme-on-background);
@@ -9490,7 +9539,7 @@ body.hiword-resizing {
 /* 重置筛选按钮 */
 #whale-filter-reset {
   color: var(--b3-theme-primary);
-  border-color: color-mix(in srgb, var(--b3-theme-primary) 40%, var(--b3-theme-divider));
+  border-color: color-mix(in srgb, var(--b3-theme-primary) 40%, var(--hw-border));
 }
 
 /* 2026-08-15 新增：3 维度 sort 按钮 */
@@ -9503,7 +9552,7 @@ body.hiword-resizing {
 }
 .whale-sort-btn {
   padding: 3px 10px;
-  border: 1px solid var(--b3-theme-divider);
+  border: 1px solid var(--hw-border);
   border-radius: 14px;
   background: var(--b3-theme-background);
   color: var(--b3-theme-on-surface-light, #999);
@@ -9527,12 +9576,12 @@ body.hiword-resizing {
   gap: 4px;
   padding: 4px 12px 8px;
   flex-wrap: wrap;
-  border-bottom: 1px solid var(--b3-theme-divider);
+  border-bottom: 1px solid var(--hw-border);
   background: color-mix(in srgb, var(--b3-theme-primary) 4%, transparent);
 }
 .whale-doc-filter-btn {
   padding: 2px 10px;
-  border: 1px solid var(--b3-theme-divider);
+  border: 1px solid var(--hw-border);
   border-radius: 12px;
   background: var(--b3-theme-background);
   color: var(--b3-theme-on-surface-light, #999);
@@ -9566,7 +9615,7 @@ body.hiword-resizing {
   font-size: 11px;
   color: var(--b3-theme-on-surface-light, #999);
   background: color-mix(in srgb, var(--b3-theme-primary) 4%, transparent);
-  border-bottom: 1px solid var(--b3-theme-divider);
+  border-bottom: 1px solid var(--hw-border);
 }
 
 /* 样式选择 popover（2026-08-15 新增） */
@@ -9575,7 +9624,7 @@ body.hiword-resizing {
   z-index: 100010;
   width: 300px;
   background: var(--b3-theme-background);
-  border: 1px solid var(--b3-theme-divider);
+  border: 1px solid var(--hw-border);
   border-radius: 10px;
   box-shadow: 0 8px 28px rgba(0,0,0,0.22);
   padding: 10px 12px;
@@ -9599,7 +9648,7 @@ body.hiword-resizing {
   align-items: center;
   gap: 2px;
   padding: 6px 4px;
-  border: 1.5px solid var(--b3-theme-divider);
+  border: 1.5px solid var(--hw-border);
   border-radius: 8px;
   background: var(--b3-theme-background);
   cursor: pointer;
@@ -9631,7 +9680,7 @@ body.hiword-resizing {
   cursor: pointer;
 }
 .hiword-style-filter-clear {
-  border: 1px solid var(--b3-theme-divider);
+  border: 1px solid var(--hw-border);
   background: transparent;
   color: var(--b3-theme-on-surface-light, #999);
 }
@@ -9673,7 +9722,7 @@ body.hiword-resizing {
 }
 /* 2026-08-15 新增：⚙ 管理标签入口样式 */
 .whale-tab--manage {
-  border: 1px dashed var(--b3-theme-divider);
+  border: 1px dashed var(--hw-border);
   background: transparent;
   font-style: italic;
   opacity: 0.85;
@@ -9719,7 +9768,7 @@ body.hiword-resizing {
   padding: 0 12px 12px;
   overflow-y: auto;
   scrollbar-width: thin;
-  scrollbar-color: var(--b3-theme-divider) transparent;
+  scrollbar-color: var(--hw-border) transparent;
 }
 
 /* 2026-08-25 B-P0：文档批注 / 阅读批注 —— 思源原生堆叠卡片风格（对齐反向链接/提及面板）
@@ -9727,7 +9776,7 @@ body.hiword-resizing {
 .whale-section {
   display: flex;
   flex-direction: column;
-  border-bottom: 1px solid var(--b3-theme-divider);
+  border-bottom: 1px solid var(--hw-border);
   padding: 8px 0;
 }
 .whale-section:last-child {
@@ -9782,7 +9831,7 @@ body.hiword-resizing {
   margin-bottom: 6px;
 }
 .whale-subsection + .whale-subsection {
-  border-top: 1px dashed var(--b3-theme-divider);
+  border-top: 1px dashed var(--hw-border);
   padding-top: 6px;
 }
 .whale-subsection-head {
@@ -9823,7 +9872,7 @@ body.hiword-resizing {
   gap: 2px;
   margin-left: 8px;
   padding: 2px;
-  border: 0.5px solid var(--b3-theme-divider);
+  border: 0.5px solid var(--hw-border);
   border-radius: 7px;
   background: var(--b3-theme-background);
 }
@@ -9860,7 +9909,7 @@ body.hiword-resizing {
   letter-spacing: 0.02em;
   color: var(--b3-theme-on-surface, #5f5e5a);
   background: var(--b3-theme-background);
-  border-bottom: 0.5px solid var(--b3-theme-divider);
+  border-bottom: 0.5px solid var(--hw-border);
 }
 .whale-notes-group:first-child { padding-top: 6px; }
 .whale-load-more {
@@ -9895,7 +9944,7 @@ body.hiword-resizing {
   gap: 8px;
   padding: 8px 4px 8px 10px;
   border-left: 3px solid var(--ann-color, transparent);
-  border-bottom: 0.5px solid var(--b3-theme-divider);
+  border-bottom: 0.5px solid var(--hw-border);
   cursor: default;
 }
 /* 左侧样式字形（与编辑器下划线呼应） */
@@ -10073,13 +10122,13 @@ body.hiword-resizing {
   padding: 12px 14px;
   margin-bottom: 8px;
   background: var(--b3-theme-background);
-  border: 1px solid var(--b3-theme-divider);
+  border: 1px solid var(--hw-border);
   border-radius: 12px;
   transition: all 0.15s;
   cursor: default;
 }
 .whale-card:hover {
-  border-color: var(--b3-theme-divider);
+  border-color: var(--hw-border);
   box-shadow: 0 2px 8px rgba(0,0,0,0.06);
 }
 
@@ -10089,7 +10138,7 @@ body.hiword-resizing {
 @keyframes whale-card-flash {
   0%   { background: var(--b3-theme-primary-lightest, #fef3c7); border-color: var(--b3-theme-primary, #3b82f6); box-shadow: 0 0 0 3px rgba(59,130,246,0.18); }
   50%  { background: var(--b3-theme-primary-lighter,  #dbeafe); border-color: var(--b3-theme-primary, #3b82f6); box-shadow: 0 0 0 3px rgba(59,130,246,0.10); }
-  100% { background: var(--b3-theme-background); border-color: var(--b3-theme-divider); box-shadow: none; }
+  100% { background: var(--b3-theme-background); border-color: var(--hw-border); box-shadow: none; }
 }
 .whale-card--flash {
   animation: whale-card-flash 1.8s ease-in-out 2; /* 闪两次更醒目 */
@@ -10143,7 +10192,7 @@ body.hiword-resizing {
 
 .whale-card-btn {
   padding: 3px 8px;
-  border: 1px solid var(--b3-theme-divider);
+  border: 1px solid var(--hw-border);
   border-radius: 6px;
   background: var(--b3-theme-background);
   color: var(--b3-theme-on-surface-light, #999);
@@ -10151,7 +10200,7 @@ body.hiword-resizing {
   cursor: pointer;
   transition: all 0.1s;
 }
-.whale-card-btn:hover { background: var(--b3-theme-surface); border-color: var(--b3-theme-divider); color: var(--b3-theme-on-background); }
+.whale-card-btn:hover { background: var(--b3-theme-surface); border-color: var(--hw-border); color: var(--b3-theme-on-background); }
 .whale-card-btn--danger { color: var(--b3-theme-error); border-color: color-mix(in srgb, var(--b3-theme-error) 28%, var(--b3-theme-background)); }
 .whale-card-btn--danger:hover { background: color-mix(in srgb, var(--b3-theme-error) 10%, var(--b3-theme-background)); border-color: color-mix(in srgb, var(--b3-theme-error) 38%, var(--b3-theme-background)); }
 
@@ -10160,7 +10209,7 @@ body.hiword-resizing {
   margin: 0 0 8px;
   padding: 8px 10px;
   background: var(--b3-theme-surface);
-  border-left: 3px solid var(--b3-theme-divider);   /* 2026-08-14 弱化：从主色→中性边框，明确"引用/背景" */
+  border-left: 3px solid var(--hw-border);   /* 2026-08-14 弱化：从主色→中性边框，明确"引用/背景" */
   border-radius: 0 6px 6px 0;
   font-size: 12.5px;
   color: var(--b3-theme-on-surface-light, #999);                  /* 2026-08-14 降级：次要文字色 */
@@ -10230,7 +10279,7 @@ body.hiword-resizing {
   overflow-y: auto;
   padding: 10px 12px;
   margin: 0 0 8px;
-  border: 1.5px solid color-mix(in srgb, var(--hw-accent, var(--b3-theme-primary)) 35%, var(--b3-theme-divider));
+  border: 1.5px solid color-mix(in srgb, var(--hw-accent, var(--b3-theme-primary)) 35%, var(--hw-border));
   border-radius: 6px;
   background: var(--b3-theme-background);
   font-size: 14px;
@@ -10251,7 +10300,7 @@ body.hiword-resizing {
   display: block;
 }
 .whale-ann-inline-editor .protyle-wysiwyg [data-type="NodeTable"] .table-content {
-  border: 1px solid var(--b3-theme-divider);
+  border: 1px solid var(--hw-border);
   border-radius: 4px;
 }
 .whale-ann-inline-editor .protyle-wysiwyg [data-type="NodeTable"] table {
@@ -10260,7 +10309,7 @@ body.hiword-resizing {
 }
 .whale-ann-inline-editor .protyle-wysiwyg [data-type="NodeTable"] th,
 .whale-ann-inline-editor .protyle-wysiwyg [data-type="NodeTable"] td {
-  border: 1px solid var(--b3-theme-divider);
+  border: 1px solid var(--hw-border);
   padding: 4px 8px;
   min-width: 30px;
 }
@@ -10456,7 +10505,7 @@ body.hiword-resizing {
   gap: 4px;
   margin-top: 8px;
   padding-top: 8px;
-  border-top: 1px dashed var(--b3-theme-divider);
+  border-top: 1px dashed var(--hw-border);
 }
 .whale-card-tag {
   font-size: 10px;
@@ -10473,13 +10522,13 @@ body.hiword-resizing {
   align-items: center;
   gap: 8px;
   padding: 10px 12px;
-  border-top: 1px solid var(--b3-theme-divider);
+  border-top: 1px solid var(--hw-border);
   background: var(--b3-theme-surface);
   flex-shrink: 0;
 }
 .whale-footer-btn {
   padding: 5px 10px;
-  border: 1px solid var(--b3-theme-divider);
+  border: 1px solid var(--hw-border);
   border-radius: 6px;
   background: var(--b3-theme-background);
   color: var(--b3-theme-on-surface-light, #999);
@@ -10518,7 +10567,7 @@ body.hiword-resizing {
   padding: 16px;
   background: var(--b3-theme-background);
   border-radius: 12px;
-  border: 1px solid var(--b3-theme-divider);
+  border: 1px solid var(--hw-border);
 }
 .whale-preview-header { margin-bottom: 12px; }
 .whale-preview-title {
@@ -10553,7 +10602,7 @@ body.hiword-resizing {
   align-items: center;
   justify-content: space-between;
   padding-top: 8px;
-  border-top: 1px dashed var(--b3-theme-divider);
+  border-top: 1px dashed var(--hw-border);
   font-size: 12px;
   color: var(--b3-theme-on-surface-light, #999);
 }
@@ -10568,7 +10617,7 @@ body.hiword-resizing {
   padding: 16px;
   background: var(--b3-theme-background);
   border-radius: 12px;
-  border: 1px solid var(--b3-theme-divider);
+  border: 1px solid var(--hw-border);
 }
 .whale-matrix-header {
   display: flex;
@@ -10610,7 +10659,7 @@ body.hiword-resizing {
   display: flex;
   align-items: center;
   justify-content: center;
-  border: 1.5px solid var(--b3-theme-divider);
+  border: 1.5px solid var(--hw-border);
   border-radius: 8px;
   background: var(--b3-theme-background);
   cursor: pointer;
@@ -10654,7 +10703,7 @@ body.hiword-resizing {
   align-items: center;
   gap: 8px;
   padding: 8px 10px;
-  border-bottom: 1px solid var(--b3-theme-divider);
+  border-bottom: 1px solid var(--hw-border);
   background: var(--b3-theme-surface);
 }
 .cp-hist-btn {
@@ -10685,7 +10734,7 @@ body.hiword-resizing {
 .cp-icon-btn {
   width: 28px;
   height: 28px;
-  border: 1px solid var(--b3-theme-divider);
+  border: 1px solid var(--hw-border);
   border-radius: 6px;
   background: var(--b3-theme-surface-lighter, var(--b3-theme-surface));
   color: var(--b3-theme-on-surface);
@@ -10710,7 +10759,7 @@ body.hiword-resizing {
   width: 80%;
   max-width: 320px;
   background: var(--b3-theme-surface);
-  border-right: 1px solid var(--b3-theme-divider);
+  border-right: 1px solid var(--hw-border);
   box-shadow: 2px 0 12px rgba(0,0,0,.12);
   transform: translateX(-100%);
   transition: transform 0.18s ease;
@@ -10726,7 +10775,7 @@ body.hiword-resizing {
   justify-content: space-between;
   padding: 10px 12px;
   font-weight: 600;
-  border-bottom: 1px solid var(--b3-theme-divider);
+  border-bottom: 1px solid var(--hw-border);
 }
 .cp-hist-close {
   border: none; background: transparent; cursor: pointer;
@@ -10795,7 +10844,7 @@ body.hiword-resizing {
   flex: 1;
   min-width: 0;
   background: var(--b3-theme-surface);
-  border: 1px solid var(--b3-theme-divider);
+  border: 1px solid var(--hw-border);
   border-radius: 8px;
   padding: 8px 10px;
   line-height: 1.55;
@@ -10823,7 +10872,7 @@ body.hiword-resizing {
 /* Markdown 渲染 */
 .cp-msg-content .cp-code {
   background: var(--b3-theme-background);
-  border: 1px solid var(--b3-theme-divider);
+  border: 1px solid var(--hw-border);
   border-radius: 6px;
   padding: 8px;
   overflow-x: auto;
@@ -10848,14 +10897,14 @@ body.hiword-resizing {
   border-left: 3px solid var(--b3-theme-primary);
   padding-left: 8px; margin: 4px 0; color: var(--b3-theme-on-surface-light, var(--b3-theme-on-surface-light, #999));
 }
-.cp-msg-content .cp-hr { border: none; border-top: 1px solid var(--b3-theme-divider); margin: 8px 0; }
+.cp-msg-content .cp-hr { border: none; border-top: 1px solid var(--hw-border); margin: 8px 0; }
 .cp-msg-content a { color: var(--b3-theme-primary); }
 
 /* 上下文 chips */
 .cp-context {
   display: flex; flex-wrap: wrap; gap: 6px;
   padding: 6px 10px;
-  border-top: 1px solid var(--b3-theme-divider);
+  border-top: 1px solid var(--hw-border);
   background: var(--b3-theme-surface);
 }
 .cp-context-label {
@@ -10876,14 +10925,14 @@ body.hiword-resizing {
 
 /* 底部 */
 .cp-footer {
-  border-top: 1px solid var(--b3-theme-divider);
+  border-top: 1px solid var(--hw-border);
   background: var(--b3-theme-surface);
   padding: 8px 10px;
 }
 .cp-toolbar { display: flex; gap: 6px; margin-bottom: 8px; }
 .cp-tool-btn {
   display: inline-flex; align-items: center; gap: 4px;
-  border: 1px solid var(--b3-theme-divider);
+  border: 1px solid var(--hw-border);
   border-radius: 6px;
   background: var(--b3-theme-surface-lighter, var(--b3-theme-surface));
   color: var(--b3-theme-on-surface);
@@ -10903,7 +10952,7 @@ body.hiword-resizing {
   min-height: 38px;
   max-height: 140px;
   overflow-y: auto;
-  border: 1px solid var(--b3-theme-divider);
+  border: 1px solid var(--hw-border);
   border-radius: 8px;
   padding: 8px 10px;
   background: var(--b3-theme-background);
@@ -10948,7 +10997,7 @@ body.hiword-resizing {
   left: 8px; right: 8px; bottom: 150px;
   max-height: 60%;
   background: var(--b3-theme-surface);
-  border: 1px solid var(--b3-theme-divider);
+  border: 1px solid var(--hw-border);
   border-radius: 10px;
   box-shadow: 0 6px 24px rgba(0,0,0,.18);
   z-index: 30;
@@ -10960,7 +11009,7 @@ body.hiword-resizing {
 .cp-drawer-head {
   display: flex; align-items: center; justify-content: space-between;
   padding: 8px 12px; font-weight: 600;
-  border-bottom: 1px solid var(--b3-theme-divider);
+  border-bottom: 1px solid var(--hw-border);
 }
 .cp-drawer-close {
   border: none; background: transparent; cursor: pointer;
@@ -10968,7 +11017,7 @@ body.hiword-resizing {
 }
 .cp-drawer-search { display: flex; gap: 6px; padding: 8px 12px; }
 .cp-search-input {
-  flex: 1; border: 1px solid var(--b3-theme-divider); border-radius: 6px;
+  flex: 1; border: 1px solid var(--hw-border); border-radius: 6px;
   padding: 6px 8px; background: var(--b3-theme-background); color: var(--b3-theme-on-background);
   outline: none;
 }
@@ -10988,7 +11037,7 @@ body.hiword-resizing {
 .cp-doc-item {
   display: flex; align-items: center; gap: 8px;
   padding: 8px; border-radius: 8px;
-  border: 1px solid var(--b3-theme-divider);
+  border: 1px solid var(--hw-border);
   background: var(--b3-theme-background);
 }
 .cp-doc-info { flex: 1; min-width: 0; }
@@ -11012,7 +11061,7 @@ body.hiword-resizing {
 .cp-prompt-tip { font-size: 11px; color: var(--b3-theme-on-surface-light, var(--b3-theme-on-surface-light, #999)); margin-bottom: 8px; }
 .cp-prompt-list { display: flex; flex-wrap: wrap; gap: 6px; }
 .cp-prompt-chip {
-  border: 1px solid var(--b3-theme-divider); border-radius: 14px;
+  border: 1px solid var(--hw-border); border-radius: 14px;
   padding: 4px 12px; background: var(--b3-theme-background);
   color: var(--b3-theme-on-surface); cursor: pointer; font-size: 12px;
   transition: all 0.12s;
@@ -11039,7 +11088,7 @@ body.hiword-resizing {
 .cp-set-row input[type="number"],
 .cp-set-row textarea {
   flex: 1; max-width: 60%;
-  border: 1px solid var(--b3-theme-divider); border-radius: 6px;
+  border: 1px solid var(--hw-border); border-radius: 6px;
   padding: 6px 8px; background: var(--b3-theme-background);
   color: var(--b3-theme-on-background); outline: none;
   font-family: var(--b3-font-family); font-size: 12px;
@@ -11055,7 +11104,7 @@ body.hiword-resizing {
 .cp-dlg { padding: 4px 0; }
 .cp-dlg-input {
   width: 100%; box-sizing: border-box;
-  border: 1px solid var(--b3-theme-divider); border-radius: 6px;
+  border: 1px solid var(--hw-border); border-radius: 6px;
   padding: 8px 10px; margin-bottom: 12px;
   background: var(--b3-theme-background); color: var(--b3-theme-on-background);
   font-size: 13px; outline: none; font-family: var(--b3-font-family);
@@ -11067,7 +11116,7 @@ body.hiword-resizing {
 }
 .cp-dlg-actions { display: flex; justify-content: flex-end; gap: 8px; }
 .cp-dlg-btn {
-  border: 1px solid var(--b3-theme-divider); border-radius: 6px;
+  border: 1px solid var(--hw-border); border-radius: 6px;
   padding: 6px 16px; cursor: pointer; font-size: 13px;
   background: var(--b3-theme-surface); color: var(--b3-theme-on-surface);
   transition: opacity 0.12s;
@@ -11076,7 +11125,7 @@ body.hiword-resizing {
 .cp-dlg-btn--danger { background: var(--b3-theme-error); color: #fff; border-color: transparent; }
 .cp-dlg-btn:hover { opacity: .9; }
 .cp-set-btn {
-  border: 1px solid var(--b3-theme-divider); border-radius: 6px;
+  border: 1px solid var(--hw-border); border-radius: 6px;
   padding: 6px 16px; cursor: pointer; font-size: 13px;
   background: var(--b3-theme-surface); color: var(--b3-theme-on-surface);
 }
@@ -11097,7 +11146,7 @@ body.hiword-resizing {
 }
 .hiword-ai-model-btn:hover {
   background: var(--b3-theme-background-hover, rgba(0,0,0,.04));
-  border-color: var(--b3-theme-divider);
+  border-color: var(--hw-border);
 }
 .hiword-ai-model-current {
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
@@ -11109,7 +11158,7 @@ body.hiword-resizing {
   position: absolute; top: calc(100% + 4px); right: 0; z-index: 50;
   min-width: 220px; max-height: 280px; overflow-y: auto;
   background: var(--b3-theme-surface, #fff);
-  border: 1px solid var(--b3-theme-divider, rgba(0,0,0,.1));
+  border: 1px solid var(--hw-border);
   border-radius: 12px; padding: 6px;
   box-shadow: 0 10px 30px rgba(0,0,0,.16);
   animation: hiword-model-menu-in 0.15s ease-out;
@@ -11147,7 +11196,7 @@ body.hiword-resizing {
   /* 2026-09-07 改动点 3：两级（平台 → 模型）选择器 */
   .hiword-ai-model-search {
     width: 100%; box-sizing: border-box;
-    border: 1px solid var(--b3-theme-divider, rgba(0,0,0,.12));
+    border: 1px solid var(--hw-border);
     border-radius: 8px; padding: 6px 8px; margin-bottom: 6px;
     font: inherit; font-size: 12px;
     background: var(--b3-theme-background, #fff);
@@ -11158,7 +11207,7 @@ body.hiword-resizing {
     display: flex; align-items: center; gap: 6px;
     padding: 7px 8px 5px; cursor: pointer; user-select: none;
     font-size: 12px; font-weight: 600; color: var(--b3-theme-on-surface-light, #888);
-    border-bottom: 1px solid var(--b3-theme-divider, rgba(0,0,0,.06));
+    border-bottom: 1px solid var(--hw-border);
   }
   .hiword-ai-model-caret { font-size: 10px; line-height: 1; opacity: 0.7; }
   .hiword-ai-model-gname { flex: 1; }
@@ -11230,7 +11279,7 @@ body.hiword-resizing {
 /* 2026-08-26 改进：工具栏分组分隔线（左:内容来源 / 右:提示词配置） */
 .hiword-ai-toolbar-divider {
   width: 1px; height: 18px; margin: 0 4px;
-  background: var(--b3-theme-divider, #e0e0e0);
+  background: var(--hw-border);
   flex-shrink: 0;
 }
 /* 预设激活态高亮（图标型按钮也可见） */
@@ -11283,7 +11332,7 @@ body.hiword-resizing {
     background: var(--b3-theme-background-hover);
     border-radius: 3px;
   }
-  &::-webkit-scrollbar-thumb:hover { background: var(--b3-theme-divider); }
+  &::-webkit-scrollbar-thumb:hover { background: var(--hw-border); }
 }
 @keyframes hiword-overlay-panel-in {
   from { transform: translateY(100%); opacity: 0; }
@@ -11295,7 +11344,7 @@ body.hiword-resizing {
   display: flex; align-items: center; justify-content: space-between;
   margin: -16px -16px 14px;
   padding: 12px 18px;
-  border-bottom: 1px solid var(--b3-theme-divider, rgba(0,0,0,.06));
+  border-bottom: 1px solid var(--hw-border);
 }
 .hiword-ai-overlay-title {
   font-size: 14px; font-weight: 500;
@@ -11361,7 +11410,7 @@ body.hiword-resizing {
 .hiword-ai-preset-search {
   width: 100%; padding: 9px 14px; border-radius: 10px;
   font-size: 13px;
-  border: 1px solid var(--b3-theme-divider, rgba(0,0,0,.14));
+  border: 1px solid var(--hw-border);
   background: var(--b3-theme-background, #fff);
   color: var(--b3-theme-on-surface, #37352f);
   transition: all 0.18s ease;
@@ -11374,12 +11423,12 @@ body.hiword-resizing {
 .hiword-ai-preset-item {
   display: flex; align-items: center; gap: 10px;
   padding: 12px 14px; border-radius: 12px;
-  border: 1px solid var(--b3-theme-divider, rgba(0,0,0,.08));
+  border: 1px solid var(--hw-border);
   background: var(--b3-theme-background, #fff);
   transition: all 0.18s ease;
 }
 .hiword-ai-preset-item:hover {
-  border-color: color-mix(in srgb, var(--b3-theme-primary) 40%, var(--b3-theme-divider));
+  border-color: color-mix(in srgb, var(--b3-theme-primary) 40%, var(--hw-border));
   box-shadow: 0 2px 10px rgba(0,0,0,.05);
 }
 .hiword-ai-preset-item.active {
@@ -11431,12 +11480,12 @@ body.hiword-resizing {
 .hiword-ai-preset-panel-subbar {
   display: flex; align-items: center; justify-content: space-between;
   padding: 8px 0 12px;
-  border-bottom: 1px solid var(--b3-theme-divider, rgba(0,0,0,.06));
+  border-bottom: 1px solid var(--hw-border);
   margin-bottom: 12px;
 }
 .hiword-ai-preset-panel-subbar .hiword-ai-preset-top-actions { display: flex; align-items: center; gap: 8px; }.hiword-ai-docsearch-input {
   flex: 1; padding: 9px 14px; border-radius: 10px; font-size: 13px;
-  border: 1.5px solid var(--b3-theme-divider, rgba(0,0,0,.14));
+  border: 1.5px solid var(--hw-border);
   background: var(--b3-theme-background, #fff);
   color: var(--b3-theme-on-surface, #37352f);
   transition: all 0.2s ease;
@@ -11455,7 +11504,7 @@ body.hiword-resizing {
 .hiword-ai-docsearch-item {
   display: flex; align-items: center; gap: 10px;
   padding: 11px 14px; border-radius: 10px;
-  border: 1px solid var(--b3-theme-divider, rgba(0,0,0,.08));
+  border: 1px solid var(--hw-border);
   background: var(--b3-theme-background, #fff);
   transition: all 0.18s ease;
 }
@@ -11488,7 +11537,7 @@ body.hiword-resizing {
 .hiword-ai-tpl-item {
   display: flex; align-items: center; gap: 10px;
   padding: 12px 14px; border-radius: 10px;
-  border: 1px solid var(--b3-theme-divider, rgba(0,0,0,.08));
+  border: 1px solid var(--hw-border);
   background: var(--b3-theme-background, #fff);
   transition: all 0.2s ease;
 }
@@ -11521,7 +11570,7 @@ body.hiword-resizing {
 }
 .hiword-ai-tpl-new-row { display: flex; justify-content: center; }
 .hiword-ai-tpl-new {
-  border: 1.5px dashed var(--b3-theme-divider, rgba(0,0,0,.2));
+  border: 1.5px dashed var(--hw-border);
   background: transparent; cursor: pointer;
   padding: 9px 24px; border-radius: 10px; font-size: 13px;
   color: var(--b3-theme-on-surface, #37352f);
@@ -11550,7 +11599,7 @@ body.hiword-resizing {
 .hiword-ai-preset-label em { font-style: normal; color: var(--b3-theme-primary, #06b6d4); font-weight: 600; }
 .hiword-ai-preset-input {
   padding: 9px 14px; border-radius: 10px; font-size: 13px;
-  border: 1.5px solid var(--b3-theme-divider, rgba(0,0,0,.14));
+  border: 1.5px solid var(--hw-border);
   background: var(--b3-theme-background, #fff);
   color: var(--b3-theme-on-surface, #37352f);
   transition: all 0.2s ease;
@@ -11570,7 +11619,7 @@ body.hiword-resizing {
 }
 .hiword-ai-preset-textarea {
   min-height: 80px; padding: 9px 14px; border-radius: 10px; font-size: 12.5px;
-  border: 1.5px solid var(--b3-theme-divider, rgba(0,0,0,.14));
+  border: 1.5px solid var(--hw-border);
   background: var(--b3-theme-background, #fff);
   color: var(--b3-theme-on-surface, #37352f);
   resize: vertical; font-family: inherit; line-height: 1.55;
@@ -11586,7 +11635,7 @@ body.hiword-resizing {
 .hiword-ai-preset-list { display: flex; flex-direction: column; gap: 6px; }.hiword-ai-preset-top-actions { display: flex; align-items: center; gap: 8px; }
 .hiword-ai-preset-select {
   padding: 9px 12px; border-radius: 10px; font-size: 13px;
-  border: 1.5px solid var(--b3-theme-divider, rgba(0,0,0,.14));
+  border: 1.5px solid var(--hw-border);
   background: var(--b3-theme-background, #fff);
   color: var(--b3-theme-on-surface, #37352f);
   transition: all 0.2s ease; cursor: pointer;
@@ -11644,14 +11693,14 @@ body.hiword-resizing {
 .hiword-ai-session-head { display: flex; justify-content: space-between; align-items: center; }
 .hiword-ai-session-title { font-size: 14px; font-weight: 600; color: var(--b3-theme-on-background); }
 .hiword-ai-session-search {
-  padding: 8px 10px; border: 1px solid var(--b3-theme-divider); border-radius: 8px;
+  padding: 8px 10px; border: 1px solid var(--hw-border); border-radius: 8px;
   background: var(--b3-theme-background); color: var(--b3-theme-on-background); font-size: 13px;
 }
 .hiword-ai-session-search:focus { outline: none; border-color: var(--b3-theme-primary, #06b6d4); }
 .hiword-ai-session-list { display: flex; flex-direction: column; gap: 6px; max-height: 50vh; overflow: auto; }
 .hiword-ai-session-item {
   display: flex; align-items: center; gap: 8px; padding: 8px 10px;
-  border: 1px solid var(--b3-theme-divider); border-radius: 8px; cursor: pointer;
+  border: 1px solid var(--hw-border); border-radius: 8px; cursor: pointer;
   transition: all .15s ease;
 }
 .hiword-ai-session-item:hover { border-color: var(--b3-theme-primary, #06b6d4); }
@@ -11734,7 +11783,7 @@ body.hiword-resizing {
   padding: 0;
   position: relative;
   transition: color .12s, background .12s, box-shadow .12s;
-  box-shadow: inset 0 0 0 1px var(--b3-theme-divider, rgba(0,0,0,.1));
+  box-shadow: inset 0 0 0 1px var(--hw-border);
 }
 .hiword-ai-token-ring:hover {
   color: var(--b3-theme-primary, #06b6d4);
@@ -11778,7 +11827,7 @@ body.hiword-resizing {
   width: 280px;
   max-width: calc(100vw - 16px);
   background: var(--b3-theme-surface, #fff);
-  border: 1px solid var(--b3-theme-divider, rgba(0,0,0,.12));
+  border: 1px solid var(--hw-border);
   border-radius: 10px;
   box-shadow: 0 8px 28px rgba(0,0,0,.16);
   color: var(--b3-theme-on-background, #1f1f1f);
@@ -11795,8 +11844,8 @@ body.hiword-resizing {
   width: 10px;
   height: 10px;
   background: var(--b3-theme-surface, #fff);
-  border-right: 1px solid var(--b3-theme-divider, rgba(0,0,0,.12));
-  border-bottom: 1px solid var(--b3-theme-divider, rgba(0,0,0,.12));
+  border-right: 1px solid var(--hw-border);
+  border-bottom: 1px solid var(--hw-border);
   transform: translateX(-50%) rotate(45deg);
 }
 /* 浮窗在圆环下方时箭头朝上（JS 按空间自动切换） */
@@ -11804,15 +11853,15 @@ body.hiword-resizing {
   top: -6px;
   bottom: auto;
   border: none;
-  border-left: 1px solid var(--b3-theme-divider, rgba(0,0,0,.12));
-  border-top: 1px solid var(--b3-theme-divider, rgba(0,0,0,.12));
+  border-left: 1px solid var(--hw-border);
+  border-top: 1px solid var(--hw-border);
 }
 .hiword-ai-token-modal-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
   padding: 14px 16px 10px;
-  border-bottom: 1px solid var(--b3-theme-divider, rgba(0,0,0,.08));
+  border-bottom: 1px solid var(--hw-border);
 }
 .hiword-ai-token-modal-title {
   font-size: 15px;
@@ -11852,7 +11901,7 @@ body.hiword-resizing {
 }
 .hiword-ai-token-modal-divider {
   height: 1px;
-  background: var(--b3-theme-divider, rgba(0,0,0,.08));
+  background: var(--hw-border);
   margin: 12px 0;
 }
 .hiword-ai-token-modal-row {
@@ -11867,7 +11916,7 @@ body.hiword-resizing {
 .hiword-ai-token-modal-row-total {
   margin-top: 6px;
   padding-top: 6px;
-  border-top: 1px dashed var(--b3-theme-divider, rgba(0,0,0,.12));
+  border-top: 1px dashed var(--hw-border);
   font-weight: 600;
   color: var(--b3-theme-on-background, #1f1f1f);
 }
@@ -12384,12 +12433,19 @@ body.hiword-resizing {
   gap: 4px;
   overflow-y: auto;
 }
+/* 2026-09-12 滚动修复（无头 Chrome 实测确认）：
+   列表是「定高 flex 容器」，而卡片自身是 `overflow: hidden`。
+   按 flex 规范，子项 `min-height: auto` 在「计算 overflow ≠ visible」时归零
+   ⇒ 卡片不是溢出，而是被压扁去适配容器（实测：列表 client 915 / scroll 915，卡片
+   被压到 26~80px，展开的例句区被裁掉一段）。列表因此没有可滚动高度。
+   修法：卡片一律禁止收缩，让内容真实溢出，由列表自身（已有 overflow-y:auto）滚动。 */
+.hiword-rp-list > * { flex: 0 0 auto; }
 /* 2026-09-11 v4 词卡：喇叭 + 大字单词 + 熟练度圆圈 + 到期徽章
    交互：左拉手势滑出操作区（右键菜单另见 .hiword-rp-ctx） */
+/* 2026-09-12 布局修复：row 块级化（句子展开区独立成块），
+   滑动操作区收进 .hiword-rp-rowmain（只覆盖词卡行，不拉满句子区高度）。 */
 .hiword-rp-row {
-  display: flex;
-  align-items: center;
-  gap: 0;
+  display: block;
   padding: 12px 14px;
   border-radius: 12px;
   background: var(--b3-theme-surface, #fff);
@@ -12399,6 +12455,11 @@ body.hiword-resizing {
   transition: background 0.12s, border-color 0.12s, box-shadow 0.12s;
   position: relative;
   overflow: hidden;
+}
+.hiword-rp-rowmain {
+  position: relative;
+  display: flex;
+  align-items: center;
 }
 .hiword-rp-row:hover {
   background: var(--hw-rp-hover);
@@ -12463,13 +12524,22 @@ body.hiword-resizing {
   color: var(--b3-theme-primary, #4f7cff);
   white-space: nowrap;
 }
-.hiword-rp-pos--unknown { background: rgba(153, 153, 153, 0.16); color: #999; }
+.hiword-rp-pos--unknown { background: var(--hw-rp-sub); color: var(--hw-rp-mut); }
+/* 右侧控制条：✨ + 掌握度点位 + 到期徽章 横排一行（2026-09-12 方案 A）。
+   原为竖排三层（✨28 + 6 + 点11 + 6 + 徽章 ≈ 71px），比左侧文字区（~34px）高一倍
+   ⇒ 它成了决定卡片高度的元素：卡片被撑高、留白落在文字上下，✨ 也被顶到最上、
+   与单词行不在同一水平线（视觉上"悬空"）。
+   改横排后卡片高度由文字决定。窄容器（dock 300px 级）下允许折行 + 压缩：
+   故 flex-shrink 由 0 改 1 并放开 min-width，避免硬挤左侧文字。 */
 .hiword-rp-side {
   display: flex;
-  flex-direction: column;
-  align-items: flex-end;
-  gap: 6px;
-  flex-shrink: 0;
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px 10px;
+  min-width: 0;
+  flex-shrink: 1;
 }
 /* 到期徽章三态 */
 .hiword-rp-badge {
@@ -12492,7 +12562,9 @@ body.hiword-resizing {
   color: var(--hw-rp-mut);
   font-weight: 500;
 }
-/* 滑出操作区：默认藏在右侧外，左拉手势后露出 */
+/* 滑出操作区：默认藏在右侧外，左拉手势后露出。
+   底色与卡片同源（--b3-theme-surface）并去掉渐变 —— 原先用 --b3-theme-background
+   （页面底色）会与卡片面形成一档色差，滑出区看起来比卡片"更白"。 */
 .hiword-rp-ops {
   position: absolute;
   right: 0;
@@ -12502,17 +12574,19 @@ body.hiword-resizing {
   align-items: center;
   gap: 6px;
   padding: 0 12px;
-  background: linear-gradient(270deg, var(--hw-rp-sub), var(--b3-theme-background, #fff));
-  border-left: 1px solid var(--b3-border-color, #eee);
+  background: var(--b3-theme-surface, #fff);
+  border-left: 0.5px dashed var(--b3-border-color, #eee);
   transform: translateX(calc(100% + var(--rp-drag, 0px)));
   transition: transform 0.2s cubic-bezier(0.2, 0.8, 0.3, 1);
   z-index: 3;
 }
+/* 按钮改"无底色 + 描边"式：不再叠第二层白底，靠描边与文字分层。
+   危险操作常态只用红字表意，hover 才升级为淡红底 + 红描边（避免红字红边红底三重强调）。 */
 .hiword-rp-ops-btn {
   height: 26px;
   border-radius: 99px;
   border: 1px solid var(--b3-border-color, #e5e5e5);
-  background: var(--b3-theme-background, #fff);
+  background: transparent;
   color: var(--b3-theme-on-surface, #555);
   cursor: pointer;
   font-size: 11.5px;
@@ -12522,7 +12596,7 @@ body.hiword-resizing {
   transition: all 0.12s;
 }
 .hiword-rp-ops-btn:hover { border-color: var(--b3-theme-primary, #4f7cff); color: var(--b3-theme-primary, #4f7cff); }
-.hiword-rp-ops-btn--danger { color: var(--b3-theme-error, #e5484d); border-color: color-mix(in srgb, var(--b3-theme-error, #e5484d) 30%, var(--b3-border-color, #e5e5e5)); }
+.hiword-rp-ops-btn--danger { color: var(--b3-theme-error, #e5484d); border-color: var(--b3-border-color, #e5e5e5); }
 .hiword-rp-ops-btn--danger:hover {
   background: color-mix(in srgb, var(--b3-theme-error, #e5484d) 10%, transparent);
   border-color: var(--b3-theme-error, #e5484d);
@@ -12559,6 +12633,205 @@ body.hiword-resizing {
 .hiword-rp-ctx-item:hover { background: var(--hw-rp-sub); color: var(--b3-theme-on-background, #333); }
 .hiword-rp-ctx-item--danger { color: var(--b3-theme-error, #e5484d); }
 .hiword-rp-ctx-item--danger:hover { background: color-mix(in srgb, var(--b3-theme-error, #e5484d) 10%, transparent); }
+
+/* ===== 2026-09-12 每日记忆计划：进度带 ===== */
+.hiword-rp-plan {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 14px 16px;
+  border-radius: 12px;
+  margin-bottom: 10px;
+  background: color-mix(in srgb, var(--b3-theme-primary, #4f7cff) 7%, var(--b3-theme-background, #fff));
+  border: 1px solid color-mix(in srgb, var(--b3-theme-primary, #4f7cff) 22%, var(--b3-border-color, #e5e5e5));
+  transition: background 0.3s, border-color 0.3s;
+}
+.hiword-rp-plan--done {
+  background: color-mix(in srgb, var(--b3-theme-success, #23b373) 8%, var(--b3-theme-background, #fff));
+  border-color: color-mix(in srgb, var(--b3-theme-success, #23b373) 30%, var(--b3-border-color, #e5e5e5));
+}
+.hiword-rp-plan-ring { position: relative; width: 64px; height: 64px; flex-shrink: 0; }
+.hiword-rp-plan-ring svg { transform: rotate(-90deg); }
+.hiword-rp-ring-bg { fill: none; stroke: color-mix(in srgb, var(--b3-theme-primary, #4f7cff) 14%, transparent); stroke-width: 6; }
+.hiword-rp-plan--done .hiword-rp-ring-bg { stroke: color-mix(in srgb, var(--b3-theme-success, #23b373) 14%, transparent); }
+.hiword-rp-ring-fg {
+  fill: none;
+  stroke: var(--b3-theme-primary, #4f7cff);
+  stroke-width: 6;
+  stroke-linecap: round;
+  transition: stroke-dashoffset 0.6s cubic-bezier(0.3, 0.7, 0.3, 1);
+}
+.hiword-rp-plan--done .hiword-rp-ring-fg { stroke: var(--b3-theme-success, #23b373); }
+.hiword-rp-plan-num {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+}
+.hiword-rp-plan-num b { font-size: 15px; color: var(--b3-theme-on-background, #333); font-variant-numeric: tabular-nums; line-height: 1; }
+.hiword-rp-plan-num span { font-size: 9px; color: var(--b3-theme-on-surface-light, #999); margin-top: 2px; }
+.hiword-rp-plan-main { flex: 1; min-width: 0; }
+.hiword-rp-plan-title { font-size: 13.5px; font-weight: 650; color: var(--b3-theme-on-background, #333); }
+.hiword-rp-plan-sub { font-size: 11.5px; color: var(--b3-theme-on-surface-light, #999); margin-top: 4px; line-height: 1.5; }
+
+/* ===== 2026-09-12 AI 造句：✨ 按钮 + 句子展开区 ===== */
+/* ✨ 按钮中性化：SVG 图标走 currentColor，避免 emoji 固定金色与背景融合 */
+/* 2026-09-12 方案 A 配套：与右侧圆点/徽章同排后改为 24×24、圆角 6px，
+   常态去描边、底色用 --hw-rp-sub（与 32px 喇叭按钮同族），避免在满屏卡片里
+   像一个"外来描边方框"。描边保留为 transparent 只为 hover / 展开态能亮出主色。 */
+.hiword-rp-gen {
+  width: 24px;
+  height: 24px;
+  border-radius: 6px;
+  border: 1px solid transparent;
+  background: var(--hw-rp-sub);
+  color: var(--b3-theme-on-surface-light, #999);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  transition: all 0.18s;
+}
+.hiword-rp-gen svg { width: 14px; height: 14px; }
+.hiword-rp-gen:hover { border-color: var(--b3-theme-primary, #4f7cff); color: var(--b3-theme-primary, #4f7cff); transform: scale(1.06); }
+.hiword-rp-gen.busy { color: var(--b3-theme-primary, #4f7cff); cursor: wait; }
+.hiword-rp-gen.busy svg { animation: hiword-rp-spin 0.9s linear infinite; }
+@keyframes hiword-rp-spin { to { transform: rotate(360deg); } }
+/* 2026-09-12 展开态（句子区已展开）= 图 2 样式：蓝色圆勾（蓝圆 + 白对勾） */
+.hiword-rp-gen.on {
+  border-radius: 50%;
+  background: var(--b3-theme-primary, #4f7cff);
+  border-color: var(--b3-theme-primary, #4f7cff);
+  color: #fff;
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--b3-theme-primary, #4f7cff) 16%, transparent);
+  transform: none;
+}
+.hiword-rp-gen.on:hover { transform: scale(1.06); color: #fff; }
+.hiword-rp-sents {
+  border-top: 1px dashed var(--b3-border-color, #eee);
+  margin-top: 10px;
+  padding-top: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  animation: hiword-rp-fade 0.25s ease;
+}
+.hiword-rp-sents-hint { font-size: 11px; color: var(--b3-theme-on-surface-light, #999); display: flex; align-items: center; gap: 6px; justify-content: space-between; }
+/* 2026-09-12 P0：展开区出口（重新生成 / 收起） */
+.hiword-rp-sents-tools { display: flex; align-items: center; gap: 6px; flex-shrink: 0; margin-left: auto; }
+.hiword-rp-sents-tool {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  height: 20px;
+  padding: 0 8px;
+  border-radius: 6px;
+  border: 1px solid var(--b3-border-color, #e5e5e5);
+  background: var(--b3-theme-background, #fff);
+  color: var(--b3-theme-on-surface-light, #888);
+  font-size: 10.5px;
+  cursor: pointer;
+  transition: all 0.15s;
+  white-space: nowrap;
+}
+.hiword-rp-sents-tool:hover {
+  border-color: var(--b3-theme-primary, #4f7cff);
+  color: var(--b3-theme-primary, #4f7cff);
+}
+.hiword-rp-sents-tool--regen:hover {
+  border-color: var(--b3-theme-warning, #d9822b);
+  color: var(--b3-theme-warning, #d9822b);
+}
+.hiword-rp-sent {
+  background: var(--b3-theme-background-light, #f7f8fa);
+  border: 1px solid var(--b3-border-color, #eee);
+  border-radius: 10px;
+  padding: 9px 12px;
+}
+.hiword-rp-sent-en { font-size: 13px; color: var(--b3-theme-on-background, #333); line-height: 1.5; }
+.hiword-rp-sent-en b { color: var(--b3-theme-primary, #4f7cff); font-weight: 700; }
+.hiword-rp-sent-zh { font-size: 11.5px; color: var(--b3-theme-on-surface-light, #999); margin-top: 3px; }
+.hiword-rp-sent-meta { display: flex; align-items: center; gap: 6px; margin-top: 7px; flex-wrap: wrap; }
+/* 五大句型徽章（5 色 + phrase 灰，b3 派生明暗自适应） */
+.hiword-rp-stype { font-size: 10px; font-weight: 700; border-radius: 5px; padding: 2px 7px; letter-spacing: 0.02em; }
+.hiword-rp-stype--SV { background: color-mix(in srgb, var(--b3-theme-primary, #4f7cff) 12%, transparent); color: var(--b3-theme-primary, #4f7cff); }
+.hiword-rp-stype--SVO { background: color-mix(in srgb, var(--b3-theme-success, #23b373) 12%, transparent); color: var(--b3-theme-success, #23b373); }
+.hiword-rp-stype--SVC { background: color-mix(in srgb, var(--b3-theme-warning, #d9822b) 14%, transparent); color: var(--b3-theme-warning, #d9822b); }
+.hiword-rp-stype--SVOO { background: color-mix(in srgb, #8b5cd6 12%, transparent); color: #8b5cd6; }
+.hiword-rp-stype--SVOC { background: color-mix(in srgb, #0e9bb5 12%, transparent); color: #0e9bb5; }
+.hiword-rp-stype--phrase { background: var(--hw-rp-sub); color: var(--b3-theme-on-surface-light, #999); }
+.hiword-rp-stag { font-size: 10px; color: var(--b3-theme-on-surface-light, #999); background: var(--hw-rp-sub); border-radius: 5px; padding: 2px 7px; }
+.hiword-rp-stag--dict { color: var(--b3-theme-primary, #4f7cff); background: color-mix(in srgb, var(--b3-theme-primary, #4f7cff) 10%, transparent); }
+.hiword-rp-sent-ops { margin-left: auto; display: flex; gap: 2px; }
+.hiword-rp-sop {
+  appearance: none;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  font-size: 12px;
+  /* 2026-09-12：图标色由 on-surface-light(≈#999) 提到 on-surface(≈#555)。
+     浅色卡片上 #999 的 14px 细线勾几乎看不见（用户反馈「看不太清」）。 */
+  color: var(--b3-theme-on-surface, #555);
+  padding: 3px 6px;
+  border-radius: 6px;
+  font-family: inherit;
+  transition: all 0.12s;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.hiword-rp-sop svg { width: 15px; height: 15px; }
+.hiword-rp-sop:hover { background: var(--hw-rp-hover); color: var(--b3-theme-on-background, #333); }
+/* 采纳态：成功绿 */
+.hiword-rp-sop.on { color: var(--b3-theme-success, #23b373); }
+/* 收藏态：警告金（SVG currentColor 可控，不再用 ⭐ emoji） */
+.hiword-rp-sop--fav.on { color: var(--b3-theme-warning, #d9822b); }
+/* 2026-09-12 采纳按钮「看得懂 + 看得清」：
+   ① 常态给一圈描边，让它一眼是「可点的控件 / 带状态的开关」，而不是一个装饰符号；
+   ② 已采纳 = 绿色淡底 + 绿描边 + 绿勾（与 .hiword-rp-gen.on / .hiword-rp-stype--* 同一套
+      color-mix(..., transparent) 语言，深浅主题都自适应）。 */
+.hiword-rp-sop--adopt {
+  border: 1px solid var(--b3-border-color, #e5e5e5);
+  background: var(--b3-theme-surface, #fff);
+}
+.hiword-rp-sop--adopt:hover {
+  border-color: var(--b3-theme-success, #23b373);
+  color: var(--b3-theme-success, #23b373);
+  background: var(--b3-theme-surface, #fff);
+}
+.hiword-rp-sop--adopt.on {
+  background: color-mix(in srgb, var(--b3-theme-success, #23b373) 16%, transparent);
+  border-color: color-mix(in srgb, var(--b3-theme-success, #23b373) 45%, transparent);
+  color: var(--b3-theme-success, #23b373);
+}
+.hiword-rp-sop--adopt.on:hover {
+  background: color-mix(in srgb, var(--b3-theme-success, #23b373) 24%, transparent);
+  color: var(--b3-theme-success, #23b373);
+}
+.hiword-rp-sent-skel {
+  height: 52px;
+  border-radius: 10px;
+  background: linear-gradient(90deg, var(--hw-rp-sub) 25%, var(--hw-rp-hover) 50%, var(--hw-rp-sub) 75%);
+  background-size: 200% 100%;
+  animation: hiword-rp-sk 1.2s infinite;
+}
+@keyframes hiword-rp-sk { to { background-position: -200% 0; } }
+.hiword-rp-gen-more {
+  align-self: flex-start;
+  appearance: none;
+  border: 1px dashed var(--b3-border-color, #e5e5e5);
+  background: transparent;
+  color: var(--b3-theme-on-surface-light, #999);
+  font-size: 11.5px;
+  padding: 5px 12px;
+  border-radius: 8px;
+  cursor: pointer;
+  font-family: inherit;
+}
+.hiword-rp-gen-more:hover { border-color: var(--b3-theme-warning, #d9822b); color: var(--b3-theme-warning, #d9822b); }
 .hiword-rp-done-banner {
   margin: 0 0 10px;
   padding: 8px 12px;
@@ -12649,6 +12922,11 @@ body.hiword-resizing {
 }
 /* 学习 pane 内的列表撑满（pane 成为 flex 容器后重新声明） */
 .hiword-rp-pane--on > .hiword-rp-list { flex: 1 1 auto; min-height: 0; }
+
+/* 词库 pane（2026-09-12 词库并入「学习」面板）：
+   pane 容器不带 .hiword-dock-content，需自行复刻其滚动模型（内容高时整块可滚，
+   列表内部 .hiword-vb-list 仍是 flex:1 + 自滚动，与原「独立词库面板」一致）。 */
+.hiword-rp-pane--vocab { overflow-y: auto; }
 
 /* 四状态 Tab（全部/待学习/已学习/标熟词）——b3 segmented 风格 */
 .hiword-rp-state-tabs {
@@ -12977,8 +13255,8 @@ body.hiword-resizing {
   .hiword-ab-side { display: none; }
 }
 
-/* 词库面板拖放高亮（作用于持久内容容器，与复习面板一致） */
-.hiword-dock-content.hiword-vb-dragover {
+/* 词库面板拖放高亮（2026-09-12：作用于词库 pane 容器 —— 合并后容器不再带 .hiword-dock-content） */
+.hiword-vb-dragover {
   outline: 2px dashed var(--b3-theme-primary, #4f7cff);
   outline-offset: -4px;
   border-radius: 12px;
@@ -13247,7 +13525,7 @@ body.hiword-resizing {
 .hiword-ai-savenote-input,
 .hiword-ai-savenote-select {
   width: 100%; padding: 9px 14px; border-radius: 10px; font-size: 13px;
-  border: 1.5px solid var(--b3-theme-divider, rgba(0,0,0,.14));
+  border: 1.5px solid var(--hw-border);
   background: var(--b3-theme-background, #fff);
   color: var(--b3-theme-on-surface, #37352f);
   transition: all 0.2s ease;
@@ -13262,7 +13540,7 @@ body.hiword-resizing {
 }
 .hiword-ai-savenote-tree {
   max-height: 240px; overflow-y: auto;
-  border: 1px solid var(--b3-theme-divider, rgba(0,0,0,.1));
+  border: 1px solid var(--hw-border);
   border-radius: 12px; padding: 8px;
   background: var(--b3-theme-background, #fff);
 }
@@ -13295,7 +13573,7 @@ body.hiword-resizing {
 .hiword-ai-savenote-footer {
   display: flex; align-items: center; justify-content: space-between;
   gap: 12px; padding-top: 4px;
-  border-top: 1px solid var(--b3-theme-divider, rgba(0,0,0,.06));
+  border-top: 1px solid var(--hw-border);
   margin-top: 2px;
 }
 .hiword-ai-savenote-switch {
@@ -13314,7 +13592,7 @@ body.hiword-resizing {
 .hiword-pdef-hint {
   font-size: 13px; color: var(--b3-theme-on-surface, #555);
   line-height: 1.6; padding: 0 4px 12px;
-  border-bottom: 1px solid var(--b3-theme-divider, #e8e8e8);
+  border-bottom: 1px solid var(--hw-border);
 }
 .hiword-pdef-hint b { color: var(--b3-theme-primary, #4f6ef7); font-size: 14px; }
 .hiword-pdef-tip { color: var(--b3-theme-on-surface-light, #888); font-size: 12px; }
@@ -13328,7 +13606,7 @@ body.hiword-resizing {
 .hiword-pdef-count b { color: var(--b3-theme-primary, #4f6ef7); font-size: 14px; }
 .hiword-pdef-list {
   flex: 1; overflow-y: auto; min-height: 100px; max-height: 380px;
-  border: 1px solid var(--b3-theme-divider, #e8e8e8);
+  border: 1px solid var(--hw-border);
   border-radius: 6px;
   padding: 4px;
   background: var(--b3-theme-background, #fff);
@@ -13352,7 +13630,7 @@ body.hiword-resizing {
 .hiword-pdef-ex { font-size: 11.5px; color: var(--b3-theme-on-surface-light, #888); font-style: italic; }
 .hiword-pdef-footer {
   display: flex; justify-content: flex-end; gap: 8px;
-  padding: 12px 4px 0; border-top: 1px solid var(--b3-theme-divider, #e8e8e8);
+  padding: 12px 4px 0; border-top: 1px solid var(--hw-border);
   margin-top: 12px;
 }
 
@@ -13362,7 +13640,7 @@ body.hiword-resizing {
   /* 2026-08-22 改：与微阅批注弹窗同 z-index (100000),保证两个弹窗在同一图层 */
   z-index: 100000;
   background: var(--b3-theme-surface, #fff);
-  border: 1px solid var(--b3-theme-divider, #e0e0e0);
+  border: 1px solid var(--hw-border);
   border-radius: 8px;
   box-shadow: 0 8px 32px rgba(0,0,0,0.18);
   font-size: 13px;
@@ -13402,7 +13680,7 @@ body.hiword-resizing {
   display: flex; align-items: center; justify-content: space-between;
   padding: 8px 12px;
   background: var(--b3-theme-background, #fafafa);
-  border-bottom: 1px solid var(--b3-theme-divider, #e8e8e8);
+  border-bottom: 1px solid var(--hw-border);
   cursor: move;
   user-select: none;
   flex: 0 0 auto;
@@ -13425,7 +13703,7 @@ body.hiword-resizing {
   color: var(--b3-theme-error, #d9534f);
   padding: 6px 12px; font-size: 12px;
   display: flex; align-items: center; gap: 8px;
-  border-bottom: 1px solid var(--b3-theme-divider, #e8e8e8);
+  border-bottom: 1px solid var(--hw-border);
 }
 .hiword-anno-ai-open-settings {
   background: var(--b3-theme-primary, #4f6ef7);
@@ -13487,8 +13765,8 @@ body.hiword-resizing {
   display: flex; align-items: center; justify-content: center;
   cursor: row-resize;
   background: var(--b3-theme-background, #fafafa);
-  border-top: 1px solid var(--b3-theme-divider, #e8e8e8);
-  border-bottom: 1px solid var(--b3-theme-divider, #e8e8e8);
+  border-top: 1px solid var(--hw-border);
+  border-bottom: 1px solid var(--hw-border);
   position: relative;
   user-select: none;
 
@@ -13557,7 +13835,7 @@ body.hiword-resizing {
   background: var(--b3-theme-surface, #fff);
   color: var(--b3-theme-on-surface, #333);
   resize: none; min-height: 48px;
-  border-bottom: 1px solid var(--b3-theme-divider, #e8e8e8);
+  border-bottom: 1px solid var(--hw-border);
   flex: 0 0 auto;
 }
 .hiword-anno-ai-textarea::placeholder { color: var(--b3-theme-on-surface-light, #aaa); }
@@ -13571,7 +13849,7 @@ body.hiword-resizing {
 .hiword-anno-ai-spacer { flex: 1; }
 .hiword-anno-ai-btn {
   background: var(--b3-theme-surface, #fff);
-  border: 1px solid var(--b3-theme-divider, #d0d0d0);
+  border: 1px solid var(--hw-border);
   color: var(--b3-theme-on-surface, #333);
   padding: 4px 10px; border-radius: 4px;
   font: inherit; font-size: 12.5px;
@@ -13605,7 +13883,7 @@ body.hiword-resizing {
   position: fixed;
   z-index: 100001;
   background: var(--b3-theme-surface, #fff);
-  border: 1px solid var(--b3-theme-divider, #d0d0d0);
+  border: 1px solid var(--hw-border);
   border-radius: 6px;
   box-shadow: 0 4px 16px rgba(0,0,0,0.18);
   padding: 4px;
@@ -13648,7 +13926,7 @@ body.hiword-resizing {
   position: fixed;
   z-index: 100001;
   background: var(--b3-theme-surface, #fff);
-  border: 1px solid var(--b3-theme-divider, #d0d0d0);
+  border: 1px solid var(--hw-border);
   border-radius: 6px;
   box-shadow: 0 4px 16px rgba(0,0,0,0.18);
   padding: 4px;
@@ -13725,7 +14003,7 @@ body.hiword-resizing {
 .hiword-vb-status-chip {
   flex: 1;
   padding: 3px 4px;
-  border: 1px solid var(--b3-theme-divider);
+  border: 1px solid var(--hw-border);
   border-radius: 4px;
   background: var(--b3-theme-surface);
   color: var(--b3-theme-on-surface-light);
@@ -13767,7 +14045,7 @@ body.hiword-resizing {
 .hiword-vb-status-chip--clear.active {
   background: var(--b3-theme-surface);
   color: var(--b3-theme-on-surface-light);
-  border-color: var(--b3-theme-divider);
+  border-color: var(--hw-border);
   font-weight: 500;
   text-decoration: line-through;
   text-decoration-color: var(--b3-theme-on-surface-light);
@@ -13872,7 +14150,7 @@ body.hiword-resizing {
     flex-wrap: wrap;
     overflow-x: auto;
     border-right: none;
-    border-bottom: 1px solid var(--b3-theme-divider, rgba(0, 0, 0, 0.08));
+    border-bottom: 1px solid var(--hw-border);
   }
   .hiword-up-nav-item {
     flex: 0 0 auto;
@@ -14201,3 +14479,89 @@ body.hiword-resizing {
 .hiword-rp-metric--draft .hiword-rp-metric-val {
   color: var(--b3-theme-warning, #f59e0b);
 }
+
+/* ===== 2026-09-12 复习会话例句轮换（ScrambleSentences 模式） ===== */
+.hiword-review__sent {
+  margin-top: 10px;
+  padding: 9px 11px;
+  border-radius: 9px;
+  background: var(--b3-theme-background-light, #f7f8fa);
+  border: 1px solid var(--b3-border-color, #eee);
+  border-left: 3px solid var(--b3-theme-primary, #4f7cff);
+  text-align: left;
+}
+.hiword-review__sent-label {
+  font-size: 10.5px;
+  color: var(--b3-theme-on-surface-light, #999);
+  margin-bottom: 4px;
+}
+.hiword-review__sent-en { font-size: 13px; color: var(--b3-theme-on-background, #333); line-height: 1.5; }
+.hiword-review__sent-en b { color: var(--b3-theme-primary, #4f7cff); font-weight: 700; }
+.hiword-review__sent-zh { font-size: 11.5px; color: var(--b3-theme-on-surface-light, #999); margin-top: 3px; }
+.hiword-review__sent-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 6px;
+  flex-wrap: wrap;
+}
+.hiword-review__sent-tts {
+  margin-left: auto;
+  appearance: none;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  color: var(--b3-theme-on-surface-light, #999);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 3px;
+  border-radius: 6px;
+}
+.hiword-review__sent-tts svg { width: 14px; height: 14px; }
+.hiword-review__sent-tts:hover { background: var(--hw-rp-hover); color: var(--b3-theme-primary, #4f7cff); }
+
+/* ===== 2026-09-12 批量造句弹层 ===== */
+.hiword-bs { display: flex; flex-direction: column; height: 100%; box-sizing: border-box; }
+.hiword-bs-desc {
+  padding: 12px 16px;
+  font-size: 12px;
+  color: var(--b3-theme-on-surface-light, #999);
+  border-bottom: 1px solid var(--b3-border-color, #eee);
+  line-height: 1.6;
+}
+.hiword-bs-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 10px 14px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-content: flex-start;
+}
+.hiword-bs-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12.5px;
+  border: 1px solid var(--b3-border-color, #e5e5e5);
+  border-radius: 8px;
+  padding: 5px 10px;
+  cursor: pointer;
+  color: var(--b3-theme-on-surface, #555);
+  background: var(--b3-theme-background, #fff);
+  transition: all 0.15s;
+}
+.hiword-bs-item:hover { border-color: var(--b3-theme-primary, #4f7cff); }
+.hiword-bs-item input { accent-color: var(--b3-theme-primary, #4f7cff); cursor: pointer; }
+.hiword-bs-word { font-weight: 600; color: var(--b3-theme-on-background, #333); }
+.hiword-bs-has { font-size: 10.5px; color: var(--b3-theme-on-surface-light, #999); }
+.hiword-bs-foot {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 16px;
+  border-top: 1px solid var(--b3-border-color, #eee);
+  background: var(--b3-theme-background-light, #fafafa);
+}
+.hiword-bs-sum { font-size: 12px; color: var(--b3-theme-on-surface, #555); }

@@ -389,6 +389,39 @@ export async function migrateDockLayoutOnce(p: RewordPlugin): Promise<void> {
     try { await p.saveData(marker, true); } catch (__swallowErr) { logSwallow(__swallowErr, "index.ts · migrateDockLayoutOnce", "error"); }
   }
 
+  /**
+   * 一次性迁移（v3，2026-09-12）：清理**已下线 feature** 的布局残留。
+   * 「词库」独立 feature 已并入「学习」面板（review 的内部第三个小 Tab），
+   * 但 hiword-dock-layout.json / hiword-dock-lastside.json 里可能仍留着 `vocab` 键 ——
+   * DockManager 只按「已注册功能」生成 UI，残留键不会长出 Tab 行，却会被「面板布局管理」
+   * 的下拉框读出来（getSlot 默认 combined）并在侧边栏留下一个点了没反应的独立 Dock 图标。
+   * 这里按键精确删除，幂等、可重复执行，不触碰其它功能的配置。
+   */
+export async function migrateRetiredFeaturesOnce(p: RewordPlugin): Promise<void> {
+    const marker = "hiword-dock-layout-migrated-v3";
+    let done = false;
+    try { done = !!(await p.loadData(marker)); } catch (__swallowErr) { logSwallow(__swallowErr, "dock-layout.ts · migrateRetiredFeaturesOnce", "debug"); }
+    if (done) return;
+    const retired = ["vocab"];
+    for (const key of ["hiword-dock-layout.json", "hiword-dock-lastside.json"]) {
+      try {
+        const cfg = (await p.loadData(key)) as Record<string, unknown> | null;
+        if (!cfg || typeof cfg !== "object") continue;
+        let hit = false;
+        for (const id of retired) {
+          if (id in cfg) { delete cfg[id]; hit = true; }
+        }
+        if (hit) {
+          await p.saveData(key, cfg);
+          getLogger().info(`[REword] 已清理下线功能的布局残留（${key}）`);
+        }
+      } catch (e) {
+        getLogger().warn(`[REword] 清理布局残留失败（${key}）`, { error: e });
+      }
+    }
+    try { await p.saveData(marker, true); } catch (__swallowErr) { logSwallow(__swallowErr, "dock-layout.ts · migrateRetiredFeaturesOnce", "error"); }
+  }
+
   /** 根据 data-type 找到承载该 dock 的思源 Dock 实例（left/right/bottom） */
 export function findDockByType(p: RewordPlugin, type: string): any {
     const layout = (window as any).siyuan?.layout;
@@ -540,6 +573,14 @@ export function onLayoutReady(p: RewordPlugin) {
 
   /** 聚焦某功能的承载界面（组合栏：展开 dock 并切到对应 Tab；独立 Dock：调 showDock） */
 export function focusFeatureDock(p: RewordPlugin, id: string) {
+    // 2026-09-12 兼容别名：原「词库」独立功能已并入「学习」面板（内部第三个小 Tab）。
+    // 旧入口（工作台 data-goto="vocab"、遗留布局里的独立 Dock、旧主区页签）一律重定向，
+    // 否则会走 getSlot("vocab") → 组合栏里并没有这个 Tab，点了毫无反应。
+    if (id === "vocab") {
+      const host = p as RewordPlugin & { gotoStudyPane?: (pane: string) => Promise<void> };
+      void host.gotoStudyPane?.("vocab");
+      return;
+    }
     const slot = p.dockManager.getSlot(id);
     if (slot !== "combined" && slot !== "hidden") {
       p.standaloneModels.get(id)?.showDock?.();

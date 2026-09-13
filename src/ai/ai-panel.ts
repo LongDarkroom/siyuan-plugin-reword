@@ -3378,7 +3378,13 @@ export class AiPanel {
           checkbox?.addEventListener("change", (e) => {
             e.stopPropagation();
             if (checkbox.checked) selected.add(id); else selected.delete(id);
-            void render();
+            // 2026-09-12 修复：勾选/取消只就地更新选择态与底部操作栏，
+            // 不再整表 render()（原先每次勾选都重建整个会话列表 → 闪烁 + 滚动位置跳动）
+            item.classList.toggle("sel", checkbox.checked);
+            const actions = p.querySelector(".hiword-ai-session-actions") as HTMLElement | null;
+            const countEl = p.querySelector(".hiword-ai-session-count") as HTMLElement | null;
+            if (actions) actions.style.display = selected.size ? "" : "none";
+            if (countEl) countEl.textContent = t("已选 {n} 个", { n: selected.size });
           });
           checkbox?.addEventListener("click", (e) => {
             e.stopPropagation();

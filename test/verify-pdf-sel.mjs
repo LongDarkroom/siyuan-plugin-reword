@@ -1,0 +1,23 @@
+// 部署版 marker 验证（2026-09-08 PDF 文本选中恢复）
+import fs from "node:fs";
+const s = fs.readFileSync("/Users/xieyue/Downloads/思源笔记/data/plugins/siyuan-plugin-reword/index.js", "utf8");
+console.log("size:", s.length, "bytes");
+console.log();
+console.log("【本次改动 (2026-09-08) PDF 文本选中修复】");
+console.log("  " + (s.match(/disableCombineTextItems:!0/g) || []).length + "x  disableCombineTextItems:!0  (true, 开启每片段独立 span)");
+console.log("  " + (s.match(/disableCombineTextItems:!1/g) || []).length + "x  disableCombineTextItems:!1  (残留应为 0)");
+console.log("  " + (s.match(/content-visibility\s*:\s*auto/g) || []).length + "x  content-visibility:auto  (.scroll-page 翻页虚拟化)");
+console.log("  " + (s.match(/contain-intrinsic-size:\s*800px 1100px/g) || []).length + "x  contain-intrinsic-size:800px 1100px  (占位防抖)");
+console.log("  " + (s.match(/contain:\s*layout paint/g) || []).length + "x  contain:layout paint  (iframe 边界隔离)");
+console.log("  " + (s.match(/2026-09-08/g) || []).length + "x  注释 2026-09-08 (本次)");
+console.log();
+console.log("【历史功能未坏】");
+console.log("  " + (s.match(/cMapPacked:!0/g) || []).length + "x  cMapPacked:!0  (CJK 字符映射)");
+console.log("  " + (s.match(/verbosity:0/g) || []).length + "x  verbosity:0  (静音 warn)");
+console.log("  " + (s.match(/corp\.dict\.cn\/search\?q=/g) || []).length + "x  词海 corp.dict.cn (URL)");
+console.log("  " + (s.match(/source:["']haici["']/g) || []).length + "x  source:haici  (词海切换)");
+console.log("  " + (s.match(/inflections/g) || []).length + "x  inflections  (词形字段)");
+console.log("  " + (s.match(/synonyms/g) || []).length + "x  synonyms  (近义词字段)");
+console.log("  " + (s.match(/antonyms/g) || []).length + "x  antonyms  (反义词字段)");
+console.log("  " + (s.match(/墨迹持久化已就绪/g) || []).length + "x  PR1 墨迹持久化已就绪");
+console.log("  " + (s.match(/墨迹 · p/g) || []).length + "x  PR2 墨迹 · p (合并到摘录)");

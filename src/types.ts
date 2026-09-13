@@ -138,6 +138,9 @@ export interface WordRecord {
   /** 系统记忆强度 0~5（复习算法维护；掌握度越高，复习优先级越低。
    *  与手动星 `mastery` 区分：mastery=用户主观重要性，recall=算法估算的记忆保持度。 */
   recall?: number;
+  /** 2026-09-12 新增：句子库索引（SentenceRecord.id 列表，仅记采纳/收藏的句子；
+   *  句子实体存 hiword-sentences.json，见 src/sentence/sentence-store.ts） */
+  sentenceIds?: string[];
   /** 有效复习次数（again 以外的评分计数） */
   reps?: number;
   /** 遗忘次数（again 评分累计） */

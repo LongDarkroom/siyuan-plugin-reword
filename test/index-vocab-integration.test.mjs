@@ -172,14 +172,13 @@ test("index.ts:click .hiword-vocab-mark 跳转词库面板(disable Alt+hover)", 
     /closest\("\.hiword-vocab-mark"\)/,
     "应通过 closest('.hiword-vocab-mark') 找到高亮 span"
   );
-  // 2026-09-11：组合栏退役，词库升级为主区页签（openTab 异步）。
-  // 源码形态由 focusFeatureDock("vocab")（同步聚焦）改为
-  // withFeatureTab(this, "vocab", (el) => this.scrollVocabPanelToWord(word))
-  // （打开/聚焦页签并等承载元素就绪后再滚动定位）。
+  // 2026-09-12：词库并入「学习」面板（review 的第三个内部小 Tab），跳转入口统一为
+  // gotoStudyPane("vocab", after) —— 打开/聚焦学习面板、切到词库 Tab，元素就绪后滚动定位。
+  // （上一版形态是对独立 vocab feature 的 withFeatureTab(this, "vocab", …)；该 feature 已下线）
   assert.match(
     src,
-    /withFeatureTab\(this, "vocab", \(el\) => this\.scrollVocabPanelToWord\(word\)\)/,
-    "应跳转到 vocab 面板"
+    /gotoStudyPane\("vocab", \(\) => this\.scrollVocabPanelToWord\(word\)\)/,
+    "应跳转到学习面板的词库 Tab"
   );
   assert.match(src, /scrollVocabPanelToWord/);
 });

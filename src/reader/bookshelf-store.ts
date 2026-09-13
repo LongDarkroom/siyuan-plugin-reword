@@ -458,14 +458,20 @@ export class BookshelfStore {
     }
   }
 
-  /** 累加阅读时长（毫秒）；同时按本地日期写入 readingLog 分桶（用于日历热力图） */
-  async addReadingTime(id: string, ms: number): Promise<void> {
+  /**
+   * 累加阅读时长（毫秒）；同时按本地日期写入 readingLog 分桶（用于日历热力图）。
+   * @param dayKey 可选：该段时长「累加所属」的本地日期（YYYY-MM-DD）。
+   *   缺省取**落盘时刻** —— 23:58 开始读、00:02 落盘会把这段记到次日。
+   *   计时器侧显式传入本段所属日期键即可修正（跨日阅读归桶错误）。
+   *   老调用方不传第三参，行为完全不变。
+   */
+  async addReadingTime(id: string, ms: number, dayKey?: string): Promise<void> {
     await this.load();
     const meta = this.get(id);
     if (!meta || ms <= 0) return;
     const delta = Math.round(ms);
     meta.readingTimeMs = (meta.readingTimeMs || 0) + delta;
-    const day = localDateKey();
+    const day = dayKey || localDateKey();
     meta.readingLog = meta.readingLog || {};
     meta.readingLog[day] = (meta.readingLog[day] || 0) + delta;
     await this.save();

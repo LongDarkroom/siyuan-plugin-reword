@@ -3,7 +3,8 @@
  * ------------------------------------------------------------------
  * 纯函数：输入书架书籍列表，输出概览 / 日历热力 / 连续天数 / 月度分布 / Top 书。
  * 日级时长来自 BookMeta.readingLog（按本地日期分桶，启用后开始填充）；
- * 累计时长来自 readingTimeMs（含历史），二者口径不同，UI 分开展示。
+ * 累计时长来自 readingTimeMs。二者在 2026-09-12 历史数据归位后已对齐同源，
+ * UI 不再并列展示两个「累计」（只保留指标格一处）。
  */
 
 import type { BookMeta, BookStatus } from "./bookshelf-store";
@@ -61,15 +62,17 @@ function monthKey(d: Date): string {
   return `${y}-${m}`;
 }
 
-/** 历史累计时长（含未分桶的老数据），毫秒 */
+/** 全时累计时长（Σ readingTimeMs），毫秒 */
 function totalReadingMs(books: BookMeta[]): number {
   let sum = 0;
   for (const b of books) sum += b.readingTimeMs || 0;
   return sum;
 }
 
-/** 把全部书籍的 readingLog 合并成 日期→毫秒 映射 */
-function mergeDayMap(books: BookMeta[]): Map<string, number> {
+/** 把全部书籍的 readingLog 合并成 日期→毫秒 映射。
+ *  export 供工作台复用：计算「阅读日 ∪ 复习日」的连续学习天数时，
+ *  需要全量阅读日（不受 stats 范围窗口限制）。 */
+export function mergeDayMap(books: BookMeta[]): Map<string, number> {
   const map = new Map<string, number>();
   for (const b of books) {
     const log = b.readingLog;
@@ -208,11 +211,14 @@ export function fmtDuration(ms: number): string {
   return m ? `${h}h${m}m` : `${h}h`;
 }
 
-/** 热力图配色等级：0=无，1~4 递增（返回 css 颜色） */
+/**
+ * 热力图配色等级：0=无，1~4 递增（返回 css 颜色）。
+ * 色阶统一由 --b3-theme-primary 叠 alpha 派生 —— 原实现硬编码 hsl(250,…) 紫，
+ * 与主色不同色相，且最深档 44% 亮度在深色主题下几乎看不出层级；
+ * 空格子用 on-background 叠 6%，与工作台热力图共用同一口径（单一真源）。
+ */
 export function heatColor(ms: number): string {
-  if (!ms || ms <= 0) return "var(--b3-theme-background-light, rgba(0,0,0,0.06))";
-  if (ms < 15 * 60000) return "hsl(250, 62%, 90%)";
-  if (ms < 30 * 60000) return "hsl(250, 65%, 78%)";
-  if (ms < 60 * 60000) return "hsl(250, 70%, 62%)";
-  return "hsl(250, 48%, 44%)";
+  if (!ms || ms <= 0) return "color-mix(in srgb, var(--b3-theme-on-background) 6%, transparent)";
+  const pct = ms < 15 * 60000 ? 18 : ms < 30 * 60000 ? 34 : ms < 60 * 60000 ? 55 : 85;
+  return `color-mix(in srgb, var(--b3-theme-primary) ${pct}%, transparent)`;
 }

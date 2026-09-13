@@ -188,7 +188,7 @@
         </RWSection>
 
         <!-- Top 书 -->
-        <RWSection title={t("阅读时长 Top ") + stats.topBooks.length}>
+        <RWSection title={t("阅读时长 Top {n}", { n: stats.topBooks.length })}>
           <div class="chart-card top-chart">
             {#each stats.topBooks as b, i}
               <div class="top-row">

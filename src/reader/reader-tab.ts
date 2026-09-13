@@ -480,4 +480,42 @@ export class ReaderTabController {
       console.warn("[REword] focusAnnotation 未找到 ReaderView 实例，无法跳转", { bookId });
     }
   }
+
+  /**
+   * C 跳转定位（**统一入口**）：打开（或聚焦）书的阅读 Tab，把整条标注记录交给 ReaderView，
+   * 由它按 cfi / page / rect 自行分支定位（含 flashRect 闪烁强调）。
+   * 与 focusAnnotation 的区别：后者只接受 cfi，而 PDF 文本标注只有 page —— 传进来会撞上
+   * 上面的 `if (!bookId || !cfi) return` 静默失败。统一入口覆盖四类标注。
+   */
+  async focusAnnotationRecord(bookId: string, ann: any): Promise<void> {
+    if (!bookId || !ann) return;
+    try {
+      await this.openBookTab(bookId);
+    } catch (e) {
+      console.warn("[REword] focusAnnotationRecord 打开阅读 Tab 失败:", e);
+    }
+    // 同 focusAnnotation：openBookTab 后 comp 可能尚未挂载，短暂轮询等待
+    let comp: any = null;
+    for (let i = 0; i < 12; i++) {
+      comp = this.openTabs.get(bookId)?.comp;
+      if (comp?.focusAnnotationRecord) break;
+      await new Promise((r) => setTimeout(r, 120));
+    }
+    if (comp?.focusAnnotationRecord) {
+      try {
+        await comp.focusAnnotationRecord(ann);
+      } catch (e) {
+        console.warn("[REword] focusAnnotationRecord 调用 ReaderView 失败:", e);
+      }
+    } else if (comp?.focusAnnotation && ann?.cfi) {
+      // 降级：旧实例只导出 focusAnnotation → 退回 cfi 链（PDF 无 cfi 时仍跳不动，但不会崩）
+      try {
+        await comp.focusAnnotation(ann.cfi);
+      } catch (e) {
+        console.warn("[REword] focusAnnotation 降级调用失败:", e);
+      }
+    } else {
+      console.warn("[REword] focusAnnotationRecord 未找到 ReaderView 实例，无法跳转", { bookId });
+    }
+  }
 }
