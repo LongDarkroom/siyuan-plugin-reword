@@ -72,6 +72,17 @@ EXCLUDE = {
 }
 
 
+def is_backup(name: str) -> bool:
+    """本地历史快照（*.bak*），一律不进发布包。
+
+    [2026-09-14 修复] i18n 是整目录白名单，而本地长期攒下了 24 个
+    `i18n/??_??.json.bak-*` 快照（约 3.4MB 未压缩）。它们既不是发布物、
+    也没被 git 跟踪，却被打进了集市包，把 package.zip 从 ~0.9MB 撑到 4.1MB。
+    这类快照随时可能再攒出来，所以用规则排除而不是逐个加进 EXCLUDE。
+    """
+    return ".bak" in name
+
+
 def collect_paths():
     paths = []  # (abs_path, arcname)
     for fn in INCLUDE_FILES:
@@ -88,7 +99,7 @@ def collect_paths():
         for cur, dirs, files in os.walk(dp):
             dirs[:] = [d for d in dirs if d not in EXCLUDE]
             for f in files:
-                if f in EXCLUDE:
+                if f in EXCLUDE or is_backup(f):
                     continue
                 fp = os.path.join(cur, f)
                 arc = os.path.relpath(fp, ROOT)

@@ -4,6 +4,7 @@ import {
   Dialog,
   fetchSyncPost,
   getFrontend,
+  platformUtils,
 } from "siyuan";
 import { DockManager, type DockableFeature, type DockSlot } from "./dock/dock-manager.ts";
 import {
@@ -187,8 +188,49 @@ import { BookModeStore } from "./reader/bilingual-book-mode.ts";
 import { GLOSSARY_STORAGE_KEY, GlossaryStore } from "./translate/glossary.ts";
 import { BookPrimerStore } from "./reader/book-primer";
 import { logSwallow } from "./core/safe.ts";
+// 2026-09-13：待办日历（CalDAV 桥接 vivo 手机/手表提醒）—— 三块能力：待办列表 / 日历展示 / 同步设置
+import { CalendarStore } from "./todo-calendar/calendar-store.ts";
+import { CALENDAR_STORAGE_KEY, type CalendarHost } from "./todo-calendar/types.ts";
+import { renderCalendarPanel } from "./todo-calendar/calendar-panel.ts";
+import { renderCalendarSettings } from "./todo-calendar/calendar-settings.ts";
+import { applyNaturalDueToBlock } from "./todo-calendar/todo-model.ts";
+import { describeDue } from "./todo-calendar/time-parse.ts";
+import {
+  getServiceStatus,
+  killManagedServiceNow,
+  startService,
+} from "./todo-calendar/radicale-service.ts";
 
 const PLUGIN_NAME = "hiword-vocab";
+
+/**
+ * 构建期注入的插件版本号（vite.config.mts 的 define 从 plugin.json 读取，见该文件注释）。
+ * 为什么走注入而不是硬编码：设置面板「关于」页此前写死 v0.1.0，版本涨到 1.7.3 仍显示 0.1.0。
+ * 未注入时（如直接跑测试、tsx 直读源码）`typeof` 兜底为 "dev"，不会抛 ReferenceError，
+ * 也不会在界面上留下空白。
+ */
+declare const __REWORD_VERSION__: string;
+const PLUGIN_VERSION: string =
+  typeof __REWORD_VERSION__ !== "undefined" ? __REWORD_VERSION__ : "dev";
+
+/**
+ * 官方链接与会话入口（2026-09-14 与 README「相关链接」章节同源）。
+ * 集中一处：设置面板「关于」页与「反馈与建议」都从这里取，避免多处硬编码各自漂移。
+ */
+const REWORD_LINKS = {
+  /** 项目仓库 */
+  repo: "https://github.com/LongDarkroom/siyuan-plugin-reword",
+  /** 完整更新日志（CHANGELOG.md） */
+  changelog: "https://github.com/LongDarkroom/siyuan-plugin-reword/blob/main/CHANGELOG.md",
+  /** Issue 反馈 */
+  issues: "https://github.com/LongDarkroom/siyuan-plugin-reword/issues",
+  /** 离线词典包获取指南 */
+  dictGuide: "https://ld246.com/article/1787911845417",
+  /** B 站主页（可私信反馈） */
+  bilibili: "https://space.bilibili.com/39780528",
+  /** 插件交流群（QQ 群号，纯数字，点「复制」用） */
+  qqGroup: "123795105",
+} as const;
 
 /**
  * AI 翻译调试日志开关（2026-08-28 v1.3.0 收敛裸 console.log，避免每次翻页刷屏）。
@@ -216,6 +258,8 @@ const ICON_ANN = "iconREwordAnn";
 const ICON_AI = "iconREwordAI";
 const ICON_REVIEW = "iconREwordReview";
 const ICON_READER = "iconREwordReader";
+// 2026-09-13：待办日历（月历轮廓 + 三个日期点）
+const ICON_CALENDAR = "iconREwordCalendar";
 
 /** 词典元信息 */
 interface DictMeta {
@@ -366,6 +410,12 @@ export default class RewordPlugin extends Plugin {
   /** 2026-09-12：每日记忆计划（软目标：复习 N + 新词 M，可结转） */
   private dailyPlanStore: DailyPlanStore = new DailyPlanStore(() => this.persistDailyPlan?.update(this.dailyPlanStore.export()));
   private persistDailyPlan?: { update(d: unknown): void };
+  /**
+   * 2026-09-13：待办日历同步（CalDAV）设置 + 同步状态。
+   * 持久化于 petal `hiword-calendar.json`（回调惰性执行，persistCalendar 可选链兜底）。
+   */
+  private calendarStore: CalendarStore = new CalendarStore(() => this.persistCalendar?.update(this.calendarStore.export()));
+  private persistCalendar?: { update(d: unknown): void };
   /** 2026-09-12：句子库（词典例句 + AI 补缺，采纳/收藏状态） */
   private sentenceStore: SentenceStore = new SentenceStore(() => this.persistSentences?.update(this.sentenceStore.export()));
   private persistSentences?: { update(d: unknown): void };
@@ -651,6 +701,8 @@ export default class RewordPlugin extends Plugin {
       `<symbol id="iconREwordReview" viewBox="0 0 1024 1024"><g fill="none" stroke="currentColor" stroke-width="64" stroke-linecap="round" stroke-linejoin="round"><path d="M320 320a256 256 0 01562 56"/><path d="M882 376v-96h-96"/><path d="M704 704a256 256 0 01-562-56"/><path d="M142 648v96h96"/></g></symbol>`,
       // 阅读器：展开的书页 + 书签尾（区别于主图标「合拢的书」）
       `<symbol id="iconREwordReader" viewBox="0 0 1024 1024"><g fill="none" stroke="currentColor" stroke-width="56" stroke-linecap="round" stroke-linejoin="round"><path d="M192 256c128-64 256-80 384-48v560c-128-32-256-16-384 48z"/><path d="M832 256c-128-64-256-80-384-48v560c128-32 256-16 384 48z"/><path d="M512 208v560"/></g></symbol>`,
+      // 待办日历：月历外框 + 双挂耳 + 三个日期点（与「复习」的循环箭头、「工作台」的四格区分）
+      `<symbol id="iconREwordCalendar" viewBox="0 0 1024 1024"><g fill="none" stroke="currentColor" stroke-width="64" stroke-linecap="round" stroke-linejoin="round"><rect x="176" y="240" width="672" height="608" rx="64"/><path d="M176 416h672"/><path d="M336 160v160M688 160v160"/><circle cx="368" cy="592" r="36"/><circle cx="512" cy="592" r="36"/><circle cx="656" cy="592" r="36"/></g></symbol>`,
       // 工作台（聚合仪表盘）：2×2 四格 —— 必须走 sprite symbol id：
       // 布局管理器 / fixStandaloneDockIcons 均按 <use xlink:href="#id"> 引用图标，
       // 内联 svg 字符串会让 href 变成 "#<svg..." 而渲染成乱码（2026-09-11 修复）。
@@ -738,6 +790,11 @@ export default class RewordPlugin extends Plugin {
       this.persistSentences = new PersistentStore(
         (d) => this.saveData("hiword-sentences.json", d),
         { onError: () => showMessage(t("句子库保存失败，请检查存储空间"), 3000, "error") }
+      );
+      // 2026-09-13 待办日历同步（CalDAV）设置与状态持久化
+      this.persistCalendar = new PersistentStore(
+        (d) => this.saveData(CALENDAR_STORAGE_KEY, d),
+        { onError: () => showMessage(t("日历同步设置保存失败，请检查存储空间"), 3000, "error") }
       );
       // 造句引擎：词典例句优先（海词）→ AI 补缺（内置可控 prompt）；三层限流
       // （aiSettings 运行时含 systemPrompt 等完整字段，normalizeAiSettings 填充；类型声明缺字段故 cast）
@@ -940,6 +997,8 @@ export default class RewordPlugin extends Plugin {
         { id: "annotations", title: t("微阅批注"), icon: ICON_ANN, defaultSlot: "combined" },
         { id: "ai", title: t("AI 精读"), icon: ICON_AI, defaultSlot: "combined" },
         { id: READER_FEATURE_ID, title: t("阅读器"), icon: ICON_READER, defaultSlot: "combined" },
+        // 2026-09-13 新增：待办日历（列表 + FullCalendar 月/周/日 + CalDAV 同步）
+        { id: "calendar", title: t("待办日历"), icon: ICON_CALENDAR, defaultSlot: "combined" },
       ];
       for (const f of dockFeatures) this.dockManager.registerFeature(f);
       // 一次性迁移：将面板布局重置为「全部收入组合栏」的干净状态（消除旧布局残留的独立 Dock 杂乱）
@@ -1105,6 +1164,14 @@ export default class RewordPlugin extends Plugin {
     this.disposables.addEventBus(
       () => this.eventBus.on("open-menu-filetab" as any, this.onOpenFileTabMenu),
       () => this.eventBus.off("open-menu-filetab" as any, this.onOpenFileTabMenu)
+    );
+
+    // 2026-09-13：待办块悬浮图标菜单（click-blockicon）→ 注入「加入日历（REword）」。
+    // 仅对 `data-type="i" data-subtype="t"` 的待办块生效；点击后解析块内自然语言时间 → 写 custom-due。
+    // ⚠️ 本版 siyuan 类型表无 `open-menu-block`，块级精确注入用 click-blockicon。
+    this.disposables.addEventBus(
+      () => this.eventBus.on("click-blockicon" as any, this.onClickBlockIcon as any),
+      () => this.eventBus.off("click-blockicon" as any, this.onClickBlockIcon as any)
     );
 
     // 2026-08-29：阅读器深链（siyuan://plugins/siyuan-plugin-rewordreader?data={…}）
@@ -1324,8 +1391,16 @@ export default class RewordPlugin extends Plugin {
     } catch {
       this.dailyPlanStore.load(null);
     }
+    // 2026-09-13：加载待办日历同步设置与状态
+    try {
+      this.calendarStore.load(await this.loadData(CALENDAR_STORAGE_KEY));
+    } catch {
+      this.calendarStore.load(null);
+    }
     this.isReady = true;
     getLogger().info("[REword] 词库加载完成");
+    // 2026-09-14：按设置决定是否随思源拉起本地 CalDAV 服务（follow 模式）
+    void this.ensureLocalService();
     // 2026-09-12：确保今日计划已生成（跨天自动归档昨日 + 结转）
     void this.ensureTodayPlan();
 
@@ -1343,6 +1418,24 @@ export default class RewordPlugin extends Plugin {
     // 词库就绪后，若侧边栏已打开则刷新显示
     if (this.dockElement) {
       this.renderVocabPanel(this.dockElement);
+    }
+  }
+
+  /**
+   * 按设置决定是否随思源启动本地 CalDAV 服务（2026-09-14）。
+   * 仅 `follow` 模式生效；已在监听（含由其他方式启动）时直接复用，绝不重复拉起。
+   * 失败只记日志，不阻断词库初始化。
+   */
+  private async ensureLocalService(): Promise<void> {
+    try {
+      const s = this.calendarStore.settings();
+      if (s.serviceMode !== "follow") return;
+      const st = await getServiceStatus(s);
+      if (st.running) return;
+      const r = await startService(s);
+      if (!r.ok) getLogger().warn("[REword] 本地 CalDAV 服务自启未成功：", { data: r.message });
+    } catch (e) {
+      getLogger().warn("[REword] 本地 CalDAV 服务自启异常：", { error: e });
     }
   }
 
@@ -3647,6 +3740,46 @@ export default class RewordPlugin extends Plugin {
       } catch (e) {
         getLogger().warn("[REword] 渲染阅读器面板失败", { error: e });
       }
+    }
+    else if (id === "calendar") {
+      try {
+        renderCalendarPanel(this.calendarHost(), dockElement);
+      } catch (e) {
+        getLogger().warn("[REword] 渲染待办日历面板失败", { error: e });
+      }
+    }
+  }
+
+  /**
+   * 待办日历模块的宿主适配器（避免 todo-calendar/* 反向 import 本文件造成循环依赖）。
+   * @internal todo-calendar/calendar-panel.ts · calendar-settings.ts 消费
+   */
+  public calendarHost(): CalendarHost {
+    return {
+      currentRootId: this.currentRootId ?? null,
+      calendarStore: this.calendarStore,
+      showMessage: (msg: string, timeout?: number, type?: string) =>
+        showMessage(msg, timeout ?? 3000, (type as any) ?? "info"),
+      refreshCalendarPanels: () => this.refreshCalendarPanels(),
+    };
+  }
+
+  /**
+   * 刷新所有已打开的待办日历面板（同步完成后调用）。
+   * 只重绘 calendar feature，不做全量 refreshActivePanel。
+   * @internal todo-calendar/* 回调
+   */
+  public refreshCalendarPanels(): void {
+    try {
+      if (this.dockElement) {
+        const activeTab = this.dockElement.querySelector(".hiword-dock-tab.active") as HTMLElement | null;
+        if (activeTab?.dataset.tab === "calendar") this.renderFeatureInto("calendar", this.dockElement);
+      }
+      for (const [id, el] of this.standaloneElements) {
+        if (id === "calendar") this.renderFeatureInto(id, el);
+      }
+    } catch (e) {
+      getLogger().warn("[REword] 刷新待办日历面板失败", { error: e });
     }
   }
 
@@ -8193,6 +8326,9 @@ export default class RewordPlugin extends Plugin {
             <div class="hiword-up-nav-item" data-up-tab="review">
               <span class="hiword-up-nav-icon">📅</span>${t("复习计划")}
             </div>
+            <div class="hiword-up-nav-item" data-up-tab="calendar">
+              <span class="hiword-up-nav-icon">🗓️</span>${t("日历同步")}
+            </div>
             <div class="hiword-up-nav-item" data-up-tab="shortcuts">
               <span class="hiword-up-nav-icon">⌨️</span>${t("快捷键")}
             </div>
@@ -8342,6 +8478,11 @@ export default class RewordPlugin extends Plugin {
               <div id="up-review-settings"><p style="color:#888;padding:20px;text-align:center;">${t("加载中…")}</p></div>
             </section>
 
+            <!-- ===== Tab: 日历同步（2026-09-13 新增，渲染见 renderCalendarSettings） ===== -->
+            <section class="hiword-up-page" data-page="calendar" style="display:none;">
+              <div id="up-calendar-settings"><p style="color:#888;padding:20px;text-align:center;">${t("加载中…")}</p></div>
+            </section>
+
             <!-- ===== Tab 5: 快捷键 ===== -->
             <section class="hiword-up-page" data-page="shortcuts" style="display:none;">
               <div id="up-shortcut-settings"><p style="color:#888;padding:20px;text-align:center;">${t("加载中…")}</p></div>
@@ -8413,6 +8554,7 @@ export default class RewordPlugin extends Plugin {
           else if (tab === "ai") this.renderAiSettingsInto(dlg.querySelector("#up-ai-settings") as HTMLElement);
           else if (tab === "annotation") this.renderAnnotationSettings(dlg, dialog);
           else if (tab === "review") this.renderReviewSettings(dlg, dialog);
+          else if (tab === "calendar") renderCalendarSettings(this.calendarHost(), dlg.querySelector("#up-calendar-settings") as HTMLElement | null);
           else if (tab === "shortcuts") this.renderShortcutSettings(dlg, dialog);
           else if (tab === "data") this.renderDataSettings(dlg, dialog);
           else if (tab === "about") this.renderAboutSettings(dlg, dialog);
@@ -8639,8 +8781,14 @@ export default class RewordPlugin extends Plugin {
         <input type="file" id="up-dm-file-stardict" accept=".ifo,.idx,.dict,.dict.dz,.syn" multiple style="display:none" />
       </div>
       <div class="hiword-dm-tip"><strong>${t("支持格式：")}</strong><br/>• <strong>MDX</strong>：${t("直接选择 .mdx 原包")}<br/>• <strong>StarDict</strong>：${t("需同时选择 .ifo/.idx/.dict 或 .dict.dz（.syn 可选）")}<br/>${t("选择文件后将自动写入插件 dict/ 目录并立即建索引。")}</div>
+      <div class="hiword-dm-tip hiword-dm-tip--guide">
+        ${t("还没有词典包？")}
+        <button class="hiword-about-copy" data-about-open="${REWORD_LINKS.dictGuide}">${t("词典包获取指南")} ↗</button>
+      </div>
       <div class="hiword-dm-footer"><button class="b3-button b3-button--outline b3-button--small" id="up-dm-refresh">${t("刷新")}</button></div>
     `;
+
+    this.bindExternalLinks(container);
 
     // MDX 导入
     const addMdxBtn = container.querySelector("#up-dm-add-mdx") as HTMLButtonElement;
@@ -9462,12 +9610,26 @@ export default class RewordPlugin extends Plugin {
     });
   }
 
-  /** 统一设置面板 - 关于 */
+  /**
+   * 统一设置面板 - 关于（2026-09-14 改版）。
+   *
+   * 三处改动：
+   * ① 版本号不再硬编码 —— 走构建期注入 PLUGIN_VERSION（源 = plugin.json，唯一天真源）；
+   * ② 更新日志换成真实近期版本（原来三条全是占位用的 v0.1.0）；
+   * ③ 补齐「反馈与建议」与「离线词典获取」两个分区：QQ 群号（可一键复制）、
+   *    B 站主页、GitHub Issue、词典包获取指南。
+   *
+   * 外链一律走 openExternalUrl（思源官方 openByMobile），**不要**用 <a href>：
+   * 插件弹窗里的裸 <a> 会把 Electron 窗口自身导航走，等于把思源界面顶掉。
+   */
   private renderAboutSettings(dlg: HTMLElement, dialog: Dialog) {
     const container = dlg.querySelector("#up-about-settings") as HTMLElement;
     if (!container) return;
     if (container.dataset.rendered === "true") return;
     container.dataset.rendered = "true";
+
+    // 版本号取不到（直接跑源码的调试态）时显示「开发版」，绝不渲染 "v undefined"
+    const verText = PLUGIN_VERSION && PLUGIN_VERSION !== "dev" ? `v${PLUGIN_VERSION}` : t("开发版");
 
     container.innerHTML = `
       <div class="hiword-up-group">
@@ -9475,23 +9637,134 @@ export default class RewordPlugin extends Plugin {
         <div class="hiword-about">
           <div class="hiword-about-logo">RE<span>word</span></div>
           <div class="hiword-about-meta">
-            <div class="hiword-about-ver">${t("版本")} <strong>v0.1.0</strong></div>
+            <div class="hiword-about-ver">${t("版本")} <strong>${verText}</strong></div>
             <div class="hiword-about-desc">${t("离线词典 · 批注精读 · 间隔复习 · EPUB 阅读")}</div>
+            <div class="hiword-about-desc">${t("作者 LongDarkroom · GPL-3.0 开源许可")}</div>
           </div>
         </div>
       </div>
       <div class="hiword-up-group">
         <div class="hiword-up-group-label"><span class="hiword-up-group-name">${t("更新日志")}</span></div>
         <ul class="hiword-changelog">
-          <li><b>v0.1.0</b> ${t("阅读器标注层重构：自建 SVG overlay，彻底修复高亮不显示")}</li>
-          <li><b>v0.1.0</b> ${t("统一设置面板：标注与批注 / 复习计划 / 快捷键 / 数据与备份")}</li>
-          <li><b>v0.1.0</b> ${t("批注默认样式、SRS 参数、数据导入导出可配置化")}</li>
+          <li><b>v1.7.4</b> ${t("待办日历与 CalDAV 手机提醒、插件内接管 Radicale 服务、设置面板关于页改版")}</li>
+          <li><b>v1.7.3</b> ${t("界面全量英文化（英文包 100%）、聚合工作台、主区页签形态")}</li>
+          <li><b>v1.7.2</b> ${t("PDF 专项：阅读进度记忆、高亮漂移根治、发热治理、矩形框选标注")}</li>
+          <li><b>v1.7.0</b> ${t("AI 精读拖入块范围修复、在线词典字号调节、模块整合重构")}</li>
+          <li><b>v1.6.1</b> ${t("AI 精读输入框稳定性、引用卡片体验、词典导入后即时生效修复")}</li>
         </ul>
+        <div class="hiword-about-links">
+          <button class="hiword-about-link" data-about-open="${REWORD_LINKS.changelog}">
+            <span class="hiword-about-link-ico">📄</span>
+            <span class="hiword-about-link-body">
+              <span class="hiword-about-link-t">${t("查看完整更新日志")}</span>
+              <span class="hiword-about-link-d">GitHub · CHANGELOG.md</span>
+            </span>
+            <span class="hiword-about-link-go">↗</span>
+          </button>
+        </div>
       </div>
-      <div class="hiword-up-group hiword-up-group--note">
-        ${t("反馈与建议：在思源笔记「RE word」对话框或 GitHub Issue 提交。")}
+      <div class="hiword-up-group">
+        <div class="hiword-up-group-label"><span class="hiword-up-group-name">${t("反馈与建议")}</span></div>
+        <div class="hiword-dm-hint">${t("遇到问题或有想加的功能，群里问最快；也可以 B 站私信，Bug 建议直接提 Issue。")}</div>
+        <div class="hiword-about-links">
+          <div class="hiword-about-link hiword-about-link--static">
+            <span class="hiword-about-link-ico">💬</span>
+            <span class="hiword-about-link-body">
+              <span class="hiword-about-link-t">${t("插件交流群")}</span>
+              <span class="hiword-about-link-d">${t("QQ 群")} ${REWORD_LINKS.qqGroup}</span>
+            </span>
+            <button class="hiword-about-copy" data-about-copy="${REWORD_LINKS.qqGroup}">${t("复制群号")}</button>
+          </div>
+          <button class="hiword-about-link" data-about-open="${REWORD_LINKS.bilibili}">
+            <span class="hiword-about-link-ico">📺</span>
+            <span class="hiword-about-link-body">
+              <span class="hiword-about-link-t">${t("B 站主页")}</span>
+              <span class="hiword-about-link-d">${t("space.bilibili.com/39780528 · 可私信")}</span>
+            </span>
+            <span class="hiword-about-link-go">↗</span>
+          </button>
+          <button class="hiword-about-link" data-about-open="${REWORD_LINKS.issues}">
+            <span class="hiword-about-link-ico">🐛</span>
+            <span class="hiword-about-link-body">
+              <span class="hiword-about-link-t">${t("提交 Issue")}</span>
+              <span class="hiword-about-link-d">${t("GitHub · 附上日志定位更快")}</span>
+            </span>
+            <span class="hiword-about-link-go">↗</span>
+          </button>
+        </div>
+      </div>
+      <div class="hiword-up-group">
+        <div class="hiword-up-group-label"><span class="hiword-up-group-name">${t("离线词典获取")}</span></div>
+        <div class="hiword-about-note">${t("RE word 不内置词典，首次使用请先准备 .mdx 词典包：设置 → 词典管理 → 「导入 MDX 词典」。")}</div>
+        <div class="hiword-about-links">
+          <button class="hiword-about-link" data-about-open="${REWORD_LINKS.dictGuide}">
+            <span class="hiword-about-link-ico">📚</span>
+            <span class="hiword-about-link-body">
+              <span class="hiword-about-link-t">${t("词典包获取指南")}</span>
+              <span class="hiword-about-link-d">${t("含推荐词库与下载渠道说明")}</span>
+            </span>
+            <span class="hiword-about-link-go">↗</span>
+          </button>
+          <button class="hiword-about-link" data-about-open="${REWORD_LINKS.repo}">
+            <span class="hiword-about-link-ico">🔗</span>
+            <span class="hiword-about-link-body">
+              <span class="hiword-about-link-t">${t("项目仓库")}</span>
+              <span class="hiword-about-link-d">github.com/LongDarkroom/siyuan-plugin-reword</span>
+            </span>
+            <span class="hiword-about-link-go">↗</span>
+          </button>
+        </div>
       </div>
     `;
+
+    this.bindExternalLinks(container);
+    // 群号一键复制
+    container.querySelectorAll<HTMLElement>("[data-about-copy]").forEach((el) => {
+      el.addEventListener("click", async (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        const text = el.dataset.aboutCopy || "";
+        try {
+          await platformUtils.copyPlainText(text);
+          showMessage(t("群号已复制：{n}", { n: text }), 2000, "info");
+        } catch (__swallowErr) {
+          logSwallow(__swallowErr, "index.ts · 复制群号", "warn");
+          showMessage(t("复制失败，请手动记下群号 {n}", { n: text }), 3000, "error");
+        }
+      });
+    });
+  }
+
+  /** 给容器内所有 `[data-about-open]` 元素绑定「打开外链」（复用 openExternalUrl） */
+  private bindExternalLinks(root: Element) {
+    root.querySelectorAll<HTMLElement>("[data-about-open]").forEach((el) => {
+      el.addEventListener("click", () => this.openExternalUrl(el.dataset.aboutOpen || ""));
+    });
+  }
+
+  /**
+   * 打开外部链接（2026-09-14）。
+   *
+   * 为什么不用 `<a href>`：插件设置弹窗活在思源主窗口里，裸 `<a>` 等于让 Electron
+   * 把整个思源界面导航到目标站点（回不来）。走官方 `openByMobile` 才是「交给系统浏览器」。
+   * `platformUtils` 缺位（极端降级）时退回 `window.open` —— 桌面端同样被 Electron 拦截外开。
+   */
+  private openExternalUrl(url: string) {
+    if (!url) return;
+    try {
+      if (typeof platformUtils?.openByMobile === "function") {
+        platformUtils.openByMobile(url);
+        return;
+      }
+    } catch (__swallowErr) {
+      logSwallow(__swallowErr, "index.ts · openExternalUrl", "warn");
+    }
+    try {
+      window.open(url, "_blank");
+    } catch (__swallowErr) {
+      logSwallow(__swallowErr, "index.ts · openExternalUrl(window.open)", "warn");
+      showMessage(t("打开链接失败：{url}", { url }), 3000, "error");
+    }
   }
 
   /**
@@ -9766,10 +10039,16 @@ export default class RewordPlugin extends Plugin {
         &bull; <strong>StarDict</strong>：${t("需同时选择词典包内所有文件")}（<code>.ifo</code>${t("、")}<code>.idx</code>${t("、")}<code>.dict</code>${t(" 或 ")}<code>.dict.dz</code>${t("；")}<code>.syn</code>${t(" 可选")}）<br/>
         ${t("选择文件后将自动写入插件")} <code>dict/</code> ${t("目录并立即建索引，全程无需手动操作。")}
       </div>
+      <div class="hiword-dm-tip hiword-dm-tip--guide">
+        ${t("还没有词典包？")}
+        <button class="hiword-about-copy" data-about-open="${REWORD_LINKS.dictGuide}">${t("词典包获取指南")} ↗</button>
+      </div>
       <div class="hiword-dm-footer">
         <button class="b3-button b3-button--outline b3-button--small" id="hiword-dm-refresh">${t("刷新")}</button>
       </div>
     `;
+
+    this.bindExternalLinks(container);
 
     // MDX 导入按钮
     const addMdxBtn = container.querySelector("#hiword-dm-add-mdx") as HTMLButtonElement;
@@ -10214,6 +10493,14 @@ export default class RewordPlugin extends Plugin {
     // 2026-09-05：正常卸载即视为本次启动已善终，清掉启动标记（反向：卡死强杀时
     // onunload 不会执行，标记得以保留，下次据此跳过阅读 Tab 自动恢复）。
     clearLaunchMarker();
+    // 2026-09-14：本地 CalDAV 服务若由本插件拉起，随思源一起停掉。
+    // ⚠️ **仅 follow 模式停** —— manual 模式的语义是「只在用户点按钮时动手」，
+    //    思源退出不该顺手带走用户手动启动的服务。
+    // 刻意只发一次 SIGTERM、不做任何 I/O —— onunload 里 await 不到异步结果，
+    // 思源不会等渲染进程收尾（`settings()` 是同步的内存读取，可以用）。
+    try {
+      if (this.calendarStore.settings().serviceMode === "follow") killManagedServiceNow();
+    } catch (__swallowErr) { logSwallow(__swallowErr, "index.ts · onunload", "debug"); }
     // 逆序释放全部托管资源：全局监听 + eventBus 订阅 + 定时器
     this.disposables.dispose();
     // 各子模块独立持有的全局/文档级监听器
@@ -13280,6 +13567,47 @@ export default class RewordPlugin extends Plugin {
    * 仅在存在文本选区时追加，不干扰原生右键菜单（复制/粘贴等）。
    * 点击后调用 showAiPanel()，面板会读取当前选区文本并预填输入框。
    */
+  /**
+   * 2026-09-13：待办块悬浮菜单（click-blockicon）→ 注入「加入日历（REword）」。
+   * 待办块判定用 DOM 的 data-type/data-subtype（与 SQL 判定互为双保险）。
+   * 与 onOpenContentMenu 同一套 menu.addItem 写法，只是入口换成「块悬浮图标」。
+   */
+  private onClickBlockIcon = (e: CustomEvent): void => {
+    try {
+      const detail = (e as any)?.detail;
+      const menu = detail?.menu;
+      if (!menu || typeof menu.addItem !== "function") return;
+      const el: HTMLElement | undefined = (detail?.blockElements || [])[0];
+      if (!el) return;
+      if (el.getAttribute("data-type") !== "i" || el.getAttribute("data-subtype") !== "t") return;
+      const blockId = el.getAttribute("data-node-id") || "";
+      if (!blockId) return;
+      menu.addItem({
+        icon: "iconREwordCalendar",
+        label: t("🗓 加入日历（REword）"),
+        click: () => { void this.addBlockToCalendar(blockId); },
+      });
+    } catch (err) {
+      getLogger().warn("[REword] 待办块菜单注入失败:", { error: err });
+    }
+  };
+
+  /** 把文档里的待办块加入日历：解析块内自然语言时间 → 写 custom-due（不新建块） */
+  private async addBlockToCalendar(blockId: string): Promise<void> {
+    try {
+      const r = await applyNaturalDueToBlock(blockId);
+      if (r.ok) {
+        showMessage(t("已加入日历：{d}", { d: describeDue(r.due) }), 3000, "info");
+        this.refreshCalendarPanels();
+      } else {
+        showMessage(t("未识别到时间，请在待办里写明「明天 9 点」这类时间后重试"), 4000, "error");
+      }
+    } catch (err) {
+      getLogger().warn("[REword] 加入日历失败:", { error: err });
+      showMessage(t("加入日历失败：{m}", { m: (err as Error).message }), 3200, "error");
+    }
+  }
+
   private onOpenContentMenu = (e: CustomEvent): void => {
     try {
       const selText = window.getSelection()?.toString()?.trim() || "";

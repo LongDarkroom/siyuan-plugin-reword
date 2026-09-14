@@ -1,6 +1,6 @@
 {
   "name": "siyuan-plugin-reword",
-  "version": "1.7.3",
+  "version": "1.7.4",
   "description": "RE word - offline dictionary lookup and vocabulary review plugin for SiYuan",
   "scripts": {
     "dev": "vite build --watch",
@@ -26,6 +26,10 @@
     "vite": "^5.4.0"
   },
   "dependencies": {
+    "@fullcalendar/core": "^6.1.21",
+    "@fullcalendar/daygrid": "^6.1.21",
+    "@fullcalendar/interaction": "^6.1.21",
+    "@fullcalendar/timegrid": "^6.1.21",
     "@mozilla/readability": "^0.5.0",
     "construct-style-sheets-polyfill": "^3.1.0",
     "fflate": "^0.8.3",

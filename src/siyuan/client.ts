@@ -40,11 +40,16 @@ export const SIYUAN_API = {
   getBlockAttrs: "/api/attr/getBlockAttrs",
   // 块
   insertBlock: "/api/block/insertBlock",
+  appendBlock: "/api/block/appendBlock",
   updateBlock: "/api/block/updateBlock",
   deleteBlock: "/api/block/deleteBlock",
   getBlockKramdown: "/api/block/getBlockKramdown",
+  // 待办勾选：专用于「任务列表项」的标记切换接口。
+  // ⚠️ 改勾选态**必须**用它，不要用 updateBlock 改 markdown —— 后者会把块属性（custom-*）整片冲掉。
+  updateTaskListItemMarker: "/api/block/updateTaskListItemMarker",
   // 查询
   sql: "/api/query/sql",
+  flushTransaction: "/api/sqlite/flushTransaction",
   // 文档树 / 笔记本
   lsNotebooks: "/api/notebook/lsNotebooks",
   getDocInfo: "/api/filetree/getDoc",
@@ -54,4 +59,11 @@ export const SIYUAN_API = {
   removeDoc: "/api/filetree/removeDoc",
   getHPathByPath: "/api/filetree/getHPathByPath",
   getHPathByID: "/api/filetree/getHPathByID",
+  /**
+   * ⚠️ 删文档只能用 `{notebook, path}`（path 取自 getPathByID 的 storage 路径，形如 /<id>.sy）。
+   * 实测 `{id}` 形式返回 code=0 却**什么都不做**（静默无效，无法自查）。
+   */
+  getPathByID: "/api/filetree/getPathByID",
+  // 网络
+  forwardProxy: "/api/network/forwardProxy",
 } as const;

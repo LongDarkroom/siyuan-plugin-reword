@@ -5,7 +5,7 @@
 <p align="center">离线查词（支持 MDX / StarDict 自定义词库）、框选快捷键收词、SM-2 间隔复习、AI 精读与文档上下文对话；内置 EPUB / MOBI / AZW3 / FB2 / CBZ / PDF / TXT / Markdown 全格式阅读器，支持 AI 双语对照、五色高亮、手写墨迹、书签摘录回跳与书架管理。所有词典本地离线查询，学习与阅读数据全部存放在你自己的思源工作空间内。</p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-1.7.3-blue?style=flat&logo=github&logoColor=white" alt="version 1.7.3">
+  <img src="https://img.shields.io/badge/version-1.7.4-blue?style=flat&logo=github&logoColor=white" alt="version 1.7.4">
   <img src="https://img.shields.io/badge/license-MIT-green?style=flat&logo=opensourceinitiative&logoColor=white" alt="license MIT">
   <img src="https://img.shields.io/badge/SiYuan-3.7.0%2B-orange?style=flat&logo=siyuan&logoColor=white" alt="SiYuan 3.7.0+">
 </p>
@@ -33,6 +33,7 @@
 
 > 近期重要更新摘要，完整版本记录见 [CHANGELOG](CHANGELOG.md)。
 
+- **待办日历**：把思源待办块变成日历——写「明天 8:00 背单词」即自动排期（截止时间存块属性，不污染正文），月 / 周 / 日视图一览；通过局域网 CalDAV 同步到手机自带日历，**到点由手机提醒**（vivo 原生日历实测可用）。本地 CalDAV 服务可在插件设置里「跟随思源启停 / 手动启停」，随思源一起开关。
 - **界面全量英文化**：全插件界面支持 English，约 2200 条界面文案 100% 覆盖；首次启动可选择语言，随时切换。
 - **聚合工作台**：组合栏新增工作台 Tab——统计卡（收词 / 复习 / 阅读 / 连续天数）、GitHub 风格 26 周学习热力图、到期复习 Top3、功能入口与掌握度分布，学习状况一屏尽览。
 - **主区页签形态**：组合栏是家、页签是放大镜——悬停任意功能 Tab 点 ⧉ 弹出为思源主区文档页签（大空间沉浸、可与笔记并排对照），⇄ 一键收回；组合栏常驻（工作台居首），布局管理仍支持角落停靠。

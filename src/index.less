@@ -8,6 +8,9 @@
    Svelte 的 scoped style 命中不到子组件内部元素，故共用控件样式必须放在全局层。 */
 @import "./reader/reader-controls.less";
 
+/* 待办日历面板（2026-09-13 新增：列表 + FullCalendar + CalDAV 同步设置） */
+@import "./todo-calendar/calendar.less";
+
 /* ===== 统一设计令牌（映射思源主题变量，供 whale-* 与 hiword-ai-* 引用） =====
    浅色 fallback 取思源默认亮色值；深色由 --b3-* 内层变量自动跟随。 */
 :root, .b3--fonts {
@@ -4699,6 +4702,75 @@ body.hiword-dragging {
     box-shadow: 0 0 0 3px color-mix(in srgb, var(--b3-theme-primary) 14%, transparent);
   }
   b { color: var(--b3-theme-primary); margin-right: 4px; }
+}
+
+/* ---- 关于页：官方链接 / 反馈两栏（2026-09-14 新增） ----
+   .hiword-about-link 既用于 <button>（可跳转项）也用于 <div>（静态项，内含复制按钮），
+   所以这里必须先做 button 重置，否则 <button> 会带系统字体与居中、且底色是灰的。 */
+.hiword-about-links {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 10px;
+}
+.hiword-about-link {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 9px 12px;
+  border: 1px solid var(--hw-border);
+  border-radius: 9px;
+  background: var(--b3-theme-background);
+  color: var(--b3-theme-on-surface, #333);
+  font-family: inherit;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 0.15s ease, background 0.15s ease;
+  &:hover {
+    border-color: var(--b3-theme-primary);
+    background: color-mix(in srgb, var(--b3-theme-primary) 5%, var(--b3-theme-background));
+  }
+  &--static { cursor: default; }
+  &--static:hover { border-color: var(--hw-border); background: var(--b3-theme-background); }
+}
+.hiword-about-link-ico { font-size: 15px; line-height: 1; flex-shrink: 0; }
+.hiword-about-link-body { display: flex; flex-direction: column; gap: 1px; flex: 1; min-width: 0; }
+.hiword-about-link-t { font-size: 13px; color: var(--b3-theme-on-surface, #333); }
+.hiword-about-link-d {
+  font-size: 11.5px;
+  color: var(--b3-theme-on-surface-light, #999);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.hiword-about-link-go { font-size: 12px; color: var(--b3-theme-primary); flex-shrink: 0; }
+.hiword-about-copy {
+  flex-shrink: 0;
+  padding: 3px 10px;
+  border: 1px solid var(--hw-border);
+  border-radius: 20px;
+  background: var(--b3-theme-surface, #fff);
+  color: var(--b3-theme-on-surface, #555);
+  font-family: inherit;
+  font-size: 11.5px;
+  line-height: 1.6;
+  cursor: pointer;
+  transition: border-color 0.15s ease, color 0.15s ease;
+  &:hover { border-color: var(--b3-theme-primary); color: var(--b3-theme-primary); }
+}
+.hiword-about-note {
+  font-size: 12px;
+  line-height: 1.7;
+  color: var(--b3-theme-on-surface-light, #999);
+}
+/* 词典管理面板里的「获取词典包」引导行（复用 .hiword-dm-tip 底色，只调成横排） */
+.hiword-dm-tip--guide {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
 }
 
 /* ========== 批注对话框（方案 C 录入入口 #20）========== */
