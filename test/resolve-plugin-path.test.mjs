@@ -13,11 +13,9 @@
  *   2. package.json 命中（开发模式）
  *   3. plugin.json + package.json 都有（dev 装到工作空间场景）
  *   4. plugin.json name 不对（误命中其他插件目录）
- *   5. dict 目录缺失
- *   6. dict 目录无 .mdx
- *   7. dict 只有非内置 .mdx（用户词典）
- *   8. plugin.json / package.json 都是非法 JSON
- *   9. 双证据都不存在（renderer/dict 等误命中目录）
+ *   5. plugin.json / package.json 都是非法 JSON
+ *   6. 双证据都不存在（renderer/dict 等误命中目录）
+ *   7. dict/ 缺失或为空（新用户发布包场景）→ 仍应命中（2026-09-16 修复）
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -137,8 +135,6 @@ test("isPluginRoot: package.json name 错 → false（不绕过 plugin.json）",
     },
   });
   // plugin.json.name 不匹配 + package.json.name 匹配 → 走 package.json 兜底
-  // 当前实现：plugin.json 读取失败（name 不对）→ fallback 到 package.json（匹配）→ true
-  // 期望：true（因为 package.json 是有效的身份证明）
   assert.equal(isPluginRootWithFs("/p", PLUGIN, fsOps), true,
     "plugin.json name 不匹配时仍可走 package.json 兜底");
 });
@@ -185,36 +181,40 @@ test("isPluginRoot: 两个文件都非法 JSON → false", () => {
   assert.equal(isPluginRootWithFs("/p", PLUGIN, fsOps), false);
 });
 
-/* ----------------- 反例：dict 维度 ----------------- */
+/* ----------------- 2026-09-16：dict 维度不再参与判定 -----------------
+ * 发布包整体排除 dict/（约 64MB，用户手动导入），新用户 dict/ 为空。
+ * 旧的「必须含内置 .mdx」条件导致身份判定恒 false → Windows 导入词典
+ * 永远 MISSING。现在 dict 缺失/为空/只有用户词典都应命中（有身份文件即可）。
+ */
 
-test("isPluginRoot: dict 目录不存在 → false", () => {
+test("isPluginRoot: 新用户发布包 dict/ 目录不存在 → true（2026-09-16 回归）", () => {
   const fsOps = makeFs({
     "/p": {
       "plugin.json": JSON.stringify({ name: "siyuan-plugin-reword" }),
     },
   });
-  assert.equal(isPluginRootWithFs("/p", PLUGIN, fsOps), false);
+  assert.equal(isPluginRootWithFs("/p", PLUGIN, fsOps), true,
+    "发布包不带词典包，dict 缺失不应否定插件身份");
 });
 
-test("isPluginRoot: dict 目录无 .mdx 文件 → false", () => {
+test("isPluginRoot: dict 目录存在但无 .mdx → true", () => {
   const fsOps = makeFs({
     "/p": {
       "plugin.json": JSON.stringify({ name: "siyuan-plugin-reword" }),
       "dict": { "manifest.json": "" },
     },
   });
-  assert.equal(isPluginRootWithFs("/p", PLUGIN, fsOps), false);
+  assert.equal(isPluginRootWithFs("/p", PLUGIN, fsOps), true);
 });
 
-test("isPluginRoot: dict 只有非内置 .mdx（用户自备词典） → false", () => {
+test("isPluginRoot: dict 只有非内置 .mdx（用户自备词典）→ true", () => {
   const fsOps = makeFs({
     "/p": {
       "plugin.json": JSON.stringify({ name: "siyuan-plugin-reword" }),
       "dict": { "oxford.mdx": "", "collins.mdx": "" },
     },
   });
-  // 只含用户词典 → 不通过内置词典检查 → 仍 false（避免误命中 renderer/dict 等）
-  assert.equal(isPluginRootWithFs("/p", PLUGIN, fsOps), false);
+  assert.equal(isPluginRootWithFs("/p", PLUGIN, fsOps), true);
 });
 
 test("isPluginRoot: renderer/dict 误命中场景（plugin.json + package.json 都没有）", () => {

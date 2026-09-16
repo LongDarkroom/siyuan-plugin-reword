@@ -8,8 +8,7 @@
    Svelte 的 scoped style 命中不到子组件内部元素，故共用控件样式必须放在全局层。 */
 @import "./reader/reader-controls.less";
 
-/* 待办日历面板（2026-09-13 新增：列表 + FullCalendar + CalDAV 同步设置） */
-@import "./todo-calendar/calendar.less";
+/* 2026-09-15：待办日历面板样式已随 siyuan-plugin-re-todo 拆出（calendar.less 不再被本插件引用） */
 
 /* ===== 统一设计令牌（映射思源主题变量，供 whale-* 与 hiword-ai-* 引用） =====
    浅色 fallback 取思源默认亮色值；深色由 --b3-* 内层变量自动跟随。 */
@@ -57,6 +56,14 @@
   --hw-gold: var(--b3-protyle-inline-mark-color, #bf5a00);
   --hw-gold-lite: var(--b3-protyle-inline-mark-background, #ffe9a8);
   --hw-success: var(--b3-theme-success, var(--hw-success));
+  /* 待办优先级分色（2026-09-15：待办列表圆点 / quick 行选择器 / 编辑器下拉共用）。
+     与 --hw-pos-* 同类：受控语义表，**兜底必须是字面色值，不可自引用**。
+     ⚠️ 上游取 --b3-theme-error / -secondary / -primary 而**不是** --b3-card-error-color：
+     后者在官方主题里是深色文字色（daylight #790600），当圆点/徽章底色会过暗。 */
+  --hw-prio-0: var(--b3-theme-error, #d23f31);              /* P0 紧急 */
+  --hw-prio-1: var(--b3-theme-secondary, #ff9200);          /* P1 高 */
+  --hw-prio-2: var(--b3-theme-primary, #0f6bff);            /* P2 中 */
+  --hw-prio-3: var(--b3-theme-on-surface-light, #8f959e);   /* P3 低 */
   /* 词性分色（受控语义表；P2 可换 b3 主题色衍生）。
      注意：必须给具体色值，不可自引用（var(--hw-pos-n) 循环引用会导致整条失效）。 */
   --hw-pos-n: #357abd;    /* 名词 蓝 */
@@ -1615,6 +1622,11 @@
   background: var(--b3-theme-on-surface-light, var(--b3-theme-on-surface-light, #888));
   color: #fff;
   opacity: 0.55;
+}
+/* 2026-09-16：词典文件缺失（待导入）状态——警示但不刺眼 */
+.hiword-dm-count.is-pending {
+  background: var(--b3-card-warning-color, rgba(255, 193, 7, 0.22));
+  color: var(--b3-theme-secondary, #a67c00);
 }
 
 .hiword-dm-active {
@@ -7926,29 +7938,74 @@ body.hiword-dragging {
 }
 @keyframes fadeIn { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
 
-/* ---- 设置分组（2026-08-21 美化：卡片风） ---- */
-.hiword-ai-setting-group {
+/* ---- 设置分组（2026-09-15 视觉重排：同一分组的设置项合并进一张大卡，
+      卡片 = .hiword-ai-setting-card；组内每一项 = 一行 .hiword-ai-setting-group，
+      行间用细分隔线。原「一项一卡 + hover 浮动」的碎卡片布局废弃） ---- */
+.hiword-ai-setting-card {
   margin-bottom: 16px;
-  padding: 16px 20px;
   background: var(--b3-theme-surface, var(--b3-theme-background, #fff));
   border: 1px solid var(--b3-border-color, #e8e8e8);
-  border-radius: 8px;
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
-  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+  border-radius: 10px;
+  overflow: hidden;
+}
+.hiword-ai-setting-card:last-child { margin-bottom: 0; }
+.hiword-ai-setting-group {
+  padding: 12px 18px;
+  transition: background 0.12s ease;
+}
+.hiword-ai-setting-group + .hiword-ai-setting-group {
+  border-top: 1px solid var(--b3-border-color, #e8e8e8);
 }
 .hiword-ai-setting-group:hover {
-  border-color: var(--b3-theme-primary, #06b6d4);
-  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.08);
-  transform: translateY(-1px);
+  background: var(--b3-theme-background-hover, rgba(0, 0, 0, 0.03));
 }
-.hiword-ai-setting-group:last-child { margin-bottom: 0; }.hiword-ai-setting-label {
+.hiword-ai-setting-group:last-child { margin-bottom: 0; }
+
+/* ---- 两列行布局：左标签（名称+说明）右控件 ---- */
+.hiword-ai-setting-row {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  width: 100%;
+}
+/* 文本域/只读等长内容：纵向整行 */
+.hiword-ai-setting-row.col {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 6px;
+}
+.hiword-ai-setting-grow {
+  flex: 1;
+  min-width: 0;
+}
+.hiword-ai-setting-ctrl {
+  flex-shrink: 0;
+  max-width: 58%;
+  min-width: 0;
+}
+/* 控件限宽：文本/密钥输入等 ~300px，数字窄 ~140px（.ais-wrap-num） */
+.hiword-ai-setting-ctrl .hiword-ai-input-wrap {
+  justify-content: flex-end;
+  width: 300px;
+  max-width: 100%;
+}
+.hiword-ai-setting-ctrl .ais-wrap-num {
+  width: 150px;
+}
+.hiword-ai-setting-ctrl .ais-wrap-num .hiword-ai-input {
+  flex: none;
+  width: 92px;
+}
+
+.hiword-ai-setting-label {
   margin-bottom: 8px;
 }
 .hiword-ai-setting-name {
-  font-size: 14px;
+  font-size: 13.5px;
   font-weight: 600;
   color: var(--b3-theme-on-surface, #222);
-  display: block;
+  display: inline-flex;
+  align-items: center;
   margin-bottom: 2px;
 }
 .hiword-ai-setting-desc {
@@ -7977,32 +8034,29 @@ body.hiword-dragging {
   &::placeholder { color: #bbb; }
 }
 
-/* ---- 开关行 ---- */
-.hiword-ai-setting-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 13.5px;
-  color: var(--b3-theme-on-surface, #444);
-}
-/* ---- API Key 输入组 ---- */
+/* ---- API Key / 输入组 ---- */
 .hiword-ai-input-wrap {
   display: flex;
   gap: 6px;
   align-items: center;
-  .hiword-ai-input { flex: 1; }
+  .hiword-ai-input { flex: 1; min-width: 0; }
 }
 .hiword-ai-icon-btn {
-  width: 32px; height: 32px;
+  width: 30px; height: 30px;
   border: 1px solid var(--b3-border-color, #ddd);
-  border-radius: 6px;
+  border-radius: 7px;
   background: var(--b3-theme-surface, #f5f5f5);
   cursor: pointer;
-  font-size: 14px;
   display: flex; align-items: center; justify-content: center;
   flex-shrink: 0;
+  color: var(--b3-theme-on-surface-light, #888);
   transition: all 0.12s;
-  &:hover { background: var(--b3-theme-background-hover); border-color: var(--b3-theme-primary, #06b6d4); }
+  svg { width: 13px; height: 13px; }
+  &:hover {
+    background: var(--b3-theme-background-hover);
+    border-color: var(--b3-theme-primary, #06b6d4);
+    color: var(--b3-theme-primary, #06b6d4);
+  }
 }
 
 /* ---- 模型管理 ---- */

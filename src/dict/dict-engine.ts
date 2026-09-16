@@ -50,6 +50,7 @@ interface DictSource {
   backend: DictBackend;
   lang: DictLang;  // 词典语言：en=英文为主，zh=中文为主，auto=未知（按内容回退）
   mdx: any;       // js-mdict MDX 实例（backend=mdx 时使用）
+  mdd?: any;      // 2026-09-16：js-mdict MDD 伴生资源包实例（可选，MDX 词条内图片/CSS 等资源）
   stardict: any;   // StarDict 实例（backend=stardict 时使用）
   count: number;   // 词表条目数
   /** P4 搜索索引（2026-08-14 新增）：词典加载时构建，供前缀/子串/编辑距离搜索收窄扫描范围 */
@@ -175,6 +176,8 @@ export function getExtraPhonetic(word: string): string {
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 import * as jsMdict from "js-mdict";
 const MDX: any = (jsMdict as any).MDX;
+// 2026-09-16：MDD = MDX 的伴生资源包（图片/CSS/字体/音频），locate(key) 返回 base64
+const MDD: any = (jsMdict as any).MDD;
 
 // StarDict 解析器（内置实现，支持 .ifo/.idx/.dict(.dz)）
 // 显式 .ts 扩展名：兼容 Node --experimental-strip-types 测试运行器
@@ -248,6 +251,107 @@ export async function initDict(
 }
 
 /**
+ * 2026-09-16：为已加载的 MDX 词典挂载伴生资源包（.mdd）。
+ * 词条 HTML 里的相对路径资源（图片/CSS/字体/音频）在 lookup 时经 rewriteMddResources
+ * 改写为 data URL。资源包不存在或解析失败时静默降级（词条文本照常显示）。
+ *
+ * @param mddPath .mdd 文件绝对路径
+ * @param id      已加载 MDX 词典的 id
+ */
+export async function initMdd(mddPath: string, id: string): Promise<boolean> {
+  if (typeof MDD !== "function") return false;
+  if (!mddPath || /electron\.asar/i.test(mddPath)) return false;
+  const src = dicts.get(id);
+  if (!src || src.backend !== "mdx") return false;
+  try {
+    // 若已有旧实例，先释放
+    if (src.mdd) {
+      try { src.mdd.close(); } catch { /* 忽略 */ }
+      src.mdd = null;
+    }
+    const mdd = new MDD(mddPath);
+    src.mdd = mdd;
+    getLogger().info(`[REword] 词典「${src.name}」(${id}) 已挂载资源包 .mdd（${mddPath}）`);
+    return true;
+  } catch (err) {
+    getLogger().warn(`[REword] 资源包 .mdd 加载失败（词条文本不受影响）: ${(err as Error)?.message || err}`, { error: err });
+    src.mdd = null;
+    return false;
+  }
+}
+
+/** mdd 资源改写缓存：srcId + 资源路径 → data URL（null = 包内不存在，避免重复查块） */
+const mddResCache = new Map<string, string | null>();
+/** 缓存上限：词典 HTML 资源高度重复（图标/音标字体等），几百条足够覆盖高频资源 */
+const MDD_RES_CACHE_MAX = 500;
+
+/** 扩展名 → data URL MIME */
+function mddMime(resPath: string): string {
+  const ext = (resPath.split("?")[0].split("#")[0].match(/\.([a-z0-9]+)$/i)?.[1] || "").toLowerCase();
+  switch (ext) {
+    case "png": return "image/png";
+    case "jpg": case "jpeg": return "image/jpeg";
+    case "gif": return "image/gif";
+    case "bmp": return "image/bmp";
+    case "webp": return "image/webp";
+    case "svg": return "image/svg+xml";
+    case "css": return "text/css";
+    case "js": return "text/javascript";
+    case "mp3": return "audio/mpeg";
+    case "wav": return "audio/wav";
+    case "ogg": return "audio/ogg";
+    case "ttf": return "font/ttf";
+    case "woff": return "font/woff";
+    case "woff2": return "font/woff2";
+    case "eot": return "application/vnd.ms-fontobject";
+    default: return "application/octet-stream";
+  }
+}
+
+/**
+ * 把词条 HTML 中的相对路径资源（src/href）经 MDD locate 改写为 data URL。
+ * 仅在词典挂载了 .mdd 时生效；查不到的资源保持原样（不影响文本渲染）。
+ * 键规则（js-mdict MDD.locate 内部会做 / → \ 与补前导 \ 的归一化）：
+ *   HTML 里常见 /img/a.png、./img/a.png、img\a.png → 统一剥掉前导 ./ 与 / 再查。
+ */
+function rewriteMddResources(src: DictSource, html: string): string {
+  const mdd = src && (src as any).mdd;
+  if (!mdd || !html || html.indexOf("://") === 0) return html;
+  if (!/[sh]\w*\s*=\s*["'][^"']*\.[a-z0-9]{2,5}["']/i.test(html)) return html;
+  return html.replace(
+    /\b(src|href|data)\s*=\s*(["'])([^"']+)\2/gi,
+    (whole, attr: string, _q: string, val: string) => {
+      const v = val.trim();
+      // 绝对 URL / 内联数据 / 词条互见链接 / 锚点 / 已是 data URL → 不动
+      if (/^(https?:|data:|entry:|about:|javascript:|mailto:|#)/i.test(v)) return whole;
+      // 静态资源扩展名白名单：避免把普通词条间链接误当资源
+      if (!/\.(png|jpe?g|gif|bmp|webp|svg|css|js|mp3|wav|ogg|ttf|woff2?|eot)$/i.test(v.split("?")[0])) return whole;
+
+      const key = src.id + "\u0000" + v;
+      let dataUrl = mddResCache.get(key);
+      if (dataUrl === undefined) {
+        let b64: string | null = null;
+        try {
+          const cleaned = v.replace(/^\.\//, "").replace(/^\/+/, "").split("?")[0].split("#")[0];
+          const located = mdd.locate(cleaned);
+          b64 = located && typeof located.definition === "string" ? located.definition : null;
+        } catch {
+          b64 = null;
+        }
+        dataUrl = b64 ? `data:${mddMime(v)};base64,${b64}` : null;
+        if (mddResCache.size >= MDD_RES_CACHE_MAX) {
+          // 简易先入先出：清最早的一批
+          const drop = mddResCache.keys().next().value;
+          if (drop !== undefined) mddResCache.delete(drop);
+        }
+        mddResCache.set(key, dataUrl);
+      }
+      return dataUrl ? `${attr}=${_q}${dataUrl}${_q}` : whole;
+    }
+  );
+}
+
+/**
  * 初始化/注册一个 StarDict 词典（.ifo/.idx/.dict(.dz)）
  *
  * @param ifoPath   .ifo 文件路径（必选，从中推导 .idx 和 .dict 路径）
@@ -304,6 +408,12 @@ function closeSource(d: DictSource): void {
       d.mdx.close();
     } else if (d.backend === "stardict" && d.stardict) {
       d.stardict.close();
+    }
+    // 2026-09-16：伴生资源包一并释放
+    if (d.mdd) {
+      try { d.mdd.close(); } catch (__swallowErr) { logSwallow(__swallowErr, "dict-engine.ts · closeSource(mdd)", "debug"); }
+      d.mdd = null;
+      mddResCache.clear();
     }
   } catch (__swallowErr) { logSwallow(__swallowErr, "dict-engine.ts · closeSource", "debug"); }
 }
@@ -690,6 +800,10 @@ function lookupInDict(src: DictSource | null, word: string): DictEntry | null {
   if (!raw) return null;
 
   const resolved = resolveMdxRedirect(src, raw.definition, 0);
+  // 2026-09-16：挂载了 .mdd 资源包时，把词条内相对路径资源改写为 data URL（图片/CSS/音频等）
+  if (src.backend === "mdx" && (src as any).mdd) {
+    resolved.definition = rewriteMddResources(src, resolved.definition);
+  }
 
   // 修复（2026-08-18，3 处叠加）：
   //   1) 跟随重定向后必须把 entry.word 同步为目标词（之前"usually 显示 usual 内容"的核心 bug）

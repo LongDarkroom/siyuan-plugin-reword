@@ -86,6 +86,7 @@ import {
   type AnnotationItem,
 } from "../annotation/annotation-store.ts";
 import { focusFeatureDock } from "../dock/dock-layout.ts";
+import { getLogger } from "../core/logger.ts";
 
 export const DASHBOARD_FEATURE_ID = "dashboard";
 
@@ -315,6 +316,13 @@ const DASHBOARD_CSS = `
 .hiword-dash-star-legend { display: flex; justify-content: space-between; font-size: 10px; color: var(--b3-theme-on-surface-light); margin-top: 7px; }
 .hiword-dash-star-foot { font-size: 11px; color: var(--b3-theme-on-surface-light); margin-top: 10px; }
 
+/* ---- 今日待办（RE 待办日历联动卡片） ---- */
+.hiword-dash-todo-row { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: 9px; padding: 3px 4px; border-radius: 4px; cursor: pointer; }
+.hiword-dash-todo-row:hover { background: var(--b3-list-hover, rgba(0,0,0,.04)); }
+.hiword-dash-todo-time { font-size: 11px; color: var(--b3-theme-primary); font-variant-numeric: tabular-nums; }
+.hiword-dash-todo-t { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; color: var(--b3-theme-on-background); }
+.hiword-dash-todo-hint { font-size: 11px; color: var(--b3-theme-on-surface-light); padding: 2px 4px; }
+
 /* ---- 现在该复习（引用块风） ---- */
 .hiword-dash-bq { background-color: var(--b3-blockquote-color, var(--b3-theme-surface)); border-radius: 8px; padding: 12px 14px; margin-bottom: 12px; }
 .hiword-dash-bq-head { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
@@ -431,6 +439,14 @@ function renderDashboardInto(contentEl: HTMLElement, p: RewordPlugin): void {
   }
   contentEl.innerHTML = buildDashboardHtml(snap, readHeatRange(contentEl));
   bindDashboardEvents(contentEl, p);
+  // 今日待办卡片：数据在新插件侧，异步填充；RE 待办日历改数据后就地刷新。
+  // 监听挂在容器上并以 AbortController 管理 —— 重渲染（含热力图切档）先 abort 旧的，防监听堆积。
+  const holder = contentEl as HTMLElement & { __todoCardAbort?: AbortController };
+  holder.__todoCardAbort?.abort();
+  const ac = new AbortController();
+  holder.__todoCardAbort = ac;
+  window.addEventListener("re-todo:changed", () => { void fillTodoCard(contentEl); }, { signal: ac.signal });
+  void fillTodoCard(contentEl);
 }
 
 function buildDashboardHtml(snap: DashboardSnapshot, range: HeatRange): string {
@@ -461,6 +477,7 @@ function buildDashboardHtml(snap: DashboardSnapshot, range: HeatRange): string {
   <div class="hiword-dash">
     ${buildHeroHtml(snap, studyStreak, weekNewWords)}
     ${buildReviewBqHtml(snap, now)}
+    ${buildTodoCardShell()}
     ${buildHeatmapCard(stats.calendar, reviewCountByDay, range)}
     <div class="hiword-dash-sec">${t("阅读数据")}</div>
     ${buildReadingMetrics(stats)}
@@ -553,6 +570,76 @@ function buildReviewBqHtml(snap: DashboardSnapshot, now: number): string {
       ? `<ul class="hiword-dash-bq-list">${items.join("")}</ul>`
       : `<div style="font-size:13px;color:var(--b3-theme-on-surface-light)">${t("没有到期的单词，休息一下吧 🎉")}</div>`}
   </div>`;
+}
+
+// ============ ②.5 今日待办（RE 待办日历联动卡片，2026-09-15） ============
+// 数据不在本插件：经 window.__RE_TODO__（siyuan-plugin-re-todo 暴露的 v1 全局 API）
+// 异步拉取，插件未启用时显示引导提示。数据契约 = 思源块属性（custom-due + custom-rw-*）。
+
+/** 今日待办条目（window.__RE_TODO__.listTodos() 返回形状的最小消费面） */
+interface ReTodoLite {
+  blockId: string;
+  title: string;
+  /** YYYY-MM-DDTHH:MM（本地）或 '' */
+  due: string;
+  done: boolean;
+  /** 软删时间戳（ms；0/缺省 = 未删） */
+  deletedAt?: number;
+  /** 父待办块 ID（空串 = 顶层任务；卡片只展示顶层，子任务在新插件面板里看） */
+  parentId?: string;
+}
+
+function buildTodoCardShell(): string {
+  return `<div class="hiword-dash-card" id="hiword-dash-todo">
+    <div class="hiword-dash-card-title">${t("今日待办")}</div>
+    <div class="hiword-dash-todo-body"><div class="hiword-dash-todo-hint">${t("加载中…")}</div></div>
+  </div>`;
+}
+
+/** 拉取今日待办并填充卡片（async；容器被重渲染时结果自然丢弃）。 */
+async function fillTodoCard(contentEl: HTMLElement): Promise<void> {
+  const body = contentEl.querySelector("#hiword-dash-todo .hiword-dash-todo-body") as HTMLElement | null;
+  if (!body) return;
+  const api = (window as any).__RE_TODO__ as
+    | { version?: number; listTodos?: (managedPath?: string) => Promise<unknown[]> }
+    | undefined;
+  if (!api || (api.version ?? 0) < 1 || typeof api.listTodos !== "function") {
+    body.innerHTML = `<div class="hiword-dash-todo-hint">${t("启用「RE 待办日历」后在此显示今日待办")}</div>`;
+    return;
+  }
+  try {
+    const all = (await api.listTodos()) as ReTodoLite[];
+    // await 期间卡片可能被重渲染（热力图切档等），旧容器直接放弃
+    const fresh = contentEl.querySelector("#hiword-dash-todo .hiword-dash-todo-body") as HTMLElement | null;
+    if (!fresh) return;
+    const now = new Date();
+    const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
+    const items = (Array.isArray(all) ? all : [])
+      .filter((it) => it && it.blockId && !it.done && !(it.deletedAt && it.deletedAt > 0)
+        && !it.parentId && (it.due || "").slice(0, 10) === today)
+      .sort((a, b) => (a.due || "").localeCompare(b.due || ""));
+    // 标题行右侧补计数
+    const titleEl = contentEl.querySelector("#hiword-dash-todo .hiword-dash-card-title") as HTMLElement | null;
+    if (titleEl) titleEl.insertAdjacentHTML("beforeend", `<span class="hiword-dash-sub is-right">${t("{n} 条", { n: items.length })}</span>`);
+    if (!items.length) {
+      fresh.innerHTML = `<div class="hiword-dash-todo-hint">${t("今日无待办")}</div>`;
+      return;
+    }
+    const MAX_SHOW = 8;
+    fresh.innerHTML =
+      items.slice(0, MAX_SHOW).map((it) => {
+        const hhmm = (it.due || "").slice(11, 16);
+        return `<div class="hiword-dash-todo-row" data-todo-focus="${esc(it.blockId)}" title="${esc(it.title)}">
+          <span class="hiword-dash-todo-time">${esc(hhmm || "--:--")}</span>
+          <span class="hiword-dash-todo-t">${esc(it.title)}</span>
+        </div>`;
+      }).join("")
+      + (items.length > MAX_SHOW ? `<div class="hiword-dash-todo-hint">${t("查看全部 {n} 条", { n: items.length })}</div>` : "");
+  } catch (e) {
+    const fresh = contentEl.querySelector("#hiword-dash-todo .hiword-dash-todo-body") as HTMLElement | null;
+    if (fresh) fresh.innerHTML = `<div class="hiword-dash-todo-hint">${t("今日待办加载失败")}</div>`;
+    getLogger().warn("[REword] 今日待办卡片加载失败", { error: e });
+  }
 }
 
 // ============ ③ 学习热力图 ============
@@ -1271,6 +1358,19 @@ function bindDashboardEvents(contentEl: HTMLElement, p: RewordPlugin): void {
       // 范围按容器（dataset）存：三处实例（组合栏 / 独立 Dock / 主区页签）互不串改（F5）
       contentEl.dataset.heatRange = next;
       renderDashboardInto(contentEl, p);
+    });
+  });
+  // 今日待办卡片 → 深链到 RE 待办日历面板（先广播定位事件再开面板，re-todo 侧滚动高亮该条）
+  contentEl.querySelectorAll("[data-todo-focus]").forEach((el) => {
+    el.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const blockId = (el as HTMLElement).dataset.todoFocus;
+      const api = (window as any).__RE_TODO__ as
+        | { openPanel?: () => void }
+        | undefined;
+      if (!blockId || !api) return;
+      window.dispatchEvent(new CustomEvent("re-todo:focus", { detail: { blockId } }));
+      if (typeof api.openPanel === "function") api.openPanel();
     });
   });
 }

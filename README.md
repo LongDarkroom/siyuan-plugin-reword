@@ -5,7 +5,7 @@
 <p align="center">离线查词（支持 MDX / StarDict 自定义词库）、框选快捷键收词、SM-2 间隔复习、AI 精读与文档上下文对话；内置 EPUB / MOBI / AZW3 / FB2 / CBZ / PDF / TXT / Markdown 全格式阅读器，支持 AI 双语对照、五色高亮、手写墨迹、书签摘录回跳与书架管理。所有词典本地离线查询，学习与阅读数据全部存放在你自己的思源工作空间内。</p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-1.7.4-blue?style=flat&logo=github&logoColor=white" alt="version 1.7.4">
+  <img src="https://img.shields.io/badge/version-1.7.5-blue?style=flat&logo=github&logoColor=white" alt="version 1.7.5">
   <img src="https://img.shields.io/badge/license-MIT-green?style=flat&logo=opensourceinitiative&logoColor=white" alt="license MIT">
   <img src="https://img.shields.io/badge/SiYuan-3.7.0%2B-orange?style=flat&logo=siyuan&logoColor=white" alt="SiYuan 3.7.0+">
 </p>

@@ -645,7 +645,9 @@ export function createBackend(
   switch (settings.engine) {
     case "system":
       primary = system;
-      fallback = null;
+      // 2026-09-16：Windows 上离线系统语音经常无声 → 失败时回退有道在线
+      // （dictvoice 支持整句，虽机械但可听；单词场景另有海词兜底，见 index.ts speak()）。
+      fallback = available(youdao) ? youdao : null;
       break;
     case "youdao":
       primary = available(youdao) ? youdao : system;

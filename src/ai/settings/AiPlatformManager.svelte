@@ -116,6 +116,16 @@
       onMessage("无法读取剪贴板，请手动粘贴", "error");
     }
   }
+
+  /* 2026-09-15：currentColor SVG 图标（替代固定色 emoji，跟随主题） */
+  const ICONS: Record<string, string> = {
+    copy: '<rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>',
+    eye: '<path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/>',
+    eyeOff: '<path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c6.5 0 10 8 10 8a13.16 13.16 0 0 1-1.67 2.68"/><path d="M6.61 6.61A13.53 13.53 0 0 0 2 12s3.5 8 10 8a9.74 9.74 0 0 0 5.39-1.61"/><path d="M2 2l20 20"/><path d="M14.12 14.12a3 3 0 1 1-4.24-4.24"/>',
+  };
+  function iconSvg(n: string): string {
+    return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICONS[n]}</svg>`;
+  }
 </script>
 
 <div class="ais-pmgr">
@@ -179,12 +189,12 @@
             value={active.apiKey}
             on:input={(e) => updateActive({ apiKey: e.currentTarget.value })}
           />
-          <button type="button" class="ais-pmgr-keybtn" title="从剪贴板导入" on:click={importKey}>📋</button>
+          <button type="button" class="ais-pmgr-keybtn" title="从剪贴板导入" on:click={importKey}>{@html iconSvg("copy")}</button>
           <button
             type="button"
             class="ais-pmgr-keybtn"
             title={showKey ? "隐藏" : "显示"}
-            on:click={() => (showKey = !showKey)}>{showKey ? "👁" : "🙈"}</button
+            on:click={() => (showKey = !showKey)}>{@html showKey ? iconSvg("eyeOff") : iconSvg("eye")}</button
           >
         </span>
       </label>
@@ -331,10 +341,20 @@
     border-radius: 6px;
     cursor: pointer;
     font-size: 13px;
-    padding: 0 8px;
+    padding: 0;
+    width: 28px;
     height: 28px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    color: var(--b3-theme-on-surface-light, #888);
   }
-  .ais-pmgr-keybtn:hover { border-color: var(--b3-theme-primary, #06b6d4); }
+  .ais-pmgr-keybtn :global(svg) {
+    width: 13px;
+    height: 13px;
+  }
+  .ais-pmgr-keybtn:hover { border-color: var(--b3-theme-primary, #06b6d4); color: var(--b3-theme-primary, #06b6d4); }
   .ais-pmgr-note {
     margin: 0;
     font-size: 11px;

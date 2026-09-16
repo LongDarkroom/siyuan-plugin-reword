@@ -38,6 +38,10 @@ export const SIYUAN_API = {
   // 属性
   setBlockAttrs: "/api/attr/setBlockAttrs",
   getBlockAttrs: "/api/attr/getBlockAttrs",
+  // 属性批量（表格批量操作）：一次请求带多个块，避免 N 次单读/单写
+  batchSetBlockAttrs: "/api/attr/batchSetBlockAttrs",
+  // ⚠️ 批量读须自行分块（批次过大内核会拒绝）；TH 实测上限 400
+  batchGetBlockAttrs: "/api/attr/batchGetBlockAttrs",
   // 块
   insertBlock: "/api/block/insertBlock",
   appendBlock: "/api/block/appendBlock",
@@ -47,6 +51,8 @@ export const SIYUAN_API = {
   // 待办勾选：专用于「任务列表项」的标记切换接口。
   // ⚠️ 改勾选态**必须**用它，不要用 updateBlock 改 markdown —— 后者会把块属性（custom-*）整片冲掉。
   updateTaskListItemMarker: "/api/block/updateTaskListItemMarker",
+  // 批量勾选：同样只碰 `[ ]`/`[x]`，不触碰块属性
+  batchUpdateTaskListItemMarker: "/api/block/batchUpdateTaskListItemMarker",
   // 查询
   sql: "/api/query/sql",
   flushTransaction: "/api/sqlite/flushTransaction",

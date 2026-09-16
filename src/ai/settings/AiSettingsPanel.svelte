@@ -21,6 +21,7 @@
     itemsOfGroup,
     isTranslateSideKey,
     countTranslateSideKeys,
+    type SettingGroup,
     type SettingGroupId,
     type SettingItem,
   } from "./ai-settings-items.ts";
@@ -31,6 +32,15 @@
   import AiPlatformManager from "./AiPlatformManager.svelte";
 
   export let settings: AiSettings;
+  /**
+   * 嵌入统一设置面板时为 true（独立 AI 设置对话框为 false）。
+   *
+   * 2026-09-15 排版：嵌入时本面板底部的保存栏正好落在外层「取消 / 保存所有设置」
+   * 上方，两栏都画 border-top 就成「双横线夹一条缝」。embedded 下把本栏降级为
+   * 内容区附属操作（去上边框、收窄间距），全局主操作留给外层 footer。
+   * 功能不变：本栏依旧只提交 AI 精读这一页的 draft。
+   */
+  export let embedded = false;
   export let onSave: (patch: Partial<AiSettings>) => void = () => {};
   export let onCancel: () => void = () => {};
   /** 热生效：改了立即应用到运行中的面板，不必等保存 */
@@ -203,9 +213,29 @@
 
   // 当前分组（内容区头部用；Svelte4 的 @const 只能放进块内，故提为响应式声明）
   $: grp = SETTING_GROUPS.find((g) => g.id === active);
+
+  /* 分组导航图标：SVG path 映射（currentColor 跟随主题，替代固定色 emoji）。
+     与 ai-settings-items.ts 的 icon key 对应；key 未命中时回退空白（不渲染缺字形）。 */
+  const GRP_ICONS: Record<string, string> = {
+    gear: '<path d="M12 15.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7Z"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.87l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.7 1.7 0 0 0-1.87-.34 1.7 1.7 0 0 0-1 1.55V21a2 2 0 1 1-4 0v-.09a1.7 1.7 0 0 0-1-1.55 1.7 1.7 0 0 0-1.87.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.7 1.7 0 0 0 .34-1.87 1.7 1.7 0 0 0-1.55-1H3a2 2 0 1 1 0-4h.09a1.7 1.7 0 0 0 1.55-1 1.7 1.7 0 0 0-.34-1.87l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.7 1.7 0 0 0 1.87.34h.09a1.7 1.7 0 0 0 1-1.55V3a2 2 0 1 1 4 0v.09a1.7 1.7 0 0 0 1 1.55 1.7 1.7 0 0 0 1.87-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.7 1.7 0 0 0-.34 1.87v.09a1.7 1.7 0 0 0 1.55 1H21a2 2 0 1 1 0 4h-.09a1.7 1.7 0 0 0-1.55 1Z"/>',
+    plug: '<path d="M9 2v6M15 2v6"/><path d="M6 8h12v3a6 6 0 0 1-12 0V8Z"/><path d="M12 17v5"/>',
+    book: '<path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2Z"/>',
+    shield: '<path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10Z"/>',
+    brain: '<rect x="9" y="2" width="6" height="12" rx="3"/><path d="M12 14v8"/><circle cx="5" cy="12" r="3"/><path d="M5 9V5a2 2 0 0 1 4 0"/><path d="M5 15v4a2 2 0 0 0 4 0"/><circle cx="19" cy="12" r="3"/><path d="M19 9V5a2 2 0 0 0-4 0"/><path d="M19 15v4a2 2 0 0 1-4 0"/>',
+    pen: '<path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5Z"/>',
+    steth: '<path d="M4.8 2.3A.3.3 0 1 0 5 2H4a2 2 0 0 0-2 2v5a6 6 0 0 0 6 6 6 6 0 0 0 6-6V4a2 2 0 0 0-2-2h-1a.2.2 0 1 0 .3.3"/><path d="M8 15v1a6 6 0 0 0 6 6 6 6 0 0 0 6-6v-4"/><circle cx="20" cy="10" r="2"/>',
+    globe: '<circle cx="12" cy="12" r="9"/><path d="M3 12h18"/><path d="M12 3a13.5 13.5 0 0 1 0 18 13.5 13.5 0 0 1 0-18Z"/>',
+  };
+
+  function grpIcon(g: SettingGroup): string {
+    const p = GRP_ICONS[g.icon];
+    return p
+      ? `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${p}</svg>`
+      : "";
+  }
 </script>
 
-<div class="hiword-ai-settings-panel">
+<div class="hiword-ai-settings-panel" class:is-embedded={embedded}>
   <nav class="hiword-ai-settings-nav">
     {#each SETTING_GROUPS as g}
       <button
@@ -214,7 +244,7 @@
         class:active={active === g.id}
         on:click={() => (active = g.id)}
       >
-        <span class="ais-tab-icon" aria-hidden="true">{g.icon}</span>
+        <span class="ais-tab-icon" aria-hidden="true">{@html grpIcon(g)}</span>
         <span class="ais-tab-label">{t(g.label)}</span>
       </button>
     {/each}
@@ -225,7 +255,7 @@
       <!-- 分组头部：当前类目 + 一句话说明（2026-09-07 UI 打磨） -->
       {#if grp}
         <header class="ais-head">
-          <span class="ais-head-icon" aria-hidden="true">{grp.icon}</span>
+          <span class="ais-head-icon" aria-hidden="true">{@html grpIcon(grp)}</span>
           <div class="ais-head-text">
             <h3 class="ais-head-title">{t(grp.label)}</h3>
             {#if grp.desc}<p class="ais-head-desc">{t(grp.desc || "")}</p>{/if}
@@ -247,38 +277,45 @@
           onMessage={(m, kind) => { testMsg = m; testKind = kind; }}
         />
       {/if}
-      {#each currentItems as item (item.key + item.title + item.type)}
-        {#if item.type === "models"}
-          <div class="hiword-ai-setting-group">
-            <div class="hiword-ai-setting-label">
-              <span class="hiword-ai-setting-name">{t(item.title)}</span>
-              {#if item.desc}<span class="hiword-ai-setting-desc">{t(item.desc || "")}</span>{/if}
-            </div>
-            <AiModelList
-              models={modelsOf(item)}
-              baseUrl={String(valOfKey("baseUrl") || "")}
-              apiKey={String(valOfKey("apiKey") || "")}
-              modelParams={paramsOf()}
-              globalTemperature={Number(valOfKey("temperature") ?? 0.3)}
-              globalMaxTokens={Number(valOfKey("maxTokens") ?? 2048)}
-              {fetchModels}
-              onMessage={(m, kind) => { testMsg = m; testKind = kind; }}
-              onChange={(list) => onChange(item.key, list)}
-              onChangeParams={(next) => onChange("modelParams", next)}
-            />
-          </div>
-        {:else}
-          <AiSettingRow
-            {item}
-            value={valOf(item)}
-            disabled={isDisabled(item)}
-            msg={item.type === "actions" && (item.group === "service" || item.group === "guard") ? testMsg : ""}
-            msgKind={testKind}
-            {onChange}
-            onAction={onAction}
-          />
-        {/if}
-      {/each}
+      <!-- 2026-09-15 视觉重排：同一分组的设置项合并进一张大卡（.hiword-ai-setting-card），
+           行间由 .hiword-ai-setting-group + .hiword-ai-setting-group 的分隔线划分，
+           取代原来一项一卡的碎卡片布局 -->
+      {#if currentItems.length > 0}
+        <div class="hiword-ai-setting-card">
+          {#each currentItems as item (item.key + item.title + item.type)}
+            {#if item.type === "models"}
+              <div class="hiword-ai-setting-group">
+                <div class="hiword-ai-setting-label">
+                  <span class="hiword-ai-setting-name">{t(item.title)}</span>
+                  {#if item.desc}<span class="hiword-ai-setting-desc">{t(item.desc || "")}</span>{/if}
+                </div>
+                <AiModelList
+                  models={modelsOf(item)}
+                  baseUrl={String(valOfKey("baseUrl") || "")}
+                  apiKey={String(valOfKey("apiKey") || "")}
+                  modelParams={paramsOf()}
+                  globalTemperature={Number(valOfKey("temperature") ?? 0.3)}
+                  globalMaxTokens={Number(valOfKey("maxTokens") ?? 2048)}
+                  {fetchModels}
+                  onMessage={(m, kind) => { testMsg = m; testKind = kind; }}
+                  onChange={(list) => onChange(item.key, list)}
+                  onChangeParams={(next) => onChange("modelParams", next)}
+                />
+              </div>
+            {:else}
+              <AiSettingRow
+                {item}
+                value={valOf(item)}
+                disabled={isDisabled(item)}
+                msg={item.type === "actions" && (item.group === "service" || item.group === "guard") ? testMsg : ""}
+                msgKind={testKind}
+                {onChange}
+                onAction={onAction}
+              />
+            {/if}
+          {/each}
+        </div>
+      {/if}
     </div>
 
     <div class="hiword-ai-settings-savebar">
@@ -332,6 +369,19 @@
     opacity: 0.65;
   }
 
+  /* 2026-09-15 嵌入统一设置面板时的排版收敛：
+     本栏下面是外层的「取消 / 保存所有设置」，两条 border-top 上下相邻 = 双横线夹一条缝。
+     这里去掉本栏上边框并压薄上下间距，让它看起来是 AI 内容区的附属操作，
+     而不是第二个工具栏；外层 footer 独占唯一的分隔线。 */
+  .hiword-ai-settings-panel.is-embedded .hiword-ai-settings-savebar {
+    border-top: 0;
+    padding-top: 4px;
+    padding-bottom: 2px;
+  }
+  .hiword-ai-settings-panel.is-embedded .hiword-ai-settings-main {
+    padding-bottom: 8px;
+  }
+
   /* 导航项用原生 button（可键盘聚焦，规避 a11y 警告），需重置默认外观 */
   .ais-tab {
     display: flex;
@@ -349,10 +399,18 @@
     cursor: pointer;
   }
   .ais-tab-icon {
-    font-size: 14px;
-    line-height: 1;
-    opacity: 0.75;
+    /* 2026-09-15：emoji 改 currentColor SVG，尺寸由 svg 元素控制 */
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 15px;
+    height: 15px;
     flex-shrink: 0;
+    opacity: 0.75;
+  }
+  .ais-tab-icon :global(svg) {
+    width: 15px;
+    height: 15px;
   }
   .ais-tab.active .ais-tab-icon {
     opacity: 1;
@@ -376,10 +434,14 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    font-size: 17px;
-    border-radius: 8px;
+    border-radius: 9px;
     background: color-mix(in srgb, var(--b3-theme-primary, #06b6d4) 10%, transparent);
     flex-shrink: 0;
+  }
+  .ais-head-icon :global(svg) {
+    width: 17px;
+    height: 17px;
+    color: var(--b3-theme-primary, #06b6d4);
   }
   .ais-head-title {
     margin: 0;

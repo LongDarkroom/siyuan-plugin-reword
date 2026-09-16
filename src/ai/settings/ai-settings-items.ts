@@ -35,7 +35,8 @@ export type SettingGroupId =
 export interface SettingGroup {
   id: SettingGroupId;
   label: string;
-  /** 导航图标（2026-09-07 打磨：轻量 emoji，渲染失败只是缺字形，不影响布局） */
+  /** 导航图标 key（SVG path 映射表在 AiSettingsPanel.svelte，currentColor 跟随主题色，
+   *  禁止 emoji —— 固定色在主题 tint 底色上会看不清） */
   icon: string;
   /** 内容区顶部的分组一句话说明（空则不渲染头部说明） */
   desc?: string;
@@ -43,14 +44,14 @@ export interface SettingGroup {
 
 /** 左侧导航。顺序即面板顺序。 */
 export const SETTING_GROUPS: SettingGroup[] = [
-  { id: "general", label: "通用", icon: "⚙︎", desc: "输入框、字号与界面行为" },
-  { id: "service", label: "AI 服务", icon: "🔌", desc: "接口地址、密钥与模型连接" },
-  { id: "read", label: "精读行为", icon: "📖", desc: "结构化精读与学习模式" },
-  { id: "guard", label: "防幻觉", icon: "🛡", desc: "引用校验与编造拦截" },
-  { id: "memory", label: "记忆与词库", icon: "🧠", desc: "长期记忆与词汇收存" },
-  { id: "preset", label: "提示词库", icon: "✍︎", desc: "各场景使用的提示词" },
-  { id: "export", label: "导出与诊断", icon: "🩺", desc: "配置备份与接线诊断" },
-  { id: "engine", label: "翻译引擎", icon: "🌐", desc: "腾讯 / 有道 / 百度 / 微软 / Libre" },
+  { id: "general", label: "通用", icon: "gear", desc: "输入框、字号与界面行为" },
+  { id: "service", label: "AI 服务", icon: "plug", desc: "接口地址、密钥与模型连接" },
+  { id: "read", label: "精读行为", icon: "book", desc: "结构化精读与学习模式" },
+  { id: "guard", label: "防幻觉", icon: "shield", desc: "引用校验与编造拦截" },
+  { id: "memory", label: "记忆与词库", icon: "brain", desc: "长期记忆与词汇收存" },
+  { id: "preset", label: "提示词库", icon: "pen", desc: "各场景使用的提示词" },
+  { id: "export", label: "导出与诊断", icon: "steth", desc: "配置备份与接线诊断" },
+  { id: "engine", label: "翻译引擎", icon: "globe", desc: "腾讯 / 有道 / 百度 / 微软 / Libre" },
 ];
 
 export interface SettingItem {

@@ -390,19 +390,21 @@ export async function migrateDockLayoutOnce(p: RewordPlugin): Promise<void> {
   }
 
   /**
-   * 一次性迁移（v3，2026-09-12）：清理**已下线 feature** 的布局残留。
-   * 「词库」独立 feature 已并入「学习」面板（review 的内部第三个小 Tab），
-   * 但 hiword-dock-layout.json / hiword-dock-lastside.json 里可能仍留着 `vocab` 键 ——
+   * 一次性迁移（v4，2026-09-15）：清理**已下线 feature** 的布局残留。
+   * 「词库」独立 feature 已并入「学习」面板（review 的内部第三个小 Tab）；
+   * 「待办日历」feature 已拆为独立插件 siyuan-plugin-re-todo。
+   * 但 hiword-dock-layout.json / hiword-dock-lastside.json 里可能仍留着 `vocab` / `calendar` 键 ——
    * DockManager 只按「已注册功能」生成 UI，残留键不会长出 Tab 行，却会被「面板布局管理」
    * 的下拉框读出来（getSlot 默认 combined）并在侧边栏留下一个点了没反应的独立 Dock 图标。
    * 这里按键精确删除，幂等、可重复执行，不触碰其它功能的配置。
+   * ⚠️ 标记版本必须随 retired 名单一起升：v3 已在旧用户侧落盘，仅加名单不升版本会漏清。
    */
 export async function migrateRetiredFeaturesOnce(p: RewordPlugin): Promise<void> {
-    const marker = "hiword-dock-layout-migrated-v3";
+    const marker = "hiword-dock-layout-migrated-v4";
     let done = false;
     try { done = !!(await p.loadData(marker)); } catch (__swallowErr) { logSwallow(__swallowErr, "dock-layout.ts · migrateRetiredFeaturesOnce", "debug"); }
     if (done) return;
-    const retired = ["vocab"];
+    const retired = ["vocab", "calendar"];
     for (const key of ["hiword-dock-layout.json", "hiword-dock-lastside.json"]) {
       try {
         const cfg = (await p.loadData(key)) as Record<string, unknown> | null;

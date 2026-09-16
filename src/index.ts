@@ -77,6 +77,7 @@ import * as dictEngine from "./dict/dict-engine.ts";
 import * as dictRenderer from "./dict/dict-renderer.ts";
 import { maybeFillPhonetic, resetOnlinePhoneticCache } from "./dict/online-phonetic.ts";
 import { fetchOnlineDict, renderOnlineDictCard, renderOnlineDictCardSimple, resetOnlineDictCache } from "./dict/online-dict.ts";
+import { speakHaici } from "./dict/online-tts.ts";
 import type { ParsedEntry, SenseItem } from "./dict/dict-renderer.ts";
 import { getWordInflections } from "./dict/inflect.ts";
 import { normalizePos, parseReviewMeaning, parseWordList, isWordListLike, type ParsedWordListEntry } from "./utils/meaning-parser.ts";
@@ -188,18 +189,9 @@ import { BookModeStore } from "./reader/bilingual-book-mode.ts";
 import { GLOSSARY_STORAGE_KEY, GlossaryStore } from "./translate/glossary.ts";
 import { BookPrimerStore } from "./reader/book-primer";
 import { logSwallow } from "./core/safe.ts";
-// 2026-09-13：待办日历（CalDAV 桥接 vivo 手机/手表提醒）—— 三块能力：待办列表 / 日历展示 / 同步设置
-import { CalendarStore } from "./todo-calendar/calendar-store.ts";
-import { CALENDAR_STORAGE_KEY, type CalendarHost } from "./todo-calendar/types.ts";
-import { renderCalendarPanel } from "./todo-calendar/calendar-panel.ts";
-import { renderCalendarSettings } from "./todo-calendar/calendar-settings.ts";
-import { applyNaturalDueToBlock } from "./todo-calendar/todo-model.ts";
-import { describeDue } from "./todo-calendar/time-parse.ts";
-import {
-  getServiceStatus,
-  killManagedServiceNow,
-  startService,
-} from "./todo-calendar/radicale-service.ts";
+// 2026-09-15：待办日历已拆分为独立插件 siyuan-plugin-re-todo（RE 待办日历），
+// 本插件只保留两条联动通道：右键「加入日历」走 re-todo:action 事件，
+// 工作台「今日待办」卡片走 window.__RE_TODO__ 全局 API（见 dashboard-panel.ts）。
 
 const PLUGIN_NAME = "hiword-vocab";
 
@@ -268,6 +260,7 @@ interface DictMeta {
   type: "mdx" | "stardict"; // 词典格式类型
   file: string;              // MDX: 相对路径如 dict/xxx.mdx；StarDict: .ifo 路径如 dict/xxx.ifo
   files?: string[];          // StarDict: 所有已保存的伴生文件路径（用于清理删除）
+  mddFile?: string;          // 2026-09-16：MDX 伴生资源包相对路径（dict/xxx.mdd，可选）
   builtin?: boolean;
   lang?: string;             // 语种标识：en=英文词典, zh=中文词典, auto=自动检测
 }
@@ -344,8 +337,8 @@ const DEFAULT_MANIFEST: DictManifest = {
   active: "ecd2",
   actives: ["ecd2", "hanyu"], // 默认启用：英汉大词典(第2版) + 现代汉语词典
   dicts: [
-    { id: "ncecd", name: "新世纪英汉大词典(全量)", type: "mdx", file: "dict/ncecd.mdx", builtin: true, lang: "en" },
-    { id: "ecd2", name: "英汉大词典（第2版）", type: "mdx", file: "dict/ecd2.mdx", builtin: true, lang: "en" },
+    { id: "ncecd", name: "新世纪英汉大词典(全量)", type: "mdx", file: "dict/ncecd.mdx", mddFile: "dict/ncecd.mdd", builtin: true, lang: "en" },
+    { id: "ecd2", name: "英汉大词典（第2版）", type: "mdx", file: "dict/ecd2.mdx", mddFile: "dict/ecd2.mdd", builtin: true, lang: "en" },
     { id: "hanyu", name: "现代汉语词典（第五版）", type: "mdx", file: "dict/hanyu.mdx", builtin: true, lang: "zh" },
   ],
 };
@@ -410,12 +403,6 @@ export default class RewordPlugin extends Plugin {
   /** 2026-09-12：每日记忆计划（软目标：复习 N + 新词 M，可结转） */
   private dailyPlanStore: DailyPlanStore = new DailyPlanStore(() => this.persistDailyPlan?.update(this.dailyPlanStore.export()));
   private persistDailyPlan?: { update(d: unknown): void };
-  /**
-   * 2026-09-13：待办日历同步（CalDAV）设置 + 同步状态。
-   * 持久化于 petal `hiword-calendar.json`（回调惰性执行，persistCalendar 可选链兜底）。
-   */
-  private calendarStore: CalendarStore = new CalendarStore(() => this.persistCalendar?.update(this.calendarStore.export()));
-  private persistCalendar?: { update(d: unknown): void };
   /** 2026-09-12：句子库（词典例句 + AI 补缺，采纳/收藏状态） */
   private sentenceStore: SentenceStore = new SentenceStore(() => this.persistSentences?.update(this.sentenceStore.export()));
   private persistSentences?: { update(d: unknown): void };
@@ -791,11 +778,6 @@ export default class RewordPlugin extends Plugin {
         (d) => this.saveData("hiword-sentences.json", d),
         { onError: () => showMessage(t("句子库保存失败，请检查存储空间"), 3000, "error") }
       );
-      // 2026-09-13 待办日历同步（CalDAV）设置与状态持久化
-      this.persistCalendar = new PersistentStore(
-        (d) => this.saveData(CALENDAR_STORAGE_KEY, d),
-        { onError: () => showMessage(t("日历同步设置保存失败，请检查存储空间"), 3000, "error") }
-      );
       // 造句引擎：词典例句优先（海词）→ AI 补缺（内置可控 prompt）；三层限流
       // （aiSettings 运行时含 systemPrompt 等完整字段，normalizeAiSettings 填充；类型声明缺字段故 cast）
       this.sentenceEngine = new SentenceEngine({
@@ -997,8 +979,7 @@ export default class RewordPlugin extends Plugin {
         { id: "annotations", title: t("微阅批注"), icon: ICON_ANN, defaultSlot: "combined" },
         { id: "ai", title: t("AI 精读"), icon: ICON_AI, defaultSlot: "combined" },
         { id: READER_FEATURE_ID, title: t("阅读器"), icon: ICON_READER, defaultSlot: "combined" },
-        // 2026-09-13 新增：待办日历（列表 + FullCalendar 月/周/日 + CalDAV 同步）
-        { id: "calendar", title: t("待办日历"), icon: ICON_CALENDAR, defaultSlot: "combined" },
+        // 2026-09-15：待办日历 feature 已随 siyuan-plugin-re-todo 拆出（布局残留见 migrateRetiredFeaturesOnce v4）
       ];
       for (const f of dockFeatures) this.dockManager.registerFeature(f);
       // 一次性迁移：将面板布局重置为「全部收入组合栏」的干净状态（消除旧布局残留的独立 Dock 杂乱）
@@ -1391,16 +1372,21 @@ export default class RewordPlugin extends Plugin {
     } catch {
       this.dailyPlanStore.load(null);
     }
-    // 2026-09-13：加载待办日历同步设置与状态
+    // 2026-09-15：待办日历拆出后，旧 petal 文件 hiword-calendar.json 一次性落只读迁移标记
+    // （防双向写漂移：标记后本插件不再读写该文件；数据真源归 siyuan-plugin-re-todo）。
     try {
-      this.calendarStore.load(await this.loadData(CALENDAR_STORAGE_KEY));
-    } catch {
-      this.calendarStore.load(null);
-    }
+      const oldCal = (await this.loadData("hiword-calendar.json")) as Record<string, unknown> | null;
+      if (oldCal && typeof oldCal === "object" && oldCal.migratedTo !== "re-todo") {
+        await this.saveData("hiword-calendar.json", {
+          ...oldCal,
+          migratedTo: "re-todo",
+          migratedAt: new Date().toISOString(),
+        });
+        getLogger().info("[REword] 已在旧日历设置文件落迁移标记（数据归 RE 待办日历插件）");
+      }
+    } catch { /* 标记失败不影响启动 */ }
     this.isReady = true;
     getLogger().info("[REword] 词库加载完成");
-    // 2026-09-14：按设置决定是否随思源拉起本地 CalDAV 服务（follow 模式）
-    void this.ensureLocalService();
     // 2026-09-12：确保今日计划已生成（跨天自动归档昨日 + 结转）
     void this.ensureTodayPlan();
 
@@ -1418,24 +1404,6 @@ export default class RewordPlugin extends Plugin {
     // 词库就绪后，若侧边栏已打开则刷新显示
     if (this.dockElement) {
       this.renderVocabPanel(this.dockElement);
-    }
-  }
-
-  /**
-   * 按设置决定是否随思源启动本地 CalDAV 服务（2026-09-14）。
-   * 仅 `follow` 模式生效；已在监听（含由其他方式启动）时直接复用，绝不重复拉起。
-   * 失败只记日志，不阻断词库初始化。
-   */
-  private async ensureLocalService(): Promise<void> {
-    try {
-      const s = this.calendarStore.settings();
-      if (s.serviceMode !== "follow") return;
-      const st = await getServiceStatus(s);
-      if (st.running) return;
-      const r = await startService(s);
-      if (!r.ok) getLogger().warn("[REword] 本地 CalDAV 服务自启未成功：", { data: r.message });
-    } catch (e) {
-      getLogger().warn("[REword] 本地 CalDAV 服务自启异常：", { error: e });
     }
   }
 
@@ -3741,48 +3709,7 @@ export default class RewordPlugin extends Plugin {
         getLogger().warn("[REword] 渲染阅读器面板失败", { error: e });
       }
     }
-    else if (id === "calendar") {
-      try {
-        renderCalendarPanel(this.calendarHost(), dockElement);
-      } catch (e) {
-        getLogger().warn("[REword] 渲染待办日历面板失败", { error: e });
-      }
-    }
   }
-
-  /**
-   * 待办日历模块的宿主适配器（避免 todo-calendar/* 反向 import 本文件造成循环依赖）。
-   * @internal todo-calendar/calendar-panel.ts · calendar-settings.ts 消费
-   */
-  public calendarHost(): CalendarHost {
-    return {
-      currentRootId: this.currentRootId ?? null,
-      calendarStore: this.calendarStore,
-      showMessage: (msg: string, timeout?: number, type?: string) =>
-        showMessage(msg, timeout ?? 3000, (type as any) ?? "info"),
-      refreshCalendarPanels: () => this.refreshCalendarPanels(),
-    };
-  }
-
-  /**
-   * 刷新所有已打开的待办日历面板（同步完成后调用）。
-   * 只重绘 calendar feature，不做全量 refreshActivePanel。
-   * @internal todo-calendar/* 回调
-   */
-  public refreshCalendarPanels(): void {
-    try {
-      if (this.dockElement) {
-        const activeTab = this.dockElement.querySelector(".hiword-dock-tab.active") as HTMLElement | null;
-        if (activeTab?.dataset.tab === "calendar") this.renderFeatureInto("calendar", this.dockElement);
-      }
-      for (const [id, el] of this.standaloneElements) {
-        if (id === "calendar") this.renderFeatureInto(id, el);
-      }
-    } catch (e) {
-      getLogger().warn("[REword] 刷新待办日历面板失败", { error: e });
-    }
-  }
-
 
   /** 工作台面板（聚合仪表盘，委托 dashboard-panel 模块渲染） */
   private renderDashboardPanel(dockElement: HTMLElement) {
@@ -6028,6 +5955,20 @@ export default class RewordPlugin extends Plugin {
         return false;
       }
 
+      // 2026-09-16（修复方案 P3 文案分流）：插件目录已定位但词典文件缺失（发布包
+      // 不带 dict/，新用户常见）→ 直接给出「待导入」指引并跳过加载，不再让
+      // js-mdict 抛难懂的 "Invalid package"，也不误导用户去重装插件。
+      let fileExists = false;
+      try { fileExists = fs.existsSync(fsPath); } catch { fileExists = false; }
+      if (!fileExists) {
+        const msg =
+          "词典文件缺失：" + meta.file +
+          "。请在词典管理中导入 .mdx 原包（内置词典导入同名文件会自动补全对应条目）。";
+        this.lastDictError = msg;
+        getLogger().warn("[REword] 词典「" + meta.name + "」加载跳过: " + msg);
+        return false;
+      }
+
       // 路径诊断：文件是否存在、大小、权限
       let diag: string[] = [`路径: ${fsPath}`];
       try {
@@ -6042,6 +5983,15 @@ export default class RewordPlugin extends Plugin {
         await dictEngine.initStarDict(fsPath, meta.id, meta.name, (meta.lang || "en") as any);
       } else {
         await dictEngine.initDict(fsPath, meta.id, meta.name, (meta.lang || "en") as any);
+        // 2026-09-16：挂载伴生资源包 .mdd（词条内图片/CSS 等资源）。缺失或失败静默降级。
+        if (meta.mddFile) {
+          const mddPath = this.resolveDictPath(meta.mddFile);
+          if (mddPath) {
+            let mddExists = false;
+            try { mddExists = fs.existsSync(mddPath); } catch { mddExists = false; }
+            if (mddExists) await dictEngine.initMdd(mddPath, meta.id);
+          }
+        }
       }
 
       dictEngine.setActiveDict(meta.id);
@@ -8326,9 +8276,6 @@ export default class RewordPlugin extends Plugin {
             <div class="hiword-up-nav-item" data-up-tab="review">
               <span class="hiword-up-nav-icon">📅</span>${t("复习计划")}
             </div>
-            <div class="hiword-up-nav-item" data-up-tab="calendar">
-              <span class="hiword-up-nav-icon">🗓️</span>${t("日历同步")}
-            </div>
             <div class="hiword-up-nav-item" data-up-tab="shortcuts">
               <span class="hiword-up-nav-icon">⌨️</span>${t("快捷键")}
             </div>
@@ -8453,49 +8400,42 @@ export default class RewordPlugin extends Plugin {
 
             <!-- ===== Tab 2: 阅读设置（2026-08-27 统一：与阅读器内文本面板共用同一 ReaderSettingsStore，改动即时生效到已开 Tab） ===== -->
             <section class="hiword-up-page" data-page="reader" style="display:none;">
-              <div id="up-reader-settings"><p style="color:#888;padding:20px;text-align:center;">${t("加载中…")}</p></div>
+              <div id="up-reader-settings"></div>
             </section>
 
             <!-- ===== Tab 3: 查词典管理 ===== -->
             <section class="hiword-up-page" data-page="dict" style="display:none;">
-              <div class="hiword-dict-manager" id="up-dict-manager">
-                <p style="color:#888;padding:20px;text-align:center;">${t("加载中…")}</p>
-              </div>
+              <div class="hiword-dict-manager" id="up-dict-manager"></div>
             </section>
 
             <!-- ===== Tab 4: AI 精读（2026-08-27 统一：复用 renderAiSettingsInto，与独立入口同源） ===== -->
             <section class="hiword-up-page" data-page="ai" style="display:none;">
-              <div id="up-ai-settings"><p style="color:#888;padding:20px;text-align:center;">${t("加载中…")}</p></div>
+              <div id="up-ai-settings"></div>
             </section>
 
             <!-- ===== Tab 5: 标注与批注 ===== -->
             <section class="hiword-up-page" data-page="annotation" style="display:none;">
-              <div id="up-annotation-settings"><p style="color:#888;padding:20px;text-align:center;">${t("加载中…")}</p></div>
+              <div id="up-annotation-settings"></div>
             </section>
 
             <!-- ===== Tab 4: 复习计划 ===== -->
             <section class="hiword-up-page" data-page="review" style="display:none;">
-              <div id="up-review-settings"><p style="color:#888;padding:20px;text-align:center;">${t("加载中…")}</p></div>
-            </section>
-
-            <!-- ===== Tab: 日历同步（2026-09-13 新增，渲染见 renderCalendarSettings） ===== -->
-            <section class="hiword-up-page" data-page="calendar" style="display:none;">
-              <div id="up-calendar-settings"><p style="color:#888;padding:20px;text-align:center;">${t("加载中…")}</p></div>
+              <div id="up-review-settings"></div>
             </section>
 
             <!-- ===== Tab 5: 快捷键 ===== -->
             <section class="hiword-up-page" data-page="shortcuts" style="display:none;">
-              <div id="up-shortcut-settings"><p style="color:#888;padding:20px;text-align:center;">${t("加载中…")}</p></div>
+              <div id="up-shortcut-settings"></div>
             </section>
 
             <!-- ===== Tab 6: 数据与备份 ===== -->
             <section class="hiword-up-page" data-page="data" style="display:none;">
-              <div id="up-data-settings"><p style="color:#888;padding:20px;text-align:center;">${t("加载中…")}</p></div>
+              <div id="up-data-settings"></div>
             </section>
 
             <!-- ===== Tab 7: 关于 ===== -->
             <section class="hiword-up-page" data-page="about" style="display:none;">
-              <div id="up-about-settings"><p style="color:#888;padding:20px;text-align:center;">${t("加载中…")}</p></div>
+              <div id="up-about-settings"></div>
             </section>
 
             <!-- 2026-08-22 许可证已封存：原「data-page="license"」页面 section 在此（恢复时加回，含 Hero/设备码/激活码/答疑交流） -->
@@ -8554,7 +8494,6 @@ export default class RewordPlugin extends Plugin {
           else if (tab === "ai") this.renderAiSettingsInto(dlg.querySelector("#up-ai-settings") as HTMLElement);
           else if (tab === "annotation") this.renderAnnotationSettings(dlg, dialog);
           else if (tab === "review") this.renderReviewSettings(dlg, dialog);
-          else if (tab === "calendar") renderCalendarSettings(this.calendarHost(), dlg.querySelector("#up-calendar-settings") as HTMLElement | null);
           else if (tab === "shortcuts") this.renderShortcutSettings(dlg, dialog);
           else if (tab === "data") this.renderDataSettings(dlg, dialog);
           else if (tab === "about") this.renderAboutSettings(dlg, dialog);
@@ -8728,8 +8667,9 @@ export default class RewordPlugin extends Plugin {
     container.dataset.rendered = "true";
 
     const loaded = new Map(dictEngine.listDicts().map(d => [d.id, d]));
-    const enDicts = this.dictManifest.dicts.filter(d => d.lang !== "zh");
-    const zhDicts = this.dictManifest.dicts.filter(d => d.lang === "zh");
+    // 2026-09-16：内置词典不再出现在管理列表中（见下方推荐提示）；导入同名文件会自动补全并启用
+    const enDicts = this.dictManifest.dicts.filter(d => d.lang !== "zh" && !d.builtin);
+    const zhDicts = this.dictManifest.dicts.filter(d => d.lang === "zh" && !d.builtin);
     const actives = this.dictManifest.actives || [this.dictManifest.active];
 
     const renderGroup = (title: string, icon: string, dicts: DictMeta[]) => {
@@ -8737,7 +8677,9 @@ export default class RewordPlugin extends Plugin {
       const rows = dicts.map(meta => {
         const info = loaded.get(meta.id);
         const isActive = actives.includes(meta.id);
-        const count = info ? t("{n} 词", { n: info.count }) : t("未加载");
+        // 2026-09-16（修复方案 P3）：文件缺失的条目显示「待导入」而非误导性的「未加载」
+        const missing = !info && !this.dictFileExists(meta);
+        const count = info ? t("{n} 词", { n: info.count }) : (missing ? t("待导入") : t("未加载"));
         const typeLabel = meta.type === "stardict" ? "StarDict" : "MDX";
         return `
         <div class="hiword-dm-row" data-id="${meta.id}">
@@ -8747,7 +8689,7 @@ export default class RewordPlugin extends Plugin {
             <span class="hiword-dm-meta">${typeLabel}${meta.builtin ? " · " + t("内置") : ""}</span>
           </div>
           <div class="hiword-dm-right">
-            <span class="hiword-dm-count ${info ? "is-loaded" : "is-unloaded"}">${count}</span>
+            <span class="hiword-dm-count ${info ? "is-loaded" : missing ? "is-pending" : "is-unloaded"}">${count}</span>
             <label class="hiword-dm-toggle ${isActive ? "is-active" : ""}" title="${t("点击启用/停用")}">
               <input type="checkbox" data-action="toggle-dict" data-id="${meta.id}" ${isActive ? "checked" : ""} />
               <span>${isActive ? t("已启用") : t("未启用")}</span>
@@ -8775,12 +8717,15 @@ export default class RewordPlugin extends Plugin {
       ${this.renderOnlineDictSectionHtml()}
       ${this.lastDictError ? `<div class="hiword-dm-diag"><details open><summary>🔍 ${t("诊断信息")}</summary><pre class="hiword-dm-diag-body">${this.escapeHtml(this.getDiagnosticInfo())}</pre></details></div>` : ""}
       <div class="hiword-dm-add">
-        <button class="hiword-dm-add-btn" id="up-dm-add-mdx"><span class="hiword-dm-add-ico">📥</span><span class="hiword-dm-add-body"><span class="hiword-dm-add-t">${t("导入 MDX 词典")}</span><span class="hiword-dm-add-d">${t("选择 .mdx 原包")}</span></span></button>
+        <button class="hiword-dm-add-btn" id="up-dm-add-mdx"><span class="hiword-dm-add-ico">📥</span><span class="hiword-dm-add-body"><span class="hiword-dm-add-t">${t("导入 MDX 词典")}</span><span class="hiword-dm-add-d">${t("选择 .mdx / .mdd 文件")}</span></span></button>
         <button class="hiword-dm-add-btn hiword-dm-add-btn--ghost" id="up-dm-add-stardict"><span class="hiword-dm-add-ico">📚</span><span class="hiword-dm-add-body"><span class="hiword-dm-add-t">${t("导入 StarDict")}</span><span class="hiword-dm-add-d">${t("多选 .ifo/.idx/.dict 包")}</span></span></button>
-        <input type="file" id="up-dm-file-mdx" accept=".mdx" style="display:none" />
+        <input type="file" id="up-dm-file-mdx" accept=".mdx,.mdd" multiple style="display:none" />
         <input type="file" id="up-dm-file-stardict" accept=".ifo,.idx,.dict,.dict.dz,.syn" multiple style="display:none" />
       </div>
-      <div class="hiword-dm-tip"><strong>${t("支持格式：")}</strong><br/>• <strong>MDX</strong>：${t("直接选择 .mdx 原包")}<br/>• <strong>StarDict</strong>：${t("需同时选择 .ifo/.idx/.dict 或 .dict.dz（.syn 可选）")}<br/>${t("选择文件后将自动写入插件 dict/ 目录并立即建索引。")}</div>
+      <div class="hiword-dm-tip"><strong>${t("支持格式：")}</strong><br/>• <strong>MDX</strong>：${t("选择 .mdx 原包，可同时多选同名 .mdd 资源包（词条图片/样式）")}<br/>• <strong>StarDict</strong>：${t("需同时选择 .ifo/.idx/.dict 或 .dict.dz（.syn 可选）")}<br/>${t("选择文件后将自动写入插件 dict/ 目录并立即建索引。")}</div>
+      <div class="hiword-dm-tip hiword-dm-tip--guide">
+        💡 ${t("推荐词典：选择导入「新世纪英汉大词典(全量)」或「英汉大词典（第2版）」预先优化过的版本；导入同名 .mdx / .mdd 文件会自动补全并启用。")}
+      </div>
       <div class="hiword-dm-tip hiword-dm-tip--guide">
         ${t("还没有词典包？")}
         <button class="hiword-about-copy" data-about-open="${REWORD_LINKS.dictGuide}">${t("词典包获取指南")} ↗</button>
@@ -8797,7 +8742,8 @@ export default class RewordPlugin extends Plugin {
     // 2026-09-07：词海在线条目开关
     this.bindOnlineDictToggle(container);
     mdxInput?.addEventListener("change", async () => {
-      const file = mdxInput.files?.[0]; if (file) await this.onDictFileChosen(file, dialog); mdxInput.value = "";
+      const files = Array.from(mdxInput.files ?? []);
+      if (files.length) await this.onDictFileChosen(files, dialog); mdxInput.value = "";
     });
 
     // StarDict 导入
@@ -9646,6 +9592,7 @@ export default class RewordPlugin extends Plugin {
       <div class="hiword-up-group">
         <div class="hiword-up-group-label"><span class="hiword-up-group-name">${t("更新日志")}</span></div>
         <ul class="hiword-changelog">
+          <li><b>v1.7.5</b> ${t("词典导入修复（Windows 新环境 MISSING 根治）、内置词典同名补全导入、海词在线发音兜底、AI 设置面板改版")}</li>
           <li><b>v1.7.4</b> ${t("待办日历与 CalDAV 手机提醒、插件内接管 Radicale 服务、设置面板关于页改版")}</li>
           <li><b>v1.7.3</b> ${t("界面全量英文化（英文包 100%）、聚合工作台、主区页签形态")}</li>
           <li><b>v1.7.2</b> ${t("PDF 专项：阅读进度记忆、高亮漂移根治、发热治理、矩形框选标注")}</li>
@@ -9799,6 +9746,11 @@ export default class RewordPlugin extends Plugin {
     if (!host) return;
     // 嵌入主设置时容器跨 Tab 持久存在：已渲染过则跳过（避免切 Tab 往返丢失未保存的编辑）
     if (host.dataset.rendered === "1" && onClose == null) return;
+    // 2026-09-15 修：Svelte 组件走 append 挂载（target: host），宿主里已有的节点
+    // 不会被顶掉。此前宿主带着「加载中…」占位，组件渲染后占位仍留在内容上方，
+    // 表现为 AI 页顶部常驻一行居中的灰字。统一面板改为空容器后仍在此清空一次，
+    // 防止旧的残留节点（以及将来任何预置内容）与新内容堆叠。
+    host.innerHTML = "";
     host.dataset.rendered = "1";
 
     // 2026-09-03 P0：记录打开设置时的输入框模式，便于「取消」时还原
@@ -9816,6 +9768,11 @@ export default class RewordPlugin extends Plugin {
       target: host,
       props: {
         settings: this.aiSettings,
+        // 2026-09-15 排版：嵌入统一设置面板（无 onClose）时，面板底部的保存栏
+        // 会与外层的「取消 / 保存所有设置」上下相邻、视觉重复。embedded 让组件
+        // 把该栏降级为「页内轻量条」并标注作用域，两层操作一眼可辨。
+        // 独立设置对话框（顶栏 cog，有 onClose）里没有外层栏，保持原样。
+        embedded: onClose == null,
         // 「默认精读角色」下拉的动态选项：来自预设库（设置项声明里只有「无」静态项）
         presetOptions: this.aiPresetStore.list().map((p) => ({ value: p.id, label: p.name })),
         // 2026-09-06 P0：merge 而非整体替换（见 readAiSettingsFromDlg 注释）。
@@ -9948,8 +9905,9 @@ export default class RewordPlugin extends Plugin {
     );
 
     // 按语种分组：英文词典(lang=en/auto/空) vs 中文词典(lang=zh)
-    const enDicts = this.dictManifest.dicts.filter((d) => d.lang !== "zh");
-    const zhDicts = this.dictManifest.dicts.filter((d) => d.lang === "zh");
+    // 2026-09-16：内置词典不再出现在管理列表中（见下方推荐提示）；导入同名文件会自动补全并启用
+    const enDicts = this.dictManifest.dicts.filter((d) => d.lang !== "zh" && !d.builtin);
+    const zhDicts = this.dictManifest.dicts.filter((d) => d.lang === "zh" && !d.builtin);
     const actives = this.dictManifest.actives || [this.dictManifest.active];
 
     const renderGroup = (title: string, icon: string, dicts: DictMeta[]) => {
@@ -9958,7 +9916,9 @@ export default class RewordPlugin extends Plugin {
         .map((meta) => {
           const info = loaded.get(meta.id);
           const isActive = actives.includes(meta.id);
-          const count = info ? t("{n} 词", { n: info.count }) : t("未加载");
+          // 2026-09-16（修复方案 P3）：文件缺失的条目显示「待导入」而非误导性的「未加载」
+          const missing = !info && !this.dictFileExists(meta);
+          const count = info ? t("{n} 词", { n: info.count }) : (missing ? t("待导入") : t("未加载"));
           const typeLabel = meta.type === "stardict" ? "StarDict" : "MDX";
           const errHtml =
             isActive && !info && this.lastDictError
@@ -9973,7 +9933,7 @@ export default class RewordPlugin extends Plugin {
               ${errHtml}
             </div>
             <div class="hiword-dm-right">
-              <span class="hiword-dm-count ${info ? "is-loaded" : "is-unloaded"}">${count}</span>
+              <span class="hiword-dm-count ${info ? "is-loaded" : missing ? "is-pending" : "is-unloaded"}">${count}</span>
               <label class="hiword-dm-toggle ${isActive ? "is-active" : ""}" title="${t("点击启用/停用")}">
                 <input type="checkbox" data-action="toggle-dict" data-id="${meta.id}" ${isActive ? "checked" : ""} />
                 <span>${isActive ? t("已启用") : t("未启用")}</span>
@@ -10020,7 +9980,7 @@ export default class RewordPlugin extends Plugin {
           <span class="hiword-dm-add-ico">📥</span>
           <span class="hiword-dm-add-body">
             <span class="hiword-dm-add-t">${t("导入 MDX 词典")}</span>
-            <span class="hiword-dm-add-d">${t("选择 .mdx 原包")}</span>
+            <span class="hiword-dm-add-d">${t("选择 .mdx / .mdd 文件")}</span>
           </span>
         </button>
         <button class="hiword-dm-add-btn hiword-dm-add-btn--ghost" id="hiword-dm-add-stardict">
@@ -10030,14 +9990,17 @@ export default class RewordPlugin extends Plugin {
             <span class="hiword-dm-add-d">${t("多选 .ifo/.idx/.dict 包")}</span>
           </span>
         </button>
-        <input type="file" id="hiword-dm-file-mdx" accept=".mdx" style="display:none" />
+        <input type="file" id="hiword-dm-file-mdx" accept=".mdx,.mdd" multiple style="display:none" />
         <input type="file" id="hiword-dm-file-stardict" accept=".ifo,.idx,.dict,.dict.dz,.syn" multiple style="display:none" />
       </div>
       <div class="hiword-dm-tip">
         <strong>${t("支持格式：")}</strong><br/>
-        &bull; <strong>MDX</strong>：${t("直接选择")} <code>.mdx</code> ${t("原包即可")}<br/>
+        &bull; <strong>MDX</strong>：${t("选择 .mdx 原包；如有同名 .mdd 资源包（图片/样式），可一并多选")}<br/>
         &bull; <strong>StarDict</strong>：${t("需同时选择词典包内所有文件")}（<code>.ifo</code>${t("、")}<code>.idx</code>${t("、")}<code>.dict</code>${t(" 或 ")}<code>.dict.dz</code>${t("；")}<code>.syn</code>${t(" 可选")}）<br/>
         ${t("选择文件后将自动写入插件")} <code>dict/</code> ${t("目录并立即建索引，全程无需手动操作。")}
+      </div>
+      <div class="hiword-dm-tip hiword-dm-tip--guide">
+        💡 ${t("推荐词典：选择导入「新世纪英汉大词典(全量)」或「英汉大词典（第2版）」预先优化过的版本；导入同名 .mdx / .mdd 文件会自动补全并启用。")}
       </div>
       <div class="hiword-dm-tip hiword-dm-tip--guide">
         ${t("还没有词典包？")}
@@ -10057,8 +10020,8 @@ export default class RewordPlugin extends Plugin {
     // 2026-09-07：词海在线条目开关
     this.bindOnlineDictToggle(container);
     mdxInput?.addEventListener("change", async () => {
-      const file = mdxInput.files?.[0];
-      if (file) await this.onDictFileChosen(file, dialog);
+      const files = Array.from(mdxInput.files ?? []);
+      if (files.length) await this.onDictFileChosen(files, dialog);
       // 重置以允许重复选择同一文件
       mdxInput.value = "";
     });
@@ -10118,50 +10081,121 @@ export default class RewordPlugin extends Plugin {
   }
 
   /**
-   * 用户选择本地 .mdx 词典原包后：原样写入插件目录并注册（无需任何转换）
+   * 词典伴生文件（.mdx/.mdd）写盘：putFile 走思源主进程权限优先，fs 直写兜底。
+   * 2026-09-03 教训：渲染进程 node:fs.writeFileSync 在 Windows 安装版上会失败
+   * （__dirname 落在 electron.asar/renderer，asar 路径被 isAsarPath 拒绝），
+   * 所以必须 putFile 打头。返回是否成功落盘。
    */
-  private async onDictFileChosen(file: File, dialog: Dialog) {
-    const id = "user-" + Date.now().toString(36);
-    const safeBase = file.name
-      .replace(/\.mdx$/i, "")
-      .replace(/[^\w一-龥-]+/g, "_")
-      .slice(0, 40);
-    const name = safeBase || "我的词典";
-    const meta: DictMeta = { id, name, type: "mdx", file: `dict/${id}.mdx` };
-
-    showMessage(t("正在导入「{n}」(.mdx 原包)...", { n: name }), 3000, "info");
-
-    // 1) 将 .mdx 原包写入工作空间下的插件 dict 目录。
-    // 2026-09-03 修复：之前用 node:fs.writeFileSync 在 Windows 安装版上会失败
-    // （webview 的 __dirname 落在 electron.asar/renderer，asar 路径被 isAsarPath
-    // 拒绝 → resolvePluginPath 返回空串 → 写入失败但 manifest 已登记 → 词典
-    // 永远 MISSING）。改用思源官方 putFile 走主进程权限写到工作空间，
-    // fs 探测回退作为兜底（macOS 等可用 fs 的环境）。
-    let savedToDisk = false;
+  private async writeDictAssetFile(relPath: string, file: File): Promise<boolean> {
     try {
       const buf = Buffer.from(await file.arrayBuffer());
       const blob = new Blob([buf]);
-      // putFile 路径是工作空间下的相对路径：/data/plugins/<plugin-name>/dict/<id>.mdx
-      const wsRelPath = `/data/plugins/siyuan-plugin-reword/dict/${id}.mdx`;
-      const putOk = await putFile(wsRelPath, false, blob);
-      if (putOk != null) {
-        savedToDisk = true;
-      } else {
-        // 兜底：fs 直写（macOS 等能解析插件目录的环境）
-        const fsDir = this.resolveDictPath("dict");
-        if (fsDir) {
-          fs.mkdirSync(fsDir, { recursive: true });
-          fs.writeFileSync(this.resolveDictPath(meta.file), buf);
-          savedToDisk = true;
-        }
+      // putFile 路径是工作空间下的相对路径：/data/plugins/<plugin-name>/<relPath>
+      const putOk = await putFile(`/data/plugins/siyuan-plugin-reword/${relPath}`, false, blob);
+      if (putOk != null) return true;
+      // 兜底：fs 直写（macOS 等能解析插件目录的环境）
+      const fsDir = this.resolveDictPath("dict");
+      if (fsDir) {
+        fs.mkdirSync(fsDir, { recursive: true });
+        fs.writeFileSync(this.resolveDictPath(relPath), buf);
+        return true;
       }
+      return false;
     } catch (err) {
       getLogger().warn("[REword] 写入词典文件失败:", { error: err });
+      return false;
+    }
+  }
+
+  /**
+   * 用户选择本地 .mdx 词典原包后：原样写入插件目录并注册（无需任何转换）。
+   * 2026-09-16 修复：文件名与内置词典同名（ncecd/ecd2/hanyu）时不新建条目，
+   * 直接补全对应内置词典的文件（=「修复内置词典」）。发布包不带词典包，新用户
+   * 只能手动导入；旧行为会生成 user-<ts> 新条目，而内置死条目仍挂在清单里。
+   * 2026-09-16 二改：支持 .mdd 资源包（词条内图片/CSS/字体等资源）——
+   *   · 与 .mdx 一同多选 → 落盘后挂载到该词典（meta.mddFile）
+   *   · 只选 .mdd → 按文件名关联到已登记的同名词典（内置或用户词典）
+   */
+  private async onDictFileChosen(files: File[], dialog: Dialog) {
+    const mdxFile = files.find((f) => /\.mdx$/i.test(f.name));
+    const mddFile = files.find((f) => /\.mdd$/i.test(f.name));
+
+    // —— 分支 A：只选了 .mdd（无 .mdx）→ 按 basename 关联既有词典并重载 ——
+    if (!mdxFile) {
+      if (!mddFile) return;
+      const base = mddFile.name.replace(/\.mdd$/i, "").toLowerCase();
+      const basenameOf = (meta: { file: string }) =>
+        meta.file.replace(/^dict\//, "").replace(/\.mdx$/i, "").toLowerCase();
+      const target =
+        DEFAULT_MANIFEST.dicts.find((b) => b.type === "mdx" && basenameOf(b) === base) ||
+        this.dictManifest.dicts.find((d) => d.type === "mdx" && basenameOf(d) === base);
+      if (!target) {
+        showMessage(t("未找到与该 .mdd 同名的词典，请与同名 .mdx 一并多选导入"), 4000, "error");
+        return;
+      }
+      const mddRel = (target as DictMeta).mddFile || `dict/${target.id}.mdd`;
+      const ok = await this.writeDictAssetFile(mddRel, mddFile);
+      if (!ok) {
+        showMessage(t("自动写入失败，请检查插件目录写权限后重试"), 6000, "error" as any);
+        return;
+      }
+      // 清单登记：内置条目可能不在清单中（异常丢失）→ 补回；否则只更新 mddFile
+      const idx = this.dictManifest.dicts.findIndex((d) => d.id === target.id);
+      if (idx >= 0) this.dictManifest.dicts[idx] = { ...this.dictManifest.dicts[idx], mddFile: mddRel };
+      else this.dictManifest.dicts.push({ ...target, mddFile: mddRel });
+      await this.saveData("hiword-dicts.json", this.dictManifest);
+      const reloaded = this.dictManifest.dicts.find((d) => d.id === target.id);
+      if (reloaded) await this.loadDictFile(reloaded);
+      showMessage(t("已为「{n}」挂载资源包，词条图片/样式资源已可用", { n: target.name }), 3200, "success" as any);
+      this.renderDictManagerContent(dialog);
+      return;
+    }
+
+    // —— 分支 B：.mdx（可伴随 .mdd）→ 原有导入逻辑 + 资源包登记 ——
+    const base = mdxFile.name.replace(/\.mdx$/i, "");
+    const builtinMatch = DEFAULT_MANIFEST.dicts.find(
+      (b) =>
+        b.type === "mdx" &&
+        b.file.replace(/^dict\//, "").replace(/\.mdx$/i, "").toLowerCase() === base.toLowerCase()
+    );
+    const id = builtinMatch ? builtinMatch.id : "user-" + Date.now().toString(36);
+    const safeBase = base.replace(/[^\w一-龥-]+/g, "_").slice(0, 40);
+    const name = builtinMatch ? builtinMatch.name : (safeBase || "我的词典");
+    const meta: DictMeta = builtinMatch
+      ? { ...builtinMatch }
+      : { id, name, type: "mdx", file: `dict/${id}.mdx` };
+    // .mdd 落盘路径：内置 → 内置同名 .mdd；用户词典 → dict/<id>.mdd
+    if (mddFile) {
+      meta.mddFile =
+        builtinMatch ? builtinMatch.mddFile || `dict/${builtinMatch.id}.mdd` : `dict/${id}.mdd`;
+    }
+
+    showMessage(t("正在导入「{n}」(.mdx 原包)...", { n: name }), 3000, "info");
+
+    // 1) 将 .mdx 原包写入工作空间下的插件 dict 目录（putFile 打头，fs 兜底）
+    const savedToDisk = await this.writeDictAssetFile(meta.file, mdxFile);
+    if (!savedToDisk) {
       showMessage(t("自动写入失败，请检查插件目录写权限后重试"), 6000, "error" as any);
     }
 
-    // 2) 无论是否写入磁盘，都先登记到清单（便于后续刷新加载）
-    this.dictManifest.dicts.push(meta);
+    // 1.1) .mdd 资源包写入（失败不阻断词典导入，仅日志）
+    if (savedToDisk && mddFile && meta.mddFile) {
+      await this.writeDictAssetFile(meta.mddFile, mddFile);
+    }
+
+    // 2) 登记到清单：内置修复 = 复用既有条目（异常丢失时按 DEFAULT_MANIFEST 补回）；
+    //    普通导入 = 新增条目。无论是否写入磁盘都先登记（便于后续刷新加载）。
+    const existingIdx = this.dictManifest.dicts.findIndex((d) => d.id === id);
+    if (existingIdx >= 0) {
+      // 内置条目已存在（loadDictManifest 会自动补回内置项）→ 只确保路径正确
+      this.dictManifest.dicts[existingIdx] = {
+        ...this.dictManifest.dicts[existingIdx],
+        file: meta.file,
+        ...(mddFile && meta.mddFile ? { mddFile: meta.mddFile } : {}),
+      };
+    } else {
+      this.dictManifest.dicts.push(meta);
+    }
     // 2026-09-03 修复：必须维护 actives，不能只写 active。
     // initDictionary() 启动时是 `actives.length ? actives : [active]` —— 只要 actives
     // 非空就完全忽略 active。只写 active 的后果：导入当次能查（这里直接调了 loadDictFile），
@@ -10174,7 +10208,11 @@ export default class RewordPlugin extends Plugin {
       const ok = await this.loadDictFile(meta);
       if (ok) {
         this.dictReady = true;
-        showMessage(t("已添加并启用词典「{n}」", { n: name }), 3000, "success" as any);
+        if (builtinMatch) {
+          showMessage(t("已补全内置词典「{n}」", { n: name }), 3000, "success" as any);
+        } else {
+          showMessage(t("已添加并启用词典「{n}」", { n: name }), 3000, "success" as any);
+        }
       } else {
         showMessage(t("文件已保存但加载失败，可点「刷新」重试"), 4000, "error");
       }
@@ -10461,10 +10499,11 @@ export default class RewordPlugin extends Plugin {
     await this.saveData("hiword-dicts.json", this.dictManifest);
     dictEngine.removeDict(id);
 
-    // 清理磁盘文件（MDX 单文件 / StarDict 多个伴生文件）
+    // 清理磁盘文件（MDX 单文件 + .mdd 资源包 / StarDict 多个伴生文件）
     const filesToRemove: string[] = removed.type === "stardict" && removed.files
       ? removed.files
       : [removed.file];
+    if (removed.type === "mdx" && removed.mddFile) filesToRemove.push(removed.mddFile);
     let removedFiles = 0;
     for (const f of filesToRemove) {
       try {
@@ -10493,14 +10532,8 @@ export default class RewordPlugin extends Plugin {
     // 2026-09-05：正常卸载即视为本次启动已善终，清掉启动标记（反向：卡死强杀时
     // onunload 不会执行，标记得以保留，下次据此跳过阅读 Tab 自动恢复）。
     clearLaunchMarker();
-    // 2026-09-14：本地 CalDAV 服务若由本插件拉起，随思源一起停掉。
-    // ⚠️ **仅 follow 模式停** —— manual 模式的语义是「只在用户点按钮时动手」，
-    //    思源退出不该顺手带走用户手动启动的服务。
-    // 刻意只发一次 SIGTERM、不做任何 I/O —— onunload 里 await 不到异步结果，
-    // 思源不会等渲染进程收尾（`settings()` 是同步的内存读取，可以用）。
-    try {
-      if (this.calendarStore.settings().serviceMode === "follow") killManagedServiceNow();
-    } catch (__swallowErr) { logSwallow(__swallowErr, "index.ts · onunload", "debug"); }
+    // 2026-09-15：本地 CalDAV（Radicale）服务的启停已随待办日历拆到 siyuan-plugin-re-todo，
+    // 本插件 onunload 不再触碰服务进程。
     // 逆序释放全部托管资源：全局监听 + eventBus 订阅 + 定时器
     this.disposables.dispose();
     // 各子模块独立持有的全局/文档级监听器
@@ -13585,27 +13618,48 @@ export default class RewordPlugin extends Plugin {
       menu.addItem({
         icon: "iconREwordCalendar",
         label: t("🗓 加入日历（REword）"),
-        click: () => { void this.addBlockToCalendar(blockId); },
+        click: () => { this.addBlockToCalendar(blockId); },
       });
     } catch (err) {
       getLogger().warn("[REword] 待办块菜单注入失败:", { error: err });
     }
   };
 
-  /** 把文档里的待办块加入日历：解析块内自然语言时间 → 写 custom-due（不新建块） */
-  private async addBlockToCalendar(blockId: string): Promise<void> {
-    try {
-      const r = await applyNaturalDueToBlock(blockId);
-      if (r.ok) {
-        showMessage(t("已加入日历：{d}", { d: describeDue(r.due) }), 3000, "info");
-        this.refreshCalendarPanels();
-      } else {
-        showMessage(t("未识别到时间，请在待办里写明「明天 9 点」这类时间后重试"), 4000, "error");
-      }
-    } catch (err) {
-      getLogger().warn("[REword] 加入日历失败:", { error: err });
-      showMessage(t("加入日历失败：{m}", { m: (err as Error).message }), 3200, "error");
+  /**
+   * 把文档里的待办块加入日历（2026-09-15 改走联动通道）。
+   * 时间解析与 custom-due 写入已随待办日历拆到 siyuan-plugin-re-todo，
+   * 本方法只负责：探测 window.__RE_TODO__ → 发 re-todo:action 事件（nonce 配对）
+   * → 等 re-todo:action-result 回执后展示结果；插件未启用时明确 toast，绝不静默失败。
+   */
+  private addBlockToCalendar(blockId: string): void {
+    const api = (window as any).__RE_TODO__ as { version?: number } | undefined;
+    if (!api || (api.version ?? 0) < 1) {
+      showMessage(t("待办日历插件未启用（请在集市安装并启用「RE 待办日历」）"), 4000, "error");
+      return;
     }
+    const nonce = Date.now() + Math.random();
+    const onResult = (ev: Event): void => {
+      const d = (ev as CustomEvent).detail as
+        | { nonce?: number; ok?: boolean; due?: string; message?: string }
+        | undefined;
+      if (!d || d.nonce !== nonce) return; // 只认本次请求的回执
+      window.removeEventListener("re-todo:action-result", onResult);
+      clearTimeout(guard);
+      if (d.ok) {
+        const dueText = (d.due || "").replace("T", " ");
+        showMessage(dueText ? t("已加入日历：{d}", { d: dueText }) : t("已加入日历"), 3000, "info");
+      } else if (d.message === "no natural time matched") {
+        showMessage(t("未识别到时间，请在待办里写明「明天 9 点」这类时间后重试"), 4000, "error");
+      } else {
+        showMessage(t("加入日历失败：{m}", { m: d.message || "unknown" }), 3200, "error");
+      }
+    };
+    // 兜底：8s 内无回执（如新插件中途被禁用）自动解除监听，防泄漏
+    const guard = setTimeout(() => window.removeEventListener("re-todo:action-result", onResult), 8000);
+    window.addEventListener("re-todo:action-result", onResult);
+    window.dispatchEvent(new CustomEvent("re-todo:action", {
+      detail: { action: "addBlock", blockId, nonce },
+    }));
   }
 
   private onOpenContentMenu = (e: CustomEvent): void => {
@@ -14460,7 +14514,14 @@ export default class RewordPlugin extends Plugin {
     const accent = cfg.accent || "us";
 
     if (cfg.engine === "system") {
-      this.speakSystem(w, cfg);
+      // 2026-09-16：Windows 上 Web Speech（离线系统语音）经常无可用嗓音/静默无声
+      // → 系统触发失败时用在线海词发音兜底，再兜有道真人音。
+      const ok = this.speakSystem(w, cfg);
+      if (!ok) {
+        speakHaici(w, accent).then((haiciOk) => {
+          if (!haiciOk) this.speakOnline(w, accent);
+        });
+      }
       return;
     }
     if (cfg.engine === "youdao" || cfg.engine === "edge") {
@@ -14469,9 +14530,13 @@ export default class RewordPlugin extends Plugin {
       return;
     }
 
-    // auto（默认）：在线优先，失败回退系统语音
+    // auto（默认）：在线优先（有道 → 海词），失败回退系统语音
     this.speakOnline(w, accent).then((ok) => {
-      if (!ok) this.speakSystem(w, cfg);
+      if (!ok) {
+        speakHaici(w, accent).then((haiciOk) => {
+          if (!haiciOk) this.speakSystem(w, cfg);
+        });
+      }
     });
   }
 

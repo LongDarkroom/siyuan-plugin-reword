@@ -169,6 +169,15 @@
     picking = false;
     onMessage(`已添加 ${toAdd.length} 个模型`, "ok");
   }
+
+  /* 2026-09-15：currentColor SVG 图标（替代固定色 emoji / 特殊字符） */
+  const ICONS: Record<string, string> = {
+    search: '<circle cx="11" cy="11" r="7"/><path d="m21 21-4.35-4.35"/>',
+    gear: '<path d="M12 15.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7Z"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.87l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.7 1.7 0 0 0-1.87-.34 1.7 1.7 0 0 0-1 1.55V21a2 2 0 1 1-4 0v-.09a1.7 1.7 0 0 0-1-1.55 1.7 1.7 0 0 0-1.87.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.7 1.7 0 0 0 .34-1.87 1.7 1.7 0 0 0-1.55-1H3a2 2 0 1 1 0-4h.09a1.7 1.7 0 0 0 1.55-1 1.7 1.7 0 0 0-.34-1.87l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.7 1.7 0 0 0 1.87.34h.09a1.7 1.7 0 0 0 1-1.55V3a2 2 0 1 1 4 0v.09a1.7 1.7 0 0 0 1 1.55 1.7 1.7 0 0 0 1.87-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.7 1.7 0 0 0-.34 1.87v.09a1.7 1.7 0 0 0 1.55 1H21a2 2 0 1 1 0 4h-.09a1.7 1.7 0 0 0-1.55 1Z"/>',
+  };
+  function iconSvg(n: string): string {
+    return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICONS[n]}</svg>`;
+  }
 </script>
 
 <div class="hiword-ai-model-mgr">
@@ -179,7 +188,7 @@
       bind:value={search}
     />
     <button class="hiword-ai-btn hiword-ai-btn--ghost hiword-ai-btn--sm" on:click={fetchFromApi}>
-      🔍 获取模型
+      <span class="ais-ml-btn-icon">{@html iconSvg("search")}</span>获取模型
     </button>
     <button class="hiword-ai-btn hiword-ai-btn--ghost hiword-ai-btn--sm" on:click={addManual}>
       + 添加
@@ -191,13 +200,13 @@
         <div class="hiword-ai-model-row">
           <span class="hiword-ai-model-name">{m}</span>
           {#if hasOverride(m)}
-            <span class="hiword-ai-model-flag" title="已单独设置参数">●</span>
+            <span class="hiword-ai-model-flag" title="已单独设置参数"><span class="ais-ml-flag-dot"></span></span>
           {/if}
           <button
             class="hiword-ai-model-param-btn"
             title="按模型设置温度 / 最大 Token / 流式 / 专属提示词"
             aria-expanded={expanded.has(m)}
-            on:click={() => toggleParams(m)}>⚙</button
+            on:click={() => toggleParams(m)}>{@html iconSvg("gear")}</button
           >
           <button class="hiword-ai-model-del" title="删除" on:click={() => remove(m)}>&times;</button>
         </div>
@@ -314,6 +323,30 @@
     opacity: 0.6;
     text-align: center;
   }
+  /* 2026-09-15：搜索按钮图标（currentColor SVG） */
+  .ais-ml-btn-icon {
+    display: inline-flex;
+    align-items: center;
+    vertical-align: -2px;
+    margin-right: 4px;
+  }
+  .ais-ml-btn-icon :global(svg) {
+    width: 12px;
+    height: 12px;
+  }
+  /* 2026-09-15：覆写标记改为 CSS 圆点（替代 ● 字符） */
+  .hiword-ai-model-flag {
+    color: var(--b3-theme-primary, #4285f4);
+    display: inline-flex;
+    align-items: center;
+    line-height: 1;
+  }
+  .ais-ml-flag-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: currentColor;
+  }
   /* T6：模型行 = 名称 +（覆写标记）+ 参数齿轮 + 删除 */
   .hiword-ai-model-row {
     display: flex;
@@ -327,18 +360,19 @@
     overflow: hidden;
     text-overflow: ellipsis;
   }
-  .hiword-ai-model-flag {
-    color: var(--b3-theme-primary, #4285f4);
-    font-size: 10px;
-    line-height: 1;
-  }
   .hiword-ai-model-param-btn {
     background: none;
     border: none;
     cursor: pointer;
     opacity: 0.55;
     padding: 0 2px;
-    font-size: 12px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .hiword-ai-model-param-btn :global(svg) {
+    width: 13px;
+    height: 13px;
   }
   .hiword-ai-model-param-btn:hover { opacity: 1; }
   .hiword-ai-model-params {

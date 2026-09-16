@@ -10,8 +10,15 @@
  * 修复方案：身份证明改为"双证据 OR"
  *   1. plugin.json + name === "siyuan-plugin-reword"  ← SiYuan 发布包
  *   2. package.json + name === "siyuan-plugin-reword" ← 开发模式（`npm run dev`）
- *   任一满足即视为本插件根；dict/*.mdx 内置词典检查保留作正交维度
- *   （防误命中 renderer/dict 等用户曾误导入词典的位置）。
+ *   任一满足即视为本插件根。
+ *
+ * 2026-09-16 再修复（Windows 新用户导入词典不可用）：
+ *   旧版还要求 dict/ 里必须存在内置词典 .mdx 之一。但发布包从 2026-08 起整体
+ *   排除 dict/（约 64MB，改用户手动导入），新用户 dict/ 恰恰是空的 → 身份判定
+ *   恒 false → workspaceDir 直连通道被误杀、fs 探测全挂（Windows __dirname 落
+ *   asar）→ resolvePluginPath 返回空串 → 导入的词典永远 MISSING。
+ *   plugin.json/package.json 的 name 匹配本身已是强身份证明，dict 检查只会
+ *   自断后路，故整体移除（renderer/dict 等误命中目录本就没有身份文件，不受影响）。
  *
  * 抽到独立模块而非内联在 index.ts（单文件 12860+ 行）的原因：
  *   - index.ts 含 parameter properties / enum 等语法，Node strip-types 跑不动
@@ -27,9 +34,6 @@ export interface PluginRootFsOps {
   readdirSync(p: string): string[];
 }
 
-/** 内置词典白名单（识别"这是 REword 插件目录"的关键） */
-const BUILTIN_DICTS = ["ncecd.mdx", "ecd2.mdx", "hanyu.mdx"];
-
 /** 节点 fs → 满足 PluginRootFsOps 形态（仅暴露三个方法，避免泄漏 fs 全部 API） */
 const nodeFs: PluginRootFsOps = {
   existsSync: (p) => fs.existsSync(p),
@@ -39,8 +43,9 @@ const nodeFs: PluginRootFsOps = {
 
 /**
  * 判定 `dir` 是否为本插件根目录。
- *   1. dict/ 子目录存在 + 至少一个内置词典 .mdx
- *   2. 身份证明：plugin.json 优先 / package.json 兜底（任一满足即可）
+ * 身份证明：plugin.json 优先 / package.json 兜底（任一满足即可）。
+ * 2026-09-16：移除「dict/ 必须含内置 .mdx」硬性条件——发布包不带词典包，
+ * 该条件在新用户机器上恒 false，是 Windows 导入词典不可用的根因。
  * @param dir 候选根目录绝对路径
  * @param pluginName 期望的插件名（当前为 "siyuan-plugin-reword"）
  * @param fsOps 可选 fs 抽象（默认 node fs；测试传 mock）
@@ -50,16 +55,7 @@ export function isPluginRootWithFs(
   pluginName: string,
   fsOps: PluginRootFsOps = nodeFs
 ): boolean {
-  // 1. dict/ 子目录 + 至少一个内置词典 .mdx
-  const d = path.join(dir, "dict");
-  if (!fsOps.existsSync(d)) return false;
-  let mdx: string[];
-  try { mdx = fsOps.readdirSync(d).filter((f) => f.endsWith(".mdx")); }
-  catch { return false; }
-  if (mdx.length === 0) return false;
-  if (!mdx.some((f) => BUILTIN_DICTS.includes(f))) return false;
-
-  // 2. 身份证明：plugin.json 优先（SiYuan 官方契约，所有发布包都含）
+  // 身份证明：plugin.json 优先（SiYuan 官方契约，所有发布包都含）
   if (identifyByJson(path.join(dir, "plugin.json"), pluginName, fsOps)) return true;
   //    兜底：package.json（开发模式 / 源码目录）
   if (identifyByJson(path.join(dir, "package.json"), pluginName, fsOps)) return true;
@@ -106,7 +102,7 @@ export interface ResolvePluginPathEnv {
  *      process.resourcesPath 父级（绿色版/便携版 SiYuan 常把 workspace.json 放这）。
  *   3. **workspace.json 多格式兼容**：数组 / {workspaces} / {data}。
  *
- * @returns 含 dict/*.mdx 且通过身份校验的插件根目录；找不到时返回 ""（绝不为 asar）。
+ * @returns 通过身份校验（plugin.json/package.json name 匹配）的插件根目录；找不到时返回 ""（绝不为 asar）。
  */
 export function resolvePluginPathWithFs(
   env: ResolvePluginPathEnv,
