@@ -25,3 +25,5 @@ cmaps/
 standard_fonts/
 # 本地方案/调研文档输出目录
 outputs/
+# 手工改前备份（*.bak-xxx），本地保险不进库；历史版本一律靠 git
+*.bak*
