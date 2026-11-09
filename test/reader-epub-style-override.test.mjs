@@ -65,7 +65,20 @@ test("buildReaderStyles 输出含必含段：段距/字体/内联覆盖/标题/�
   assert.match(css, /font-family[^;]*Noto Sans CJK SC/);
   // 内联覆盖
   assert.match(css, /p\s+span[^}]*font-size:\s*inherit\s*!important/);
-  assert.match(css, /p\s+span[^}]*font-family:\s*inherit\s*!important/);
+  // 2026-09-29 P0：inlineOverrideStyles 里的 `p span { font-family: inherit }` 已废弃，
+  //   改由 fontFamilyStyles 统一处理（Readest 式：body !important + 全后代 revert，
+  //   排除 code/译文块）。旧实现漏覆盖 div/span 布局的正文，且会抹平书内自带字体设计。
+  //   故此处改为断言「不再有 per-tag font-family:inherit，且存在新的 revert 覆盖层」。
+  assert.doesNotMatch(
+    css,
+    /p\s+span[^{]*\{[^}]*font-family:\s*inherit/,
+    "p span 的 font-family:inherit 已废弃，应由 fontFamilyStyles 统一接管",
+  );
+  assert.match(
+    css,
+    /body\s*\*:not\([^)]*pre[^)]*\)[^{]*\{[^}]*font-family:\s*revert\s*!important/,
+    "应存在新版全后代 font-family:revert 覆盖层（排除 pre/code 等）",
+  );
   // 标题（2026-08-30 排版精修后为 1.5em / 1.32em，旧断言的 1.6em / 1.4em 已过期）
   assert.match(css, /h1\s*\{[^}]*font-size:\s*1\.5em\s*!important/);
   assert.match(css, /h2\s*\{[^}]*font-size:\s*1\.32em\s*!important/);
@@ -74,6 +87,19 @@ test("buildReaderStyles 输出含必含段：段距/字体/内联覆盖/标题/�
   // 列表
   assert.match(css, /ul,\s*ol\s*\{[^}]*margin:\s*0\.6em\s*0/);
   assert.match(css, /li\s*\{[^}]*margin:\s*0\.3em\s*0/);
+  // 2026-10-06：列表 marker 回归断言（此前只断言 margin，漏掉了本 bug）
+  // ① li 必须保留左内边距：list-style-position:outside 的 marker 画在 li 的 padding 盒外侧，
+  //    清零会让项目符号被挤到容器边缘甚至裁掉
+  assert.match(
+    css,
+    /html body li\s*\{[^}]*padding-left:\s*(?!0(?:[;\s]|$))[\d.]+em\s*!important/,
+    "li 的 padding-left 不得为 0（marker 悬挂位）",
+  );
+  // ② 必须显式声明 list-style-type：书里常见 list-style:none，无声明则符号全丢
+  assert.match(css, /ul,\s*ol\s*\{[^}]*list-style-type:\s*disc\s*!important/);
+  assert.match(css, /ol\s*\{[^}]*list-style-type:\s*decimal\s*!important/);
+  // ③ 必须有 ::marker 字体族兜底：图标字体缺字形时退回 serif，避免 .notdef 方框
+  assert.match(css, /li::marker\s*\{[^}]*font-family:\s*serif\s*!important/);
   // 图片
   assert.match(css, /figure\s*\{[^}]*text-align:\s*center\s*!important/);
   // word-wrap
@@ -111,16 +137,22 @@ test("color-scheme 在亮主题时为 light", () => {
 // 2026-09 更新：旧断言 `body { padding: 2em 1.5em }`（来自 LINE_WIDTH_PRESETS）已过期。
 // 2026-08-29 起 body padding 改由「页面布局」4 个边距滑块驱动（reader-style.ts layoutMarginStyles），
 // lineWidth 预设的 padding 只经 deriveStyleOutput 透传、不再注入 CSS（见 reader-settings.ts:526 说明）。
-test("body 内边距由「页面布局」边距滑块驱动（缺省 16px 四边 + column-gap 16px）", () => {
+// 2026-09-25 语义升级：左右边距不再用 marginLeft/RightPx 直出，而是由 widthPct
+//   换算百分比（每侧 (100-pct)/2 %）随窗口伸缩；缺省 widthPct 未传时回落 80 → 10.00%。
+//   widthMode="fixed" 时左右归零（书页宽交给 paginator 的 --_reword-content-fixed）。
+test("body 内边距由「页面布局」边距滑块驱动（上下 px + 左右换算值 + column-gap 16px）", () => {
   const css = build();
-  assert.match(css, /body\s*\{\s*padding:\s*16px 16px 16px 16px\s*!important;\s*column-gap:\s*16px;\s*\}/);
+  assert.match(css, /body\s*\{\s*padding:\s*16px\s+10\.00%\s+16px\s*!important;\s*column-gap:\s*16px;\s*\}/);
 });
 
 test("body 内边距随 settings.layout 四边与分栏间距变化", () => {
   const css = build(mkSettings({
     layout: { marginTopPx: 8, marginBottomPx: 12, marginLeftPx: 24, marginRightPx: 32, columnGapPx: 40 },
   }));
-  assert.match(css, /body\s*\{\s*padding:\s*8px 32px 12px 24px\s*!important;\s*column-gap:\s*40px;\s*\}/);
+  // 上下用 layout 的 px；左右在默认 widthPct=80 下同为 10.00%（不再直出 32px/24px）
+  assert.match(css, /body\s*\{\s*padding:\s*8px\s+10\.00%\s+12px\s*!important;\s*column-gap:\s*40px;\s*\}/);
+  // 跟随思源页边时左右才回到宿主 px（此处未开启，故不应出现 32px/24px）
+  assert.doesNotMatch(css, /padding:\s*8px\s+32px\s+12px\s+24px/, "未开启跟随思源页边时左右不应直出宿主 px");
 });
 
 test("行高 line-height 注入", () => {
@@ -131,14 +163,34 @@ test("行高 line-height 注入", () => {
 test("fontFaceCss 参数原样拼接到开头（@font-face 段）", () => {
   const userFont = '@font-face { font-family: "LXGW WenKai"; src: url(blob:abc); }';
   const css = build(mkSettings(), lightPreset, normalLineWidth, userFont, '"LXGW WenKai", serif');
-  // fontFaceCss 出现在 buildReaderStyles 输出起始
-  assert.ok(css.startsWith(userFont), `fontFaceCss should be at start of output, got: ${css.slice(0, 100)}`);
+  // 2026-09-29 P0：buildReaderStyles 现在会**前置** cjkAliasFontFaces()（中文泛型字体族
+  //   别名映射，全部是 local() 型 @font-face），故用户 fontFaceCss 不再是整个输出的第一段。
+  // 断言改为「用户字体段存在，且排在别名映射之后、body 主题规则之前」。
+  //   注意：不能用 indexOf('font-family: "LXGW WenKai"') 判断位置 —— 该名字也出现在
+  //   CJK 别名的 local() 候选链里（楷体系回退含 LXGW WenKai），会命中错误位置。
+  assert.ok(css.includes(userFont), "fontFaceCss 应原样出现在输出中");
+  // 注意：cjkAliasFontFaces() 输出的是**紧凑格式** @font-face{font-family:"楷体_GB2312"
+  //   （冒号后无空格），不能用带空格的串去 indexOf，否则恒为 -1。
+  const aliasEnd = css.indexOf('font-family:"楷体_GB2312"');
+  assert.ok(aliasEnd > 0, "应存在 CJK 别名映射（楷体系，紧凑格式）");
+  assert.ok(
+    css.indexOf(userFont) > aliasEnd,
+    "用户 fontFaceCss 应排在 CJK 别名映射之后（别名映射前置）",
+  );
+  // 用户字体段必须排在主题 body 规则之前（保证书籍字体声明优先落地）
+  assert.ok(
+    css.indexOf(userFont) < css.indexOf("color-scheme"),
+    `fontFaceCss 应在 body 主题规则之前，got: ${css.slice(0, 120)}`,
+  );
 });
 
 test("fontFamilyStack 注入到 body 块（单一职责）", () => {
   const userStack = '"LXGW WenKai", "Microsoft YaHei", sans-serif';
   const css = build(mkSettings(), lightPreset, normalLineWidth, "", userStack);
-  assert.match(css, new RegExp(`body\\s*\\{[^}]*font-family:\\s*${userStack.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*!important`));
+  // 2026-10-06：fontFamilyStyles 会经 withDigitFix() 在栈首注入 "RW Digit Fix"
+  //   （修正书籍字体破坏数字/标点字形），故用户栈不再紧跟 font-family: 之后。
+  const escaped = userStack.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  assert.match(css, new RegExp(`body\\s*\\{[^}]*font-family:[^;]*${escaped}\\s*!important`));
 });
 
 test("内联覆盖覆盖 p/li/blockquote/h 的 span/div/b/i/em/strong/a", () => {

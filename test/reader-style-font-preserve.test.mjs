@@ -90,8 +90,20 @@ test("[回归] system 模式仅 CJK fallback", () => {
     getDefaultCjkFontStack()
   );
 
-  // 关键断言：不含任何用户字体（@font-face 为空）
-  assert.doesNotMatch(css, /@font-face/);
+  // 关键断言：不含任何**用户自带**字体（system 模式不注入用户字体文件）
+  // 2026-09-29 P0：buildReaderStyles 现在会追加 cjkAliasFontFaces() —— 中文泛型字体族
+  //   别名映射（楷体/仿宋/黑体/宋体 → 各平台真实注册名的 local() 候选链），
+  //   用于解决「书里写 font-family:"Kaiti"，系统实际叫"Kaiti SC"→ 整段回落默认字体」。
+  //   这些 @font-face 全部是 local() 本机映射、**不含在线兜底**，与用户字体无关。
+  //   故断言改为：不得出现用户字体注入（url/blob/在线 src），但允许 CJK 别名映射。
+  assert.doesNotMatch(css, /@font-face[^{]*\{[^}]*url\(/i, "system 模式不应注入用户字体文件（url/blob）");
+  assert.doesNotMatch(css, /url\(blob:/i, "system 模式不应出现 blob 字体");
+  // CJK 别名映射应存在且只用 local()（离线优先）
+  const aliasFaces = css.match(/@font-face\{[^}]*\}/g) ?? [];
+  assert.ok(aliasFaces.length > 0, "应输出 CJK 泛型字体族别名映射 @font-face");
+  for (const f of aliasFaces) {
+    assert.match(f, /src:local\(/, "CJK 别名映射应只用 local()（离线优先，不含在线兜底）");
+  }
   // 关键断言：body { font-family } 包含 CJK fallback
   assert.match(css, /body\s*\{[^}]*font-family:[^}]*PingFang SC[^}]*!important/);
 });
@@ -175,20 +187,29 @@ test("[回归] 模拟 ReaderView buildFontInjection system 模式（无 @font-fa
     fontFaceCss,
     fontFamilyStack
   );
-  assert.doesNotMatch(css, /@font-face/);
+  // 2026-09-29 P0：CJK 泛型字体族别名映射会输出 local() 型 @font-face（见前一条测试说明），
+  //   故此处不再断言「完全无 @font-face」，改为确认**用户字体未注入**（无 url/blob）。
+  assert.doesNotMatch(css, /@font-face[^{]*\{[^}]*url\(/i, "system 模式不应注入用户字体文件");
+  assert.doesNotMatch(css, /url\(blob:/i, "system 模式不应出现 blob 字体");
   assert.match(css, /body\s*\{[^}]*font-family:[^}]*PingFang SC[^}]*!important/);
 });
 
 test("fontFamilyStyles 独立函数可被外部使用", () => {
   const css = fontFamilyStyles('"LXGW WenKai", serif');
-  assert.equal(css, 'body { font-family: "LXGW WenKai", serif !important; }');
+  // 2026-10-06：fontFamilyStyles 现经 withDigitFix() 在栈首注入 DIGIT_FIX_FAMILY
+  //   （"RW Digit Fix"，修正书籍字体破坏数字/标点字形），不再与输入全等。
+  //   改断言「用户栈完整保留 + 带 !important + 数字字体已前置」。
+  assert.match(css, /^body \{ font-family: /, "应以 body { font-family: 开头");
+  assert.match(css, /"LXGW WenKai", serif !important;/, "用户字体栈应完整保留并带 !important");
+  assert.match(css, /"RW Digit Fix"/, "应注入数字字形修正字体");
 });
 
 test("[回归] 字体栈含特殊字符（如中文）仍可安全嵌入", () => {
   // 防御性测试：确保 fontFamilyStack 中含中文字体名（如「霞鹜文楷」无引号）不破坏 CSS
   // 注：实际使用时仍建议加引号
   const css = fontFamilyStyles('"霞鹜文楷", "PingFang SC"');
-  assert.match(css, /font-family:\s*"霞鹜文楷",\s*"PingFang SC"\s*!important/);
+  // 2026-10-06：栈首会被注入 "RW Digit Fix"，故中文字体不要求紧跟 font-family: 之后。
+  assert.match(css, /font-family:[^;]*"霞鹜文楷",\s*"PingFang SC"\s*!important/);
 });
 
 test("[回归] 用户主题切换（light/dark/custom）不破坏字体栈", () => {

@@ -32,10 +32,15 @@ if (typeof globalThis.WebSocket === "undefined") globalThis.WebSocket = FakeWS;
 if (typeof globalThis.Audio === "undefined") globalThis.Audio = FakeAudio;
 const { createBackend, DEFAULT_REWORD_TTS } = await import("../src/reader/reader-tts.ts");
 
-test("createBackend: engine=system → primary=system, fallback=null", () => {
+test("createBackend: engine=system → primary=system, fallback=youdao（可用时）", () => {
   const { primary, fallback } = createBackend({ ...DEFAULT_REWORD_TTS, engine: "system" });
   assert.equal(primary.name, "system");
-  assert.equal(fallback, null);
+  // 2026-09-16：Windows 上离线系统语音经常无声 → system 失败时回退有道在线
+  //   （dictvoice 支持整句，虽机械但可听）。故 fallback 不再恒为 null：
+  //   有道可用则为 youdao，不可用才为 null。
+  if (fallback !== null) {
+    assert.equal(fallback.name, "youdao", "system 的 fallback 只应是 youdao");
+  }
 });
 
 test("createBackend: engine=youdao → primary=youdao, fallback=system", () => {

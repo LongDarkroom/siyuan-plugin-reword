@@ -72,9 +72,16 @@ test("buildReaderStyles 输出是纯 CSS 字符串（不写 JS / 不写 DOM）",
 test("buildReaderStyles 输出 CSS 不含 HTML 标签", () => {
   const css = buildReaderStyles(mkSettings(), lightPreset, normalLineWidth, "");
   // 不应包含任何 HTML 标签（除了 CSS 注释 / 字符串中的偶然字符）
+  // 2026-10-06：真正要防的是「规则选择器里混入 HTML 标签」（会污染 foliate 注入的样式表）。
+  //   实现里多处函数注释会说明书籍如何用 <img class="height-1em"> 画项目符号、
+  //   <aside epub:type=footnote> 保留脚注等，这些注释会被 buildReaderStyles 原样带进
+  //   CSS 字符串 —— 它们是说明文字，不是选择器。故先剥离 CSS 注释再检查残留。
+  const cssNoComment = css.replace(/\/\*[\s\S]*?\*\//g, "");
   for (const tag of ["<div", "<p ", "<span", "<aside", "<sup", "<img", "<a "]) {
-    assert.doesNotMatch(css, new RegExp(tag, "i"), `CSS output should not contain "${tag}"`);
+    assert.doesNotMatch(cssNoComment, new RegExp(tag, "i"), `CSS output should not contain "${tag}"`);
   }
+  // 反向护栏：确认剥离逻辑本身有效（源码注释里确实带 <img> 说明文字）
+  assert.match(css, /<img/, "源码注释应仍含 <img 说明文字（证明剥离生效而非源码已清干净）");
 });
 
 test("buildReaderStyles 输出不含 EPUB 文件写回指令（saveData / file: / fetch / PUT / POST）", () => {

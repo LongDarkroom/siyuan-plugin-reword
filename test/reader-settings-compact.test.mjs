@@ -119,9 +119,10 @@ test("D1: 4 大分组中的 文本/段落/页面布局 仍在弹窗内（笔记�
 // 2026-09 更新：分组从 4 个扩到 6 个（朗读 / 笔记导出绑定 / 高级设置陆续并入），
 // 弹窗 max-height 仅 80vh，全部展开必然溢出 → 现改为**全部默认折叠**（6 个 details 均无 open 属性）。
 // 旧断言「文本 + 段落 默认 open」已过期。
-test("D2: 分组默认折叠（6 个 details 均无 open 属性）", () => {
+// 2026-10-06：新增「📊 状态栏」分组后为 7 个（原断言写死 6，已过时）。
+test("D2: 分组默认折叠（7 个 details 均无 open 属性）", () => {
   const all = viewSrc.match(/<details class="reader-setting-section"[^>]*>/g) ?? [];
-  assert.equal(all.length, 6, `应有 6 个 details 分组，实际 ${all.length}`);
+  assert.equal(all.length, 7, `应有 7 个 details 分组，实际 ${all.length}`);
   const opened = viewSrc.match(/<details class="reader-setting-section"[^>]*\sopen[^>]*>/g) ?? [];
   assert.equal(opened.length, 0, `不应有默认展开的分组，实际 ${opened.length} 个：${opened.join(", ")}`);
 });

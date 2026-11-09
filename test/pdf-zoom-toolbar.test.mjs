@@ -36,7 +36,7 @@ test("[核心] 工具栏在 PDF 模式下显示缩放按钮组", () => {
 test("[按钮] 缩放组有 - 按钮（缩小）", () => {
   // 找 − 按钮 + on:click={onZoomOut}（组件内回调 prop 名带 on 前缀）
   assert.ok(
-    /title="缩小[\s\S]*?on:click=\{onZoomOut\}/.test(tbSrc) || /on:click=\{onZoomOut\}[\s\S]*?title="缩小/.test(tbSrc),
+    /title=\{t\("缩小[^"]*"\)\}[^>]*?on:click=\{onZoomOut\}/.test(tbSrc),
     "应含缩小按钮（on:click={onZoomOut}）"
   );
   assert.ok(/onZoomOut=\{zoomOut\}/.test(src), "ReaderView 应把 zoomOut 传给 PdfToolbar");
@@ -44,7 +44,7 @@ test("[按钮] 缩放组有 - 按钮（缩小）", () => {
 
 test("[按钮] 缩放组有 + 按钮（放大）", () => {
   assert.ok(
-    /title="放大[\s\S]*?on:click=\{onZoomIn\}/.test(tbSrc) || /on:click=\{onZoomIn\}[\s\S]*?title="放大/.test(tbSrc),
+    /title=\{t\("放大[^"]*"\)\}[^>]*?on:click=\{onZoomIn\}/.test(tbSrc),
     "应含放大按钮（on:click={onZoomIn}）"
   );
   assert.ok(/onZoomIn=\{zoomIn\}/.test(src), "ReaderView 应把 zoomIn 传给 PdfToolbar");
@@ -52,7 +52,7 @@ test("[按钮] 缩放组有 + 按钮（放大）", () => {
 
 test("[按钮] 缩放组有 ↔ 按钮（适应宽度）", () => {
   assert.ok(
-    /title="适应宽度[\s\S]*?on:click=\{onFitWidth\}/.test(tbSrc) || /on:click=\{onFitWidth\}[\s\S]*?title="适应宽度/.test(tbSrc),
+    /title=\{t\("适应宽度[^"]*"\)\}[^>]*?on:click=\{onFitWidth\}/.test(tbSrc),
     "应含适应宽度按钮（on:click={onFitWidth}）"
   );
   assert.ok(/onFitWidth=\{fitWidth\}/.test(src), "ReaderView 应把 fitWidth 传给 PdfToolbar");
@@ -60,7 +60,7 @@ test("[按钮] 缩放组有 ↔ 按钮（适应宽度）", () => {
 
 test("[按钮] 缩放组有 ⊡ 按钮（适应整页）", () => {
   assert.ok(
-    /title="适应整页[\s\S]*?on:click=\{onFitPage\}/.test(tbSrc) || /on:click=\{onFitPage\}[\s\S]*?title="适应整页/.test(tbSrc),
+    /title=\{t\("适应整页[^"]*"\)\}[^>]*?on:click=\{onFitPage\}/.test(tbSrc),
     "应含适应整页按钮（on:click={onFitPage}）"
   );
   assert.ok(/onFitPage=\{fitPage\}/.test(src), "ReaderView 应把 fitPage 传给 PdfToolbar");

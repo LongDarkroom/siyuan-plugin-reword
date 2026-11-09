@@ -55,7 +55,11 @@ function bodyOf(src, name) {
 
 test("[A1] layoutMarginStyles 输出 body padding（不再是 margin）", () => {
   // 注：layoutMarginStyles 参数含内联类型对象，bodyOf 会误抓，故直接对源码断言返回值
-  assert.match(styleSrc, /body \{ padding: \$\{mt\}px \$\{mr\}px \$\{mb\}px \$\{ml\}px !important/, "应以 4 边距生成 body padding");
+  // 2026-09-25 语义升级：左右边距改由 widthPct 换算百分比（${side}），随窗口伸缩；
+  //   widthMode="fixed" 时左右 padding 归零（宽度交给 paginator 的 --_reword-content-fixed）。
+  //   故断言「上下用 ${mt}/${mb}、左右用 ${side}」的三段式结构，而非旧版四段独立 px。
+  assert.match(styleSrc, /body \{ padding: \$\{mt\}px \$\{side\} \$\{mb\}px !important/, "应以「上下 px + 左右换算值」生成 body padding");
+  assert.match(styleSrc, /const side = input\?\.widthMode === "fixed"/, "左右边距应按 widthMode 分支计算");
   // 旧实现用 margin，确认已移除
   assert.doesNotMatch(styleSrc, /margin: \$\{mt\}px/, "不应再输出 body margin");
 });
@@ -68,9 +72,13 @@ test("[A2] bodyStyles 不再输出 padding（padding 改由 layoutMarginStyles �
 
 test("[C1] LAYOUT_PRESETS 含铺满 / 正常 / 宽松 三档及数值", () => {
   assert.match(settingsSrc, /export const LAYOUT_PRESETS/, "应声明 LAYOUT_PRESETS");
-  assert.match(settingsSrc, /fill: \{ label: "铺满", margins: \{ top: 4, right: 16, bottom: 8, left: 12 \}/, "铺满档数值");
-  assert.match(settingsSrc, /normal: \{ label: "正常", margins: \{ top: 16, right: 24, bottom: 20, left: 20 \}/, "正常档数值");
-  assert.match(settingsSrc, /loose: \{ label: "宽松", margins: \{ top: 32, right: 56, bottom: 48, left: 48 \}/, "宽松档数值");
+  // 2026-09-25 起每档新增 widthPct（内容宽度占视口百分比），label 也包了 t()（i18n）。
+  //   断言改为「档位 key + margins 数值」这一不变的内核，宽度百分比另行断言。
+  assert.match(settingsSrc, /fill: \{ label: t\("铺满"\), widthPct: 95, margins: \{ top: 4, right: 16, bottom: 8, left: 12 \}/, "铺满档数值");
+  assert.match(settingsSrc, /normal: \{ label: t\("正常"\), widthPct: 80, margins: \{ top: 16, right: 24, bottom: 20, left: 20 \}/, "正常档数值");
+  assert.match(settingsSrc, /loose: \{ label: t\("宽松"\), widthPct: 70, margins: \{ top: 32, right: 56, bottom: 48, left: 48 \}/, "宽松档数值");
+  // 三档宽度递增关系（铺满最宽 → 宽松最窄）
+  assert.match(settingsSrc, /custom: \{ label: t\("自定义"\), widthPct: 80/, "应含 custom 兜底档");
 });
 
 test("[C2] detectLayoutPreset 反推当前预设（自定义兜底）", () => {

@@ -83,22 +83,37 @@ test("B3: 输出 margin-bottom: 1.2em 当 paragraphSpacing=1.2", () => {
 });
 
 test("B4: 输出 text-indent: 2em 当 textIndent=2", () => {
-  const css = styleSrc.match(/export\s+function\s+paragraphLayoutStyles[\s\S]*?return\s+`([^`]+)`/)?.[1] ?? "";
+  // 2026-10-06：paragraphLayoutStyles 改为「清洗层 + 施加层」双段结构后，
+  // text-indent 位于 applyLayer 变量内、且函数是**单出口**（关闭 overrideLayout
+  // 时不提前 return，见该函数注释）。因此不能再用「抓第一个 return 模板字面量」
+  // 的方式断言 —— 那样只能拿到 `${cleanLayer}${applyLayer}` 这行占位。
+  // 改为断言施加层模板本身包含 text-indent 插值。
+  const css = styleSrc.match(/const\s+applyLayer\s*=[\s\S]*?`([\s\S]*?)`\s*:\s*""/)?.[1] ?? "";
   const out = css.replace(/\$\{ti[^}]*\}/g, "2");
   assert.ok(out.includes("text-indent: 2em"), `应输出 text-indent: 2em，实际：${out}`);
+  // 回归护栏：缩进必须施加在段落级选择器上（html body p），否则压不过书籍的 p{text-indent}
+  assert.ok(
+    /html body p[^{]*\{[\s\S]*?text-indent: 2em/.test(out),
+    `text-indent 必须在 html body p 上施加才能压过书籍 p 选择器，实际：${out}`,
+  );
 });
 
-test("B5: 输出 body padding: 16 16 16 16 + column-gap 当 4 边距都=16", () => {
+test("B5: 输出 body padding + column-gap 当 4 边距都=16", () => {
   // 2026-09-04 对齐：layoutMarginStyles 已改为 body padding + column-gap（原 margin 简写）
+  // 2026-09-25 语义升级：左右边距不再直接用 ${ml}/${mr}，而是由 widthPct 换算百分比
+  //   （左右各 (100-pct)/2 %），随窗口伸缩；widthMode="fixed" 时左右 padding 归零
+  //   （书页宽由 paginator 的 --_reword-content-fixed 控制）。故此处断言
+  //   「上下用 px、左右为换算值」的结构，不再写死四边都是 16px 的旧格式。
   const css = styleSrc.match(/export\s+function\s+layoutMarginStyles[\s\S]*?return\s+`([^`]+)`/)?.[1] ?? "";
   const out = css
     .replace(/\$\{mt[^}]*\}/g, "16")
     .replace(/\$\{mb[^}]*\}/g, "16")
-    .replace(/\$\{ml[^}]*\}/g, "16")
-    .replace(/\$\{mr[^}]*\}/g, "16")
+    .replace(/\$\{side[^}]*\}/g, "8.00%")
     .replace(/\$\{gap[^}]*\}/g, "16");
-  assert.ok(/padding:\s*16px\s+16px\s+16px\s+16px/.test(out), `应输出 padding: 16px 16px 16px 16px，实际：${out}`);
+  assert.ok(/padding:\s*16px\s+\S+\s+16px\s*!important/.test(out), `应输出上下 px + 左右换算值，实际：${out}`);
   assert.ok(/column-gap:\s*16px/.test(out), `应输出 column-gap: 16px，实际：${out}`);
+  // 旧实现用四边独立 px，确认已移除
+  assert.doesNotMatch(styleSrc, /margin:\s*\$\{mt\}px/, "不应再输出 body margin");
 });
 
 // ============== C. 设置 UI 模板（ReaderView.svelte） ==============
@@ -139,15 +154,16 @@ test("C4: 第 3 分组为朗读设置（语音引擎 + 讯飞配置 + 中文发�
 
 // 2026-09 更新：分组数 3 → 6（陆续并入 笔记导出绑定 / 页面布局 / 高级设置），
 // 「笔记插入」分组自 2026-08-25 移除后未回归（insertPosition/linkFormat 仅保留在 onSelSend 数据层）。
-test("C5: 设置弹窗为 6 大分组（笔记插入组已移除）", () => {
+test("C5: 设置弹窗为 7 大分组（笔记插入组已移除、新增状态栏组）", () => {
   const blocks = viewSrc.match(/<details\s+class="reader-setting-section"[^>]*>[\s\S]*?<\/details>/g) ?? [];
-  assert.equal(blocks.length, 6, `应恰好 6 个 details 分组，实际 ${blocks.length}`);
+  // 2026-10-06：新增「📊 状态栏」分组，故由 6 改为 7（原测试写死 6，已过时）。
+  assert.equal(blocks.length, 7, `应恰好 7 个 details 分组，实际 ${blocks.length}`);
   const titles = [...viewSrc.matchAll(/<summary class="reader-setting-section-title">([^<]+)<\/summary>/g)]
     // 2026-09-11 i18n：标题改为 `📖 {t("文本设置")}` 形态，剥掉 t() 包装后再比对
     .map((m) => m[1].replace(/\{t\("([^"]+)"\)\}/, "$1"));
   assert.deepEqual(
     titles,
-    ["📖 文本设置", "📐 段落设置", "🔊 朗读设置", "📤 笔记导出绑定", "⬜ 页面布局", "⚙ 高级设置"],
+    ["📖 文本设置", "📐 段落设置", "🔊 朗读设置", "📤 笔记导出绑定", "⬜ 页面布局", "📊 状态栏", "⚙ 高级设置"],
     `分组标题与顺序不符，实际 ${JSON.stringify(titles)}`
   );
   assert.doesNotMatch(blocks.join("\n"), /笔记插入/, "设置弹窗分组内不应再有「笔记插入」标题");

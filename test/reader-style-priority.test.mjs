@@ -26,6 +26,8 @@ import {
   codeStyles,
   deriveStyleOutput,
   fontFamilyStyles,
+  paragraphLayoutStyles,
+  verticalWritingStyles,
 } from "../src/reader/reader-style.ts";
 
 const lightPreset = { bg: "#ffffff", fg: "#222222", fg2: "#888888" };
@@ -71,7 +73,12 @@ test("bodyStyles 不输出 font-family（避免覆盖宿主字体如霞鹜文楷
 
 test("fontFamilyStyles 单一职责输出 body font-family 段", () => {
   const css = fontFamilyStyles('"LXGW WenKai", "PingFang SC", sans-serif');
-  assert.match(css, /body\s*\{\s*font-family:\s*"LXGW WenKai",\s*"PingFang SC",\s*sans-serif\s*!important/);
+  // 2026-10-06：fontFamilyStyles 现经 withDigitFix() 在栈首注入 DIGIT_FIX_FAMILY
+  // （"RW Digit Fix"，修正书籍字体破坏数字/标点字形），故断言不再写死栈首。
+  assert.match(css, /body\s*\{\s*font-family:[^;]*"LXGW WenKai",\s*"PingFang SC",\s*sans-serif\s*!important/);
+  // 关键回归：用户选定的字体必须仍在栈内（顺序可被数字字体前置）
+  assert.match(css, /"LXGW WenKai"/, "用户选定字体应保留在 font-family 栈内");
+  assert.match(css, /!important/, "font-family 需带 !important 压过书籍内联样式");
 });
 
 test("段落 p { margin: 0.6em 0 } 带 !important（核心段距修复）", () => {
@@ -79,8 +86,44 @@ test("段落 p { margin: 0.6em 0 } 带 !important（核心段距修复）", () =
   const m = css.match(/p\s*\{([^}]*)\}/);
   assert.ok(m, "should have p block");
   assert.match(m[1], /margin:\s*0\.6em\s*0\s*!important/, "p margin should have !important");
-  assert.match(m[1], /line-height:\s*inherit\s*!important/, "p line-height should have !important");
-  assert.match(m[1], /text-align:\s*justify\s*!important/, "p text-align should have !important");
+  // 2026-10-06：段落级排版改由 paragraphLayoutStyles 按 overrideBookLayout 门控施加，
+  // 此处**不再**声明 line-height / text-align / text-indent。
+  // 原因：旧版 `line-height: inherit !important` 会架空用户的行距滑块
+  // （inherit 取的是 body 值，而 body 上的书籍脏值又未被清洗），
+  // 且 `text-indent: 0 !important` 靠注入顺序压过用户缩进滑块（脆弱）。
+  // ⚠️ 断言只扫 p 的**规则体**（m[1]），不扫整段 CSS —— 否则会误匹配到
+  //    解释这次改动的注释文字（注释里就写着这两个旧值）。
+  // 2026-10-06：p 规则体内新增了 padding-left/right 清零，其后的说明注释里
+  // 出现了 "line-height" / "text-indent" 字样 —— 必须先剥注释再断言，
+  // 否则 doesNotMatch 会被注释文字命中（假失败）。
+  const pBody = m[1].replace(/\/\*[\s\S]*?\*\//g, "");
+  assert.doesNotMatch(
+    pBody,
+    /line-height/,
+    "p 规则体内不应再有 line-height（会架空用户行距设置）",
+  );
+  assert.doesNotMatch(
+    pBody,
+    /text-indent/,
+    "p 规则体内不应再有 text-indent（应由 overrideBookLayout 门控）",
+  );
+  assert.doesNotMatch(
+    pBody,
+    /text-align/,
+    "p 规则体内不应再有 text-align（应由 overrideBookLayout 门控）",
+  );
+  // 同批新增：p 横向 padding/margin 显式清零，避免同页内不同 p 左缘参差。
+  assert.match(pBody, /padding-left:\s*0\s*!important/, "p 应显式清零 padding-left（对齐左边界）");
+  assert.match(pBody, /padding-right:\s*0\s*!important/, "p 应显式清零 padding-right（对齐右边界）");
+  // 护栏：清洗层与施加层必须真的存在（Readest「脏样式让位」策略的核心）
+  const layout = paragraphLayoutStyles({ paragraphSpacing: 0.8, textIndent: 2 }, true, 1.8);
+  assert.match(layout, /html body\s*\{[\s\S]*?line-height:\s*unset/, "缺少清洗层：body 脏 line-height 未丢弃");
+  assert.match(layout, /html body p[^{]*\{[\s\S]*?text-indent:\s*2em/, "缺少施加层：用户缩进未落到段落级");
+  // 关闭开关时：清洗层与施加层都不应出现（尊重书籍原版排版）
+  const off = paragraphLayoutStyles({ paragraphSpacing: 0.8, textIndent: 2 }, false, 1.8);
+  assert.doesNotMatch(off, /line-height:\s*unset/, "关闭开关时不应有清洗层");
+  assert.doesNotMatch(off, /text-indent/, "关闭开关时不应施加首行缩进");
+  assert.match(off, /margin-bottom:\s*0\.8em/, "关闭开关时段距仍应保留（属容器观感）");
 });
 
 test("内联覆盖 p span { font-size: inherit !important } 必须带 !important（否则覆盖不到内联 style）", () => {
@@ -173,4 +216,23 @@ test("buildReaderStyles 输出 !important 全为合法格式（不出现 !import
   for (const m of matches) {
     assert.equal(m, "!important", `unexpected ! token in CSS: ${m}`);
   }
+});
+
+// ==== 2026-10-06 竖排（verticalWriting）回归断言 ====
+test("竖排关闭时不注入任何 writing-mode（横排基线不被污染）", () => {
+  const css = verticalWritingStyles(false);
+  assert.equal(css, "", "关闭时应返回空串");
+});
+
+test("竖排开启：注入 writing-mode 且覆盖竖排不适用的横排属性", () => {
+  const css = verticalWritingStyles(true);
+  // ① 引擎的唯一触发条件就是这个属性
+  assert.match(css, /html body\s*\{[\s\S]*?writing-mode:\s*vertical-rl\s*!important/);
+  // ② 竖排下 line-height 撑开的是「列宽」而非行距，必须压回 1
+  assert.match(css, /line-height:\s*1\s*!important/);
+  // ③ 竖排下 text-indent 无位移，必须归零并改用 padding-top
+  assert.match(css, /html body p\s*\{[\s\S]*?text-indent:\s*0\s*!important/);
+  assert.match(css, /padding-top:\s*calc\(var\(--rwt-vertical-indent/);
+  // ④ justify 在竖排里是沿垂直方向两端对齐，中文竖排惯例不做 ⇒ 回 start
+  assert.match(css, /text-align:\s*start\s*!important/);
 });
