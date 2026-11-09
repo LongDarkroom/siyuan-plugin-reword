@@ -1,5 +1,6 @@
 import { logSwallow } from "../core/safe.ts";
 import { t } from "../i18n/index.ts";
+import type { ShortcutOverride } from "./reader-shortcuts.ts";
 
 /** 阅读设置全局单例（供非 Svelte 模块如 graph.ts / index.ts 读取绑定文档 ID） */
 let _globalSettingsStore: any = null;
@@ -77,11 +78,17 @@ export interface ReaderParagraphSettings {
 
 /** 页面布局（2026-08-24 新增） */
 export interface ReaderLayoutSettings {
-  /** 4 边距（px） */
+  /** 4 边距（px）——上下边距仍直接生效；左右边距仅在「跟随思源页边」开启时使用（页宽语义下由 widthPct 派生） */
   marginTopPx: number;
   marginBottomPx: number;
   marginLeftPx: number;
   marginRightPx: number;
+  /** 内容宽度占视口百分比（50-100；三档预设 铺满95 / 正常80 / 宽松70；左右 padding = (100-pct)/2 %，随窗口伸缩） */
+  widthPct?: number;
+  /** 页宽模式（2026-09-29）：pct = 随窗口百分比（原行为，默认）；fixed = 固定书页宽（Readst 式，居中） */
+  widthMode?: "pct" | "fixed";
+  /** 固定书页宽（widthMode=fixed 时生效，560-1440 px，默认 720；窗口窄于该值时退化撑满） */
+  fixedWidthPx?: number;
   /** 分栏间距 0-40 px（默认 16，foliate 默认单列，预留多列扩展） */
   columnGapPx: number;
   /** 显示页眉（默认 true） */
@@ -149,6 +156,8 @@ export interface ReaderSettings {
   customBg?: string;
   /** 自定义背景图 URL（theme=custom 时生效，2026-08-27 晚 P2.3） */
   customBgImage?: string;
+  /** @deprecated 2026-09-29 设置整合：三档行宽 UI 已删（与「页宽模式」重叠）。字段保留兼容旧档，
+   *  运行时不再消费（buildStyles 恒用 LINE_WIDTH_PRESETS.normal）。 */
   lineWidth: ReaderLineWidth;
   /** 阅读模式：分页 / 连续滚动 */
   flow: ReaderFlow;
@@ -175,6 +184,39 @@ export interface ReaderSettings {
   overridePublisherFont?: boolean;
   /** 统一正文字号：压平书籍自带 p/li 级字号（如 font-size: medium），让字号 A+/A- 全局生效；默认开 */
   overrideBookFontSize?: boolean;
+  /**
+   * 排版让位：书籍自带排版（行距/首行缩进/对齐/断词）是否让位给阅读器设置。
+   * 默认开 = Readest 的 overrideLayout：先清洗出版方写在 body 上的脏排版值，
+   * 再把用户设置以 !important 施加到段落级选择器，让滑块真正说了算。
+   * 关闭 = 使用书籍原版排版：只保留颜色/字号/字体族与容器横向对齐，
+   * 行距/缩进/对齐/断词全部交给书自己（适合排版考究的精排书）。
+   * 与 overridePublisherFont / overrideBookFontSize 独立：那两项管字体与字号。
+   */
+  overrideBookLayout?: boolean;
+  /**
+   * 竖排（中文竖排阅读）：默认关。
+   * - `false`（默认）= 横排，与之前一致。
+   * - `true` = 竖排（`writing-mode: vertical-rl`，从右往左逐列）。
+   *
+   * 实现依据：vendored `paginator.js` 的 `getDirection()` **只看 CSS `writing-mode`**，
+   * 不读任何插件配置；分页器自身在竖排下会自动把 `column-gap` 换成上下间距、
+   * 把 body 的 `max-width` 换成 `max-height`、并翻转翻页方向（`rtl`）。
+   * 所以插件侧只需**注入 writing-mode** + 做竖排专属的排版适配。
+   */
+  verticalWriting?: boolean;
+  /**
+   * 竖排标点替换（2026-10-06）：仅在 `verticalWriting` 开启时生效。
+   * - `true`（默认）= 开启竖排时，把横排引号 `“”‘’「」『』` 换成竖排字形 `﹃﹄﹁﹂`。
+   * - `false` = 保持横排引号形态（部分字体/个人习惯）。
+   * 简体与繁体用不同映射表（与 Readest 一致），依据书籍语言或界面语言自动选择。
+   */
+  verticalPunctuation?: boolean;
+  /**
+   * 快捷键自定义（2026-10-06）：`action → {key, ctrl, cmd, shift, alt}` 的覆盖表。
+   * 只写要改的项，其余沿用默认（见 `reader-shortcuts.ts` 的 `mergeShortcuts`）。
+   * `{}` / 缺省 = 全默认。改完**立即生效**（控制器有 setOverrides 重算冲突）。
+   */
+  shortcutOverrides?: Record<string, ShortcutOverride>;
   /** 专注模式：滚动时高亮视口中心段落、其余淡出（仅滚动模式生效）；默认关 */
   focusMode?: boolean;
   /** 双语对照：开启后每段正文后注入译文（2026-08-27 重设计） */
@@ -278,6 +320,9 @@ export const READER_DEFAULT_SETTINGS: ReaderSettings = {
   clickToTurn: false,
   overridePublisherFont: true,
   overrideBookFontSize: true,
+  overrideBookLayout: true,
+  verticalWriting: false,
+  verticalPunctuation: true,
   focusMode: false,
   bilingual: false,
   bilingualTarget: "zh",
@@ -321,6 +366,9 @@ export const READER_DEFAULT_SETTINGS: ReaderSettings = {
     marginBottomPx: 16,
     marginLeftPx: 16,
     marginRightPx: 16,
+    widthPct: 80,
+    widthMode: "pct",
+    fixedWidthPx: 720,
     columnGapPx: 16,
     showHeader: true,
     showFooter: true,
@@ -518,44 +566,34 @@ export const THEME_PRESETS: Record<ReaderTheme, { label: string; bg: string; fg:
   custom: { label: t("自定义"), bg: "#ffffff", fg: "#222222", fg2: "#888888" },
 };
 
+/** @deprecated 2026-09-29 设置整合：三档行宽 UI 已删；仅 normal 仍被 buildStyles 作为正文 padding 常量使用。 */
 export const LINE_WIDTH_PRESETS: Record<ReaderLineWidth, { label: string; padding: string }> = {
   narrow: { label: t("窄"), padding: "2em 3em" },
   normal: { label: t("标准"), padding: "2em 1.5em" },
   wide: { label: t("宽"), padding: "2em 0.6em" },
 };
 
-/* ================= 2026-08-29 页面边距三档预设（替代失效的行宽 padding 控制） =================
- * 旧 lineWidth 预设只控制 body padding 的左右，且无法让 4 边距滑块生效；现统一改由
- * 4 个边距滑块 / 三档预设驱动 body padding（见 reader-style.ts layoutMarginStyles）。
- * 三档数值（px，对应 T R B L）：
- *   - 铺满：内容几乎贴边，适合小屏 / 资料密集型阅读
- *   - 正常：日常默认
- *   - 宽松：大屏沉浸式，左右留白更多
- * custom 仅作 UI 态，不携带固定数值（滑块拖动即进入该态）。
+/* ================= 2026-09-25 页面宽度三档预设（用户定稿：铺满 95% / 正常 80% / 宽松 70%） =================
+ * 语义从「四边 px 边距」改为「内容宽度占视口百分比」：widthPct 驱动 body 左右 padding =
+ * (100-pct)/2 %（随窗口伸缩，见 reader-style.ts layoutMarginStyles）。
+ * 点击预设时须同时关掉「跟随思源页边」，否则左右边距会被宿主 padding 覆盖（点击无效的根因）。
+ * margins 只保留上/下两边（px）；custom 仅作 UI 态（拖「页面宽度」滑块即进入该态）。
  */
 export type ReaderLayoutPreset = "fill" | "normal" | "loose" | "custom";
 export const LAYOUT_PRESETS: Record<
   ReaderLayoutPreset,
-  { label: string; margins: { top: number; right: number; bottom: number; left: number } }
+  { label: string; widthPct: number; margins: { top: number; right: number; bottom: number; left: number } }
 > = {
-  fill: { label: t("铺满"), margins: { top: 4, right: 16, bottom: 8, left: 12 } },
-  normal: { label: t("正常"), margins: { top: 16, right: 24, bottom: 20, left: 20 } },
-  loose: { label: t("宽松"), margins: { top: 32, right: 56, bottom: 48, left: 48 } },
-  custom: { label: t("自定义"), margins: { top: 0, right: 0, bottom: 0, left: 0 } },
+  fill: { label: t("铺满"), widthPct: 95, margins: { top: 4, right: 16, bottom: 8, left: 12 } },
+  normal: { label: t("正常"), widthPct: 80, margins: { top: 16, right: 24, bottom: 20, left: 20 } },
+  loose: { label: t("宽松"), widthPct: 70, margins: { top: 32, right: 56, bottom: 48, left: 48 } },
+  custom: { label: t("自定义"), widthPct: 80, margins: { top: 0, right: 0, bottom: 0, left: 0 } },
 };
 
-/** 根据 4 边距反推当前落在哪个预设（都不匹配则「自定义」） */
+/** 根据内容宽度百分比反推当前落在哪个预设（都不匹配则「自定义」） */
 export function detectLayoutPreset(layout: ReaderLayoutSettings): ReaderLayoutPreset {
   for (const key of ["fill", "normal", "loose"] as ReaderLayoutPreset[]) {
-    const m = LAYOUT_PRESETS[key].margins;
-    if (
-      layout.marginTopPx === m.top &&
-      layout.marginRightPx === m.right &&
-      layout.marginBottomPx === m.bottom &&
-      layout.marginLeftPx === m.left
-    ) {
-      return key;
-    }
+    if (layout.widthPct === LAYOUT_PRESETS[key].widthPct) return key;
   }
   return "custom";
 }

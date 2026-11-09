@@ -595,10 +595,17 @@ export class View extends HTMLElement {
         return this.renderer.isOverflowY
     }
     goLeft() {
-        return this.book.dir === 'rtl' ? this.next() : this.prev()
+        // REword P2 (2026-09-29)：当前节方向优先（paginator 含 RTL 内容检测结果）；
+        // 方向未计算（开书瞬间）回退 book.dir 元数据。此前只看元数据，内容检测出的
+        // RTL 书（漏标 dir 的阿拉伯语/希伯来语书）左右键会反向。
+        const rendererRtl = this.renderer?.rtl
+        const isRtl = typeof rendererRtl === 'boolean' ? rendererRtl : this.book.dir === 'rtl'
+        return isRtl ? this.next() : this.prev()
     }
     goRight() {
-        return this.book.dir === 'rtl' ? this.prev() : this.next()
+        const rendererRtl = this.renderer?.rtl
+        const isRtl = typeof rendererRtl === 'boolean' ? rendererRtl : this.book.dir === 'rtl'
+        return isRtl ? this.prev() : this.next()
     }
     // A matcher result carries a primary `range` (nav/excerpt anchor) and, for
     // nearby-words, per-word `subRanges` to highlight each matched word.

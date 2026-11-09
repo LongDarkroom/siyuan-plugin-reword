@@ -27,6 +27,25 @@ const TENCENT_VERSION = "2018-03-21";
 const MAX_SEGMENTS = 8;
 const MAX_SEGMENT_CHARS = 1800;
 
+/**
+ * 签名调试开关（2026-10-03）。
+ * 默认关闭：签名详情含 Credential 与原文，绝不能无条件进控制台。
+ * 需要排查签名时在控制台执行：
+ *   localStorage.setItem("reword:debug-tencent-sign", "1")
+ */
+function tencentSignDebug(): boolean {
+  try {
+    return localStorage.getItem("reword:debug-tencent-sign") === "1";
+  } catch {
+    return false;
+  }
+}
+
+/** 掩码 Authorization 里的 SecretId：AKID****ABCD（保留首尾各 4 位，便于核对是否配错） */
+function maskCredential(authorization: string): string {
+  return authorization.replace(/(Credential=)([A-Za-z0-9]{4})[A-Za-z0-9]+/g, "$1$2****");
+}
+
 export class TencentTranslator implements Translator {
   readonly name = "tencent" as const;
 
@@ -116,16 +135,22 @@ export class TencentTranslator implements Translator {
       `TC3-HMAC-SHA256 Credential=${this.secretId}/${credentialScope}, ` +
       `SignedHeaders=${signedHeaders}, Signature=${signature}`;
 
-    // 调试：签名失败时便于与腾讯云「签名调试」工具核对
-    // eslint-disable-next-line no-console
-    console.debug("[REword] 腾讯签名详情", {
-      canonicalRequest,
-      stringToSign,
-      authorization,
-      payload,
-      timestamp,
-      date,
-    });
+    // 2026-10-03 安全加固：原为无条件 console.debug，每次翻译请求都把
+    //   authorization（含 Credential=<SecretId>/...）与 payload（用户书籍原文）
+    //   打进开发者控制台，且已随构建产物分发。现改为「默认关闭的调试开关」，
+    //   即使打开也对 SecretId 掩码、payload 只报字节数。
+    //   排查签名：控制台执行 localStorage.setItem("reword:debug-tencent-sign","1")。
+    if (tencentSignDebug()) {
+      // eslint-disable-next-line no-console
+      console.debug("[REword] 腾讯签名详情", {
+        canonicalRequest,
+        stringToSign,
+        authorization: maskCredential(authorization),
+        payloadBytes: payload.length,
+        timestamp,
+        date,
+      });
+    }
 
     const headers: Record<string, string> = {
       "Content-Type": contentType,

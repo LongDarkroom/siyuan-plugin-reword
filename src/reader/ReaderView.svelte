@@ -111,6 +111,11 @@ import { getLogger } from "../core/logger.ts";
     captureSiyuanThemeVars,
     neutralizeBadFontFaces,
   } from "../reader/reader-style";
+  // 2026-10-06 竖排标点替换（仅竖排开启时生效，见 openBook 里的 transformTarget 钩子）
+  import {
+    transformVerticalPunctuation,
+    shouldUseHant,
+  } from "../reader/vertical-punctuation";
   // 2026-09-01 接口化第一阶段（L0/L3）：思源令牌注入 + 全局主题同步总线
   import { subscribeThemeChange, registerIframe, unregisterIframe } from "../ui/theme-bridge.ts";
   // 2026-09-02 性能修复：跨 frame console 钩子改为「阅读器打开时才观察本容器」，
@@ -230,6 +235,59 @@ import { getLogger } from "../core/logger.ts";
     };
   })();
 
+  // 2026-10-06 竖排标点：把 HTML 变换挂到 foliate 的书内资源钩子（CSS 那支是 @font-face 中和）。
+  // 竖排字形是 BMP 单码位、替换前后文本长度不变 ⇒ 不破坏 CFI 定位与已有标注（详见 vertical-punctuation.ts）。
+  // 只做正向替换（多对多映射无法反推原字符）；关闭竖排时不挂本分支即天然保持原样。
+  function attachBookTransform(bt: any, punctOn: boolean, punctHant: boolean) {
+    if (!bt || bt === lastTransformTarget) return;
+    lastTransformTarget = bt;
+    bt.addEventListener("data", (ev: any) => {
+      const t = ev?.detail?.type;
+      if (punctOn && HTML_TYPES.has(t)) {
+        ev.detail.data = Promise.resolve(ev.detail.data).then((h: string) =>
+          transformVerticalPunctuation(h, punctHant));
+        return;
+      }
+      if (t !== "text/css") return;
+      ev.detail.data = Promise.resolve(ev.detail.data).then((css: string) =>
+        neutralizeBadFontFaces(css));
+    });
+  }
+
+  /**
+   * 把 foliate 视图挂进 reader 容器（2026-10-06 抽出为模块级，理由见下）。
+   *
+   * ⚠️ 真机 console 实证的 bug：`container` 是 Svelte 的 `bind:this`，在
+   * **「重启后恢复阅读 Tab」路径**下 openBook 可能早于模板绑定完成 ⇒ 为 `undefined`，
+   * 而 `container.innerHTML = ""` 会抛
+   * `TypeError: Cannot set properties of undefined (setting 'innerHTML')`。
+   * 后果远比"少一个图标"重：**该行之后 openBook 全被中断**，包括后面的
+   * `applyStyles()` ⇒ **书内样式（字号/行距/图片尺寸…）根本没注入**
+   * ⇒ 表现为「排版全都不对」，日志里还缺少 `[开书细步] applyStyles 前` 可自证。
+   *
+   * ⚠️ 这里**不能 early-return**（会跳过挂载 foliate 视图），只静默降级，
+   * 让后续 applyStyles 的 `view?.renderer` 可选链自行兜底。
+   *
+   * ⚠️ 为什么抽成模块级函数：`openBook` 体量已顶到
+   * test/reader-book-excerpts-refresh 的 10000 字符扫描窗口上限（基线 9902），
+   * 往里堆代码会让那个断言**假失败**（本轮已踩过一次）。见该测试注释。
+   */
+  function mountReaderContainer(box: HTMLDivElement | undefined, el: any): void {
+    try {
+      if (!box) throw new Error("container undefined");
+      box.innerHTML = "";
+      box.append(el);
+      console.log("[REword] openBook reword-foliate-view 已挂载", {
+        containerH: box.clientHeight,
+        containerW: box.clientWidth,
+        viewTag: el.tagName,
+      });
+    } catch {
+      logSwallow(new Error("reader container 尚未绑定（bind:this 时序）"),
+        "ReaderView.svelte · mountReaderContainer", "debug");
+    }
+  }
+
   export let bookId: string;
   export let store: BookshelfStore;
   // 2026-09-09 P0 设置双分家：reader-tab 按书类型传入 scopeView（book/pdf 各一份设置），接口不变
@@ -346,6 +404,15 @@ import { getLogger } from "../core/logger.ts";
   let view: any = null;
   // 2026-09-02：记录已挂接过 @font-face 中和监听的 transformTarget，避免重复注册
   let lastTransformTarget: any = null;
+  // 2026-10-06 竖排标点替换：钩子闭包里直接读这两项，故用响应式派生保持实时性。
+  // 开关口径：竖排开启 且 用户允许替换标点（verticalPunctuation 默认 true）。
+  $: verticalPunctActive = settings.verticalWriting === true && settings.verticalPunctuation !== false;
+  // 繁体映射判定：书籍语言（OPF dc:language）优先，其次界面语言；
+  // 都取不到时按简体处理（简体映射覆盖面更广，误判代价更小）。
+  $: verticalPunctHant = shouldUseHant(
+    (store as any)?.get?.(bookId)?.language,
+    typeof window !== "undefined" ? (window as any).siyuan?.config?.lang : undefined,
+  );
   // 2026-08-28：连续朗读控制器状态
   let ttsController: ReaderTtsController | null = null;
   let ttsState: TtsState = "idle";
@@ -959,7 +1026,9 @@ import { getLogger } from "../core/logger.ts";
 
   function buildStyles() {
     const t = themeOf();
-    const lw = LINE_WIDTH_PRESETS[settings.lineWidth];
+    // 2026-09-29 设置整合：lineWidth 三档已删（与「页宽模式」重叠）。书页左右留白统一由
+    // layoutMarginStyles（widthPct/widthMode）管理；此处恒用标准正文 padding（签名不变）。
+    const lw = LINE_WIDTH_PRESETS.normal;
     // 委托给 reader-style.ts 纯函数，便于单测与维护
     // 字号（含 overrideBookFontSize 压平书籍字号）由 fontSizeOverrideStyles 段统一输出（2026-08-27 修复字号无效）
     const { fontFaceCss, fontFamilyStack } = buildFontInjection();
@@ -996,6 +1065,23 @@ import { getLogger } from "../core/logger.ts";
   function applyStylesInner() {
     // 跟随思源文档边距：开时把宿主 .protyle-wysiwyg 的水平 padding 同步为阅读器左右边距
     applySiyuanDocMargin();
+    // 2026-09-25 页面宽度：widthPct（铺满95/正常80/宽松70）与上下边距 relay 给 foliate
+    // 分页器 —— 分页器几何由自身 CSS 变量驱动（--_max-inline-size / --_margin-*），
+    // 注入 iframe 的 body padding 会被其内联样式覆盖（旧「点击没反应」的真根因），
+    // 换算见 paginator.js #beforeRender 的 reword 段；随后 forceRelayout 重排生效。
+    if (view?.renderer?.style) {
+      const pct = Math.min(100, Math.max(50, settings.layout.widthPct ?? 80));
+      /* 2026-09-29 页宽模式：fixed = 固定书页宽（Readst 式居中， paginator 侧 clamp）；pct = 随窗口百分比（原行为） */
+      if (settings.layout.widthMode === "fixed") {
+        const fw = Math.min(1440, Math.max(560, settings.layout.fixedWidthPx ?? 720));
+        view.renderer.style.setProperty("--_reword-content-fixed", `${fw}px`);
+      } else {
+        view.renderer.style.setProperty("--_reword-content-fixed", "");
+        view.renderer.style.setProperty("--_reword-content-pct", String(pct));
+      }
+      view.renderer.style.setProperty("--_reword-margin-top", `${settings.layout.marginTopPx}px`);
+      view.renderer.style.setProperty("--_reword-margin-bottom", `${settings.layout.marginBottomPx}px`);
+    }
     if (view?.renderer?.setStyles) {
       try {
         view.renderer.setStyles(buildStyles());
@@ -1760,16 +1846,10 @@ import { getLogger } from "../core/logger.ts";
       const file = new File([blob], name, {
         type: /epub$/i.test(name) ? "application/epub+zip" : "",
       });
-      container.innerHTML = "";
       const el = document.createElement("reword-foliate-view") as any;
-      container.append(el);
+      mountReaderContainer(container, el);
       view = el;
       setupAnnotationLayer();
-      console.log("[REword] openBook reword-foliate-view 已挂载", {
-        containerH: container.clientHeight,
-        containerW: container.clientWidth,
-        viewTag: el.tagName,
-      });
 
       view.addEventListener("relocate", (e: any) => {
         const d = e.detail;
@@ -1872,20 +1952,10 @@ import { getLogger } from "../core/logger.ts";
       markStage("foliate view.open（解析书籍文件）");
       // R1 收敛：按格式打开统一走 DocumentLoader → 适配器（行为等价于旧 view.open 分支）
       await DocumentLoader.openView(view, { bookId, name, file, title: meta.title });
-      // 2026-09-02：中和书内 @font-face 的非法 scheme src（如 tt001a.ttf →
-      // ERR_UNKNOWN_URL_SCHEME），避免浏览器请求坏字体报 console 错，并让
-      // document.fonts.ready 干净解析。挂在 foliate 的书内 CSS 转换钩子
-      // transformTarget 上，仅对同一 target 注册一次。
+      // 2026-09-02 中和书内 @font-face 的非法 scheme src；2026-10-06 兼做竖排标点替换。
+      // 逻辑见 attachBookTransform（模块级）—— 勿往 openBook 里堆代码，见该函数上方说明。
       try {
-        const bt = (view.book as any)?.transformTarget;
-        if (bt && bt !== lastTransformTarget) {
-          lastTransformTarget = bt;
-          bt.addEventListener("data", (ev: any) => {
-            if (ev?.detail?.type !== "text/css") return;
-            ev.detail.data = Promise.resolve(ev.detail.data).then((css: string) =>
-              neutralizeBadFontFaces(css));
-          });
-        }
+        attachBookTransform((view.book as any)?.transformTarget, verticalPunctActive, verticalPunctHant);
       } catch (__e) { logSwallow(__e, "openBook fontFaceNeutralize", "debug"); }
       console.log("[REword] openBook view.open 完成");
       markStage("view.init（定位+首次渲染）");
@@ -3794,11 +3864,19 @@ import { getLogger } from "../core/logger.ts";
     applyStyles();
   }
 
-  // [2026-08-29] 页面边距三档预设：铺满 / 正常 / 宽松（替代失效的行宽 padding 控制）
+  // [2026-09-25] 页面宽度三档预设：铺满 95% / 正常 80% / 宽松 70%（内容宽度随窗口伸缩）。
+  // ⚠️ 点击时显式关掉「跟随思源页边」——否则 applyStyles 后 applySiyuanDocMargin 会把
+  // 左右边距覆盖回宿主 padding，预设点了等于白点（用户报障「点击没有用」的根因）。
   function onSetLayoutPreset(p: string) {
-    const m = LAYOUT_PRESETS[p as ReaderLayoutPreset].margins;
+    const preset = LAYOUT_PRESETS[p as ReaderLayoutPreset];
     settings = settingsStore.update({
-      layout: { ...settings.layout, marginTopPx: m.top, marginRightPx: m.right, marginBottomPx: m.bottom, marginLeftPx: m.left },
+      layout: {
+        ...settings.layout,
+        widthPct: preset.widthPct,
+        marginTopPx: preset.margins.top,
+        marginBottomPx: preset.margins.bottom,
+        followSiyuanMargin: false,
+      },
     });
     applyStyles();
   }
@@ -3903,6 +3981,41 @@ import { getLogger } from "../core/logger.ts";
     applyStyles();
   }
 
+  /**
+   * 排版让位开关（2026-10-06，Readest 同思路）：
+   * 开 = 清洗出版方脏排版值 + 用户设置以 !important 施加到段落级选择器；
+   * 关 = 使用书籍原版排版（行距/缩进/对齐/断词交给书自己）。
+   */
+  function setOverrideBookLayout(e: Event) {
+    settings = settingsStore.update({
+      overrideBookLayout: (e.target as HTMLInputElement).checked,
+    });
+    applyStyles();
+  }
+
+  /**
+   * 竖排开关（2026-10-06）：
+   * 引擎（vendored foliate paginator）只看 CSS `writing-mode`，
+   * 这里改设置后由 buildReaderStyles 注入 writing-mode + 竖排专属排版适配。
+   */
+  function setVerticalWriting(e: Event) {
+    settings = settingsStore.update({
+      verticalWriting: (e.target as HTMLInputElement).checked,
+    });
+    applyStyles();
+  }
+
+  /**
+   * 竖排标点开关（2026-10-06）：
+   * 需重开书籍才生效 —— 标点替换挂在 foliate 的书内 HTML 转换钩子上，
+   * 属于「加载时一次性变换」，不是运行期可改的样式。
+   */
+  function setVerticalPunctuation(e: Event) {
+    settings = settingsStore.update({
+      verticalPunctuation: (e.target as HTMLInputElement).checked,
+    });
+  }
+
   /* ================= 2026-08-28 双语 + 阅读增强 handler ================= */
 
   /** 译文字号（em 倍数，0.6–1.0，步长 0.02） */
@@ -3931,12 +4044,8 @@ import { getLogger } from "../core/logger.ts";
     if (bilingualOn) ensureBilingualHandle().refresh();
   }
 
-  /** 2026-08-30 透明化：双语调试信息（译文块显示引擎与送译原文/前文参考） */
-  function setBilingualDebug(e: Event) {
-    const v = (e.target as HTMLInputElement).checked;
-    settings = settingsStore.update({ bilingualDebug: v });
-    if (bilingualOn) ensureBilingualHandle().refresh();
-  }
+  // 2026-08-30 透明化：双语调试信息开关已移至「双语翻译设置 → 显示与界面」（BilingualSettingsTab）；
+  // 此处原 setBilingualDebug 处理器为死代码，2026-09-29 设置整合时删除。
 
   /**
    * 2026-08-31 Phase 2：归档译文到思源 SQLite（可搜索 / 可 SQL 查询 / 随同步）。
@@ -4491,6 +4600,20 @@ import { getLogger } from "../core/logger.ts";
   }
   function setColumnGapPx(v: number) {
     settings = settingsStore.update({ layout: { ...settings.layout, columnGapPx: clamp(v, 0, 40) } });
+    applyStyles();
+  }
+  /* 页面宽度（2026-09-25）：内容宽度占视口百分比，左右 padding = (100-pct)/2 %；拖动即离开三档预设（custom） */
+  function setWidthPct(v: number) {
+    settings = settingsStore.update({ layout: { ...settings.layout, widthPct: clamp(v, 50, 100) } });
+    applyStyles();
+  }
+  /* 页宽模式（2026-09-29）：pct = 随窗口百分比；fixed = 固定书页宽（Readst 式居中） */
+  function setWidthMode(m: "pct" | "fixed") {
+    settings = settingsStore.update({ layout: { ...settings.layout, widthMode: m } });
+    applyStyles();
+  }
+  function setFixedWidthPx(v: number) {
+    settings = settingsStore.update({ layout: { ...settings.layout, fixedWidthPx: clamp(v, 560, 1440) } });
     applyStyles();
   }
   function setShowHeader(e: Event) {
@@ -5330,13 +5453,15 @@ import { getLogger } from "../core/logger.ts";
     return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
   }
 
-  /** 把标签 id 列表解析为 {id, name, color}（委托插件 LabelStore；缺失时降级为 id 文本） */
+  /** 把标签 id 列表解析为 {id, name, color}（委托插件 LabelStore）
+   *  [labels-off] getLabel 未提供或返回 null（标签系统关闭 / 标签已删）→ 跳过该标签，
+   *  不再降级显示灰 #id 文本（气泡无标签时整块不渲染） */
   function resolveLabels(ids: string[] | undefined): { id: string; name: string; color: string }[] {
     if (!ids || !ids.length) return [];
     return ids.map((id) => {
       const info = getLabel ? getLabel(id) : null;
-      return { id, name: info?.name ?? id, color: info?.color ?? "#9ca3af" };
-    });
+      return info ? { id, name: info.name, color: info.color } : null;
+    }).filter((x): x is { id: string; name: string; color: string } => x !== null);
   }
 
   /**
@@ -8472,6 +8597,41 @@ import { getLogger } from "../core/logger.ts";
             <span class="reader-switch-track"></span>
           </label>
         </div>
+        <div class="reader-setting-row reader-setting-toggle-row">
+          <span class="reader-setting-label">{t("排版让位")}</span>
+          <label class="reader-switch" title={t("开启后先清洗出版方写在正文容器上的脏排版值，再把行距/首行缩进/对齐按你的设置施加，行距与缩进滑块才真正说了算；关闭则使用书籍原版排版（适合排版考究的精排书）")}>
+            <input
+              type="checkbox"
+              checked={settings.overrideBookLayout !== false}
+              on:change={setOverrideBookLayout}
+            />
+            <span class="reader-switch-track"></span>
+          </label>
+        </div>
+        <div class="reader-setting-row reader-setting-toggle-row">
+          <span class="reader-setting-label">{t("竖排阅读")}</span>
+          <label class="reader-switch" title={t("中文竖排：从右往左逐列阅读，列距由页面布局的分栏间距控制。适合竖排原版书与古文经典")}>
+            <input
+              type="checkbox"
+              checked={settings.verticalWriting === true}
+              on:change={setVerticalWriting}
+            />
+            <span class="reader-switch-track"></span>
+          </label>
+        </div>
+        {#if settings.verticalWriting === true}
+          <div class="reader-setting-row reader-setting-toggle-row">
+            <span class="reader-setting-label">{t("竖排标点")}</span>
+            <label class="reader-switch" title={t("竖排时把横排引号换成竖排字形（﹃﹄﹁﹂），字面居中、位置正确。简繁自动按书籍语言选择映射")}>
+              <input
+                type="checkbox"
+                checked={settings.verticalPunctuation !== false}
+                on:change={setVerticalPunctuation}
+              />
+              <span class="reader-switch-track"></span>
+            </label>
+          </div>
+        {/if}
         <div class="reader-setting-row">
           <span class="reader-setting-label">{t("字重")}</span>
           <div class="reader-setting-control">
@@ -8758,7 +8918,8 @@ import { getLogger } from "../core/logger.ts";
         />
       </details>
 
-      <!-- 3. 页面布局：4 边距 + 分栏间距 + 3 开关 + 进度样式 + 参考页数 + 时间 + 24h
+      <!-- 3. 页面布局：排版预设 + 4 边距 + 页宽模式 + 分栏间距 + 跟随思源边距
+           （2026-09-29 设置整合：页眉/页脚/进度/时间等状态栏类 8 项拆至独立「📊 状态栏」组）
            [REword 2026-09-09] 边距/分栏对 PDF 画布无效 → 归为图书专属，PDF 模式隐藏 -->
       {#if readerMode !== "pdf"}
       <details class="reader-setting-section">
@@ -8789,20 +8950,31 @@ import { getLogger } from "../core/logger.ts";
             <span class="reader-setting-value">{settings.layout.marginBottomPx}px</span>
           </div>
           <div class="reader-setting-row">
-            <span class="reader-setting-label">{t("左边距")}</span>
-            <input type="range" min="0" max="100" step="2"
-              value={settings.layout.marginLeftPx}
-              on:input={(e) => setMarginPx("marginLeftPx", +e.currentTarget.value)}
-              class="reader-slider" />
-            <span class="reader-setting-value">{settings.layout.marginLeftPx}px</span>
+            <span class="reader-setting-label" title={t("随窗口 = 内容宽度占窗口百分比；固定书页 = 页宽恒定居中（Readst 式）")}>{t("页宽模式")}</span>
+            <div class="reader-setting-control reader-width-modes">
+              <button type="button" class="reader-width-mode-btn{(settings.layout.widthMode ?? "pct") === "fixed" ? "" : " on"}"
+                on:click={() => setWidthMode("pct")}>{t("随窗口")}</button>
+              <button type="button" class="reader-width-mode-btn{(settings.layout.widthMode ?? "pct") === "fixed" ? " on" : ""}"
+                on:click={() => setWidthMode("fixed")}>{t("固定书页")}</button>
+            </div>
           </div>
           <div class="reader-setting-row">
-            <span class="reader-setting-label">{t("右边距")}</span>
-            <input type="range" min="0" max="100" step="2"
-              value={settings.layout.marginRightPx}
-              on:input={(e) => setMarginPx("marginRightPx", +e.currentTarget.value)}
-              class="reader-slider" />
-            <span class="reader-setting-value">{settings.layout.marginRightPx}px</span>
+            <span class="reader-setting-label" title={t("内容宽度占窗口百分比：铺满 95 / 正常 80 / 宽松 70")}>
+              {(settings.layout.widthMode ?? "pct") === "fixed" ? t("书页宽度") : t("页面宽度")}
+            </span>
+            {#if (settings.layout.widthMode ?? "pct") === "fixed"}
+              <input type="range" min="560" max="1440" step="20"
+                value={settings.layout.fixedWidthPx ?? 720}
+                on:input={(e) => setFixedWidthPx(+e.currentTarget.value)}
+                class="reader-slider" />
+              <span class="reader-setting-value">{settings.layout.fixedWidthPx ?? 720}px</span>
+            {:else}
+              <input type="range" min="50" max="100" step="1"
+                value={settings.layout.widthPct ?? 80}
+                on:input={(e) => setWidthPct(+e.currentTarget.value)}
+                class="reader-slider" />
+              <span class="reader-setting-value">{settings.layout.widthPct ?? 80}%</span>
+            {/if}
           </div>
         </div>
         <div class="reader-setting-row">
@@ -8819,6 +8991,14 @@ import { getLogger } from "../core/logger.ts";
           <span class="reader-setting-label">{t("跟随思源文档边距")}</span>
           <label class="reader-switch"><input type="checkbox" checked={settings.layout.followSiyuanMargin} on:change={setFollowSiyuanMargin} /><span class="reader-switch-track"></span></label>
         </div>
+      </details>
+      {/if}
+
+      <!-- 4. 📊 状态栏（2026-09-29 设置整合：从「页面布局」拆出）——页眉/页脚/进度/程序坞/参考页数/时间，
+           均为图书模式专属显示元素，与 PDF 同样无关 ⇒ 保持在 readerMode!=="pdf" 内 -->
+      {#if readerMode !== "pdf"}
+      <details class="reader-setting-section">
+        <summary class="reader-setting-section-title">📊 {t("状态栏")}</summary>
         <div class="reader-setting-row reader-setting-toggle-row">
           <span class="reader-setting-label">{t("显示页眉")}</span>
           <label class="reader-switch"><input type="checkbox" checked={settings.layout.showHeader} on:change={setShowHeader} /><span class="reader-switch-track"></span></label>

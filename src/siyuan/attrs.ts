@@ -11,6 +11,20 @@ import { siyuanRequest, SIYUAN_API } from "./client.ts";
 import type { SiyuanBlock, SiyuanBlockAttrs } from "./types.ts";
 
 /**
+ * SQL 字符串字面量转义。
+ *
+ * ⚠️ 2026-10-03 安全加固：思源 `/api/query/sql` 走 stmt 字符串、不支持占位符绑定，
+ * 凡是把外部输入拼进 SQL 的地方都必须过这里，否则单引号即可闭合字面量注入。
+ * 用法：`WHERE id='${sqlEscape(id)}'`
+ *
+ * 处理：单引号 `'` → `''`（SQLite 标准转义），反斜杠保持原样
+ * （SQLite 不把反斜杠当转义符，擅自处理反而会改变字面量语义）。
+ */
+export function sqlEscape(value: unknown): string {
+  return String(value ?? "").replace(/'/g, "''");
+}
+
+/**
  * 执行思源 SQL 查询，返回结果行数组。
  * @param stmt  SQL 语句（针对 blocks / spans / assets 等内核表）
  * @param T     行类型（默认 SiyuanBlock，可传入自定义投影类型）

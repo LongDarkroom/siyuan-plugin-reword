@@ -72,6 +72,7 @@
  */
 import type RewordPlugin from "../index.ts";
 import { t } from "../i18n/index.ts";
+import { isLabelSystemEnabled } from "../annotation/annotation-config.ts";
 import { getDueQueue } from "../review/scheduler.ts";
 import { countByMastery } from "../review/star-filter.ts";
 import { computeDayStreak, startOfDay } from "../review/review-history.ts";
@@ -1112,12 +1113,14 @@ function buildAnnotationSection(snap: DashboardSnapshot, now: number): string {
       </div>
       <div class="hiword-dash-rank">${bookRows}</div>
     </div>
+    <!-- [labels-off] 标签系统关闭：「标签分布」整卡隐藏（方案 B，2026-10-02 用户确认） -->
+    ${isLabelSystemEnabled() ? `
     <div class="hiword-dash-card">
       <div class="hiword-dash-card-title">${t("标签分布")}
         <span class="hiword-dash-sub is-right">${t("{n} 条", { n: labelRank.reduce((s, x) => s + x[1], 0) })}</span>
       </div>
       ${labelRank.length ? `<div class="hiword-dash-chips">${labelChips}</div>` : `<div class="hiword-dash-empty">${t("还没有标签记录")}</div>`}
-    </div>
+    </div>` : ""}
   </div>
   <div class="hiword-dash-card">
     <div class="hiword-dash-card-title">${t("最近标注")}

@@ -1,5 +1,6 @@
 import { t } from "../i18n/index.ts";
 import { logSwallow } from "../core/safe.ts";
+import { isLabelSystemEnabled } from "./annotation-config.ts";
 /**
  * 微阅风格 —— 侧边栏批注汇总面板渲染器
  * ------------------------------------------------------------------
@@ -361,7 +362,7 @@ export function renderWhalePanel(
               <span class="whale-tab-count">${labelCounts[l.id] || 0}</span>
             </button>
           `).join("")}
-          <button class="whale-tab whale-tab--manage" data-action="whale-manage-labels" title="${t("管理标签（增删改 + 颜色）")}">⚙ ${t("管理")}</button>
+          ${isLabelSystemEnabled() ? `<button class="whale-tab whale-tab--manage" data-action="whale-manage-labels" title="${t("管理标签（增删改 + 颜色）")}">⚙ ${t("管理")}</button>` : ""}
         </div>
       </div>
 
@@ -558,9 +559,12 @@ function renderWhaleNoteItem(
   const annColor = a.color || "#06b6d4";
   const annStyle = a.style || "solid";
   const styleGlyph = STYLE_ICONS[annStyle] || "━";
-  const tagBadges = (a.labels || []).map(id =>
-    `<span class="whale-notes-tag" style="--tag-color:${labelMap[id] || "#9ca3af"}">#${esc(labelNames[id] || id)}</span>`
-  ).join("");
+  // [labels-off] 标签系统关闭：卡片不渲染标签徽章（labelMap 为空时会显示 #id 灰文本，一并屏蔽）
+  const tagBadges = isLabelSystemEnabled()
+    ? (a.labels || []).map(id =>
+      `<span class="whale-notes-tag" style="--tag-color:${labelMap[id] || "#9ca3af"}">#${esc(labelNames[id] || id)}</span>`
+    ).join("")
+    : "";
 
   // 正文：有 note → 原生 lite Protyle 只读预览（宿主 + 静态兜底渐进增强）；
   //       纯标注（note 空）→ 只显示选中词（bare，不变）

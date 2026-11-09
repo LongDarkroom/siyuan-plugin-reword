@@ -1111,6 +1111,108 @@ export function renderCrossrefEntryCard(definition: string, resolvedZh?: string)
 }
 
 /**
+ * 词典 HTML 白名单净化（2026-10-03 安全加固）。
+ *
+ * 为什么需要：StarDict 后端的 `h` 类型条目按规范就是**原始 HTML**（stardict.ts 里
+ * 注释直写「HTML 不 escape」），`g` 类型经 pangoToHtml 也只做标签改名、不剔除
+ * `<script>` / `onerror=`。这些内容最终经 entry.html → 渲染卡 innerHTML 落到 DOM，
+ * 而插件面板与思源主界面同源 ⇒ 用户只要导入一个第三方词典包就等于给了它代码执行。
+ *
+ * 做法：DOM 解析 + 标签/属性白名单（不引 DOMPurify 等新依赖）。
+ * 关键点：
+ *   ① 剥掉 <script>/<style>/<iframe>/<object>/<embed>/<link>/<meta>/<form>/<base> 等
+ *      危险元素**及其子树**（脚本内容不能当文本留着，style 同理会破版式）；
+ *   ② 属性只保留白名单，且一律剥掉 `on*` 事件属性与含 `javascript:` 的 href/src；
+ *   ③ <a href> 只允许 http/https/mailto，其余（javascript:/data:/vbscript:）整属性删除。
+ */
+const DICT_SAFE_TAGS = new Set([
+  "b", "i", "u", "s", "sub", "sup", "em", "strong", "small", "big", "span", "div",
+  "p", "br", "hr", "ul", "ol", "li", "dl", "dt", "dd", "blockquote", "pre", "code",
+  "table", "thead", "tbody", "tfoot", "tr", "td", "th", "caption", "col", "colgroup",
+  "abbr", "cite", "q", "kbd", "samp", "var", "wbr", "mark", "ruby", "rt", "rp", "figure",
+  "figcaption", "h1", "h2", "h3", "h4", "h5", "h6", "img", "font", "center", "label",
+  "a",
+]);
+/** 危险元素：连内容一起丢 */
+const DICT_DROP_TAGS = new Set([
+  "script", "style", "iframe", "object", "embed", "link", "meta", "base", "form",
+  "input", "button", "select", "textarea", "option", "noscript", "template", "svg", "math",
+]);
+/** 元素上允许保留的属性（不含任何事件属性） */
+const DICT_SAFE_ATTRS = new Set([
+  "class", "title", "lang", "dir", "colspan", "rowspan", "align", "width", "height", "alt",
+]);
+/** 仅这些标签允许 href，且协议受限 */
+const DICT_URL_ATTR_TAGS = new Set(["a"]);
+/** 允许 src 的标签（词典内嵌配图；协议同样受限，防外泄 + 防 javascript:） */
+const DICT_SRC_ATTR_TAGS = new Set(["img"]);
+const DICT_SAFE_URL = /^(?:https?:|mailto:)/i;
+
+/** 把词典释义 HTML 净化为安全子集 */
+function sanitizeDictHtml(html: string): string {
+  if (!html) return "";
+  const hasDom = typeof document !== "undefined" && typeof document.createElement === "function";
+  // 无 DOM 的纯正则兜底：剥危险标签「连内容」、事件属性、style。
+  // ⚠️ 不能整体退化成纯文本——那会把词典 class/span 排版全抹平。
+  const regexFallback = (s: string): string =>
+    s
+      // script/style 连内容一起丢（否则 JS 源码会当释义文本显示出来）
+      .replace(/<(script|style)\b[^>]*>[\s\S]*?<\/\1\s*>/gi, "")
+      // 其余危险元素只剥标签本身
+      .replace(/<\/?(?:iframe|object|embed|link|meta|base|form|input|button|select|textarea|noscript|template|svg|math)\b[^>]*>/gi, "")
+      .replace(/\son[a-z]+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, "")
+      .replace(/\sstyle\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, "");
+  if (!hasDom) return regexFallback(html);
+  let doc: Document;
+  try {
+    doc = new DOMParser().parseFromString(`<div>${html}</div>`, "text/html");
+  } catch {
+    return regexFallback(html);
+  }
+  const root = doc.body.firstElementChild;
+  if (!root) return "";
+
+  const walk = (el: Element) => {
+    // 先取快照：处理中会改动子节点列表
+    for (const node of Array.from(el.children)) {
+      const tag = node.tagName.toLowerCase();
+      if (DICT_DROP_TAGS.has(tag)) {
+        node.remove(); // 连内容一起丢
+        continue;
+      }
+      if (!DICT_SAFE_TAGS.has(tag)) {
+        // 未知标签：保留其文本，丢掉标签本身（unwrap），避免误删排版
+        const parent = node.parentNode;
+        if (parent) {
+          while (node.firstChild) parent.insertBefore(node.firstChild, node);
+          parent.removeChild(node);
+        }
+        continue; // 子树已提升到父级，由父级后续处理；此处不再 walk（内容已在新位置）
+      }
+      // 属性过滤
+      for (const attr of Array.from(node.attributes)) {
+        const name = attr.name.toLowerCase();
+        const val = attr.value;
+        if (name.startsWith("on")) { node.removeAttribute(attr.name); continue; }
+        if (name === "style") { node.removeAttribute(attr.name); continue; } // 可承载 url()/expression
+        if (name === "href" || name === "src") {
+          const isSafeUrl = DICT_SAFE_URL.test(val.trim());
+          const tagAllowed =
+            (name === "href" && DICT_URL_ATTR_TAGS.has(tag)) ||
+            (name === "src" && DICT_SRC_ATTR_TAGS.has(tag));
+          if (!(isSafeUrl && tagAllowed)) node.removeAttribute(attr.name);
+          continue;
+        }
+        if (!DICT_SAFE_ATTRS.has(name)) node.removeAttribute(attr.name);
+      }
+      walk(node);
+    }
+  };
+  walk(root);
+  return root.innerHTML;
+}
+
+/**
  * 解析新世纪英汉大词典的 HTML 释义
  */
 export function parseDictEntry(entry: DictEntry): ParsedEntry {
@@ -1136,7 +1238,7 @@ export function parseDictEntry(entry: DictEntry): ParsedEntry {
     // P3 外部音标补全：NCECD 人名/地名/专名词头无 <pron> 时，回退查询 phon_extra.json（CMU 数据）
     getExtraPhonetic(word);
 
-  let cleanedHtml = definition
+  let cleanedHtml = sanitizeDictHtml(definition)
     .replace(/<link[^>]*>/gi, "")
     .replace(/<span class="header">/gi, '<span class="hiword-dict-headword">')
     .replace(/class="ncecd_con"/gi, 'class="hiword-dict-content"')

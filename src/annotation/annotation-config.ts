@@ -51,6 +51,11 @@ export interface AnnotationConfig {
    * 每次真正落库的高亮/批注都会覆写，跨会话、跨 Tab 生效（模块级单例）。 */
   lastStyle?: AnnotationStyle;
   lastColor?: string;
+  /* ---- [labels-off] 2026-10-02 标签系统静默开关 ----
+   * true = 标签系统完整可用；false/缺省 = 静默关闭（UI 入口全部隐藏、写入路径短路）。
+   * 数据不删不改：WordRecord.labels / AnnotationItem.labels / 两个 labels.json 原样保留，
+   * 重新开启后标签与颜色自动恢复（渲染端对已删标签本就有灰色兜底）。 */
+  labelSystemEnabled?: boolean;
 }
 
 const STORAGE_KEY = "hiword-annotation-config.json";
@@ -119,6 +124,11 @@ export function setAnnotationConfig(patch: Partial<AnnotationConfig>): Annotatio
 /** 新建批注的默认颜色（用户配置优先，回退内置青蓝） */
 export function getDefaultAnnotationColor(): string {
   return current.defaultColor || DEFAULTS.defaultColor;
+}
+
+/** [labels-off] 标签系统是否启用（缺省 false = 静默关闭；设置页「标注」页可切换） */
+export function isLabelSystemEnabled(): boolean {
+  return current.labelSystemEnabled === true;
 }
 
 /** 新建批注的默认线型 */

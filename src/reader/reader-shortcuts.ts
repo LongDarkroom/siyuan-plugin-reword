@@ -87,8 +87,43 @@ export const NO_MODIFIER_SHORTCUTS: Array<{ action: ShortcutAction; label: strin
   { action: "closeOverlay", label: "关闭浮窗 / 退出全屏",  key: "Escape" },
 ];
 
-/** 把 keydown 事件匹配到 ShortcutAction；无匹配返回 null */
-export function matchShortcut(e: KeyboardEvent, isMac: boolean): ShortcutAction | null {
+/** 用户自定义覆盖表：action → 部分字段（未给的字段沿用默认） */
+export type ShortcutOverride = Partial<
+  Pick<ShortcutSpec, "ctrl" | "cmd" | "shift" | "alt" | "key">
+>;
+
+/**
+ * 合并自定义覆盖与默认表（2026-10-06 快捷键自定义 UI）。
+ *
+ * 设计要点：**按 action 合并**而非整表替换 —— 用户只改想改的项，
+ * 其余动作的默认键位必须原样保留（否则会出现"改一个键崩一堆"的体验）。
+ * 未在 `overrides` 里出现的 action 走 `READER_SHORTCUTS` 原值。
+ */
+export function mergeShortcuts(overrides?: Record<string, ShortcutOverride> | null): ShortcutSpec[] {
+  if (!overrides) return READER_SHORTCUTS;
+  return READER_SHORTCUTS.map((spec) => {
+    const ov = overrides[spec.action];
+    if (!ov) return spec;
+    const merged: ShortcutSpec = { ...spec };
+    // key 必须存在且非空，否则该动作会变成"匹配不到任何键"
+    if (typeof ov.key === "string" && ov.key.trim()) merged.key = ov.key.trim();
+    // 修饰键允许显式给 false（用于取消某个修饰键），故用 in 判断后逐项赋值
+    if ("ctrl" in ov) merged.ctrl = ov.ctrl;
+    if ("cmd" in ov) merged.cmd = ov.cmd;
+    if ("shift" in ov) merged.shift = ov.shift;
+    if ("alt" in ov) merged.alt = ov.alt;
+    return merged;
+  });
+}
+
+/** 把 keydown 事件匹配到 ShortcutAction；无匹配返回 null
+ *  @param overrides 用户自定义键位（快捷键设置面板写入）
+ */
+export function matchShortcut(
+  e: KeyboardEvent,
+  isMac: boolean,
+  overrides?: Record<string, ShortcutOverride> | null,
+): ShortcutAction | null {
   // 跳过输入框内（让 input/textarea 正常接收）
   const target = e.target as HTMLElement | null;
   if (target) {
@@ -98,13 +133,15 @@ export function matchShortcut(e: KeyboardEvent, isMac: boolean): ShortcutAction 
     }
   }
 
+  const table = mergeShortcuts(overrides);
+
   // 无修饰键（? / Escape）
   if (!e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey) {
     for (const spec of NO_MODIFIER_SHORTCUTS) {
       if (e.key === spec.key) return spec.action;
     }
     // Space / Arrow / Home / End
-    for (const spec of READER_SHORTCUTS) {
+    for (const spec of table) {
       if (spec.ctrl || spec.cmd || spec.shift) continue;
       if (e.key === spec.key) return spec.action;
     }
@@ -112,7 +149,7 @@ export function matchShortcut(e: KeyboardEvent, isMac: boolean): ShortcutAction 
   }
 
   // 有修饰键
-  for (const spec of READER_SHORTCUTS) {
+  for (const spec of table) {
     if (spec.ctrl || spec.cmd) {
       const wantMod = isMac ? e.metaKey : e.ctrlKey;
       if (!wantMod) continue;
@@ -131,9 +168,12 @@ export function matchShortcut(e: KeyboardEvent, isMac: boolean): ShortcutAction 
 
 /** 探测与思源全局快捷键冲突（粗略：以相同 key 组合视为冲突）
  *  spec.ctrl/cmd 表示「Mac/Win 任一侧有修饰键即视为匹配」（双平台共用） */
-export function detectConflicts(siyuanReserved: Array<{ ctrl?: boolean; cmd?: boolean; shift?: boolean; key: string }>): ShortcutSpec[] {
+export function detectConflicts(
+  siyuanReserved: Array<{ ctrl?: boolean; cmd?: boolean; shift?: boolean; key: string }>,
+  overrides?: Record<string, ShortcutOverride> | null,
+): ShortcutSpec[] {
   const conflicts: ShortcutSpec[] = [];
-  for (const spec of READER_SHORTCUTS) {
+  for (const spec of mergeShortcuts(overrides)) {
     for (const reserved of siyuanReserved) {
       const keyMatch = spec.key.toLowerCase() === reserved.key.toLowerCase();
       if (!keyMatch) continue;
@@ -152,9 +192,9 @@ export function detectConflicts(siyuanReserved: Array<{ ctrl?: boolean; cmd?: bo
 }
 
 /** 生成 hint overlay 文本（按行） */
-export function getHintLines(): Array<{ keys: string; label: string }> {
+export function getHintLines(overrides?: Record<string, ShortcutOverride> | null): Array<{ keys: string; label: string }> {
   const lines: Array<{ keys: string; label: string }> = [];
-  for (const spec of READER_SHORTCUTS) {
+  for (const spec of mergeShortcuts(overrides)) {
     lines.push({
       keys: formatKeys(spec),
       label: spec.label,
@@ -186,6 +226,8 @@ export class ShortcutController {
   private bound: ((e: KeyboardEvent) => void) | null = null;
   private handlers: Partial<Record<ShortcutAction, () => void | Promise<void>>> = {};
   private conflicts: Set<ShortcutAction> = new Set();
+  /** 用户自定义键位（2026-10-06 快捷键设置）；setOverrides 可在运行期替换 */
+  private overrides: Record<string, ShortcutOverride> | null = null;
 
   constructor(
     rootEl: HTMLElement,
@@ -197,9 +239,24 @@ export class ShortcutController {
     this.isMac = isMac;
     this.siyuanReserved = siyuanReserved;
     // 探测冲突
-    for (const c of detectConflicts(siyuanReserved)) {
+    for (const c of detectConflicts(siyuanReserved, this.overrides)) {
       this.conflicts.add(c.action);
     }
+  }
+
+  /**
+   * 替换自定义键位并**重算冲突**（2026-10-06）。
+   * 必须在改键后调用，否则冲突集合仍是旧的 —— 表现为"改完键位，
+   * 与思源冲突的那一项仍被静默跳过"，且用户无从得知。
+   */
+  setOverrides(overrides: Record<string, ShortcutOverride> | null): void {
+    this.overrides = overrides && Object.keys(overrides).length ? overrides : null;
+    this.conflicts = new Set(detectConflicts(this.siyuanReserved, this.overrides).map((c) => c.action));
+  }
+
+  /** 当前生效的键位表（默认值 + 用户覆盖） */
+  getTable(): ShortcutSpec[] {
+    return mergeShortcuts(this.overrides);
   }
 
   /** 注册 action 处理器 */
@@ -232,7 +289,7 @@ export class ShortcutController {
   }
 
   private handleKeydown(e: KeyboardEvent): void {
-    const action = matchShortcut(e, this.isMac);
+    const action = matchShortcut(e, this.isMac, this.overrides);
     if (!action) return;
     if (this.conflicts.has(action)) return; // 与思源冲突，跳过
     const handler = this.handlers[action];

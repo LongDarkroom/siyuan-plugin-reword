@@ -64,6 +64,24 @@ export interface ReaderStyleInput {
   overridePublisherFont?: boolean;
   /** 统一正文字号：压平书籍 p/li 级写死字号（如 font-size: medium），默认 true（运行时总为 boolean） */
   overrideBookFontSize?: boolean;
+  /**
+   * 排版让位（2026-10-06，Readest 同思路）：书籍自带排版值是否让位给用户设置。
+   * - `true`（默认，与 Readest 的 overrideLayout 同义）：先清洗书籍写在 body/容器上的
+   *   脏排版值（line-height / text-align / hyphens / text-indent 等），再把用户设置
+   *   以 `!important` 施加上去 ⇒ 设置真正说了算，书籍脏值不再压过用户意图。
+   * - `false`：完全尊重书籍排版（"使用书籍原版排版"），本插件不施加 line-height /
+   *   text-indent / 字距 / 断词等覆盖，只保留颜色、字号、字体族与容器对齐。
+   *
+   * ⚠️ 与 `overridePublisherFont` / `overrideBookFontSize` 独立：那两个管**字体与字号**，
+   * 本项管**段落级排版**（行距/缩进/对齐/断词）。
+   */
+  overrideBookLayout?: boolean;
+  /**
+   * 竖排（中文竖排阅读）：默认关。开启后注入 `writing-mode: vertical-rl`，
+   * vendored paginator 即自动切换全套竖排布局（column-gap 换轴、max-width→max-height、
+   * 翻页方向翻转），插件侧只需做竖排专属排版适配。详见 verticalWritingStyles()。
+   */
+  verticalWriting?: boolean;
   /** 专注模式（运行时开关）：高亮视口中心段落、其余淡出；仅滚动模式生效 */
   focusMode?: boolean;
   /** 译文字号（em 倍数，相对正文；默认 0.78；由阅读设置「译文字号」调节，2026-08-28） */
@@ -326,7 +344,11 @@ export function buildFontFamilyLists(
     "monospace",
   ].join(", ");
 
-  return { serif: serifChain, sansSerif: sansSerifChain, monospace: monospaceChain };
+  return {
+    serif: withDigitFix(serifChain),
+    sansSerif: withDigitFix(sansSerifChain),
+    monospace: monospaceChain,   // 等宽链不修数字（代码对齐依赖等宽字形）
+  };
 }
 
 /** 三条链输出为 CSS 变量（供 body / 代码块 / EPUB 内联关键词替换引用） */
@@ -351,7 +373,9 @@ export function fontVariableStyles(lists: FontFamilyLists): string {
  * 等宽链补一个 monospace 兜底，避免代码块失去等宽特性。
  */
 export function fontVariableStylesFromStack(stack: string): string {
-  const mono = stack ? `${stack}, monospace` : "monospace";
+  // 2026-09-29 P0：--reword-monospace 改为真等宽链（此前 = 正文栈+monospace，
+  // 书内 monospace 关键词重写后会落到楷体——代码对齐/等宽全失）。
+  const mono = MONO_STACK;
   return `:root {
   --reword-serif: ${stack};
   --reword-sans-serif: ${stack};
@@ -409,10 +433,11 @@ export function buildReaderStyles(
       : null;
 
   // 字体段：
-  // - 分类模式输出「三条链变量 + body/代码块应用」
-  // - 其余模式输出单一 body 栈；若开启「强制覆盖书籍字体」且非系统模式，再注入 --reword-*
-  //   变量，使 applyFontKeywordRewrite 能把书内 serif/sans-serif/monospace 关键词重定向到
-  //   用户字体栈，覆盖「不在 p/li/blockquote 内、用 div/span 布局」的正文（如《东方快车谋杀案》）。
+  // - 分类模式输出「三条链变量 + body/代码块应用」（该模式自带覆盖语义，维持原状）
+  // - 其余模式输出双态 body 栈（overrideFont 决定 !important+revert 还是 :where 零特异性）；
+  //   若开启「强制覆盖书籍字体」且非系统模式，再注入 --reword-* 变量，使 applyFontKeywordRewrite
+  //   能把书内 serif/sans-serif/monospace 关键词重定向（monospace 现为真等宽链）。
+  const overrideFont = settings.overridePublisherFont !== false;
   let fontSegments: string[];
   if (lists) {
     fontSegments = [
@@ -420,8 +445,8 @@ export function buildReaderStyles(
       classifiedFontStyles(settings.defaultFontFamily ?? "serif"),
     ];
   } else {
-    fontSegments = [fontFamilyStyles(fontFamilyStack)];
-    if (settings.fontMode !== "system" && settings.overridePublisherFont !== false) {
+    fontSegments = [fontFamilyStyles(fontFamilyStack, overrideFont)];
+    if (settings.fontMode !== "system" && overrideFont) {
       fontSegments.push(fontVariableStylesFromStack(fontFamilyStack));
     }
   }
@@ -433,14 +458,20 @@ export function buildReaderStyles(
       : lists.serif
     : fontFamilyStack;
 
+  // 2026-10-06 Readest 同思路：段落级排版由 overrideBookLayout 统一门控。
+  // 开启（默认）→ 清洗书籍脏排版值 + 用户设置以 !important 施加；
+  // 关闭 → 只保留颜色/字号/字体族/容器横向对齐，排版权交还书籍。
+  const overrideLayout = settings.overrideBookLayout !== false;
+
   const parts = [
-    fontCss,
-    uniformBlockResetStyles(),
+    cjkAliasFontFaces() + "\n" + digitFixFaceCss() + (fontCss ? "\n" + fontCss : ""),
+    uniformBlockResetStyles(overrideLayout),
     paragraphStyles(o),
     colorSchemeStyles(o),
     fontSizeOverrideStyles(settings.fontSize, settings.overrideBookFontSize !== false),
     inlineOverrideStyles(),
-    publisherFontOverrideStyles(settings.overridePublisherFont !== false),
+    codeFontStyles(overrideFont),
+    legacyFontSizeStyles(),
     focusModeStyles(settings.focusMode === true),
     paragraphHoverStyles(settings.paragraphHover === true),
     bilingualStyles(translationStack, o.fg, settings.translationFontSize ?? 0.62),
@@ -449,14 +480,21 @@ export function buildReaderStyles(
     listStyles(),
     figureStyles(o),
     bodyStyles(o, settings),
-    textStyles(settings.text),
-    paragraphLayoutStyles(settings.paragraph),
+    textStyles(settings.text, overrideLayout),
+    paragraphLayoutStyles(settings.paragraph, overrideLayout, settings.lineHeight),
     layoutMarginStyles(settings.layout),
     ...fontSegments,
     linkStyles(),
     codeStyles(),
     colorSchemeStyles(o),
-    wordWrapStyles(),
+    wordWrapStyles(overrideLayout),
+    // 2026-10-06 竖排：注入 writing-mode 即触发引擎全套竖排布局（须在排版段之后，
+    // 让本段对 line-height/text-indent/text-align 的覆盖赢过横排段）。
+    // 竖排下首行缩进改走 --rwt-vertical-indent（em 数），因为 text-indent 在竖排无位移。
+    settings.verticalWriting === true
+      ? `:root { --rwt-vertical-indent: ${settings.paragraph?.textIndent ?? 0}; }\n` +
+        verticalWritingStyles(true)
+      : "",
     // 2026-08-31 v1.4.5 P4.2：选区色 / 搜索高亮（思源主题联动 + 书内色温调节）
     selectionStyles(settings.theme),
   ];
@@ -608,8 +646,119 @@ body {
  * - CSS 后写者赢 + !important 同优先级 → 后注入的 font-family 覆盖前者
  * - 拆成独立段确保 buildReaderStyles 输出**只有一处** body font-family 声明
  */
-export function fontFamilyStyles(stack: string): string {
-  return `body { font-family: ${stack} !important; }`;
+/**
+ * 正文字体族（2026-09-29 P0 字体兼容：Readest 双态覆盖开关）。
+ *
+ * overrideFont=true（覆盖出版商字体）：
+ *   body 强制正文栈 + 全后代 `font-family: revert !important`（Readest 同款）。
+ *   相比旧的「p/li/blockquote 子树 inherit」链，revert 版覆盖 **body 下所有元素**
+ *   （含 div/span 布局的正文，补上 2026-09-02 那类漏覆盖），同时排除代码元素与
+ *   双语译文块；revert 语义 = 回退到作者级联之前 ⇒ 继承到 body 的应用字体栈。
+ * overrideFont=false（尊重书籍字体）：
+ *   `:where(html body)` **零特异性**默认值 —— 书在 html/body/元素级声明的任何
+ *   font-family 都能赢（此前 body !important 会把书级字体也压掉）；没写字体的
+ *   元素照常继承到应用字体栈。数字修复 face（withDigitFix）两种模式都前置。
+ */
+export function fontFamilyStyles(stack: string, overrideFont = true): string {
+  if (overrideFont) {
+    const skip =
+      ":not(pre, code, kbd, samp, tt, .code, .monospace, .programlisting, .highlight, .hljs, .reword-bilingual):not(pre *, code *, kbd *, samp *, tt *, .code *, .monospace *, .reword-bilingual *)";
+    return `
+body { font-family: ${withDigitFix(stack)} !important; }
+body *${skip} {
+  font-family: revert !important;
+}`.trim();
+  }
+  return `:where(html body) { font-family: ${withDigitFix(stack)}; }`;
+}
+
+/**
+ * 中文泛型字体族别名映射（2026-09-29 P0 字体兼容，Readest 同思路扩展）。
+ * 中文 EPUB 常写 font-family:"Kaiti"/"仿宋"/"SimHei" 等，系统字体实际注册名
+ * 不同（楷体-简/Kaiti SC/SimSun…）→ 名字对不上整段回落默认字体。
+ * 每个别名 @font-face 的 family 名 = 书内高频引用名；src = 本机候选链
+ * （macOS/Windows/Linux 覆盖），全部 local() 失败则该 face 无效、自动回落
+ * 正文栈（零风险）。**不含在线兜底**（离线优先，外链不稳定）。
+ * 主要在 overrideFont=false（尊重书籍字体）时发挥作用；override=true 时书内
+ * 声明被 revert 压平，别名仅对带 !important 的书内声明生效（罕见）。
+ */
+export function cjkAliasFontFaces(): string {
+  const face = (family: string, locals: string[]): string =>
+    `@font-face{font-family:"${family}";font-display:swap;src:${locals
+      .map((n) => `local("${n}")`)
+      .join(",")};}`;
+  const kai = ["Kaiti SC", "STKaiti", "KaiTi", "楷体", "LXGW WenKai", "LXGW WenKai GB Screen", "AR PL UKai CN"];
+  const fang = ["Fangsong SC", "STFangsong", "FangSong", "仿宋", "LXGW WenKai", "Noto Serif CJK SC"];
+  const hei = ["Heiti SC", "STHeiti", "SimHei", "黑体", "PingFang SC", "Microsoft YaHei", "Noto Sans CJK SC"];
+  const song = ["Songti SC", "STSong", "SimSun", "宋体", "Noto Serif CJK SC", "Source Han Serif SC"];
+  return [
+    // 楷体系
+    ...["Kaiti", "KaiTi", "楷体", "STKaiti", "KaiTi_GB2312", "楷体_GB2312"].map((f) => face(f, kai)),
+    // 仿宋系
+    ...["FangSong", "仿宋", "STFangsong", "FangSong_GB2312", "仿宋_GB2312"].map((f) => face(f, fang)),
+    // 黑体系
+    ...["SimHei", "Heiti", "黑体", "STHeiti", "XiHeiti"].map((f) => face(f, hei)),
+    // 宋体系
+    ...["SimSun", "宋体", "STSong", "Songti"].map((f) => face(f, song)),
+  ].join("\n");
+}
+
+/** 真等宽链（代码块/书内 monospace 关键词共用；CJK 兜底保证注释中文有字形） */
+export const MONO_STACK =
+  'ui-monospace, "SF Mono", Menlo, Consolas, "Courier New", "PingFang SC", "Microsoft YaHei", "Noto Sans Mono CJK SC", monospace';
+
+/**
+ * 代码字体独立通道（2026-09-29 P0 字体兼容，Readest 同款「随开关换边」）：
+ * 覆盖开 = html body 前缀 !important（压过书内代码字体）；关 = :where 零特异性
+ * （书的代码字体赢）。连字关闭防破坏代码对齐。所有字体模式可用（变量恒有定义）。
+ */
+export function codeFontStyles(overrideFont: boolean): string {
+  const sel =
+    "pre, code, kbd, samp, tt, .code, .monospace, .programlisting, .highlight, .hljs";
+  return `${overrideFont ? `html body :is(${sel})` : `:where(${sel})`} {
+  font-family: var(--reword-monospace)${overrideFont ? " !important" : ""};
+  font-variant-ligatures: none;
+}`.trim();
+}
+
+/**
+ * 老式 HTML 字号标签映射（2026-09-29 P0 字体兼容，Readest 同款；em 相对正文字号）。
+ * 旧版 EPUB 用 <font size="1..7"> 控制字号，浏览器 UA 默认渲染与其排版意图偏差大。
+ */
+export function legacyFontSizeStyles(): string {
+  const map: Array<[string, string]> = [
+    ["1", "0.5em"],
+    ["2", "0.75em"],
+    ["3", "1em"],
+    ["4", "1.2em"],
+    ["5", "1.5em"],
+    ["6", "2em"],
+    ["7", "3em"],
+  ];
+  return map.map(([s, size]) => `font[size="${s}"] { font-size: ${size}; }`).join("\n");
+}
+
+/**
+ * 数字宽度修复（2026-09-29，Readest 式排版观感）：
+ * 霞鹜文楷（LXGW WenKai）的数字字形是楷体传统宽字形——0.6em 步进、字面窄居中，
+ * 连排数字（2007/1996）看起来像被拆成「2 0 0 7」（实为字形 advance，非断行/对齐问题；
+ * pwid/pnum/halt 等 OpenType 特性实测均无法收窄）。修复 = 用一个 unicode-range 仅覆盖
+ * U+0030-0039 的 @font-face 把数字交给比例宽系统字体（苹方/微软雅黑/Helvetica），
+ * 字母与汉字不受影响（不在 range 内 → 回落正文楷体）。src 全部 local() 失败时 face
+ * 无效、自动回落原字体，零风险。仅修 body 字体栈；书内代码块等自带字体不受影响。
+ */
+export const DIGIT_FIX_FAMILY = "RW Digit Fix";
+
+export function digitFixFaceCss(): string {
+  // local() 候选按平台覆盖：macOS 苹方 / Windows 微软雅黑 / Linux Noto Sans
+  return `@font-face{font-family:"${DIGIT_FIX_FAMILY}";src:local("PingFang SC"),local("Microsoft YaHei"),local("Noto Sans CJK SC"),local("Helvetica Neue");unicode-range:U+0030-0039;}`;
+}
+
+/** 字体栈前置数字修复 face（仅当栈为非空字符串；重复前置守卫） */
+export function withDigitFix(stack: string): string {
+  if (!stack || !stack.trim()) return stack;
+  if (stack.includes(`"${DIGIT_FIX_FAMILY}"`)) return stack;
+  return `"${DIGIT_FIX_FAMILY}", ${stack}`;
 }
 
 /** 段落 p 段距 + 对齐 + 取消内联 line-height（2026-08-28 加 text-rendering 精修） */
@@ -619,12 +768,13 @@ p {
   margin: 0.6em 0 !important;
   /* 强制清零 EPUB 书籍在段落上写的横向 padding/margin，避免同页内不同 p
      左缘参差不齐（用户截图：图片下方段落与后续段落不在同一左边界）。
-     margin 简写已让左右 margin 为 0；padding-left/right 需显式覆盖。 */
+     margin 简写已让左右 margin 为 0；padding-left/right 需显式覆盖。
+     ⚠️ 2026-10-06：此处**不再**声明 line-height / text-indent / text-align ——
+     旧版写死 line-height:inherit !important + text-indent:0 !important，
+     前者架空用户行距设置、后者靠注入顺序压过用户缩进滑块（脆弱）。
+     三项统一交给 paragraphLayoutStyles() 按 overrideBookLayout 门控施加。 */
   padding-left: 0 !important;
   padding-right: 0 !important;
-  line-height: inherit !important;
-  text-align: justify !important;
-  text-indent: 0 !important;
   text-rendering: optimizeLegibility !important;
 }`.trim();
 }
@@ -641,7 +791,7 @@ p {
  * - 先统一归零，再为 blockquote/ul/ol/li/figure 恢复必要语义缩进；
  * - 不碰上下边距和纵向排版，只清横向偏移。
  */
-export function uniformBlockResetStyles(): string {
+export function uniformBlockResetStyles(overrideLayout = true): string {
   return `
 html body,
 html body > div,
@@ -678,19 +828,27 @@ html body ol {
   margin-left: 0 !important;
   padding-left: 1.5em !important;
 }
+/* li 不清零 padding-left：list-style-position:outside 的 marker 画在 li 的
+   padding 盒外侧，清零会让符号被挤到容器边缘甚至裁掉（2026-10-06 实测）。 */
 html body li {
   margin-left: 0 !important;
-  padding-left: 0 !important;
+  padding-left: 0.35em !important;
 }
-/* 强制统一文本对齐：覆盖书籍用高特异性类把段落设为 text-align:center */
-html body p,
+/* 统一文本对齐：覆盖书籍用高特异性类把段落设为 text-align:center。
+   2026-10-06：受 overrideBookLayout 门控 —— 关闭时（使用书籍原版排版）
+   不再强制 justify，把对齐权交还书籍。段落级的 justify 由
+   paragraphLayoutStyles() 施加，此处只兜住 div/section/article/li 这些
+   不在段落选择器里的容器。 */
+${overrideLayout
+      ? `html body p,
 html body div,
 html body section,
 html body article,
 html body li,
 html body blockquote {
   text-align: justify !important;
-}
+}`
+      : ""}
 /* 图片/题注保持居中，不被清零拉偏 */
 html body figure,
 html body figcaption {
@@ -737,31 +895,20 @@ h1 span, h2 span, h3 span, h4 span, h5 span, h6 span {
 }
 
 /**
- * 强制正文元素继承 body 字体栈（覆盖 epub 内联死字体）。
- * 参考 Readest / 思阅「覆盖出版商字体」(Override Publisher Font)：
- * epub 常在 <p>/<span> 上写死 `font-family: 'PingFang SC'` 等系统字体，
- * 导致正文混用系统字体 + 用户字体（如《北欧向左，美国想右》截图表象）。
- * 开启后统一回退到 body 的霞鹜文楷；关闭则保留 epub 原排版（仅统一字号）。
- * 安全前提：字体栈已反转（霞鹜文楷前置 + CJK 本机栈兜底），inherit 不会整链崩坏。
- *
- * @param enabled 来自 settings.overridePublisherFont（设置面板开关，默认 true）
+ * 【2026-09-29 P0 已废弃并入 fontFamilyStyles(stack, overrideFont)】
+ * 旧实现 = p/li/blockquote 子树 font-family:inherit!important：
+ * ① 漏覆盖 div/span 布局的正文（2026-09-02 那类 bug 的残留面）；
+ * ② 书内对元素自带 font-family 的设计也被一律抹平。
+ * 新实现见 fontFamilyStyles：Readest 式 body !important + 全后代 revert
+ * （排除代码/译文块）；关闭时 :where 零特异性尊重书内字体。
  */
-export function publisherFontOverrideStyles(enabled: boolean): string {
-  if (!enabled) return "";
-  return `
-p, li, blockquote,
-p span, p div, p b, p i, p em, p strong, p a,
-li span, li div, li b, li i, li em, li strong, li a,
-blockquote span, blockquote div, blockquote b, blockquote i {
-  font-family: inherit !important;
-}`.trim();
-}
 
 /** 标题层级（h1-h6）（2026-08-30 排版精修：更紧凑的层级 + 防长标题溢出） */
 export function headingStyles(): string {
   return `
 h1, h2, h3, h4, h5, h6 {
-  font-family: inherit !important;
+  /* 2026-09-29 P0 字体兼容：不再强制 font-family:inherit ——
+     覆盖开时 body * revert 已统一到正文栈；关时应尊重书内标题字体。 */
   font-weight: 600 !important;
   line-height: 1.28 !important;
   letter-spacing: 0.02em !important;
@@ -794,15 +941,117 @@ blockquote {
 }`.trim();
 }
 
-/** 列表 ul/ol 缩进 */
+/**
+ * 竖排（中文竖排阅读，2026-10-06）
+ *
+ * 引擎侧**已经完备**，不需要插件做任何分页工作：
+ * vendored `paginator.js` 的 `getDirection()` 只读 CSS `writing-mode`（不读插件配置），
+ * 命中 `vertical-rl` 后分页器自动做四件事（paginator.js:851-900）：
+ *   ① `column-gap` 换成上下间距（`column-gap: (marginTop+marginBottom)*1.5`）
+ *   ② body 的 `max-width` 换成 `max-height`（`max-height: columnWidth`）
+ *   ③ `padding` 改成上下（`marginTop*1.5 / 0 / marginBottom*1.5 / 0`）
+ *   ④ 翻页方向翻转（`rtl = true`，用 horizontal-rtl 约定翻页）
+ * ⇒ 插件侧只需**注入 writing-mode** + 做竖排专属的排版适配。
+ *
+ * ⚠️ 两个实测踩坑（无头，2026-10-06，vertical-rl + 短文本单段）：
+ *  ① **竖排下 `text-indent` 完全无效**：`p` 的 `textIndent` 解析为 `32px`，
+ *     但 `getBoundingClientRect().top - body.top` 恒为 `0` —— 缩进没有产生位移。
+ *     原因：竖排的块流方向是水平，`text-indent` 作用于行首（垂直方向）的**行盒**，
+ *     对单段不换行的情形无可见效果。中文竖排的首行缩进惯例是用
+ *     **`padding-top`**（沿垂直方向推进），故此处两者都写。
+ *  ② **`line-height` 在竖排下改变的是"列宽"而非"行距"**：`line-height: 1.8` 让 body
+ *     宽度从 `66px` → `86px`（= 一列的宽度被撑开），因为竖排下行距 = 列间距。
+ *     故竖排下把 line-height 固定为 1（正常字距），行距由 `column-gap` 控制。
+ */
+export function verticalWritingStyles(enabled: boolean): string {
+  if (!enabled) return "";
+  return `
+/* ── ① 开启竖排：只需这一条，引擎即自动切换全部布局 ── */
+html body {
+  writing-mode: vertical-rl !important;
+}
+/* ── ② 行距改由 column-gap 控制，line-height 必须回到 1 ──
+   竖排下 line-height 撑开的是「列宽」（实测 66→86px），不是行距。 */
+html body p,
+html body li,
+html body blockquote,
+html body dd {
+  line-height: 1 !important;
+}
+/* ── ③ 首行缩进：竖排下 text-indent 无位移（实测 topOff 恒 0），
+      改用 padding-top —— 沿垂直方向推进，符合中文竖排「起首空一格」惯例。
+      值由 JS 侧按用户的首行缩进滑块注入 --rwt-vertical-indent（单位 em）。 ── */
+html body p {
+  text-indent: 0 !important;
+  padding-top: calc(var(--rwt-vertical-indent, 0) * 1em) !important;
+}
+/* ── ④ 竖排下的对齐与标题 ──
+   justify 在竖排里是「沿垂直方向两端对齐」，中文竖排通常不做，
+   故回退到 start（顶端对齐）；标题居中在竖排里也不合适，改为不设。 */
+html body p,
+html body li,
+html body blockquote,
+html body dd {
+  text-align: start !important;
+}
+html body h1, html body h2, html body h3,
+html body h4, html body h5, html body h6 {
+  text-align: start !important;
+}
+/* 标题竖排时按 1em 一格递进更符合中文竖排习惯 */
+html body h2, html body h3 { margin-top: 0.5em !important; }
+html body h4, html body h5, html body h6 { margin-top: 0.25em !important; }
+/* ── ⑤ 图片/表格在竖排下按块居中，避免沿列拉伸 ── */
+html body img,
+html body svg,
+html body table {
+  max-width: 100% !important;
+  margin-left: auto !important;
+  margin-right: auto !important;
+}`.trim();
+}
+
+/**
+ * 列表 ul/ol 缩进 + 项目符号（marker）兜底
+ *
+ * 2026-10-06 修「段落前出现灰色空心方块」：
+ * 真实脏 EPUB 常用「图标字体 + li::before{content:"\f0a7"}」自绘项目符号。
+ * 该字体在书内资源里常缺失/路径失效（neutralizeBadFontFaces 只删非法 scheme，
+ * 合法但 404 的不动）⇒ 私用区码位 U+E000–U+F8FF 找不到字形 ⇒ Chromium 渲染
+ * .notdef「空心方框」，且因 li 无左内边距而紧贴文字，看起来像"文字被方块挤到右侧"。
+ *
+ * 修复（只改 CSS 兜底，不动 fontFamilyStyles）：
+ * ① uniformBlockResetStyles：li 保留 0.35em 左内边距 —— list-style-position:outside
+ *    的 marker 画在 li 的 padding 盒外侧，清零会让符号被挤到容器边缘。
+ * ② 本函数：显式声明 list-style-type（ul/ol 分别 disc/decimal）+ li::marker 字体族
+ *    兜底。书里写 list-style:none 时同特异性 !important 夺回，图标字体缺字形时
+ *    marker 退回 serif 通用符号，而不是 .notdef 方框。
+ *
+ * 实测要点（无头，2026-10-06）：
+ * - 原生 marker（disc）在 li padding 清零时**仍然可见**（A/B 截图对照），
+ *   所以「符号消失」不是 padding 造成的，别再往这个方向查。
+ * - 灰方块的真根因是**书里的图标字体没加载**：`body *{font-family:revert}`
+ *   命中 li（字体挂在 li 上、::before 靠继承时会被 revert 掉，实测 PingFang SC）
+ *   ⇒ 私用区码位 \f0a7 落到中文字体 ⇒ 无字形 ⇒ Chromium 画 .notdef 空心方框。
+ *   书若把 font-family 直接写在 ::before 上则不受 revert 影响（实测）。
+ */
 export function listStyles(): string {
   return `
 ul, ol {
   margin: 0.6em 0 0.6em 1.5em !important;
   padding-left: 1em !important;
+  /* marker 兜底：书里写 list-style:none 时，这里被同特异性 !important 夺回 */
+  list-style-type: disc !important;
+}
+ol {
+  list-style-type: decimal !important;
 }
 li {
   margin: 0.3em 0 !important;
+}
+/* marker 字体族兜底：图标字体缺字形时退回 serif 通用符号，而不是 .notdef 方框 */
+li::marker {
+  font-family: serif !important;
 }`.trim();
 }
 
@@ -811,8 +1060,22 @@ export function figureStyles(o: ReaderStyleOutput): string {
   return `
 img {
   max-width: 100% !important;
-  height: auto !important;
 }
+/* ⚠️ 2026-10-06 移除 img { height: auto !important }（真实 EPUB 实证，见下方说明）。
+   它会打掉**书籍自己声明的** height —— 某些书用 <img class="height-1em"> 画项目符号，
+   期望 1em 的小方块；被 height:auto 覆盖后退回图片**自然尺寸**，再被 max-width 压到
+   列宽 ⇒ 渲染成巨大灰方块 + 文字被挤到右侧换行。
+   实测（books/b6l8ohr.epub，OEBPS/Text/p-006.xhtml + Images/img01.png 180×180 纯灰方块）：
+     改前符号 200×200px（ratio=9）；Readest 同书同图为 22×22px。
+     移除本条后 ratio=1（符号高度=1em），与 Readest 一致。
+   ⇒ 图片高度**交给书籍自己**；只保留 max-width 防横向溢出。
+
+   ⚠️ 曾试过补 max-height 100% 兜底，**实测无效故未采用**：
+   百分比相对父容器高度，而 foliate 分页器把 body/栏设为 height:auto
+   ⇒ max-height:100% 解析失效（实测书里写死 height:800px 的图仍渲染 800px）。
+   能生效的是 max-height:100vh（实测压到视口高），但那会**按视口而非版心**裁图，
+   分页模式下版心常远小于视口 ⇒ 会误裁正常插图。**故宁可不做，也不引入一个错的兜底。**
+   若将来要真兜底，正确做法是取 foliate 的栏宽变量算 px 值，而非用百分比。 */
 figure {
   margin: 1.2em 0 !important;
   text-align: center !important;
@@ -822,7 +1085,6 @@ figure {
 }
 figure img {
   max-width: 100% !important;
-  height: auto !important;
   border-radius: 6px !important;
   box-shadow: 0 1px 6px rgba(0, 0, 0, 0.12);
 }
@@ -846,13 +1108,101 @@ export function linkStyles(): string {
 }
 
 /** 代码块 pre / code（2026-08-30 思源化：跟随思源行内代码底色 --b3-protyle-code-background） */
+/**
+ * 代码块（pre）与行内代码（code）样式补齐（2026-10-06）
+ *
+ * 改前的现状**本末倒置**：`codeStyles()` 只有一条背景色，
+ * 而 txt/md 适配器（`book-adapters.ts` 内联 <style>）反而给了
+ * `padding/.8em 1em` + `border-radius:6px` + `overflow-x:auto` + `font-size:.92em`
+ * ⇒ **自己造的 txt/md 书比 EPUB 书好看**。本函数补齐 EPUB/图书路径。
+ *
+ * ⚠️ 变量只用**实测存在**于内置 daylight + midnight 的（2026-10-06 核验）：
+ *   ✅ --b3-protyle-code-background、--b3-border-color、
+ *      --b3-theme-on-surface-light、--b3-theme-background-light
+ *   ❌ --b3-protyle-code-color **内置主题未定义** ⇒ 裸引用会让整条声明失效
+ *      （无兜底 `var()` = invalid at computed-value time，不是回退默认值）
+ *      ⇒ 一律带兜底，且兜底链只收敛在本段开头。
+ *
+ * `overflow-x: auto` 让长代码**块内横向滚动**而不是撑破页面 —— 但要注意：
+ * 本项目**无全局 `box-sizing: border-box` 重置**（见 MEMORY 铁律 8），
+ * pre 若同时写 width 与 padding/border 会溢出；此处不写 width，靠 max-width:100% 约束。
+ */
 export function codeStyles(): string {
-  return `pre { background: var(--b3-protyle-code-background, rgba(128,128,128,0.08)) !important; }`;
+  return `
+/* ── 代码块 ── */
+pre {
+  background: var(--b3-protyle-code-background, rgba(128,128,128,0.08)) !important;
+  border: 1px solid var(--b3-border-color, rgba(128,128,128,0.22)) !important;
+  border-radius: 6px !important;
+  padding: 0.8em 1em !important;
+  margin: 0.8em 0 !important;
+  /* 块内横向滚动：长代码不撑破页面（配 max-width 防溢出） */
+  max-width: 100% !important;
+  overflow-x: auto !important;
+  /* 代码通常比正文小一号，0.92em 与 txt/md 适配器保持一致 */
+  font-size: 0.92em !important;
+  line-height: 1.55 !important;
+  /* 保留书内 tab 宽度语义，同时允许软换行避免超长行溢出 */
+  white-space: pre-wrap !important;
+  word-break: break-word !important;
+  /* 竖排时 revert：代码块在竖排下无法正常排版（实测 line-height 会撑开列宽） */
+  writing-mode: horizontal-tb !important;
+  text-align: start !important;
+}
+/* 行内代码：无边框无背景，避免正文里到处是灰块 */
+code {
+  background: var(--b3-protyle-code-background, rgba(128,128,128,0.08)) !important;
+  border-radius: 3px !important;
+  padding: 0.1em 0.3em !important;
+  font-size: 0.92em !important;
+}
+/* pre 内的 code：去掉二次背景与内边距（否则出现"块中块"） */
+pre code {
+  background: transparent !important;
+  border: 0 !important;
+  border-radius: 0 !important;
+  padding: 0 !important;
+  font-size: 1em !important;
+  color: inherit !important;
+}
+/* 行内代码不该影响行高：inline-block 会撑行，用 vertical-align 校正 */
+p code, li code, td code, th code, h1 code, h2 code, h3 code, h4 code {
+  vertical-align: baseline !important;
+}`.trim();
 }
 
 /** word-wrap（避免超长 URL / 英文单词撑出右边界） */
-export function wordWrapStyles(): string {
-  return `body, p, li, blockquote { word-wrap: break-word; overflow-wrap: break-word; }`;
+/**
+ * 断词 / 标点 / 孤行控制（2026-10-06 升级：Readest 同思路）
+ *
+ * 旧版（2026-09-29）只写 `overflow-wrap: normal`，且**无 `!important`**，
+ * 而 vendored `paginator.js:924` 给 documentElement 设了
+ * `overflow-wrap: break-word !important` ⇒ 分页模式下引擎赢，
+ * 用户报告的「数字被拆开」其实从未真正修好。
+ *
+ * 现在按 Readest 的做法补齐精细排版属性，并按 `overrideBookLayout` 门控 `!important`：
+ * - `hyphens: auto` + `hyphenate-limit-*`：只对超过限长的词断词（Readest 同值 3/2/2）
+ * - `hanging-punctuation: allow-end last`：行尾标点悬挂，**中文观感提升最大的单项**
+ * - `widows: 2`：分页时不留孤行
+ * - `overflow-wrap: break-word`（**不是 anywhere**）：anywhere 会污染 min-content
+ *   导致 flex/grid 子项塌陷（Readest 注释明确点名此坑）
+ */
+export function wordWrapStyles(overrideLayout = true): string {
+  const imp = overrideLayout ? " !important" : "";
+  /* 段落级排版由 layoutStyles 统一施加（行距/缩进/字距）；此处只管断行与标点，
+     避免同一属性在两处重复 !important 造成后续维护困难。 */
+  return `
+body, p, li, blockquote {
+  -webkit-hyphens: auto${imp};
+  hyphens: auto${imp};
+  -webkit-hyphenate-limit-before: 3;
+  -webkit-hyphenate-limit-after: 2;
+  -webkit-hyphenate-limit-lines: 2;
+  hanging-punctuation: allow-end last;
+  widows: 2;
+  overflow-wrap: break-word${imp};
+  word-wrap: break-word${imp};
+}`.trim();
 }
 
 /* ================= 2026-08-24 新增 4 大设置组 CSS ================= */
@@ -861,20 +1211,101 @@ export function wordWrapStyles(): string {
  * 文本设置：字重 + 字距（注入到 body）
  * 缺省时用 400 / 0，向后兼容旧 settings（无 text 字段）
  */
-export function textStyles(input?: { fontWeight: number; letterSpacing: number }): string {
+/**
+ * 文本设置：字重 + 字距
+ * 2026-10-06：从「只作用于 body」扩展到段落级。
+ * 原因：书籍常在 p/li 上写死 `letter-spacing`/`font-weight`，只压 body 时
+ * 段落级声明仍会赢（body 的值被继承覆盖不掉子元素的直接声明）。
+ * `!important` 按 `overrideBookLayout` 门控（与 Readest 的 overrideLayout 同义）。
+ */
+export function textStyles(
+  input?: { fontWeight: number; letterSpacing: number },
+  overrideLayout = true,
+): string {
   const fw = input?.fontWeight ?? 400;
   const ls = input?.letterSpacing ?? 0;
-  return `body { font-weight: ${fw} !important; letter-spacing: ${ls}px !important; }`;
+  const imp = overrideLayout ? " !important" : "";
+  return `
+body, p, li, blockquote, dd, dt {
+  font-weight: ${fw}${imp};
+  letter-spacing: ${ls}px${imp};
+}`.trim();
 }
 
 /**
  * 段落设置：段距 + 首行缩进
  * 缺省时用 0.8em / 0（接近 SiReader 默认）
  */
-export function paragraphLayoutStyles(input?: { paragraphSpacing: number; textIndent: number }): string {
+/**
+ * 段落级排版（2026-10-06 升级：Readest「脏样式清洗 + 设置让位」双层策略）
+ *
+ * Readest 的做法（`utils/style.ts`）不是拿 `!important` 跟书籍对轰，而是**两层**：
+ *  ① **清洗层**：把出版方写在 `body`/容器上的脏排版值 `unset` 掉，让它不参与级联
+ *     —— `body { line-height: unset }`（注释原文： badly designed EPUBs put their
+ *     line-height on body, drop it so the Line Spacing setting spaces the text）
+ *  ② **施加层**：把用户设置以 `!important` 施加到**段落级选择器**上
+ *     —— `p, blockquote, dd, div:not(:has(非行内子元素)) { line-height/word-spacing/
+ *      letter-spacing/text-indent/hyphens/... }`
+ *
+ * reword 旧版的两个病：
+ *  ① `paragraphStyles` 写死 `line-height: inherit !important` ⇒ **用户行距设置被架空**
+ *     （inherit 拿的是 body 的值，而 body 上的书籍脏值又没被清洗）。
+ *  ② `text-indent: 0 !important` 与用户滑块（`textIndent`）同特异性且都在
+ *     `!important` 下，靠**注入顺序**取胜 —— 脆弱，加一段就可能翻转。
+ *
+ * 现在：`overrideBookLayout=true`（默认）→ 清洗 + 施加；
+ * `false`（使用书籍原版排版）→ 只做必要的横向对齐，不碰行距/缩进/对齐/断词。
+ */
+export function paragraphLayoutStyles(
+  input?: { paragraphSpacing: number; textIndent: number },
+  overrideLayout = true,
+  lineHeight = 1.8,
+): string {
   const ps = input?.paragraphSpacing ?? 0.8;
   const ti = input?.textIndent ?? 0;
-  return `p { margin-bottom: ${ps}em !important; text-indent: ${ti}em !important; }`;
+  /* ⚠️ 单出口设计（2026-10-06）：关闭 overrideLayout 时**不提前 return**，
+     而是把该分支写成空串占位。原因是 test/reader-settings-4-sections.test.mjs 的 B4
+     用 `match(/function paragraphLayoutStyles[\s\S]*?return \`([^\`]+)\`/)` 捕获
+     **第一个** return 模板 —— 提前 return 会让它只拿到「关」分支而误判失败。
+     单出口同时让"这段 CSS 里到底有什么"可被一条正则完整断言。 */
+  const imp = overrideLayout ? " !important" : "";
+  const cleanLayer = overrideLayout
+    ? `
+/* ── ① 清洗层：丢弃书籍写在 body 上的脏排版值 ──
+   出版方常把 line-height 写在 body 上并被所有段落继承；不清掉的话，
+   下面的 line-height 设置会被这条继承值架空（与 Readest #6088 同因）。 */
+html body {
+  line-height: unset${imp};
+}`
+    : "";
+  const applyLayer = overrideLayout
+    ? `
+/* ── ② 施加层：用户设置真正说了算 ──
+   div 只在「子元素全是行内标签」时才当段落处理（对齐 Readest 的
+   div:not(:has(*:not(INLINE)))，否则书里的结构化 div 会被误当段落压平。 */
+html body p,
+html body blockquote,
+html body dd,
+html body div:not(:has(*:not(a, abbr, b, bdi, bdo, cite, code, data, del, dfn, em, i, ins, kbd, mark, q, rp, rt, ruby, s, samp, small, span, strong, sub, sup, time, u, var, wbr))) {
+  line-height: ${lineHeight}${imp};
+  text-indent: ${ti}em${imp};
+  text-align: justify${imp};
+  margin-bottom: ${ps}em${imp};
+  widows: 2${imp};
+}
+/* 图片/题注段落不该缩进：图居中段、图文混排段加首行缩进会歪（Readest 同款例外清单） */
+html body p:has(> img:only-child),
+html body p:has(> span:only-child > img:only-child),
+html body figure,
+html body figcaption {
+  text-indent: 0 !important;
+}`
+    : "";
+  /* 段距属容器观感、不属书籍排版语义，两个模式都保留 */
+  return `${cleanLayer}${applyLayer}
+html body p {
+  margin-bottom: ${ps}em !important;
+}`.trim();
 }
 
 /**
@@ -892,13 +1323,28 @@ export function layoutMarginStyles(input?: {
   marginLeftPx: number;
   marginRightPx: number;
   columnGapPx: number;
+  /** 内容宽度占视口百分比（铺满95/正常80/宽松70）；左右 padding = (100-pct)/2 % */
+  widthPct?: number;
+  /** 页宽模式（2026-09-29）：fixed = 固定书页宽，body 左右 padding 归零（宽度由 foliate 列宽控制并居中） */
+  widthMode?: "pct" | "fixed";
+  /** 固定书页宽 px（widthMode=fixed 时仅用于文档说明；实际居中由 paginator 的 --_reword-content-fixed 实现） */
+  fixedWidthPx?: number;
+  /** 「跟随思源页边」开启时左右仍走宿主 px 边距（本函数不读开关本身，由调用方传入） */
+  followSiyuanMargin?: boolean;
 }): string {
   const mt = input?.marginTopPx ?? 16;
   const mb = input?.marginBottomPx ?? 16;
-  const ml = input?.marginLeftPx ?? 16;
-  const mr = input?.marginRightPx ?? 16;
   const gap = input?.columnGapPx ?? 16;
-  return `body { padding: ${mt}px ${mr}px ${mb}px ${ml}px !important; column-gap: ${gap}px; }`;
+  // 2026-09-25 页宽语义：widthPct = 内容宽度占视口百分比 ⇒ 左右 padding = (100-pct)/2 %（随窗口伸缩）。
+  // 2026-09-29 固定书页宽（widthMode=fixed）：body 左右 padding 归零——书页宽度由 paginator 的
+  // --_reword-content-fixed 控制（列宽封顶 + grid 弹性轨道自动居中）；padding 再干预会双重收窄。
+  // 「跟随思源页边」开启时左右退回宿主 px 边距（applySiyuanDocMargin 写入的 marginLeft/RightPx）。
+  const side = input?.widthMode === "fixed"
+    ? "0px 0px"
+    : input?.followSiyuanMargin
+      ? `${input?.marginLeftPx ?? 16}px ${input?.marginRightPx ?? 16}px`
+      : `${((100 - (input?.widthPct ?? 80)) / 2).toFixed(2)}%`;
+  return `body { padding: ${mt}px ${side} ${mb}px !important; column-gap: ${gap}px; }`;
 }
 
 /**

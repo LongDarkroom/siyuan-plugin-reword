@@ -582,10 +582,38 @@ export const getDirection = doc => {
     // even though its computed `direction` stays `ltr`, so the writing mode
     // itself marks it RTL and page turns follow the horizontal-rtl convention
     // (readest#624). Mirrors getDirection in the app's libs/document.ts.
-    const rtl = writingMode === 'vertical-rl'
+    let rtl = writingMode === 'vertical-rl'
         || doc.body.dir === 'rtl'
         || direction === 'rtl'
         || doc.documentElement.dir === 'rtl'
+    // REword P2 (2026-09-29)：RTL 内容检测兜底 —— 阿拉伯语/希伯来语书常缺 dir 属性
+    // 与 page-progression-direction 元数据（反面案例：原子习惯是误标 rtl，这里是漏标）。
+    // 仅在全书无任何方向声明时触发：采样正文前 4000 字符，RTL 文字（希伯来/阿拉伯/叙
+    // 利亚/扩展阿拉伯区）占字母数 >30% 且样本 ≥200 字母 → 判定 RTL，并就地补写
+    // documentElement 的 dir 属性（文本 bidi/标点/对齐与分页方向一并修正）。
+    if (!rtl && !doc.body.dir && !doc.documentElement.dir && direction !== 'rtl') {
+        const text = (doc.body.textContent || '').slice(0, 4000)
+        if (text.length >= 200) {
+            let rtlChars = 0
+            let letters = 0
+            for (let i = 0; i < text.length; i++) {
+                const cp = text.codePointAt(i)
+                if (cp > 0xffff) i++ // 代理对
+                const isLetter = (cp >= 0x41 && cp <= 0x5a) || (cp >= 0x61 && cp <= 0x7a) || cp >= 0x370
+                if (!isLetter) continue
+                letters++
+                if ((cp >= 0x0590 && cp <= 0x05ff)   // 希伯来
+                    || (cp >= 0x0600 && cp <= 0x06ff) // 阿拉伯
+                    || (cp >= 0x0700 && cp <= 0x074f) // 叙利亚
+                    || (cp >= 0xfb50 && cp <= 0xfdff) // 阿拉伯扩展 A
+                    || (cp >= 0xfe70 && cp <= 0xfeff)) rtlChars++ // 阿拉伯呈现形
+            }
+            if (letters >= 200 && rtlChars / letters > 0.3) {
+                try { doc.documentElement.setAttribute('dir', 'rtl') } catch { /* 只读文档 */ }
+                rtl = true
+            }
+        }
+    }
     return { vertical, rtl }
 }
 
@@ -1304,6 +1332,7 @@ export class Paginator extends HTMLElement {
     #primaryIndex = -1
     #vertical = false
     #rtl = false
+    #directionKnown = false // REword P2：首节方向是否已计算（未计算前键盘翻页回退 book.dir 元数据）
     #marginTop = 0
     #marginBottom = 0
     #anchor = 0 // anchor view to a fraction (0-1), Range, or Element
@@ -1954,15 +1983,31 @@ export class Paginator extends HTMLElement {
         }
         this.#vertical = vertical
         this.#rtl = rtl
+        this.#directionKnown = true
         this.#top.classList.toggle('vertical', vertical)
         this.#container.classList.toggle('vertical', vertical)
 
         const style = getComputedStyle(this.#top)
         const maxInlineSize = parseFloat(style.getPropertyValue('--_max-inline-size'))
         const maxColumnCount = parseInt(style.getPropertyValue('--_max-column-count-spread'))
-        const marginTop = parseFloat(style.getPropertyValue('--_margin-top'))
+        // 2026-09-25 REword 页面宽度语义：宿主经 --_reword-content-pct（50-100）声明
+        // 「内容总宽 = hostSize × pct%」，上下边距经 --_reword-margin-top/bottom（px）注入。
+        // 换算在 #beforeRender 完成（hostSize 此处可得），写回 #top 内联 —— 网格轨道与
+        // 排版数学同源。列数仍按样式表默认 720px 舒适列宽判定（与覆盖值解耦，防止
+        // 「上次覆盖值 → 列数 → 再覆盖」的反馈振荡——即本函数上方注释警告的那类环）。
+        // 窗口变化 → ResizeObserver → 重渲染 → 按新 hostSize 重算 ⇒ 边距/文字跟随窗口伸缩。
+        const rewordPct = parseFloat(style.getPropertyValue('--_reword-content-pct'))
+        // 2026-09-29 固定书页宽：--_reword-content-fixed（px，内容总宽）优先于 pct；
+        // 窗口窄于书页时 clamp 到 hostSize（退化撑满）。列数判定仍按 720px 舒适列宽，防振荡。
+        const rewordFixed = parseFloat(style.getPropertyValue('--_reword-content-fixed'))
+        const rewordFixedActive = !vertical && Number.isFinite(rewordFixed) && rewordFixed >= 320
+        const rewordActive = !vertical && (rewordFixedActive || (Number.isFinite(rewordPct) && rewordPct >= 50 && rewordPct <= 100))
+        const rewordDivisorBase = rewordActive ? 720 : maxInlineSize
+        const rewordMarginTop = parseFloat(style.getPropertyValue('--_reword-margin-top'))
+        const rewordMarginBottom = parseFloat(style.getPropertyValue('--_reword-margin-bottom'))
+        let marginTop = parseFloat(style.getPropertyValue('--_margin-top'))
+        let marginBottom = parseFloat(style.getPropertyValue('--_margin-bottom'))
         const marginRight = parseFloat(style.getPropertyValue('--_margin-right'))
-        const marginBottom = parseFloat(style.getPropertyValue('--_margin-bottom'))
         const marginLeft = parseFloat(style.getPropertyValue('--_margin-left'))
         this.#marginTop = marginTop
         this.#marginBottom = marginBottom
@@ -1980,8 +2025,28 @@ export class Paginator extends HTMLElement {
             ? 1
             : Math.min(
                 maxColumnCount + (vertical ? 1 : 0),
-                Math.ceil(Math.floor(hostSize) / Math.floor(maxInlineSize)),
+                Math.ceil(Math.floor(hostSize) / Math.floor(rewordDivisorBase)),
             )
+        // 页宽覆盖：每列 max-inline-size = 内容总宽 / 列数（写回 #top 内联，
+        // --_max-width = 列宽 × 列数 ⇒ 内容总宽恒 ≈ hostSize × pct%）
+        if (rewordActive) {
+            // fixed 模式：内容总宽 = 固定 px（clamp 到 hostSize）；pct 模式：hostSize × pct%
+            const totalWidth = rewordFixedActive
+                ? Math.min(rewordFixed, Math.floor(hostSize))
+                : Math.round(hostSize * rewordPct / 100)
+            const perColumn = Math.max(120, Math.round(totalWidth / Math.max(1, divisor)))
+            this.#top.style.setProperty('--_max-inline-size', perColumn + 'px')
+        }
+        if (Number.isFinite(rewordMarginTop)) {
+            this.#top.style.setProperty('--_margin-top', rewordMarginTop + 'px')
+            marginTop = rewordMarginTop
+            this.#marginTop = rewordMarginTop
+        }
+        if (Number.isFinite(rewordMarginBottom)) {
+            this.#top.style.setProperty('--_margin-bottom', rewordMarginBottom + 'px')
+            marginBottom = rewordMarginBottom
+            this.#marginBottom = rewordMarginBottom
+        }
         // Set --_column-count BEFORE measuring the container so the read
         // below reflects the grid template that will actually be used.
         this.#top.style.setProperty('--_column-count', divisor)
@@ -2083,6 +2148,11 @@ export class Paginator extends HTMLElement {
     }
     get scrolled() {
         return this.getAttribute('flow') === 'scrolled'
+    }
+    // REword P2 (2026-09-29)：当前主节方向（含内容检测兜底结果）。方向未计算前返回
+    // null —— view.goLeft/goRight 据此回退到 book.dir 元数据，避免开书瞬间误判。
+    get rtl() {
+        return this.#directionKnown ? this.#rtl : null
     }
     get noPreload() {
         return this.hasAttribute('no-preload')

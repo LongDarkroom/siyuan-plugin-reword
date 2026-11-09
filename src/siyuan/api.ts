@@ -18,6 +18,7 @@
  */
 
 import { fetchPost, fetchSyncPost, IWebSocketData, openTab, platformUtils, openMobileFileById } from "siyuan";
+import { sqlEscape } from "./attrs.ts";
 
 /**
  * 思源运行时常量表。
@@ -1085,7 +1086,7 @@ export async function listDocuments(limit = 300): Promise<DocSummary[]> {
 export async function searchDocuments(keyword: string, limit = 50): Promise<DocSummary[]> {
     const kw = keyword.trim();
     if (!kw) return [];
-    const esc = kw.replace(/'/g, "''");
+    const esc = sqlEscape(kw);
     const rows = await sql<{
         id: string;
         content: string;
@@ -1110,17 +1111,20 @@ export async function getDocumentContent(
     docId: string,
     asMarkdown = true
 ): Promise<string> {
+    // 2026-10-03 安全加固：docId 来源含 AI 设置里的自由文本框（SOUL 文档 ID），
+    // 裸拼进 SQL 可被单引号闭合注入（读任意块内容 → 进 system prompt 发往第三方 AI）。
+    const q = sqlEscape(docId);
     const rows = await sql<{ content: string; markdown: string }>(
         // 2026-08-21：改为 ORDER BY sort ASC, id ASC。
         //   - sort 字段是思源原生"块在文档树中的位置"，稳定反映视觉顺序
         //   - id ASC 兜底（思源 v3.x UUID 36 位字典序不再可靠，但与 sort 二级排序能稳定对齐）
         //   - 历史 custom-sort 子查询被 NULL 干扰,导致排序退化为不可控顺序
-        `SELECT content, markdown FROM blocks WHERE root_id='${docId}' AND type NOT IN ('d') ORDER BY sort ASC, id ASC`
+        `SELECT content, markdown FROM blocks WHERE root_id='${q}' AND type NOT IN ('d') ORDER BY sort ASC, id ASC`
     );
     if (!rows.length) {
         // 兜底：直接获取根块
         const root = await sql<{ markdown: string; content: string }>(
-            `SELECT markdown, content FROM blocks WHERE id='${docId}' LIMIT 1`
+            `SELECT markdown, content FROM blocks WHERE id='${q}' LIMIT 1`
         );
         return root[0]?.[asMarkdown ? "markdown" : "content"] || "";
     }

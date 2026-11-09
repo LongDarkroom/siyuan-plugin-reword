@@ -40,10 +40,10 @@ import {
   refreshFeatureTabs,
 } from "./dock/feature-tab.ts";
 import { renderDashboardPanel, DASHBOARD_ICON, DASHBOARD_FEATURE_ID, type DashboardSnapshot } from "./dashboard/dashboard-panel.ts";
-import type { BookMeta } from "./reader/bookshelf-store.ts";
 import * as path from "path";
 import * as fs from "node:fs";
 import { isPluginRootWithFs, isAsarPath, resolvePluginPathWithFs } from "./core/plugin-path.ts";
+import { buildAnnotationsMarkdown, buildVocabCsv, downloadTextFile } from "./export/download.ts";
 import { VocabStore, ALL_BOOK_ID } from "./vocab/vocab-store.ts";
 import { LearningStatus, type LearningStatus as LearningStatusT } from "./types.ts";
 import { getVocabHighlighter, configureVocabHighlightDeps } from "./vocab/vocab-highlight.ts";
@@ -85,7 +85,7 @@ import { normalizePos, parseReviewMeaning, parseWordList, isWordListLike, type P
 import { initLicense, getStatus } from "./license/license.ts";
 import { togglePosCollapsed } from "./dict/pos-toggle.ts";
 import { AnnotationStore, WHALE_COLORS, DEFAULT_ANNOTATION_COLOR, DEFAULT_ANNOTATION_STYLE, type AnnotationStyle } from "./annotation/annotation-store.ts";
-import { getAnnotationConfig, setAnnotationConfig, getAnnotationPalette, getAnnotationTagPresets, getDefaultAnnotationColor, getDefaultAnnotationStyle, initAnnotationConfig, loadAnnotationConfig } from "./annotation/annotation-config.ts";
+import { getAnnotationConfig, setAnnotationConfig, getAnnotationPalette, getAnnotationTagPresets, getDefaultAnnotationColor, getDefaultAnnotationStyle, initAnnotationConfig, loadAnnotationConfig, isLabelSystemEnabled } from "./annotation/annotation-config.ts";
 import { READER_SHORTCUTS, NO_MODIFIER_SHORTCUTS, detectConflicts, type ShortcutSpec } from "./reader/reader-shortcuts.ts";
 import { setAnnotationStore } from "./annotation/store-singleton.ts";
 import { LabelStore } from "./annotation/label-store.ts";
@@ -106,7 +106,6 @@ function isSiYuanBlockUi(el: Element): boolean {
   const dt = (el as HTMLElement).getAttribute?.("data-type");
   return dt === "block-icon" || dt === "block-menu";
 }
-import { buildAnnotationsMarkdown, buildVocabCsv, downloadTextFile } from "./export/download.ts";
 import type { AnnotationItem } from "./annotation/annotation-store.ts";
 import { queryAnnotations as queryAnns } from "./annotation/annotation-query.ts";
 import type { AnnotationQueryResult } from "./annotation/annotation-query.ts";
@@ -156,7 +155,8 @@ import "./index.less";
 import { PersistentStore } from "./core/persist.ts";
 import { getLogger } from "./core/logger.ts";
 import { openLogViewer, exportLogsCommand } from "./core/log-viewer.ts";
-// ===== 阅读器（Phase 1：书架 + EPUB/MOBI/TXT/MD 阅读；内核 foliate-js）=====
+// ===== 2026-10-13 阅读器已拆分为独立插件 siyuan-plugin-reader；
+// 以下 reader/ 模块仅保留翻译/UI 设置所需的子集（其余由读者插件托管）=====
 // foliate customElement 注册保护（必须在 reader 其他模块之前）—— 防止热重载重复 define 抛错阻断 plugin onload
 import "./reader/foliate-shim.ts";
 import { ReaderDockController, READER_FEATURE_ID } from "./reader/reader-dock.ts";
@@ -273,7 +273,7 @@ interface DictManifest {
 }
 
 /** 朗读引擎 */
-type TtsEngine = "system" | "youdao" | "edge" | "auto";
+type TtsEngine = "system" | "youdao" | "edge" | "iflytek" | "auto";
 
 /** 朗读设置（持久化在插件数据中；连续朗读与查词发音共用同一份配置） */
 interface TtsSettings {
@@ -291,6 +291,15 @@ interface TtsSettings {
   highlightColor: string;                              // 高亮颜色
   autoPage: boolean;                                   // 读完当前节自动翻页续读
   sleepTimerMin: number;                               // 睡眠定时（分钟，0=关）
+  // 2026-10-14：补齐阅读器透传的字段（此前类型未声明，运行时靠 ...s 透传落盘，
+  // 但缺声明易误导。讯飞凭据/发音人、中英分设嗓音都在阅读器面板可编辑）。
+  preferVoiceURIZh?: string;
+  preferVoiceURIEn?: string;
+  source?: "original" | "translation";
+  iflytekAppId?: string;
+  iflytekApiKey?: string;
+  iflytekApiSecret?: string;
+  iflytekVoice?: string;
 }
 
 const DEFAULT_TTS: TtsSettings = {
@@ -511,7 +520,6 @@ export default class RewordPlugin extends Plugin {
   private isComposing = false;
   /** 防抖持久化层（P1 #7/#8：高频变更合并落盘 + 失败重试并上报） */
   private persistVocab!: PersistentStore;
-  private persistAnnotations!: PersistentStore;
   /** 词库分类标签库（2026-08-15 拆分：hiword-vocab-labels.json，与批注标签各自独立管理） */
   private persistVocabLabels!: PersistentStore;
   private vocabLabelStore!: LabelStore;
@@ -751,10 +759,6 @@ export default class RewordPlugin extends Plugin {
         (d) => this.saveData("hiword-vocab.json", d),
         { onError: () => showMessage(t("词库保存失败，请检查存储空间"), 3000, "error") }
       );
-      this.persistAnnotations = new PersistentStore(
-        (d) => this.saveData("hiword-annotations.json", d),
-        { onError: () => showMessage(T("批注保存失败，请检查存储空间"), 3000, "error") }
-      );
       this.persistVocabLabels = new PersistentStore(
         (d) => this.saveData("hiword-vocab-labels.json", d),
         { onError: () => showMessage(t("词库标签保存失败，请检查存储空间"), 3000, "error") }
@@ -827,7 +831,11 @@ export default class RewordPlugin extends Plugin {
         getLogger().info(`[REword] 墨迹持久化已就绪（${this.inkSaver.getStrokes().length} 笔）`);
       })();
       this.vocabStore = new VocabStore(() => this.saveVocab());
-      this.annotationStore = new AnnotationStore(() => this.saveAnnotations());
+      // 2026-10-07：onChange 里除落盘外，再广播给批注桥的订阅者，
+      // 使**主插件侧**的批注增删改也能实时刷新阅读器的高亮（双向同步）。
+      this.annotationStore = new AnnotationStore(() => {
+        /* 批注持久化已迁移到阅读器插件 */
+      });
       setAnnotationStore(this.annotationStore); // Phase 2：暴露单例供阅读面板访问
       this.vocabLabelStore = new LabelStore(() => this.persistVocabLabels.update(this.vocabLabelStore.toJSON()));
       this.annotationLabelStore = new LabelStore(() => this.persistAnnotationLabels.update(this.annotationLabelStore.toJSON()));
@@ -1407,17 +1415,18 @@ export default class RewordPlugin extends Plugin {
     }
   }
 
-  /** 持久化批注（方案 C：独立文件，正文零污染） */
-  private async saveAnnotations() {
-    this.persistAnnotations.update(this.annotationStore.toJSON());
-  }
-
   /**
    * 容错初始化分类标签库（2026-08-15 拆分：词库标签 / 批注标签 各自独立）。
    * 一次性迁移：若旧的共享 hiword-labels.json 存在且对应拆分文件尚不存在，则继承其内容，
    * 之后两域各自独立增删、互不干扰。
    */
   private async initLabelStores() {
+    // [labels-off] 标签系统静默关闭：跳过加载（store 保持空实例，下游 getAll() 恒 []）。
+    // 不调 load ⇒ 空库播种（DEFAULT_LABELS）也不会发生；原 json 数据原样保留，重开即恢复。
+    if (!isLabelSystemEnabled()) {
+      getLogger().info("[REword] 标签系统已关闭（labelSystemEnabled=false），跳过标签库初始化");
+      return;
+    }
     const sharedRaw = await this.loadData("hiword-labels.json").catch(() => null);
 
     // —— 词库标签 ——
@@ -1468,17 +1477,20 @@ export default class RewordPlugin extends Plugin {
     }
 
     // ========== 4.2.0 旧 category/tags → labels 一次性迁移（2026-08-15 新增）==========
-    try {
-      // category → 中文标签名映射
-      const catNameMap = { important: "重点", hard: "困难", todo: "待办", schedule: "行程" };
-      const labelNameToId = (name: string) => this.annotationLabelStore.getAll().find((l) => l.name === name)?.id;
-      const changed = await this.annotationStore.migrateLegacyCategoriesToLabels(
-        (cat) => (catNameMap as any)[cat] || null,
-        labelNameToId
-      );
-      if (changed > 0) getLogger().info(`[REword] 旧 category/tags 迁移到 labels 完成（${changed} 条）`);
-    } catch (e) {
-      getLogger().warn("[REword] 旧批注迁移失败:", { error: e });
+    // [labels-off] 标签系统关闭时跳过（空 store 下迁移本就 no-op，显式短路更稳）
+    if (isLabelSystemEnabled()) {
+      try {
+        // category → 中文标签名映射
+        const catNameMap = { important: "重点", hard: "困难", todo: "待办", schedule: "行程" };
+        const labelNameToId = (name: string) => this.annotationLabelStore.getAll().find((l) => l.name === name)?.id;
+        const changed = await this.annotationStore.migrateLegacyCategoriesToLabels(
+          (cat) => (catNameMap as any)[cat] || null,
+          labelNameToId
+        );
+        if (changed > 0) getLogger().info(`[REword] 旧 category/tags 迁移到 labels 完成（${changed} 条）`);
+      } catch (e) {
+        getLogger().warn("[REword] 旧批注迁移失败:", { error: e });
+      }
     }
 
     // ========== 4.2.1 初始化微阅快速批注管理器 ==========
@@ -2915,10 +2927,11 @@ export default class RewordPlugin extends Plugin {
       preferredDefinitions = pick.preferredDefinitions;
     }
     const labelIds: string[] = [];
-    if (opts?.markUnmastered) {
+    // [labels-off] 标签系统关闭：跳过「未掌握」自动标签与思源文档 tags 继承（词照常入库，不带标签）
+    if (opts?.markUnmastered && isLabelSystemEnabled()) {
       try { labelIds.push(this.vocabLabelStore.add("未掌握").id); } catch (__swallowErr) { logSwallow(__swallowErr, "index.ts · try { labelIds.push(this.vocabLabelStore.add(\"未掌握\").id); }", "debug"); }
     }
-    if (opts?.inheritThemeTags) {
+    if (opts?.inheritThemeTags && isLabelSystemEnabled()) {
       const docId = this.lastDeepReadDocId || "";
       const tags = await this.getDocTagLabels(docId);
       for (const t of tags) {
@@ -3044,13 +3057,15 @@ export default class RewordPlugin extends Plugin {
       // 2026-08-14 修：思源 Electron 禁用 window.prompt，桥接到自定义输入弹窗
       promptInput: (msg: string, def?: string) => self.copilotPromptDialog(msg, def ?? ""),
       // 2026-08-15 拆分：批注标签库桥接（独立于词库标签）
-      getLabels: () => self.annotationLabelStore.getAll(),
-      addLabel: async (name: string) => self.annotationLabelStore.add(name),
+      // [labels-off] 标签系统关闭：getLabels 恒空（store 未加载本就空）；写类操作全部 no-op——
+      // 否则 addLabel 会在空 store 上落盘，用单条标签**覆盖**原有 hiword-annotation-labels.json（数据丢失）。
+      getLabels: () => (isLabelSystemEnabled() ? self.annotationLabelStore.getAll() : []),
+      addLabel: async (name: string) => (isLabelSystemEnabled() ? self.annotationLabelStore.add(name) : (undefined as any)),
       // 2026-08-15 新增：管理标签弹窗（重命名/删除/换色）
-      renameLabel: async (id: string, name: string) => self.annotationLabelStore.rename(id, name),
-      removeLabel: async (id: string) => self.annotationLabelStore.remove(id),
-      cycleLabelColor: async (id: string) => self.annotationLabelStore.cycleColor(id),
-      manageLabels: () => self.openLabelManagementDialog("annotation"),
+      renameLabel: async (id: string, name: string) => { if (isLabelSystemEnabled()) self.annotationLabelStore.rename(id, name); },
+      removeLabel: async (id: string) => { if (isLabelSystemEnabled()) self.annotationLabelStore.remove(id); },
+      cycleLabelColor: async (id: string) => { if (isLabelSystemEnabled()) return self.annotationLabelStore.cycleColor(id); return ""; },
+      manageLabels: () => { if (isLabelSystemEnabled()) self.openLabelManagementDialog("annotation"); },
       // 2026-08-22 新增：微阅批注 AI 助手桥接
       getAiSettings: () => self.aiSettings,
       openAiSettings: () => self.openAiSettings(),
@@ -3515,7 +3530,8 @@ export default class RewordPlugin extends Plugin {
     const docId = this.lastDeepReadDocId || this.getSelectionDocId(bid) || "";
     const model = this.aiSettings.model;
     const fillNote = opts?.fillNote ?? true;
-    const extraLabels: string[] = opts?.labels ? [...opts.labels] : [];
+    // [labels-off] 标签系统关闭：忽略调用方传入的 labels（AI 批量批注不带标签）
+    const extraLabels: string[] = isLabelSystemEnabled() && opts?.labels ? [...opts.labels] : [];
     const CATEGORY_COLOR: Record<string, string> = {
       important: "#4285f4",
       hard: "#ea4335",
@@ -4588,6 +4604,8 @@ export default class RewordPlugin extends Plugin {
 
   /** 按当前标签筛选过滤单词（all=全部；no-label=无标签） */
   private applyVocabLabelFilter(words: WordRecord[]): WordRecord[] {
+    // [labels-off] 标签系统关闭：恒透传（filter 状态可能残留旧标签 id，避免把列表过滤空）
+    if (!isLabelSystemEnabled()) return words;
     if (this.vocabLabelFilter === "all" || this.vocabLabelFilter === "__all__" || !this.vocabLabelFilter) return words;
     if (this.vocabLabelFilter === "__no_label__") {
       return words.filter((w) => !(w.labels && w.labels.length > 0));
@@ -4626,6 +4644,8 @@ export default class RewordPlugin extends Plugin {
 
   /** 2026-08-14 新增：词卡标签行（可折叠，默认前 2 个 + 展开/编辑入口） */
   private renderVocabRowTags(w: WordRecord): string {
+    // [labels-off] 标签系统关闭：词卡不渲染标签行（连「＋添加标签」入口一起隐藏）
+    if (!isLabelSystemEnabled()) return "";
     const labels = this.vocabLabelStore?.getAll() ?? [];
     const wordLabels = w.labels || [];
     // 词卡已选标签的完整定义（取 id+name+color）
@@ -5729,11 +5749,14 @@ export default class RewordPlugin extends Plugin {
       const s = await this.loadData("hiword-tts.json");
       if (s && typeof s.engine === "string") {
         // 兼容旧版 engine 枚举（offline/online → 新 system/youdao）
+        // 2026-10-14：白名单必须含 "iflytek"。此前缺该分支，导致阅读器里选「讯飞」
+        // 落盘的 engine 在插件重载/重进面板时被规范化成 "system"（表现为「设了讯飞，
+        // 再进去又变回系统语音」）。
+        const VALID_ENGINES: TtsEngine[] = ["system", "youdao", "edge", "iflytek", "auto"];
         const norm: TtsEngine =
           s.engine === "offline" || s.engine === "system" ? "system"
           : s.engine === "online" ? "youdao"
-          : s.engine === "edge" ? "edge"
-          : s.engine === "auto" ? "auto"
+          : VALID_ENGINES.includes(s.engine) ? s.engine
           : "system";
         return { ...DEFAULT_TTS, ...s, engine: norm };
       }
@@ -8831,7 +8854,6 @@ export default class RewordPlugin extends Plugin {
         ${sel("up-rd-fontmode", t("正文字体"), [
           ["follow-siyuan", t("跟随思源（霞鹜文楷等）")], ["custom", t("自定义导入字体")], ["system", t("系统默认")],
         ], String(st.fontMode))}
-        ${sel("up-rd-linewidth", t("正文行宽"), [["narrow", t("窄")], ["normal", t("标准")], ["wide", t("宽")]], String(st.lineWidth))}
       </div>
 
       <div class="hiword-up-group">
@@ -8910,7 +8932,7 @@ export default class RewordPlugin extends Plugin {
     };
     bindSel("up-rd-theme", "theme");
     bindSel("up-rd-fontmode", "fontMode");
-    bindSel("up-rd-linewidth", "lineWidth");
+    // 2026-09-29 设置整合：up-rd-linewidth 三档已删（与阅读器内「页宽模式」重叠，见上方模板注释位）
     bindRng("up-rd-fontsize", "fontSize", "px");
     bindRng("up-rd-lineheight", "lineHeight");
     bindSw("up-rd-ovpub", "overridePublisherFont");
@@ -8960,6 +8982,18 @@ export default class RewordPlugin extends Plugin {
       `<button class="hiword-ann-swatch ${active ? "is-active" : ""}" data-ann-color="${hex}" style="--sw:${hex}" title="${hex}"></button>`;
 
     container.innerHTML = `
+      <!-- [labels-off] 标签系统开关（2026-10-02）：关闭 = 全部标签 UI 静默隐藏，数据保留 -->
+      <div class="hiword-up-group">
+        <div class="hiword-up-group-label"><span class="hiword-up-group-name">${t("标签系统")}</span>
+          <span class="hiword-up-group-hint">${t("关闭后隐藏词库/批注/阅读器中全部标签入口；已有标签数据保留，重新开启即恢复")}</span></div>
+        <div class="hiword-up-row">
+          <span class="hiword-up-row-k">${t("启用标签系统")}</span>
+          <label class="b3-switch" style="margin:0">
+            <input type="checkbox" id="up-ann-labelswitch" class="b3-switch" ${isLabelSystemEnabled() ? "checked" : ""} />
+          </label>
+        </div>
+      </div>
+
       <div class="hiword-up-group">
         <div class="hiword-up-group-label"><span class="hiword-up-group-name">${t("默认标注样式")}</span>
           <span class="hiword-up-group-hint">${t("新建高亮/批注时自动套用，可在创建工具栏随时改")}</span></div>
@@ -8999,14 +9033,33 @@ export default class RewordPlugin extends Plugin {
         </div>
       </div>
 
+      <!-- [labels-off] 标签系统关闭时隐藏「标签预设」区块 -->
+      ${isLabelSystemEnabled() ? `
       <div class="hiword-up-group">
         <div class="hiword-up-group-label"><span class="hiword-up-group-name">${t("标签预设")}</span>
           <span class="hiword-up-group-hint">${t("每行一个，创建批注时作为可选项")}</span></div>
         <div class="hiword-up-row hiword-up-row--block">
           <textarea id="up-ann-tags" class="hiword-up-textarea" rows="5" placeholder="${t("每行一个标签，如：生词 / 句法 / 文化")}">${cfg.tagPresets.join("\n")}</textarea>
         </div>
-      </div>
+      </div>` : ""}
     `;
+
+    /* [labels-off] 标签系统开关：即时生效（无需重载插件）——
+       开 = 动态补跑标签库初始化（幂等）；关 = 重建两个空 store 实例（UI 全部入口随空数据消失）。
+       数据文件全程不动：关闭不删、开启不重建（空库播种仅发生在 hiword-*-labels.json 确实为空时）。 */
+    container.querySelector<HTMLInputElement>("#up-ann-labelswitch")?.addEventListener("change", async (e) => {
+      const on = (e.target as HTMLInputElement).checked;
+      setAnnotationConfig({ labelSystemEnabled: on });
+      if (on) {
+        await this.initLabelStores();
+      } else {
+        this.vocabLabelStore = new LabelStore(() => this.persistVocabLabels.update(this.vocabLabelStore.toJSON()));
+        this.annotationLabelStore = new LabelStore(() => this.persistAnnotationLabels.update(this.annotationLabelStore.toJSON()));
+      }
+      showMessage(on ? t("标签系统已开启") : t("标签系统已关闭（数据保留，重新开启即恢复）"), 2500, "info");
+      container.dataset.rendered = "false";
+      this.renderAnnotationSettings(dlg, dialog);
+    });
 
     container.querySelectorAll<HTMLInputElement>('input[name="up-ann-style"]').forEach(r => {
       r.addEventListener("change", () => {
@@ -10559,7 +10612,6 @@ export default class RewordPlugin extends Plugin {
     // 词典引擎与对话落盘（防抖层在卸载时强制落盘，避免防抖窗口内数据丢失，根因修复 #8）
     dictEngine.dispose();
     void this.persistVocab.flush();
-    void this.persistAnnotations.flush();
     void this.persistVocabLabels.flush();
     void this.persistAnnotationLabels.flush();
     void this.persistAiPresets.flush();
@@ -13902,6 +13954,8 @@ export default class RewordPlugin extends Plugin {
    */
   /** 解析批注标签 id → {name, color}（供阅读器查看气泡展示标签名/色） */
   resolveAnnotationLabel(id: string): { name: string; color: string } | null {
+    // [labels-off] 标签系统关闭：恒 null（ReaderView resolveLabels 对 null 跳过 → chips 不渲染）
+    if (!isLabelSystemEnabled()) return null;
     try {
       const l = this.annotationLabelStore?.get(id);
       return l ? { name: l.name, color: l.color } : null;

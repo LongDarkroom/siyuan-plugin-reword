@@ -19,7 +19,7 @@ import { logSwallow } from "../core/safe.ts";
 
 import type { AnnotationItem, AnnotationStyle, AnnotationCategory, ANNOTATION_STYLES } from "./annotation-store.ts";
 import { WHALE_COLORS } from "./annotation-store.ts";
-import { getDefaultAnnotationColor, getDefaultAnnotationStyle, getLastAnnotationStyle, getLastAnnotationColor, setLastAnnotationStyle } from "./annotation-config.ts";
+import { getDefaultAnnotationColor, getDefaultAnnotationStyle, getLastAnnotationStyle, getLastAnnotationColor, setLastAnnotationStyle, isLabelSystemEnabled } from "./annotation-config.ts";
 import { requestEditSession, releaseEditSession } from "./edit-session.ts";
 import { mountAnnEditor, DEFAULT_ANN_TOOLBAR, hasBlockTable, type AnnEditor } from "./ann-editor.ts";
 import { confirmDelete } from "./whale-confirm.ts";
@@ -213,8 +213,9 @@ export function buildWhaleDialogHtml(
               </div>
             </div>
             <div class="whale-dlg-custom-row">
-              <span class="whale-dlg-section-label">${t("标签")}</span>
-              <div class="whale-dlg-tags" id="whale-dlg-tags"></div>
+              <!-- [labels-off] 标签系统关闭：整个「标签」区块隐藏 -->
+              ${isLabelSystemEnabled() ? `<span class="whale-dlg-section-label">${t("标签")}</span>
+              <div class="whale-dlg-tags" id="whale-dlg-tags"></div>` : ""}
             </div>
           </div>
         </details>
@@ -623,9 +624,10 @@ export class WhaleAnnotationManager {
     });
 
     // ====== 标签多选（2026-08-14 改：分类标签 chips，host.getLabels 数据驱动）======
+    // [labels-off] 标签系统关闭：区块已隐藏，此处仅守卫（wrap 不存在直接返回）
     const renderLabelChips = () => {
       const wrap = dlg.querySelector("#whale-dlg-tags");
-      if (!wrap) return;
+      if (!wrap || !isLabelSystemEnabled()) return;
       const labels = this.host.getLabels() || [];
       const chips = labels
         .map((l) => `<button type="button" class="whale-dlg-tag-chip ${selectedLabels.has(l.id) ? "active" : ""}" data-label="${l.id}" style="--tag-color:${l.color || "#9ca3af"}">#${l.name}</button>`)

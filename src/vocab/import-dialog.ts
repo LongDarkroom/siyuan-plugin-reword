@@ -29,6 +29,7 @@
  */
 
 import { getLogger } from "../core/logger.ts";
+import { isLabelSystemEnabled } from "../annotation/annotation-config.ts";
 import { autoParse } from "./parser/index.ts";
 import type { CleanedResult, ParsedWord, ParserFormat } from "./parser/types.ts";
 import type { VocabStore } from "./vocab-store.ts";
@@ -472,7 +473,8 @@ benevolent :: 仁慈
             pos: w.pos,
             meaning: w.meaning,
             example: w.example,
-            labels: w.labels,
+            // [labels-off] 标签系统关闭：批量导入不写入文件里带的标签
+            labels: isLabelSystemEnabled() ? w.labels : undefined,
             senseCount: undefined,
           }, book.id, theme.id);
           added++;

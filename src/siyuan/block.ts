@@ -5,7 +5,7 @@
  * 数据写入采用 kramdown / Markdown 标记；大纲同步通过 SQL 按 parent_id / sort 还原层级。
  */
 import { siyuanRequest, SIYUAN_API } from "./client.ts";
-import { sqlQuery } from "./attrs.ts";
+import { sqlQuery, sqlEscape } from "./attrs.ts";
 import type { SiyuanBlock, SiyuanBlockAttrs } from "./types.ts";
 
 /* ============ 基础读写 ============ */
@@ -64,21 +64,23 @@ export async function deleteBlock(blockId: string): Promise<void> {
 
 /** 按 ID 精确获取单个块 */
 export async function getBlockByID(blockId: string): Promise<SiyuanBlock | null> {
-  const rows = await sqlQuery<SiyuanBlock>(`SELECT * FROM blocks WHERE id='${blockId}'`);
+  const rows = await sqlQuery<SiyuanBlock>(
+    `SELECT * FROM blocks WHERE id='${sqlEscape(blockId)}'`
+  );
   return rows[0] ?? null;
 }
 
 /** 获取某块的直接子块（按 sort 升序，对应大纲同层顺序） */
 export async function getChildBlocks(parentId: string): Promise<SiyuanBlock[]> {
   return sqlQuery<SiyuanBlock>(
-    `SELECT * FROM blocks WHERE parent_id='${parentId}' ORDER BY sort ASC`
+    `SELECT * FROM blocks WHERE parent_id='${sqlEscape(parentId)}' ORDER BY sort ASC`
   );
 }
 
 /** 获取某块的父块 */
 export async function getParentBlock(blockId: string): Promise<SiyuanBlock | null> {
   const rows = await sqlQuery<SiyuanBlock>(
-    `SELECT * FROM blocks WHERE id=(SELECT parent_id FROM blocks WHERE id='${blockId}')`
+    `SELECT * FROM blocks WHERE id=(SELECT parent_id FROM blocks WHERE id='${sqlEscape(blockId)}')`
   );
   return rows[0] ?? null;
 }
@@ -89,7 +91,7 @@ export async function getParentBlock(blockId: string): Promise<SiyuanBlock | nul
  */
 export async function getDocOutline(rootId: string): Promise<SiyuanBlock[]> {
   return sqlQuery<SiyuanBlock>(
-    `SELECT * FROM blocks WHERE root_id='${rootId}' AND type='h' ORDER BY sort ASC`
+    `SELECT * FROM blocks WHERE root_id='${sqlEscape(rootId)}' AND type='h' ORDER BY sort ASC`
   );
 }
 
@@ -98,7 +100,7 @@ export async function getDocOutline(rootId: string): Promise<SiyuanBlock[]> {
  */
 export async function getRootIdByBlock(blockId: string): Promise<string | null> {
   const rows = await sqlQuery<{ root_id: string }>(
-    `SELECT root_id FROM blocks WHERE id='${blockId}'`
+    `SELECT root_id FROM blocks WHERE id='${sqlEscape(blockId)}'`
   );
   return rows[0]?.root_id ?? null;
 }
